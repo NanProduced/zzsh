@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { createReadStream, existsSync, lstatSync, mkdirSync, openSync, closeSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
-import { readSourceRows } from "./local-source-adapter.mjs";
+import { readBoundSourceRows } from "./local-source-adapter.mjs";
 import { parseLegacyImagePaths } from "../../apps/api/src/supply/legacy-path-media.ts";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -24,9 +24,9 @@ const sourceReceipt = bound(join(source, "receipt.json"), option("--source-plan-
 if (datasetManifest.status !== "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN" || sourceReceipt.status !== "SOURCE_REFERENCES_PLANNED_TARGET_NOT_RUN" || datasetManifest.sourceReceiptSha256 !== sourceReceipt.sourceReceiptSha256) throw new Error("SOURCE_BINDING_MISMATCH");
 async function checkFile(path, expected) { const hash = createHash("sha256"); for await (const bytes of createReadStream(path)) hash.update(bytes); if (hash.digest("hex") !== expected) throw new Error("SOURCE_FILE_SHA_MISMATCH"); }
 const accountsFile = join(dataset, "accounts.jsonl"), sourceFile = join(source, "references.jsonl");
-await checkFile(accountsFile, datasetManifest.files.accounts.sha256); await checkFile(sourceFile, sourceReceipt.referencesSha256);
+await checkFile(sourceFile, sourceReceipt.referencesSha256);
 const accounts = new Map();
-for await (const row of readSourceRows(accountsFile)) {
+for await (const row of readBoundSourceRows(accountsFile, datasetManifest.files.accounts)) {
   if (!row.ready || typeof row.sourceId !== "string" || accounts.has(row.sourceId) || !/^[a-f0-9]{64}$/.test(row.sourceDigest ?? "") || typeof row.ownerUserId !== "string") throw new Error("ACCOUNT_PLAN_INVALID");
   accounts.set(row.sourceId, row);
 }
@@ -40,7 +40,7 @@ if (spawnSync("pwsh.exe", ["-NoProfile", "-Command", verify], { env: { ...proces
 const fd = openSync(join(out, "account-paths.jsonl"), "wx"), outputHash = createHash("sha256");
 const counts = { accounts: 0, displayPaths: 0, penaltyPaths: 0 }, seen = new Set();
 try {
-  for await (const row of readSourceRows(sourceFile)) {
+  for await (const row of readBoundSourceRows(sourceFile, { sha256: sourceReceipt.referencesSha256, rows: sourceReceipt.plannedRows })) {
     const account = accounts.get(row.legacyAccountId); if (!account) continue;
     if (seen.has(row.legacyAccountId) || row.sourceSnapshotSha256 !== sourceReceipt.sourceAccountsSha256 || row.legacyOwnerId !== account.ownerLegacyId || !["PRESENT", "EMPTY", "NULL"].includes(row.fields?.img_paths?.observation) || !["PRESENT", "EMPTY", "NULL"].includes(row.fields?.punishment_img_url?.observation)) throw new Error("SOURCE_ACCOUNT_MISMATCH");
     const displayPaths = parseLegacyImagePaths(row.fields.img_paths.raw), penaltyPaths = parseLegacyImagePaths(row.fields.punishment_img_url.raw);
@@ -51,7 +51,7 @@ try {
   }
 } finally { closeSync(fd); }
 if (seen.size !== accounts.size) throw new Error("SOURCE_ACCOUNT_CLOSURE_MISMATCH");
-await checkFile(accountsFile, datasetManifest.files.accounts.sha256); await checkFile(sourceFile, sourceReceipt.referencesSha256);
+await checkFile(accountsFile, datasetManifest.files.accounts.sha256);
 const receipt = { schema: "legacy-account-path-plan-v1", status: "PREPARED_TARGET_NOT_RUN", datasetSha256: option("--dataset-sha"), sourcePlanReceiptSha256: option("--source-plan-receipt-sha"), file: "account-paths.jsonl", fileSha256: outputHash.digest("hex"), ...counts, dbConnections: 0, targetWrites: 0, storageWrites: 0 };
 writeFileSync(join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
 console.log(JSON.stringify(receipt));

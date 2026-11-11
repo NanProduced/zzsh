@@ -63,6 +63,20 @@ test("only the exact loopback R07 clone accepts the dedicated local demo configu
     assert.throws(()=>loadConfig({...env,...patch}),ConfigurationError);
 });
 
+test("next migration bootstrap accepts only a fake isolated runtime with all external providers and workers closed",()=>{
+  const env={...validEnv('test'),NODE_ENV:'development',PROVIDER_MODE:'fake',PORT:'4242',DB_PORT:'55435',DB_NAME:'zzsh_test_regression',
+    DB_USER:'zzsh_regression_runtime',LOCAL_MIGRATION_BOOTSTRAP_ENABLED:'true',ENABLE_TEST_OPERATIONS:'false',USER_SMS_PROVIDER:'disabled',USER_REAL_NAME_PROVIDER:'disabled',
+    JOINPAY_COLLECTION_ENABLED:'false',JOINPAY_REFUND_ENABLED:'false',JOINPAY_PAYOUT_ENABLED:'false',JOINPAY_ACCOUNTS_ENABLED:'false',
+    YUNXIN_ENABLED:'false',ORDER_TEAMS_ENABLED:'false',SUPPORT_DISPATCH_ENABLED:'false',ORDER_IM_EVENTS_ENABLED:'false',ORDER_SWEEP_ENABLED:'false',
+    DISTRIBUTION_DUE_WORKER_ENABLED:'false',DISTRIBUTION_NATIVE_ENABLED:'false',ORDER_SETTLEMENT_RECORDING_ENABLED:'false'};
+  assert.equal(loadConfig(env).database.port,55435);
+  for(const change of [{LOCAL_MIGRATION_BOOTSTRAP_ENABLED:'false'},{LOCAL_MIGRATION_BOOTSTRAP_ENABLED:'bad'},{APP_PROFILE:'dev'},
+    {NODE_ENV:'production'},{PROVIDER_MODE:'real'},{PORT:'4232'},{DB_HOST:'192.0.2.1'},{DB_PORT:'55433'},{DB_PORT:'55434'},
+    {DB_NAME:'zzsh_dev_daily'},{DB_USER:'zzsh'},{ENABLE_TEST_OPERATIONS:'true'},{JOINPAY_REFUND_ENABLED:'true'},
+    {YUNXIN_ENABLED:'true'},{ORDER_SWEEP_ENABLED:'true'},{USER_SMS_PROVIDER:'aliyun'},{USER_REAL_NAME_PROVIDER:'aliyun-market'}])
+    assert.throws(()=>loadConfig({...env,...change}),ConfigurationError);
+});
+
 test("keeps the non-funding test executor opt-in and isolated to test/fake", () => {
   assert.equal(loadConfig(validEnv("test")).testOperationsEnabled, false);
   assert.equal(loadConfig({ ...validEnv("test"), ENABLE_TEST_OPERATIONS: "true" }).testOperationsEnabled, true);
@@ -458,6 +472,16 @@ test("identity binding secret stays stable when authentication secrets rotate", 
   for (const key of ["short", env.AUTH_USER_SECRET, env.AUTH_ADMIN_SECRET]) {
     assert.throws(() => loadAuthRuntimeConfig({ ...env, USER_IDENTITY_SUBJECT_HMAC_KEY: key }), /stable independent secret/);
   }
+});
+
+test("legacy identity profile uses a separate canonical encryption key", () => {
+  const key = Buffer.alloc(32, 11).toString("base64url");
+  const env = { AUTH_USER_SECRET: "u".repeat(32), AUTH_ADMIN_SECRET: "a".repeat(32),
+    USER_IDENTITY_SUBJECT_HMAC_KEY: "i".repeat(64), USER_LEGACY_IDENTITY_PROFILE_KEY: key };
+  assert.deepEqual(loadAuthRuntimeConfig(env).userLegacyIdentityProfileKey, Buffer.alloc(32, 11));
+  assert.throws(() => loadAuthRuntimeConfig({ ...env, USER_LEGACY_IDENTITY_PROFILE_KEY: "short" }), /canonical base64url/);
+  assert.throws(() => loadAuthRuntimeConfig({ ...env, USER_IDENTITY_SUBJECT_HMAC_KEY: key }), /independent protection key/);
+  assert.throws(() => loadAuthRuntimeConfig({ ...env, USER_IDENTITY_SUBJECT_HMAC_KEY: "" }), /independent protection key/);
 });
 
 test("formal settlement has an explicit deployment switch, never a permissive string fallback", () => {

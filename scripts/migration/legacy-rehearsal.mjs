@@ -23,7 +23,7 @@ const DEFAULT_MANIFEST = join(HERE, "fixtures", "manifest.json");
 const DEFAULT_OUT = join(HERE, "out");
 const FIXED_COMMIT = "376760181054ae0a3e12fa99f155d88588a6ca03";
 const STATUSES = ["READY", "REPLAY_ONLY", "MISSING_FACT", "CONFLICT", "ISOLATED"];
-const SECRET_KEYS = new Set(["mobile", "nickname", "password", "legacyPassword", "id_card", "idCard", "bank_card", "bankCard", "token", "secret", "authorization"]);
+const SECRET_KEYS = new Set(["mobile", "nickname", "password", "legacyPassword", "real_name", "realName", "fullName", "id_card", "idCard", "id_card_no", "idCardNo", "identityNumber", "documentNumber", "trustedIdentityNumber", "legacyIdentityProfile", "bank_card", "bankCard", "token", "secret", "authorization"]);
 
 const io = { fileReads: 0, fileWrites: 0, networkAttempts: 0, dbConnects: 0, writerCalls: 0 };
 installOfflineGuard(io);

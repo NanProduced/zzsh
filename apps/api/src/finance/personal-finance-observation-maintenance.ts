@@ -3,7 +3,7 @@ import type {Pool,PoolClient} from 'pg';
 import {recordAudit,setAuditContext,withTransaction} from '../auth/security-core';
 import {canonicalize} from '../supply/content-hash';
 import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} from '../supply/supply-util';
-import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,authorizeMaintenanceBatch,closeMaintenanceBatch,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
+import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,authorizeMaintenanceBatch,closeMaintenanceBatch,isReviewedFinanceMaintenanceEndpoint,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
 import {OBSERVATION_ENTITIES,prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
 
@@ -51,10 +51,10 @@ async function authorize(client:PoolClient,actor:Actor,scope:ObservationImportAd
 function validateObservationImportReview(review:ObservationImportReview,mode:'execute'|'recover'){
  if(!review||typeof review!=='object'||!review.actor||!review.resource)throw invalid('Exact internal observation review required');
  ensureOnlyFields(review,['ref','attempt','actor','resource','notBefore','expiresAt','inputSha256','cutoff','bodyDigest','userId','sourceKind']);
- ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid']);
+ ensureOnlyFields(review.actor,['userId','sessionId']);ensureOnlyFields(review.resource,['host','port','database','oid','owner','marker','role','roleOid','migrationProfile','systemIdentifier','nonce']);
  const r=copy(review);
  if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId,r.userId].every(x=>typeof x==='string'&&identifier.test(x))
-  ||r.resource.host!=='127.0.0.1'||![55432,55433].includes(r.resource.port)||!isReviewedFinanceMaintenanceResource(r.resource)
+  ||!isReviewedFinanceMaintenanceEndpoint(r.resource)||!isReviewedFinanceMaintenanceResource(r.resource)
   ||![r.resource.owner,r.resource.role].every(x=>typeof x==='string'&&/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(x))
   ||![r.resource.oid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0)
   ||![r.inputSha256,r.bodyDigest].every(x=>typeof x==='string'&&digest.test(x))

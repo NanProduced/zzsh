@@ -26,7 +26,7 @@ function component(boundTarget:LocalBankTarget = target) {
       if (sql.startsWith("SELECT d.oid::text AS oid")) { const r = state.identity; return { rows: [{ oid: String(r.databaseOid), name: r.database, role: r.runtimeUser,
         role_oid: String(r.runtimeRoleOid), owner: r.owner, owner_oid: String(r.ownerOid), marker: r.marker, nonce: r.nonce,
         rolsuper: r.rolsuper, rolcreatedb: r.rolcreatedb, rolcreaterole: r.rolcreaterole, rolinherit:r.rolinherit, rolbypassrls: r.rolbypassrls, system_identifier:r.system_identifier, ready: true }] }; }
-      if (sql.includes('AS "databaseName"')) return { rows: [{ databaseName: target.database, currentUser: target.runtimeUser, owner: target.owner }] };
+      if (sql.includes('AS "databaseName"')) return { rows: [{ databaseName: boundTarget.database, currentUser: boundTarget.runtimeUser, owner: boundTarget.owner }] };
       if (sql.includes('AS "ownsBusinessSchema"')) return { rows: [{ ownsBusinessSchema: false, ownsBusinessRelation: false, hasPrivilegedMembership: false }] };
       if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: state.adminStatus }] };
       if (sql.includes('FROM "zzsh_auth_admin"."session" s')) return { rows: values[0] === operator.sessionId && values[1] === operator.userId
@@ -42,7 +42,7 @@ function component(boundTarget:LocalBankTarget = target) {
       }
       if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { state.audits.push(values); return { rows: [] }; }
       if (sql.startsWith("SELECT current_setting('transaction_read_only')")) return { rows: [{ mode: state.readonly ? "on" : "off" }] };
-      if (sql.startsWith("SELECT current_database()")) return { rows: [{ database: target.database, runtime_user: target.runtimeUser, ready: true }] };
+      if (sql.startsWith("SELECT current_database()")) return { rows: [{ database: boundTarget.database, runtime_user: boundTarget.runtimeUser, ready: true }] };
       if (sql.startsWith("SELECT id,user_id,revision::text")) { const r = state.rows.get(values[0]); return { rows: r ? [structuredClone(r)] : [] }; }
       if (sql.startsWith("SELECT action,actor_type,actor_id,session_id,outcome,details FROM zzsh_iam.audit_event")) return { rows: state.audits.filter(a => a[6] === values[0]
         && JSON.parse(a[10]).revision === values[1]).map(a => ({ action: a[4], actor_type: a[1], actor_id: a[2], session_id: a[3], outcome: a[7], details: JSON.parse(a[10]) })) };
@@ -84,6 +84,24 @@ test("R07 绑定实例、端口和独立恢复键，错误或缺失实例在写�
   const other=prepareLegacyBankImport([input],users,source,{...r07,instance:{...instance,systemIdentifier:"654321"}},operator);
   assert.notEqual(legacyBankImportRequestId(other,"1",options),requestId);
   releaseLegacyBankImportPlan(other);releaseLegacyBankImportPlan(plan);
+});
+
+test("next-round bank import requires its exact registered local cluster, epoch and role",async()=>{
+  const instance={host:"127.0.0.1" as const,port:55435,systemIdentifier:"123456"};
+  const next:LocalBankTarget={...target,round:'next',port:instance.port,instance,database:'zzsh_test_regression',marker:'zzsh:regression-test:v1',
+    owner:'zzsh',runtimeUser:'zzsh_regression_runtime',migrationUser:'zzsh_regression_migration',migrationRoleOid:9988,migrationProfile:'LOCAL_MIGRATION_NEXT_V1'};
+  const opts={...options,database:next.database,runtimeUser:next.runtimeUser};
+  for(const changed of [{migrationProfile:undefined},{port:55433},{instance:{...instance,systemIdentifier:''}},
+    {runtimeUser:'zzsh_regression_migration'},{migrationUser:'other_role'},{nonce:'bad'}])
+    assert.throws(()=>prepareLegacyBankImport([input],users,source,{...next,...changed} as LocalBankTarget,operator));
+  const plan=prepareLegacyBankImport([input],users,source,next,operator),requestId=legacyBankImportRequestId(plan,'1',opts),valid=component(next);
+  assert.equal((await importLegacyBankBinding(valid.client,plan,'1',opts,requestId)).status,'IMPORTED');
+  for(const changed of ['999999',undefined]){const blocked=component(next);blocked.state.identity.system_identifier=changed;
+    await assert.rejects(importLegacyBankBinding(blocked.client,plan,'1',opts,requestId),/RESOURCE_MISMATCH/);assert.equal(blocked.state.rows.size,0);}
+  const wrong=component(next);(wrong.client as PoolClient & {connectionParameters:{port:number}}).connectionParameters.port=55433;
+  await assert.rejects(importLegacyBankBinding(wrong.client,plan,'1',opts,requestId),/RESOURCE_MISMATCH/);
+  const other=prepareLegacyBankImport([input],users,source,{...next,instance:{...instance,systemIdentifier:'654321'}},operator);
+  assert.notEqual(legacyBankImportRequestId(other,'1',opts),requestId);releaseLegacyBankImportPlan(other);releaseLegacyBankImportPlan(plan);
 });
 
 test("不同已映射用户可以沿用同一卡号，姓名差异本身也不虚构归属验证", () => {

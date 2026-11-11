@@ -6,8 +6,9 @@ import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivate } from '../local-auth.mjs';
-import { advisoryLockSql, assertLiveTarget, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
+import { advisoryLockSql, assertCaptureTargetProfile, assertLiveTarget, NEXT_MIGRATION_PROFILE, normalizeRegisteredTarget, targetConnection, targetIdentityQuery } from './local-target-registry.mjs';
 import { writeLoadCheckpoint } from './local-load-checkpoint.mjs';
+import { assertR07ContainerCreated, validateR07ContainerPlan } from './prepare-round07-postgres.mjs';
 
 const sha=x=>createHash('sha256').update(x).digest('hex'),hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),privateRoot=resolve('E:/zzsh-local-state/restricted'),secretRoot=resolve('E:/zzsh/zzsh/apps/api/.secrets');
@@ -21,6 +22,10 @@ function protectedSecret(value){
  assert(typeof value==='string'&&isAbsolute(value),'TARGET_PRIVATE_PATH_REQUIRED');const rel=relative(secretRoot,resolve(value));
  return rel&&!rel.startsWith('..')&&!isAbsolute(rel)?privatePath(value,false,secretRoot):privatePath(value);
 }
+export function assertDatasetCaptureProfile(manifest,bytes,next){
+ assert(hex(manifest.sourceReceiptSha256)&&sha(bytes)===manifest.sourceReceiptSha256,'TARGET_SOURCE_RECEIPT_CHANGED');
+ assertCaptureTargetProfile(JSON.parse(bytes),next?NEXT_MIGRATION_PROFILE:null);
+}
 function inspectContainer(id){
  assert(hex(id),'TARGET_CONTAINER_ID_REQUIRED');const result=spawnSync('docker',['inspect','--type','container',id],{encoding:'utf8',windowsHide:true,timeout:10000,maxBuffer:2*1024*1024});
  assert.equal(result.status,0,'TARGET_CONTAINER_INSPECTION_FAILED');const list=JSON.parse(result.stdout);assert(Array.isArray(list)&&list.length===1,'TARGET_CONTAINER_INSPECTION_FAILED');return list[0];
@@ -29,6 +34,12 @@ export function assertR07Container(value,id){
  const bindings=value?.NetworkSettings?.Ports?.['5432/tcp'];
  assert(value?.Id===id&&value?.Config?.Labels?.['zzsh.task']==='round07-migration'&&value?.State?.Running===true
    &&Array.isArray(bindings)&&bindings.length===1&&bindings[0]?.HostIp==='127.0.0.1'&&bindings[0]?.HostPort==='55433','TARGET_CONTAINER_MISMATCH');
+}
+export function assertNextContainerBinding({containerPlan,container,id,secretPath,secretSha256}){
+ assert(containerPlan?.schema==='zzsh.local-migration-postgres-container-plan.v1','TARGET_CONTAINER_PLAN_INVALID');
+ validateR07ContainerPlan(containerPlan);assertR07ContainerCreated(container,containerPlan,id);
+ assert(typeof secretPath==='string'&&resolve(secretPath).toLowerCase()===resolve(containerPlan.password.path).toLowerCase()
+   &&hex(secretSha256)&&secretSha256===containerPlan.password.sha256,'TARGET_CONTAINER_SECRET_CHANGED');
 }
 export function assertFreshR07Cluster(identity,expectedSystem){
  assert(identity?.database==='postgres'&&identity.role==='zzsh'&&identity.superuser===true&&identity.version>=160000&&identity.version<170000
@@ -60,26 +71,42 @@ export async function createR07Database(client,passwords,nonce,record){
 async function main(){
  const args=process.argv.slice(2),option=name=>{const i=args.indexOf(name);return i<0?undefined:args[i+1];},prepare=args.includes('--prepare'),execute=args.includes('--execute');
  assert(!(prepare&&execute),'ONE_TARGET_ACTION_REQUIRED');
+ assert(Boolean(option('--container-plan'))===Boolean(option('--container-plan-sha'))&&(!execute||!args.includes('--container-plan')&&!args.includes('--container-plan-sha')),'TARGET_CONTAINER_PLAN_INVALID');
  if(!prepare&&!execute){console.log(JSON.stringify({status:'PLAN_ONLY',prepare:['--prepare','--container-id','--admin-secret','--dataset','--dataset-sha','--out'],execute:['--execute','--plan','--plan-sha','--out'],connections:0,targetWrites:0}));return;}
  assert.equal(process.version,'v24.20.0','NODE_BASELINE_MISMATCH');
  const require=createRequire(join(root,'apps/api/package.json')),{Client}=require('pg');
  let plan;
  if(prepare){
   const id=option('--container-id'),secretPath=protectedSecret(option('--admin-secret')),dataset=privatePath(option('--dataset')),datasetSha256=option('--dataset-sha'),out=privatePath(option('--out'),true);
-  assert(!existsSync(out)&&hex(datasetSha256),'TARGET_PLAN_INPUT_INVALID');assertR07Container(inspectContainer(id),id);
+  assert(!existsSync(out)&&hex(datasetSha256),'TARGET_PLAN_INPUT_INVALID');
+  const containerRef=option('--container-plan')?{path:privatePath(option('--container-plan')),sha256:option('--container-plan-sha')}:null;
+  let containerPlan;
+  if(containerRef){const bytes=readFileSync(containerRef.path);assert(hex(containerRef.sha256)&&sha(bytes)===containerRef.sha256,'TARGET_CONTAINER_PLAN_CHANGED');containerPlan=JSON.parse(bytes);
+   assertNextContainerBinding({containerPlan,container:inspectContainer(id),id,secretPath,secretSha256:sha(readFileSync(secretPath))});}
+  else assertR07Container(inspectContainer(id),id);
   const bytes=readFileSync(join(dataset,'manifest.json'));assert.equal(sha(bytes),datasetSha256,'TARGET_DATASET_CHANGED');const manifest=JSON.parse(bytes);
   assert(manifest.status==='FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN'&&manifest.population?.mode==='SELECTED_BUSINESS_SCOPE','TARGET_DATASET_SCOPE_INVALID');
-  const secret=readFileSync(secretPath),client=new Client({host:'127.0.0.1',port:55433,database:'postgres',user:'zzsh',password:secret.toString('utf8').trim(),connectionTimeoutMillis:3000,statement_timeout:15000});let began=false,identity;
+  assertDatasetCaptureProfile(manifest,readFileSync(privatePath(join(manifest.source??'','receipt.json'))),!!containerRef);
+  const port=containerPlan?.port??55433,secret=readFileSync(secretPath),secretSha256=sha(secret);
+  if(containerPlan&&secretSha256!==containerPlan.password.sha256){secret.fill(0);throw Error('TARGET_CONTAINER_SECRET_CHANGED');}
+  const client=new Client({host:'127.0.0.1',port,database:'postgres',user:'zzsh',password:secret.toString('utf8').trim(),connectionTimeoutMillis:3000,statement_timeout:15000});let began=false,identity;
   try{await client.connect();await client.query('BEGIN READ ONLY');began=true;identity=await inspectCluster(client);assert.equal((await client.query('ROLLBACK')).command,'ROLLBACK');began=false;}
   finally{try{if(began)await client.query('ROLLBACK');}finally{await client.end();secret.fill(0);}}
-  plan={schema:'zzsh.round07-target-plan.v1',containerId:id,instance:{host:'127.0.0.1',port:55433,systemIdentifier:identity.systemIdentifier},dataset:{path:dataset,sha256:datasetSha256},adminSecret:{path:secretPath,sha256:sha(readFileSync(secretPath))}};
-  writePrivate(join(out,'plan.json'),plan);console.log(JSON.stringify({status:'R07_TARGET_PLAN_SEALED_NOT_EXECUTED',plan:join(out,'plan.json'),planSha256:sha(readFileSync(join(out,'plan.json'))),connections:1,targetWrites:0}));return;
+  assert.equal(sha(readFileSync(secretPath)),secretSha256,'TARGET_ADMIN_SECRET_CHANGED');
+  plan={schema:containerRef?'zzsh.local-migration-target-plan.v1':'zzsh.round07-target-plan.v1',containerId:id,instance:{host:'127.0.0.1',port,systemIdentifier:identity.systemIdentifier},dataset:{path:dataset,sha256:datasetSha256},adminSecret:{path:secretPath,sha256:secretSha256},...(containerRef?{containerPlan:containerRef}:{})};
+  writePrivate(join(out,'plan.json'),plan);console.log(JSON.stringify({status:containerRef?'MIGRATION_TARGET_PLAN_SEALED_NOT_EXECUTED':'R07_TARGET_PLAN_SEALED_NOT_EXECUTED',plan:join(out,'plan.json'),planSha256:sha(readFileSync(join(out,'plan.json'))),connections:1,targetWrites:0}));return;
  }
  const planPath=privatePath(option('--plan')),planBytes=readFileSync(planPath),expected=option('--plan-sha'),out=privatePath(option('--out'),true);
  assert(hex(expected)&&sha(planBytes)===expected&&!existsSync(out),'TARGET_PLAN_CHANGED');plan=JSON.parse(planBytes);
- assert(plan?.schema==='zzsh.round07-target-plan.v1'&&plan.instance?.host==='127.0.0.1'&&plan.instance.port===55433&&/^[0-9]+$/.test(plan.instance.systemIdentifier??'')&&hex(plan.dataset?.sha256),'TARGET_PLAN_INVALID');
- assertR07Container(inspectContainer(plan.containerId),plan.containerId);
- const dataset=privatePath(plan.dataset.path);assert.equal(sha(readFileSync(join(dataset,'manifest.json'))),plan.dataset.sha256,'TARGET_DATASET_CHANGED');
+ const next=plan?.schema==='zzsh.local-migration-target-plan.v1';
+ assert((next||plan?.schema==='zzsh.round07-target-plan.v1')&&plan.instance?.host==='127.0.0.1'&&(next||plan.instance.port===55433)
+   &&/^[0-9]+$/.test(plan.instance.systemIdentifier??'')&&hex(plan.dataset?.sha256),'TARGET_PLAN_INVALID');
+ if(next){const ref=plan.containerPlan,bytes=readFileSync(privatePath(ref?.path));assert(hex(ref?.sha256)&&sha(bytes)===ref.sha256,'TARGET_CONTAINER_PLAN_CHANGED');
+  const containerPlan=JSON.parse(bytes);assertNextContainerBinding({containerPlan,container:inspectContainer(plan.containerId),id:plan.containerId,secretPath:plan.adminSecret?.path,secretSha256:plan.adminSecret?.sha256});
+  assert(plan.instance.port===containerPlan.port,'TARGET_CONTAINER_PLAN_CHANGED');}
+ else assertR07Container(inspectContainer(plan.containerId),plan.containerId);
+ const dataset=privatePath(plan.dataset.path),manifestBytes=readFileSync(join(dataset,'manifest.json'));assert.equal(sha(manifestBytes),plan.dataset.sha256,'TARGET_DATASET_CHANGED');
+ const manifest=JSON.parse(manifestBytes);assertDatasetCaptureProfile(manifest,readFileSync(privatePath(join(manifest.source??'','receipt.json'))),next);
  const secretPath=protectedSecret(plan.adminSecret.path),secret=readFileSync(secretPath);assert(hex(plan.adminSecret.sha256)&&sha(secret)===plan.adminSecret.sha256,'TARGET_ADMIN_SECRET_CHANGED');
  const nonce=randomBytes(12).toString('hex'),passwords={migration:randomBytes(32).toString('base64url'),runtime:randomBytes(32).toString('base64url')};
  const credentials={database,marker,migration:{name:migration,oid:null,password:passwords.migration},runtime:{name:runtime,oid:null,password:passwords.runtime}};
@@ -95,19 +122,19 @@ async function main(){
   assert(db?.oid&&roles.length===2,'TARGET_REGISTRATION_READBACK_FAILED');const roleOids=Object.fromEntries(roles.map(row=>[row.rolname,row.oid]));
   credentials.migration.oid=roleOids[migration];credentials.runtime.oid=roleOids[runtime];writePrivate(join(out,'credentials.json'),credentials);
   const resource={database,marker,oid:db.oid,nonce,owner:'zzsh',instance:plan.instance,roles:{migration:{name:migration,oid:roleOids[migration]},runtime:{name:runtime,oid:roleOids[runtime]}},
-    lockKey:'806006',protectedDataset:{status:'ROUND07_BOOTSTRAP_RESERVED',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED',manifestSha256:plan.dataset.sha256,epoch:{oid:db.oid,nonce}}};
+    ...(next?{migrationProfile:NEXT_MIGRATION_PROFILE}:{}),lockKey:'806006',protectedDataset:{status:'ROUND07_BOOTSTRAP_RESERVED',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED',manifestSha256:plan.dataset.sha256,epoch:{oid:db.oid,nonce}}};
   const target=normalizeRegisteredTarget(resource);for(const kind of ['migration','runtime']){
    const c=new Client(targetConnection(target,{user:credentials[kind].name,password:credentials[kind].password,applicationName:'r07-target-role-proof',connectionTimeoutMillis:3000,statement_timeout:15000}));
    try{await c.connect();await c.query('BEGIN READ ONLY');assertLiveTarget(target,(await c.query(targetIdentityQuery())).rows[0],kind);assert.equal((await c.query('ROLLBACK')).command,'ROLLBACK');}finally{await c.end();}
   }
-  writePrivate(join(out,'resource.json'),resource);receipt.status='R07_TARGET_REGISTERED';receipt.oid=db.oid;receipt.roleReadback=true;save();
+  writePrivate(join(out,'resource.json'),resource);receipt.status=next?'MIGRATION_TARGET_REGISTERED':'R07_TARGET_REGISTERED';receipt.oid=db.oid;receipt.roleReadback=true;save();
  }catch(error){receipt.status=receipt.steps.at(-1)?.status==='INTENT'?'CREATION_OUTCOME_UNKNOWN':'STOPPED_PRESERVE_TARGET';receipt.error=/^[A-Z][A-Z0-9_]+$/.test(error?.message??'')?error.message:error?.code??error?.name;process.exitCode=1;}
  finally{
   try{if(held)receipt.unlockAck=(await client.query(advisoryLockSql({lockKey:'806006'},'unlock'))).rows[0]?.ok===true;}catch{receipt.unlockAck=false;process.exitCode=1;}
   try{await client.end();receipt.maintenanceClosed=true;}catch{receipt.maintenanceClosed=false;process.exitCode=1;}
-  if(receipt.status==='R07_TARGET_REGISTERED'&&(!receipt.unlockAck||!receipt.maintenanceClosed)){receipt.status='TARGET_CLEANUP_UNCONFIRMED';process.exitCode=1;}
+  if(['R07_TARGET_REGISTERED','MIGRATION_TARGET_REGISTERED'].includes(receipt.status)&&(!receipt.unlockAck||!receipt.maintenanceClosed)){receipt.status='TARGET_CLEANUP_UNCONFIRMED';process.exitCode=1;}
   receipt.finishedAt=new Date().toISOString();save();secret.fill(0);
  }
- console.log(JSON.stringify({status:receipt.status,receipt:join(out,'receipt.json'),resource:receipt.status==='R07_TARGET_REGISTERED'?join(out,'resource.json'):null}));
+ console.log(JSON.stringify({status:receipt.status,receipt:join(out,'receipt.json'),resource:['R07_TARGET_REGISTERED','MIGRATION_TARGET_REGISTERED'].includes(receipt.status)?join(out,'resource.json'):null}));
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{console.error(JSON.stringify({status:'STOPPED_BEFORE_REGISTRATION',code:/^[A-Z][A-Z0-9_]+$/.test(error.message??'')?error.message:error.code??error.name}));process.exitCode=1;});

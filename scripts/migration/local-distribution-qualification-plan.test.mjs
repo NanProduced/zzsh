@@ -109,6 +109,9 @@ test("registration, source and scene must all bind to this R06 target", () => {
  const instance={host:'127.0.0.1',port:55433,systemIdentifier:'123'};
  assert.doesNotThrow(()=>assertRegisteredDistributionTarget({...target,instance},digest,{...registry,instance}));
  assert.throws(()=>assertRegisteredDistributionTarget({...target,instance},digest,{...registry,instance:{...instance,systemIdentifier:'456'}}),/DISTRIBUTION_REGISTERED_TARGET_CHANGED/);
+ const next={...target,instance:{...instance,port:55435},migrationProfile:'LOCAL_MIGRATION_NEXT_V1'},nextRegistry={...registry,instance:next.instance,migrationProfile:next.migrationProfile};
+ assert.doesNotThrow(()=>assertRegisteredDistributionTarget(next,digest,nextRegistry));
+ assert.throws(()=>assertRegisteredDistributionTarget(next,digest,{...nextRegistry,migrationProfile:undefined}),/DISTRIBUTION_REGISTERED_TARGET_CHANGED/);
  const capture={status:'CAPTURED_READ_ONLY',rollbackConfirmed:true,clientClosed:true,files:{distributionConfig:{sha256:digest},distributionLevels:{sha256:digest}}};
  const scene={sourceReceiptSha256:digest,domains:{users:{ready:1}}},candidate={source:{receiptSha256:digest,configurationSha256:digest,levelsSha256:digest}};
  assert.doesNotThrow(()=>assertDistributionSourceBindings(digest,capture,scene,candidate));
@@ -121,7 +124,19 @@ test("financial baseline requires the completed round and its exact independent 
  const round={schema:'zzsh.local-round-receipt.v1',inputSha256:digest,datasetSha256:digest,sourceReceiptSha256:digest,target,status:'DATASET_AND_GROWTH_ACK_READBACK_PASS',completion:{status:'COMPLETE',dataset:'PASS'},finishedAt:'2026-11-05T00:00:00Z',stages:[{name:'readback',status:'ACK',code:0,signal:null,metrics:{evidenceSha256:digest}}]};
  const readback={schema:'zzsh.local-dataset-readback.v1',status:'CORE_SOURCE_TARGET_EXACT_READBACK_PASSED',sourceDatasetSha256:digest,resource:{database:'zzsh_test_regression',...target},differenceCount:0,targetWrites:0,rollbackConfirmed:true,lockReleased:true,connectionsClosed:true,financialHistory:{walletEffectsFromObservation:false,arrivalVerified:false,counts:{orders:{expected:3,readable:3},refunds:{expected:2,readable:2}}}};
  assert.equal(assertDistributionCoreReadback(round,readback,binding),5);
- assert.throws(()=>assertDistributionCoreReadback(round,readback,{...binding,target:{...target,instance:{host:'127.0.0.1',port:55433,systemIdentifier:'123'}}}),/DISTRIBUTION_CORE_READBACK_REQUIRED/);
+ const instance={host:'127.0.0.1',port:55433,systemIdentifier:'123'},boundTarget={...target,instance};
+ const boundRound={...round,target:boundTarget,completion:{...round.completion,growth:'PASS'}};
+ const boundReadback={...readback,resource:{...readback.resource,instance}},boundBinding={...binding,target:boundTarget};
+ assert.equal(assertDistributionCoreReadback(boundRound,boundReadback,boundBinding),5);
+ const nextTarget={...boundTarget,instance:{...instance,port:55435},migrationProfile:'LOCAL_MIGRATION_NEXT_V1'};
+ const nextRound={...boundRound,target:nextTarget},nextReadback={...boundReadback,resource:{...boundReadback.resource,...nextTarget},targetFence:'HELD_UNTIL_ROLLBACK'},nextBinding={...boundBinding,target:nextTarget};
+ assert.equal(assertDistributionCoreReadback(nextRound,nextReadback,nextBinding),5);
+ assert.throws(()=>assertDistributionCoreReadback(nextRound,{...nextReadback,targetFence:undefined},nextBinding),/DISTRIBUTION_CORE_READBACK_REQUIRED/);
+ assert.throws(()=>assertDistributionCoreReadback(nextRound,{...nextReadback,resource:{...nextReadback.resource,migrationProfile:undefined}},nextBinding),/DISTRIBUTION_CORE_READBACK_REQUIRED/);
+ assert.throws(()=>assertDistributionCoreReadback({...nextRound,target:{...nextTarget,migrationProfile:undefined}},nextReadback,nextBinding),/DISTRIBUTION_COMPLETED_ROUND_REQUIRED/);
+ assert.throws(()=>assertDistributionCoreReadback(boundRound,readback,boundBinding),/DISTRIBUTION_CORE_READBACK_REQUIRED/);
+ assert.throws(()=>assertDistributionCoreReadback({...boundRound,target:{...boundTarget,instance:{...instance,systemIdentifier:'456'}}},boundReadback,boundBinding),/DISTRIBUTION_COMPLETED_ROUND_REQUIRED/);
+ assert.throws(()=>assertDistributionCoreReadback({...boundRound,completion:{...boundRound.completion,growth:'INCOMPLETE'}},boundReadback,boundBinding),/DISTRIBUTION_COMPLETED_ROUND_REQUIRED/);
  for(const changed of [{...round,status:'RUNNING'},{...round,completion:{status:'INCOMPLETE',dataset:'PASS'}},{...round,target:{...target,oid:'43'}},{...round,stages:[{...round.stages[0],metrics:{evidenceSha256:'b'.repeat(64)}}]}])
    assert.throws(()=>assertDistributionCoreReadback(changed,readback,binding),/DISTRIBUTION_COMPLETED_ROUND_REQUIRED/);
  for(const changed of [{...readback,resource:{...readback.resource,nonce:'b'.repeat(24)}},{...readback,differenceCount:1},{...readback,lockReleased:false}])
@@ -147,6 +162,16 @@ test("policy is reconstructed from old settings and refuses missing or duplicate
   assert.throws(() => legacyDistributionPolicy(input), /LEGACY_DISTRIBUTION_SETTING_CHANGED/);
   const original = Object.entries(flags).map(([name, value]) => ({ name, value, is_delete: "0" }));
   assert.throws(() => legacyDistributionPolicy({ ...input, configuration: [...original, original[0]] }), /DUPLICATE_LEGACY_DISTRIBUTION_SETTING/);
+});
+
+test("the settlement delay follows the captured old configuration and its whole-day rule", () => {
+  const levels=[{id:'1',weights:'1',is_default:'1',first_ratio:'20.00',second_ratio:'20.00',name:'青铜',is_delete:'0'}];
+  const make=value=>legacyDistributionPolicy({scope:'NATIVE',receiptSha256:digest,configurationSha256:digest,levelsSha256:digest,
+    configuration:Object.entries({...flags,settlementTime:value}).map(([name,v])=>({name,value:v,is_delete:'0'})),rawLevels:levels});
+  for(const [source,expected] of [['0.0',0],['3',3],['7.0',7],['7.9',7],['0.99999999',1],['1e1',10]])
+    assert.equal(make(source).config.settlementDelayDays,expected);
+  for(const source of [undefined,'','-1','NaN','Infinity','1000000','0.123456789012','not-a-number'])
+    assert.throws(()=>make(source),/LEGACY_DISTRIBUTION_DELAY_INVALID/);
 });
 
 test("planning distinguishes eligible, already admitted, ineligible and unverifiable subjects", () => {
@@ -221,6 +246,7 @@ test("plans and execution windows reject another target, changed build, or broad
   const isolated = { host: '127.0.0.1', port: 55433, systemIdentifier: '12345' };
   assert.throws(() => assertQualificationPlanBinding(signed, { ...binding, target: { ...target, instance: isolated } }, canonicalize), /DISTRIBUTION_PLAN_BINDING_CHANGED/);
   assert.throws(() => assertQualificationPlanBinding(signed, { ...binding, target: { ...target, oid: "14" } }, canonicalize), /DISTRIBUTION_PLAN_BINDING_CHANGED/);
+  assert.throws(() => assertQualificationPlanBinding(signed, { ...binding, target: { ...target, migrationProfile:'LOCAL_MIGRATION_NEXT_V1' } }, canonicalize), /DISTRIBUTION_PLAN_BINDING_CHANGED/);
   assert.throws(() => assertQualificationPlanBinding(signed, { ...binding, buildDigest: "b".repeat(64) }, canonicalize), /DISTRIBUTION_PLAN_BINDING_CHANGED/);
   assert.throws(() => assertQualificationPlanBinding(signed, { ...binding, expectedParticipants: 2 }, canonicalize), /DISTRIBUTION_PLAN_POPULATION_CHANGED/);
   assert.throws(() => assertQualificationPlanBinding({ ...signed, existing: [{ userId:'previous' }] }, { ...binding, expectedParticipants: 2 }, canonicalize), /ORIGINAL_QUALIFICATION_PLAN_REQUIRED/);

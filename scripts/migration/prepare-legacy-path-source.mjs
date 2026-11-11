@@ -4,7 +4,7 @@ import {createReadStream,existsSync,lstatSync,mkdirSync,openSync,writeSync,close
 import {basename,dirname,isAbsolute,relative,resolve,sep} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {performance} from 'node:perf_hooks';
-import {readSourceRows,sourceJsonLine} from './local-source-adapter.mjs';
+import {readBoundSourceRows,sourceJsonLine} from './local-source-adapter.mjs';
 import {parseLegacyImagePaths} from '../../apps/api/src/supply/legacy-path-media.ts';
 
 const sha=x=>createHash('sha256').update(x).digest('hex');
@@ -68,7 +68,7 @@ export async function prepareLegacyPathSource({privateRoot,sourceDir,receiptSha2
  const counts={rows:0,plannedRows:0,quarantinedRows:0,displayPaths:0,penaltyPaths:0,absentFields:0,invalidFields:0};
  try{
   refs=openSync(resolve(output,'references.jsonl'),'wx',0o600);quarantine=openSync(resolve(output,'quarantine.jsonl'),'wx',0o600);
-  for await(const row of readSourceRows(input)){
+  for await(const row of readBoundSourceRows(input,accountFile)){
    counts.rows++;let record;
    try{record=planLegacyPathSourceRow(row,accountFile.sha256)}catch(error){if(error.message!=='SOURCE_IDENTITY_REQUIRED')throw error;
     const b=Buffer.from(sourceJsonLine({sourceRow:counts.rows,reason:'SOURCE_IDENTITY_INVALID'}));writeAll(quarantine,b);qh.update(b);counts.quarantinedRows++;continue}
@@ -79,7 +79,7 @@ export async function prepareLegacyPathSource({privateRoot,sourceDir,receiptSha2
   }
  }finally{if(refs!==undefined)closeSync(refs);if(quarantine!==undefined)closeSync(quarantine)}
  if(counts.rows!==accountFile.rows)throw new Error('SOURCE_ROW_COUNT_MISMATCH');
- if(await fileSha(input)!==accountFile.sha256||sha(readFileSync(receiptFile))!==receiptSha256)throw new Error('SOURCE_CHANGED_DURING_PREPARATION');
+ if(sha(readFileSync(receiptFile))!==receiptSha256)throw new Error('SOURCE_CHANGED_DURING_PREPARATION');
  const receipt={schema:'legacy-path-source-extract-v1',status:'SOURCE_REFERENCES_PLANNED_TARGET_NOT_RUN',sourceReceiptSha256:receiptSha256,
   sourceAccountsSha256:accountFile.sha256,...counts,referencesSha256:rh.digest('hex'),quarantineSha256:qh.digest('hex'),
   startedAt,finishedAt:new Date().toISOString(),wallMs:performance.now()-started,dbConnections:0,storageWrites:0,targetWrites:0};

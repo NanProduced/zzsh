@@ -4,11 +4,12 @@ import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, re
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { parseSourceCaptureLine, sourceJsonLine, readSourceRows, assertSourceSupplementFields, LEGACY_DISTRIBUTION_CAPTURE_FIELDS } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readVerifiedSourceRows, assertSourceSupplementFields, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, LEGACY_DISTRIBUTION_CAPTURE_FIELDS } from "./local-source-adapter.mjs";
 import { assertAccountExtraColumns } from "./capture-legacy-account-extra.mjs";
+import { verifyBoundMysqlSource } from "./prepare-local-mysql-source.mjs";
 const TABLES = {
-    tradePolicy: { table: "la_system_config", fields: ["id", "type", "name", "value"], where: "(type='trade' AND name='advanceOrderSetRatio') OR (type='expendConfig' AND name IN ('barrettBullet','bullet','awm','armor','helmet','coffee','experienceCard','barrettBulletSale','bulletSale','awmSale','armorSale','helmetSale','coffeeSale','experienceCardSale'))" },
-    users: { table: "la_user", fields: ["id", "sn", "nickname", "mobile", "is_bind_id", "is_disable", "is_delete", "is_high_risk", "password", "salt", "id_card", "create_time", "update_time", "money", "earnings", "code", "inviter_id", "first_leader", "second_leader", "third_leader"] },
+    tradePolicy: { table: "la_system_config", fields: ["id", "type", "name", "value"], where: "(type='trade' AND name='advanceOrderSetRatio') OR (type='game' AND name='profitFirstDot') OR (type='expendConfig' AND name IN ('barrettBullet','bullet','awm','armor','helmet','coffee','experienceCard','barrettBulletSale','bulletSale','awmSale','armorSale','helmetSale','coffeeSale','experienceCardSale'))" },
+    users: { table: "la_user", fields: ["id", "sn", "nickname", "mobile", "is_bind_id", "is_disable", "is_delete", "is_high_risk", "password", "salt", "real_name", "id_card", "create_time", "update_time", "money", "earnings", "code", "inviter_id", "first_leader", "second_leader", "third_leader"] },
     accounts: { table: "la_rental_accounts", fields: ["id", "user_id", "game_id", "no", "status", "is_delete", "price_tenant", "extra_goods_total_price_tenant", "deposit_amount", "rental_days", "default_consume_type", "update_time", "haff", "img_paths", "title_img_name", "is_full_payout", "base_bot", "awm_bullet_price", "level6_bullet_price", "level6_helmet_price", "level6_armor_price", "top_insure_card_price", "barrett_bullet_price", "coffee_price", "gold_skin", "knife_skin", "weapon_skin", "level6_bullet_num", "awm_bullet_num", "top_insure_card_num", "leshua_order_id", "yj_order_id", "transaction_id"] },
     orders: { table: "la_order", fields: ["id", "order_sn", "user_id", "sale_user_id", "accounts_id", "order_type", "order_source", "order_status", "pay_is", "is_settle", "is_delete", "create_time", "update_time", "pay_time", "confirm_time", "cancel_time", "tenancy_deadline", "express_is", "express_time", "expend_haff", "money", "goods_money", "expend_pay_money", "need_pay_money", "pay_money", "deposit_amount", "return_order_money", "detain_money", "sale_earnings", "commission_money", "full_payout_money", "awm_bullet_num", "level6_bullet_num", "level6_helmet_num", "level6_armor_num", "top_insure_card_num", "barrett_bullet_num", "coffee_num", "awm_bullet_price", "level6_bullet_price", "level6_helmet_price", "level6_armor_price", "top_insure_card_price", "barrett_bullet_price", "coffee_price", "team_id", "pay_way", "transaction_id", "profit_dot", "is_advance_set", "is_full_payout"] },
     earnings: { table: "la_log_earnings", fields: ["id", "sn", "user_id", "action", "change_type", "change_amount", "left_amount", "create_time", "source_id", "source_sn", "remark", "extra"] },
@@ -18,7 +19,7 @@ const TABLES = {
     pays: { table: "la_pay_order", fields: ["id", "order_id", "order_type", "pay_is", "pay_way", "pay_money", "pay_order_sn", "pay_time", "transaction_id"] },
     distribution: { table: "la_distribution", fields: ["id", "user_id", "level_id", "is_distribution", "is_freeze", "is_delete"] },
     distributionOrders: { table: "la_distribution_order", fields: [...LEGACY_DISTRIBUTION_CAPTURE_FIELDS] },
-    games: { table: "la_sg_game", fields: ["id", "game_name", "game_status", "is_delete", "type_id"] },
+    games: { table: "la_sg_game", fields: ["id", "game_name", "game_status", "is_delete", "type_id", "profit_dot"] },
 };
 // Capture display, holdings and business continuation facts in the original snapshot, not a later supplement.
 TABLES.users.fields.push("ancestor_relation", "avatar", "sex", "channel", "delete_time", "commission_rate", "is_deposit_free", "is_checked");
@@ -70,10 +71,12 @@ if (refundSupplement) {
     TABLES.sourceParentBindings = { table: "la_refund_log", fields: Object.keys(expr), expressions: expr, from: "la_refund_log l LEFT JOIN la_refund_record r ON r.id=l.record_id LEFT JOIN la_order o ON r.order_type='order' AND o.id=r.order_id LEFT JOIN la_recharge_order rc ON r.order_type='recharge' AND rc.id=r.order_id", orderBy: "l.id" };
 }
 const sourceSupplement = fundsSupplement || refundSupplement;
+const listedPricingCapture = TABLES.games && TABLES.tradePolicy ? { schema: "zzsh.legacy-listed-pricing-capture.v1", gameDomain: "games", gameProfitField: "profit_dot", fastConfigDomain: "tradePolicy", fastConfigType: "game", fastConfigName: "profitFirstDot", runtimeRedis: "NOT_CAPTURED" } : null;
+const skinDictionaryCapture = TABLES.accountDisplay && TABLES.skinDictionaryTypes && TABLES.skinDictionaryData ? { schema: "zzsh.legacy-skin-dictionary-capture.v1", accounts: "accountDisplay", types: "skinDictionaryTypes", data: "skinDictionaryData", sameSnapshot: true } : null;
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const args = process.argv.slice(2), option = (name) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 if (!args.includes("--capture")) {
-    console.log(JSON.stringify({ action: "PLAN", source: "local frozen MySQL only", domains: Object.keys(TABLES), fieldsByDomain: Object.fromEntries(Object.entries(TABLES).map(([domain,entry])=>[domain,entry.fields])), required: ["--capture", "--container-id", "--out", ...(sourceSupplement ? ["--base-source", "--base-sha"] : [])], dbConnections: 0, credentialReads: 0, rawContentsPublic: false }));
+    console.log(JSON.stringify({ action: "PLAN", source: "local frozen MySQL only", domains: Object.keys(TABLES), tablesByDomain: Object.fromEntries(Object.entries(TABLES).map(([domain,entry])=>[domain,entry.table])), fieldsByDomain: Object.fromEntries(Object.entries(TABLES).map(([domain,entry])=>[domain,entry.fields])), filtersByDomain: Object.fromEntries(Object.entries(TABLES).filter(([,entry])=>entry.where).map(([domain,entry])=>[domain,entry.where])), ...(listedPricingCapture ? {listedPricingCapture} : {}), ...(skinDictionaryCapture ? {skinDictionaryCapture} : {}), required: ["--capture", "--container-id", "--out", ...(sourceSupplement ? ["--base-source", "--base-sha"] : [])], nextSource: ["--source-origin-v2", "--source-origin-sha"], dbConnections: 0, credentialReads: 0, rawContentsPublic: false }));
     process.exit(0);
 }
 if (process.version !== "v24.20.0")
@@ -83,6 +86,10 @@ if (!/^[a-f0-9]{64}$/.test(containerId ?? ""))
     throw new Error("EXACT_CONTAINER_ID_REQUIRED");
 if (!output || !isAbsolute(output) || existsSync(output))
     throw new Error("NEW_ABSOLUTE_PRIVATE_OUTPUT_REQUIRED");
+const sourceOriginFile=option("--source-origin-v2"),sourceOriginSha=option("--source-origin-sha");
+if (Boolean(sourceOriginFile)!==Boolean(sourceOriginSha) || args.filter(x=>x==="--source-origin-v2").length>1 || args.filter(x=>x==="--source-origin-sha").length>1)
+    throw new Error("SOURCE_ORIGIN_ARGUMENT_INVALID");
+const nextOrigin=sourceOriginFile?await verifyBoundMysqlSource(sourceOriginFile,sourceOriginSha,containerId):null;
 const privateRoot = realpathSync("E:/zzsh-local-state/restricted");
 const baseRows = new Map(), commonHashes = new Map(), supplementBinding = {}, baseOrders = new Map();
 if (sourceSupplement) {
@@ -90,25 +97,27 @@ if (sourceSupplement) {
     if (!base.toLowerCase().startsWith(privateRoot.toLowerCase() + "\\") || !/^[a-f0-9]{64}$/.test(expected ?? "")) throw new Error("BOUND_PRIVATE_BASE_CAPTURE_REQUIRED");
     const bytes = readFileSync(join(base, "receipt.json")), original = JSON.parse(bytes);
     if (hash(bytes) !== expected || original.status !== "CAPTURED_READ_ONLY" || !original.rollbackConfirmed || !original.clientClosed || original.containerId !== containerId || original.database !== "sg_zzsh_restore") throw new Error("BASE_CAPTURE_NOT_CONFIRMED");
+    if (nextOrigin && original.sourceOrigin?.bindingSha256!==nextOrigin.bindingSha256) throw new Error("BASE_CAPTURE_SOURCE_ORIGIN_CHANGED");
     Object.assign(supplementBinding, { baseSource: base, baseReceiptSha256: expected, fullSourcePopulation: true, comparison: "EXACT_SOURCE_ID_SETS_AND_EVERY_BASE_FIELD", actualBusinessTablesRead: fundsSupplement ? ["la_rental_accounts", "la_log_earnings", "la_withdraw_apply", "la_user"] : ["la_refund_log", "la_refund_record", "la_order", "la_recharge_order"], ...(fundsSupplement ? { derivedObserved: { accounts: { high_risk_owner: { sourceTable: "la_user", sourceColumn: "is_high_risk", method: "SAME_SNAPSHOT_CORRELATED_LOOKUP" } } } } : {}), domains: {} });
     for (const domain of Object.keys(TABLES).filter(domain => original.files[domain])) {
         const file = original.files[domain];
         if (!file || file.file !== parse(file.file).base) throw new Error("BASE_SOURCE_FILE_INVALID");
-        const raw = readFileSync(join(base, file.file));
-        if (hash(raw) !== file.sha256) throw new Error("BASE_SOURCE_FILE_CHANGED:" + domain);
         const rows = new Map(), expectedHash = createHash("sha256"), fields = [...file.fields].sort();
-        for await (const row of readSourceRows(join(base, file.file))) {
+        await readVerifiedSourceRows(join(base, file.file), file, row => {
             if (rows.has(row.id)) throw new Error("BASE_SOURCE_ID_DUPLICATE:" + domain);
             rows.set(row.id, row); expectedHash.update(sourceJsonLine(Object.fromEntries(fields.map(field => [field, row[field]]))));
-        }
+        });
         if (rows.size !== file.rows) throw new Error("BASE_SOURCE_ROWS_CHANGED:" + domain);
         baseRows.set(domain, rows); commonHashes.set(domain, { fields, hash: createHash("sha256") });
         supplementBinding.domains[domain] = { baseRows: file.rows, commonFields: fields, expectedCommonSha256: expectedHash.digest("hex"), comparedRows: 0, remainingIds: file.rows };
     }
     if (refundSupplement) {
-        const file = original.files.orders, raw = readFileSync(join(base, file.file));
-        if (hash(raw) !== file.sha256) throw new Error("BASE_ORDER_FILE_CHANGED");
-        for await (const row of readSourceRows(join(base, file.file))) baseOrders.set(row.id, row);
+        const file = original.files.orders;
+        if (!file || file.file !== parse(file.file).base) throw new Error("BASE_ORDER_FILE_INVALID");
+        await readVerifiedSourceRows(join(base, file.file), file, row => {
+            if (baseOrders.has(row.id)) throw new Error("BASE_ORDER_ID_DUPLICATE");
+            baseOrders.set(row.id, row);
+        });
         supplementBinding.typedParentBinding = { attemptSourceEntity: "la_refund_log", recordSourceEntity: "la_refund_record", recordForeignKey: "record_id", orderEntityByType: { order: "la_order", recharge: "la_recharge_order" }, orderFieldsCompared: ["user_id", "sale_user_id", "order_sn", "pay_money", "order_status", "is_delete"], comparedRows: 0 };
         supplementBinding.sourceEvidence = [
             { path: "E:/zzsh/analysis/front/source/com/mdd/common/enums/RefundEnum.java", lines: "4-9,30-38" },
@@ -126,9 +135,10 @@ while (ancestor !== parse(ancestor).root) {
         throw new Error("OUTPUT_REPARSE_POINT_REFUSED");
     ancestor = dirname(ancestor);
 }
-const inspected = spawnSync("docker", ["inspect", "--format", "{{.Id}}", "zzsh-mysql-restore"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
-if (inspected.status !== 0 || inspected.stdout.trim() !== containerId)
-    throw new Error("FROZEN_SOURCE_CONTAINER_CHANGED");
+if (!nextOrigin) {
+    const inspected = spawnSync("docker", ["inspect", "--format", "{{.Id}}", "zzsh-mysql-restore"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
+    if (inspected.status !== 0 || inspected.stdout.trim() !== containerId) throw new Error("FROZEN_SOURCE_CONTAINER_CHANGED");
+}
 const sidResult = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, timeout: 5000 });
 const sid = /S-1-5-[0-9-]+/.exec(sidResult.stdout)?.[0];
 if (!sid)
@@ -138,12 +148,13 @@ const acl = spawnSync("icacls", [destination, "/inheritance:r", "/grant:r", `*${
 if (acl.status !== 0)
     throw new Error("PRIVATE_OUTPUT_ACL_FAILED");
 const monotonicStarted = performance.now();
-const receipt = { schema: "zzsh.legacy-source-capture.v1", toolSha256: hash(readFileSync(fileURLToPath(import.meta.url))), supportToolSha256: hash(readFileSync(new URL("./local-source-adapter.mjs", import.meta.url))), accountExtraToolSha256: hash(readFileSync(new URL("./capture-legacy-account-extra.mjs", import.meta.url))), transport: "HEX_JSON_TO_UTF8_JSONL", startedAt: new Date().toISOString(), containerId, database: "sg_zzsh_restore", status: "STARTED", files: {}, physicalColumns: {}, statements: 0, privateReads: 0, connections: 1 };
+const receipt = { schema: "zzsh.legacy-source-capture.v1", toolSha256: hash(readFileSync(fileURLToPath(import.meta.url))), supportToolSha256: hash(readFileSync(new URL("./local-source-adapter.mjs", import.meta.url))), accountExtraToolSha256: hash(readFileSync(new URL("./capture-legacy-account-extra.mjs", import.meta.url))), transport: "HEX_JSON_TO_UTF8_JSONL", startedAt: new Date().toISOString(), containerId, database: "sg_zzsh_restore", status: "STARTED", files: {}, physicalColumns: {}, statements: 0, privateReads: 0, connections: 1, ...(listedPricingCapture ? {listedPricingCapture} : {}), ...(skinDictionaryCapture ? {skinDictionaryCapture} : {}) };
+if (nextOrigin) receipt.sourceOrigin={schema:'zzsh.local-source-origin.v2',bindingSha256:nextOrigin.bindingSha256,serverUuid:nextOrigin.serverUuid,sourceExportConsistency:nextOrigin.sourceExportConsistency};
 if (sourceSupplement) receipt.sourceSupplement = supplementBinding;
 if (refundSupplement) receipt.aggregates = [];
 let child, stderr = "", section = null, failure, rollbackConfirmed = false;
 const handles = new Map(), columns = new Map();
-const input = ["--defaults-extra-file=/root/.my.cnf", "--user=root", "--protocol=SOCKET", "--skip-reconnect", "--local-infile=0", "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names", "--unbuffered", "sg_zzsh_restore"];
+const input = ["--defaults-extra-file="+(nextOrigin?.clientFile??"/root/.my.cnf"), "--user=root", "--protocol=SOCKET", "--skip-reconnect", "--local-infile=0", "--default-character-set=utf8mb4", "--batch", "--raw", "--skip-column-names", "--unbuffered", "sg_zzsh_restore"];
 child = spawn("docker", ["exec", "-i", containerId, "mysql", ...input], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
 child.stderr.on("data", bytes => { stderr = (stderr + bytes.toString("utf8")).slice(-8192); });
 const closed = new Promise((resolveClose) => { child.once("error", error => resolveClose({ error: error.code })); child.once("close", (code, signal) => resolveClose({ code, signal })); });
@@ -152,7 +163,7 @@ function send(sql, statements = 1) { receipt.statements += statements; child.std
 const timeout = setTimeout(() => { failure ??= "SOURCE_CAPTURE_DEADLINE"; child.stdin.end(); }, 10 * 60 * 1000);
 try {
     send("SET SESSION transaction_read_only=1; SET SESSION transaction_isolation='REPEATABLE-READ'; SET SESSION max_execution_time=60000; START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY;", 4);
-    send("SELECT JSON_OBJECT('_phase','identity','database',DATABASE(),'principal',CURRENT_USER(),'readOnly',@@transaction_read_only,'isolation',@@transaction_isolation,'thread',CONNECTION_ID(),'accessMode',(SELECT ACCESS_MODE FROM performance_schema.events_transactions_current t JOIN performance_schema.threads p ON p.THREAD_ID=t.THREAD_ID WHERE p.PROCESSLIST_ID=CONNECTION_ID()),'txState',(SELECT STATE FROM performance_schema.events_transactions_current t JOIN performance_schema.threads p ON p.THREAD_ID=t.THREAD_ID WHERE p.PROCESSLIST_ID=CONNECTION_ID()));");
+    send("SELECT JSON_OBJECT('_phase','identity','database',DATABASE(),'principal',CURRENT_USER(),'readOnly',@@transaction_read_only,'isolation',@@transaction_isolation,'thread',CONNECTION_ID(),'accessMode',(SELECT ACCESS_MODE FROM performance_schema.events_transactions_current t JOIN performance_schema.threads p ON p.THREAD_ID=t.THREAD_ID WHERE p.PROCESSLIST_ID=CONNECTION_ID()),'txState',(SELECT STATE FROM performance_schema.events_transactions_current t JOIN performance_schema.threads p ON p.THREAD_ID=t.THREAD_ID WHERE p.PROCESSLIST_ID=CONNECTION_ID())"+(nextOrigin?",'serverUuid',@@server_uuid,'globalReadOnly',@@global.read_only,'superReadOnly',@@global.super_read_only,'eventScheduler',@@global.event_scheduler":"")+");");
     send("SELECT JSON_OBJECT('_phase','column','table',TABLE_NAME,'name',COLUMN_NAME) FROM information_schema.columns WHERE TABLE_SCHEMA='sg_zzsh_restore'" + (fundsSupplement ? " AND TABLE_NAME IN ('la_rental_accounts','la_log_earnings','la_withdraw_apply')" : refundSupplement ? " AND TABLE_NAME IN ('la_refund_log','la_refund_record','la_order','la_recharge_order')" : "") + " ORDER BY TABLE_NAME,ORDINAL_POSITION;");
     send("SELECT JSON_OBJECT('_phase','columns-complete');");
     for await (const line of lines) {
@@ -169,6 +180,8 @@ try {
         if (row._phase === "identity") {
             if (row.database !== "sg_zzsh_restore" || row.principal !== "root@localhost" || row.readOnly !== 1 || row.isolation !== "REPEATABLE-READ" || row.accessMode !== "READ ONLY" || row.txState !== "ACTIVE")
                 throw new Error("SOURCE_READ_ONLY_IDENTITY_FAILED");
+            if (nextOrigin && (row.serverUuid!==nextOrigin.serverUuid || row.globalReadOnly!==1 || row.superReadOnly!==1 || row.eventScheduler!=='DISABLED'))
+                throw new Error("SOURCE_RESTORE_IDENTITY_FAILED");
             receipt.identity = row;
         }
         else if (row._phase === "column") {
@@ -180,6 +193,8 @@ try {
             if (!receipt.identity)
                 throw new Error("SOURCE_IDENTITY_NOT_OBSERVED");
             receipt.physicalColumns = Object.fromEntries([...columns].map(([table, fields]) => [table, [...fields]]));
+            if (listedPricingCapture) assertLegacyListedPricingColumns(columns.get("la_sg_game"), columns.get("la_system_config"));
+            if (skinDictionaryCapture) assertLegacySkinDictionaryColumns(columns.get("la_rental_accounts"), columns.get("la_dict_type"), columns.get("la_dict_data"));
             if (refundSupplement) {
                 send("SELECT JSON_OBJECT('_phase','aggregate','kind','attempt-status','status',CAST(refund_status AS CHAR),'rows',COUNT(*),'refundAmountYuan',CAST(SUM(refund_amount) AS CHAR)) FROM la_refund_log GROUP BY refund_status ORDER BY refund_status;");
                 send("SELECT JSON_OBJECT('_phase','aggregate','kind','parent-link','parentType',parent_type,'recordMissing',record_missing,'orderMissing',order_missing,'userMismatch',user_mismatch,'rows',COUNT(*)) FROM (SELECT r.order_type parent_type,r.id IS NULL record_missing,CASE r.order_type WHEN 'order' THEN o.id IS NULL WHEN 'recharge' THEN rc.id IS NULL ELSE NULL END order_missing,IF(r.id IS NULL,NULL,l.user_id<>r.user_id) user_mismatch FROM la_refund_log l LEFT JOIN la_refund_record r ON r.id=l.record_id LEFT JOIN la_order o ON r.order_type='order' AND o.id=r.order_id LEFT JOIN la_recharge_order rc ON r.order_type='recharge' AND rc.id=r.order_id) links GROUP BY parent_type,record_missing,order_missing,user_mismatch;");
@@ -190,6 +205,7 @@ try {
                 const present = columns.get(entry.table);
                 if (!present?.has("id"))
                     throw new Error("SOURCE_REQUIRED_TABLE_MISSING:" + entry.table);
+                if (entry.table === "la_user") assertLegacyIdentityColumns(present);
                 if (entry.table === "la_rental_accounts") assertAccountExtraColumns(present);
                 const available = field => present.has(field) || Object.hasOwn(entry.expressions??{},field) && (entry.expressionSources?.[field] ?? []).every(source => present.has(source));
                 const fields = [...new Set(entry.fields)].filter(available);
@@ -249,6 +265,7 @@ try {
         comparison.actualCommonSha256 = commonHashes.get(domain).hash.digest("hex");
         if (remaining.size || comparison.expectedCommonSha256 !== comparison.actualCommonSha256) throw new Error("SUPPLEMENT_COMMON_SOURCE_CHANGED:" + domain);
     }
+    if (nextOrigin) { await verifyBoundMysqlSource(sourceOriginFile,sourceOriginSha,containerId); receipt.sourceOrigin.verifiedAfterCapture=true; }
     receipt.status = "CAPTURED_READ_ONLY";
 }
 catch (error) {

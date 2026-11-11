@@ -5,11 +5,28 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   assertLiveTarget,
+  assertMaintenanceLockHeld,
+  acquireMigrationSessionFence,
+  acquireMigrationTransactionFence,
+  captureMaintenanceLockEpoch,
+  guardedMigrationTargetPool,
+  assertNextMigrationWriteReady,
+  isRegisteredMigrationInstance,
   assertRuntimeRoleCompanion,
   assertReadbackTarget,
   loadRegisteredTarget,
   normalizeRegisteredTarget,
+  sameMigrationProfile,
+  releaseMigrationSessionFence,
 } from "./local-target-registry.mjs";
+
+test('migration profile cannot drift between registered input and subsequent reads',()=>{
+  const next={migrationProfile:'LOCAL_MIGRATION_NEXT_V1'};
+  assert.equal(sameMigrationProfile(next,next),true);
+  assert.equal(sameMigrationProfile({},{}),true);
+  assert.equal(sameMigrationProfile(next,{}),false);
+  assert.equal(sameMigrationProfile({},next),false);
+});
 
 const nonce = "0123456789abcdef01234567";
 const legacy = {
@@ -24,6 +41,20 @@ const isolated = {
   ...legacy,
   instance: { host: "127.0.0.1", port: 55433, systemIdentifier: "7704626787080364068" },
 };
+test("old R07 port and a separately registered next-round instance cannot be confused", () => {
+  const old = normalizeRegisteredTarget(isolated);
+  assert.equal(isRegisteredMigrationInstance(old), true);
+  const next = normalizeRegisteredTarget({ ...isolated, instance: { ...isolated.instance, port: 55435 }, migrationProfile: "LOCAL_MIGRATION_NEXT_V1" });
+  assert.equal(isRegisteredMigrationInstance(next), true);
+  assert.doesNotThrow(()=>assertNextMigrationWriteReady(old));
+  assert.throws(()=>assertNextMigrationWriteReady(next),/NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+  for (const changed of [
+    { ...next, migrationProfile: null }, { ...next, port: 55433 }, { ...next, host: "0.0.0.0" },
+    { ...next, instance: { ...next.instance, systemIdentifier: "" } }, { ...next, instance: { ...next.instance, port: 55434 }, port: 55434 },
+    { ...old, migrationProfile: "LOCAL_MIGRATION_NEXT_V1" },
+  ]) assert.equal(isRegisteredMigrationInstance(changed), false);
+  assert.throws(() => normalizeRegisteredTarget({ ...isolated, migrationProfile: "unknown" }), /TARGET_MIGRATION_PROFILE_INVALID/);
+});
 const live = (over = {}) => ({
   database: "zzsh_test_regression",
   oid: "3375850",
@@ -51,6 +82,54 @@ const withRegistry = (body, run) => {
     rmSync(dir, { recursive: true, force: true });
   }
 };
+
+test('target pool verifies each borrowed client and discards a replaced or unfenced session', async () => {
+  let destroyed; const client = { release: value => { destroyed=value; } }, pool = { connect: async () => client };
+  assert.equal(await guardedMigrationTargetPool(pool, async c => assert.equal(c,client)).connect(), client);
+  await assert.rejects(guardedMigrationTargetPool(pool, async () => { throw Error('FENCE_LOST'); }).connect(), /FENCE_LOST/);
+  assert.equal(destroyed,true);
+});
+
+test('maintenance lock proof rejects lost locks and another database or cluster', async () => {
+  const target = normalizeRegisteredTarget(isolated), values = [];
+  const client = row => ({ async query(sql, params) { values.push({ sql, params }); return { rows: [row] }; } });
+  const ok = { database: 'postgres', system_identifier: isolated.instance.systemIdentifier, held: true };
+  await assertMaintenanceLockHeld(client(ok), target);
+  assert.deepEqual(values[0].params, ['806006']); assert.match(values[0].sql, /pid=pg_backend_pid\(\)/);
+  for (const changed of [{ ...ok, held: false }, { ...ok, database: 'other' }, { ...ok, system_identifier: '999' }, undefined])
+    await assert.rejects(assertMaintenanceLockHeld(client(changed), target), /TARGET_MAINTENANCE_LOCK_LOST/);
+  await assert.rejects(assertMaintenanceLockHeld(client(ok), { ...target, lockKey: '9223372036854775808' }), /TARGET_LOCK_KEY_INVALID/);
+});
+
+test('next-round transaction fence binds the live maintenance backend and target epoch', async () => {
+  const target = normalizeRegisteredTarget({ ...isolated, instance: { ...isolated.instance, port: 55435 }, migrationProfile: 'LOCAL_MIGRATION_NEXT_V1' });
+  const owner = { database: 'postgres', system_identifier: target.instance.systemIdentifier, held: true };
+  const ownerClient = (over = {}) => ({ query: async sql => ({ rows: [sql.includes('pg_locks') ? { ...owner, ...over }
+    : sql.includes('pg_try_advisory_lock') ? { acquired: true } : { pid: 123 }] }) });
+  const epoch = await captureMaintenanceLockEpoch(ownerClient(), target);
+  assert.equal(epoch.pid, 123); assert.equal(epoch.systemIdentifier, target.instance.systemIdentifier); assert.equal(epoch.keys.length, 4);
+  for (const changed of [{ held: false }, { system_identifier: '999' }])
+    await assert.rejects(captureMaintenanceLockEpoch(ownerClient(changed), target), /TARGET_MAINTENANCE_LOCK_LOST/);
+  const calls = [], proof = { database: target.database, oid: target.oid, nonce: target.nonce, system_identifier: target.instance.systemIdentifier, held: true };
+  const client = (over = {}) => ({ getTransactionStatus: () => over.transaction ?? 'T', async query(sql) {
+    calls.push(sql);
+    if (sql.includes('pg_try_advisory_xact_lock') || sql.includes('pg_try_advisory_lock')) return { rows: [{ acquired: over.acquired ?? true }] };
+    if (sql.includes('pg_advisory_unlock')) return { rows: [{ released: over.released ?? true }] };
+    return { rows: [over.proof ?? proof] };
+  } });
+  await acquireMigrationTransactionFence(client(), target, epoch);
+  assert.match(calls[0], /pg_try_advisory_xact_lock/); assert.match(calls[1], /pg_locks/);
+  await assert.rejects(acquireMigrationTransactionFence(client({ transaction: 'I' }), target, epoch), /TARGET_FENCE_TRANSACTION_REQUIRED/);
+  await assert.rejects(acquireMigrationTransactionFence(client({ acquired: false }), target, epoch), /TARGET_FENCE_BUSY/);
+  for (const changed of [{ ...proof, held: false }, { ...proof, oid: '2' }, { ...proof, nonce: 'b'.repeat(24) }, { ...proof, system_identifier: '999' }])
+    await assert.rejects(acquireMigrationTransactionFence(client({ proof: changed }), target, epoch), /TARGET_FENCE_EPOCH_LOST/);
+  await assert.rejects(acquireMigrationTransactionFence(client(), target, { ...epoch, keys: [1] }), /TARGET_FENCE_BINDING_INVALID/);
+  const session = client({ transaction: 'I' });
+  await acquireMigrationSessionFence(session, target, epoch); await releaseMigrationSessionFence(session, target);
+  await assert.rejects(acquireMigrationSessionFence(client(), target, epoch), /TARGET_FENCE_IDLE_CONNECTION_REQUIRED/);
+  await assert.rejects(acquireMigrationSessionFence(client({ transaction:'I', proof:{ ...proof, held:false } }), target, epoch), /TARGET_FENCE_EPOCH_LOST/);
+  await assert.rejects(releaseMigrationSessionFence(client({ transaction:'I', released:false }), target), /TARGET_FENCE_RELEASE_UNCONFIRMED/);
+});
 
 test("legacy registry keeps the fixed local instance and needs no cluster identity", () => {
   const target = withRegistry(legacy, loadRegisteredTarget);
@@ -141,6 +220,10 @@ test("readback binds registry, checkpoint instance and the migration credential 
   assert.throws(()=>assertReadbackTarget(target,{...binding,instance:{...binding.instance,systemIdentifier:'999'}},credential),/RESOURCE_BINDING_CHANGED/);
   assert.throws(()=>assertReadbackTarget(target,binding,{migration:{...credential.migration,oid:'16390'}}),/RESOURCE_BINDING_CHANGED/);
   assert.throws(()=>assertReadbackTarget({...target,pendingReset:{oid:target.oid}},binding,credential),/RESOURCE_BINDING_CHANGED/);
+  const next=normalizeRegisteredTarget({...isolated,instance:{...isolated.instance,port:55435},migrationProfile:'LOCAL_MIGRATION_NEXT_V1',roles:{migration:{name:'zzsh_regression_migration',oid:'16389'},runtime:{name:'zzsh_regression_runtime',oid:'16390'}}});
+  const nextBinding={...binding,instance:next.instance,migrationProfile:next.migrationProfile};
+  assert.doesNotThrow(()=>assertReadbackTarget(next,nextBinding,credential));
+  assert.throws(()=>assertReadbackTarget(next,{...nextBinding,migrationProfile:undefined},credential),/RESOURCE_BINDING_CHANGED/);
 });
 
 test("the runtime companion role must be a separate non-privileged login", () => {

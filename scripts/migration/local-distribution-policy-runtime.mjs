@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { LocalSession, localOrigin, totp, validateProfile } from "../local-auth.mjs";
 import { runNativeDistributionApproval } from "./local-distribution-policy-approval.mjs";
 import { assertHistoricalFinanceUnchanged } from "./local-distribution-qualification-plan.mjs";
+import { assertMaintenanceLockHeld } from './local-target-registry.mjs';
 
 /** Check the execution window and sealed build immediately before approval transactions commit. */
 export function guardedApprovalPool(pool, check) {
@@ -12,8 +13,15 @@ export function guardedApprovalPool(pool, check) {
     async connect() {
       const client = await pool.connect(), query = client.query, release = client.release;
       client.query = function (...args) {
-        if (typeof args[0] === "string" && args[0].trim().toUpperCase() === "COMMIT") check();
-        return query.apply(this, args);
+        const statement = typeof args[0] === "string" ? args[0].trim().toUpperCase() : "";
+        const ready = statement === "COMMIT" ? check() : undefined;
+        const result = statement === "COMMIT" && ready && typeof ready.then === 'function'
+          ? ready.then(() => query.apply(this, args)) : query.apply(this, args);
+        if (statement !== "COMMIT" && statement !== "ROLLBACK") return result;
+        return Promise.resolve(result).then(value => {
+          assert.equal(value?.command, statement, statement === "COMMIT" ? "DISTRIBUTION_APPROVAL_COMMIT_ACK_UNCONFIRMED" : "DISTRIBUTION_APPROVAL_ROLLBACK_ACK_UNCONFIRMED");
+          return value;
+        });
       };
       client.release = function (...args) { client.query = query; client.release = release; return release.apply(this, args); };
       return client;
@@ -50,7 +58,7 @@ export function assertRejectedPolicyRecovery({failure,previousPlan,probe,plan,ta
 }
 
 /** Existing auth runtime is mounted only to an inert sink; no route or lifecycle can serve traffic. */
-async function approveLocked({ input, plan, registry, credentials, target, base, Pool, sha, pinned, protectedInput, moduleFromBuild, identity, readTarget, canonicalize, verifyBuild, summary, save }) {
+async function approveLocked({ input, plan, registry, credentials, target, base, Pool, sha, pinned, protectedInput, moduleFromBuild, identity, readTarget, canonicalize, verifyBuild, checkMaintenanceLock, summary, save }) {
   const d = input.distribution, approval = d.approval;
   assert(d.scope === "NATIVE" && approval && Date.parse(input.window?.notBefore) <= Date.now() && Date.now() < Date.parse(input.window?.expiresAt), "LOCAL_NATIVE_APPROVAL_WINDOW_REQUIRED");
   const matchesBefore = actual => actual.headCompatible && !actual.policyActive && sameQualificationPopulation(actual.plan, plan, canonicalize);
@@ -90,8 +98,11 @@ async function approveLocked({ input, plan, registry, credentials, target, base,
   const { mountAuthHandlers } = moduleFromBuild("auth/auth-runtime"), { handleAdminSecurity } = moduleFromBuild("auth/auth-security");
   assert(typeof createReviewedLocalNativeDistributionScope === "function", "LOCAL_NATIVE_SCOPE_BUILD_REQUIRED");
   const scopeConfig = { profile: "test", provider: "fake", testOperationsEnabled: true, database: { target: "local-compose", targetProfile: "test", host: base.host, port: base.port, name: registry.database, user: credentials.runtime.name, runtimeUser: credentials.runtime.name } };
-  const proof = createControlledRegressionResource(scopeConfig, { resourceOid: Number(target.oid), nonce: target.nonce, runtimeRoleOid: Number(credentials.runtime.oid) }, "DISTRIBUTION");
-  const scope = createReviewedLocalNativeDistributionScope(proof, { owner: "zzsh", ownerOid: plan.target.ownerOid, ...(target.instance ? { instance:target.instance } : {}) });
+  const migrationInstance = target.migrationProfile ? { ...target.instance, migrationProfile: target.migrationProfile } : undefined;
+  const proof = createControlledRegressionResource(scopeConfig, { resourceOid: Number(target.oid), nonce: target.nonce, runtimeRoleOid: Number(credentials.runtime.oid),
+    ...(migrationInstance?{migrationInstance}:{}) }, "DISTRIBUTION");
+  const scope = createReviewedLocalNativeDistributionScope(proof, { owner: "zzsh", ownerOid: plan.target.ownerOid,
+    ...(target.instance ? { instance:migrationInstance??target.instance } : {}) });
   const pool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 2 });
   const routeSink = new Proxy({}, { get: () => () => routeSink });
   const app = { getHttpAdapter: () => ({ getInstance: () => routeSink }), get: () => { throw Error("OFFLINE_LIFECYCLE_FORBIDDEN"); } };
@@ -120,7 +131,7 @@ async function approveLocked({ input, plan, registry, credentials, target, base,
       }finally{try{if(begun)await c.query('ROLLBACK');}finally{c.release();}}
     }
     const security = await timed('authAssemblyMs',()=>mountAuthHandlers(app, { pool, apiOrigin, adminOrigin, userOrigin, userSecret, adminSecret, secureCookies: false, testOperationsEnabled: false, localSmsMock: false }));
-    security.pool = guardedApprovalPool(pool, () => { verifyBuild(); assert(Date.now() < Date.parse(input.window.expiresAt), "LOCAL_NATIVE_APPROVAL_WINDOW_EXPIRED"); });
+    security.pool = guardedApprovalPool(pool, async () => { verifyBuild(); assert(Date.now() < Date.parse(input.window.expiresAt), "LOCAL_NATIVE_APPROVAL_WINDOW_EXPIRED"); await checkMaintenanceLock(); });
     security.distributionPolicyWriteScope = scope;
     security.approvalOperationExecutor = (client, body, actor, requestId) => {
       assert.equal(body.operationCode, "distribution.policy.publish", "OFFLINE_APPROVAL_OPERATION_FORBIDDEN");
@@ -138,14 +149,21 @@ async function approveLocked({ input, plan, registry, credentials, target, base,
 
 /** The existing regression maintenance lock protects policy initialization and its readback. */
 export async function approveLocalNativePolicy(params) {
-  const { Client, credentials, base, summary, save } = params;
+  const { Client, credentials, base, summary, save, target } = params;
   const lock = new Client({ ...base, database: "postgres", user: credentials.migration.name, password: credentials.migration.password });
-  let locked = false;const lockAt=performance.now();
+  let locked = false, lockError;const lockAt=performance.now();
+  lock.on?.('error', error => { lockError ??= error; });
+  const checkMaintenanceLock = async () => {
+    assert(!lockError, 'DISTRIBUTION_MAINTENANCE_CONNECTION_LOST');
+    await assertMaintenanceLockHeld(lock, { lockKey: '806006', maintenanceDatabase: 'postgres', instance: target?.instance ?? null });
+    assert(!lockError, 'DISTRIBUTION_MAINTENANCE_CONNECTION_LOST');
+  };
   try {
     await lock.connect(); locked = (await lock.query("SELECT pg_try_advisory_lock(806006) AS ok")).rows[0]?.ok === true;
     (summary.timings??={}).maintenanceLockMs=Math.round(performance.now()-lockAt);save();
     assert(locked, "DISTRIBUTION_MAINTENANCE_LOCK_BUSY");
-    await approveLocked(params);
+    await checkMaintenanceLock();
+    await approveLocked({ ...params, checkMaintenanceLock });
   } finally {
     if(summary.timings?.maintenanceLockMs===undefined)(summary.timings??={}).maintenanceLockMs=Math.round(performance.now()-lockAt);
     if (locked) try { summary.lockReleased = (await lock.query("SELECT pg_advisory_unlock(806006) AS ok")).rows[0]?.ok === true; } catch { summary.lockReleased = false; }

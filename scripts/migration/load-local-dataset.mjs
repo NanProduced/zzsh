@@ -1,15 +1,16 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
 import { join, resolve, dirname, basename } from "node:path";
-import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertSelectedScopeForWrite } from "./selected-business-scope.mjs";
+import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readSourceRows as readRows } from "./local-source-adapter.mjs";
+import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -29,6 +30,9 @@ const manifestBytes = readFileSync(join(dataset, "manifest.json"));
 if (sha(manifestBytes) !== option("--dataset-sha"))
     throw new Error("DATASET_MANIFEST_SHA_MISMATCH");
 const manifest = JSON.parse(manifestBytes);
+if ((args.includes("--contact-append") || args.includes("--legacy-number-only"))
+    && loadRegisteredTarget(option("--credentials")).migrationProfile === NEXT_MIGRATION_PROFILE)
+    throw new Error("NEXT_ADDITIVE_MIGRATION_NOT_SUPPORTED");
 // A direct invocation must not bypass the runner's full-capture readiness gate.
 const population = manifest.population ?? { mode: manifest.scenarioSelection?.schema === "zzsh.source-scenarios.v1" ? "LEGACY_SCENARIO_SELECTION" : "LEGACY_UNDECLARED" };
 assertFullExecutionAdmitted(population, execute ? "execute" : "recover");
@@ -58,15 +62,16 @@ if (contactAppend || numberOnly) {
     }
 } else if (manifest.status !== "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN")
     throw new Error("DATASET_NOT_PREPARED");
-async function* readRows(file) { const stream = createReadStream(file); const reader = createInterface({ input: stream, crlfDelay: Infinity }); try {
-    for await (const line of reader)
-        if (line)
-            yield JSON.parse(line);
+const importsCore = !["--enrich-display", "--import-openings", "--enrich-holdings", "--contact-append", "--legacy-number-only"].some(flag => args.includes(flag));
+let sourceScopeVerification;
+if (execute && importsCore && manifest.identityProfiles?.schema !== "zzsh.legacy-identity-profile-source.v1")
+    throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_REQUIRED");
+if (execute && importsCore && manifest.refundRelationshipPolicy !== LEGACY_REFUND_RELATIONSHIP_POLICY)
+    throw new Error("LEGACY_REFUND_RELATIONSHIP_POLICY_REQUIRED");
+if (execute && importsCore && population.mode === "SELECTED_BUSINESS_SCOPE") {
+    const source = readBoundSelectedSourceReceipt(manifest.source, manifest.sourceReceiptSha256);
+    sourceScopeVerification = await verifySelectedPopulationFiles({ datasetDir: dataset, sourceDir: manifest.source, dataset: manifest, source });
 }
-finally {
-    reader.close();
-    stream.destroy();
-} }
 for (const [name, file] of Object.entries(manifest.files)) {
     if (file.file !== basename(file.file))
         throw new Error("DATASET_FILE_PATH_INVALID");
@@ -78,6 +83,24 @@ for (const [name, file] of Object.entries(manifest.files)) {
 }
 const api = resolve(option("--api-dist") ?? join(ROOT, "apps/api/dist/src")), mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize;
+const subject = mod("auth/identity-subject"), identityProfile = mod("auth/legacy-identity-profile");
+const subjectSecret = readFileSync(process.env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/user_identity_subject_hmac", "utf8").trim();
+const subjectKey = subject.deriveIdentitySubjectKey(subjectSecret);
+const hasIdentityProfiles = manifest.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1";
+if (manifest.identityProfiles && (!hasIdentityProfiles || manifest.identityProfiles.invalid !== 0
+    || !Number.isSafeInteger(manifest.identityProfiles.ready) || manifest.identityProfiles.ready < 0
+    || manifest.identityProfiles.verified !== manifest.identityProfiles.ready)) throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_INCOMPLETE");
+let profileKey;
+if (hasIdentityProfiles) {
+    if (!process.env.USER_LEGACY_IDENTITY_PROFILE_KEY_FILE) throw new Error("LEGACY_IDENTITY_PROFILE_KEY_FILE_REQUIRED");
+    const profileSecret = readFileSync(process.env.USER_LEGACY_IDENTITY_PROFILE_KEY_FILE, "utf8").trim();
+    if (profileSecret === subjectSecret) throw new Error("LEGACY_IDENTITY_PROFILE_KEY_NOT_INDEPENDENT");
+    profileKey = identityProfile.legacyIdentityProfileKey(profileSecret);
+}
+const keyBinding = hasIdentityProfiles ? {
+    identityProfileKeyProof: createHmac("sha256", profileKey).update("legacy-profile-key-v1:" + sha(manifestBytes)).digest("hex"),
+    identitySubjectKeyProof: createHmac("sha256", subjectKey).update("legacy-subject-key-v1:" + sha(manifestBytes)).digest("hex"),
+} : {};
 let invitationSource, invitationPacketCount;
 if (execute && !["--enrich-display", "--import-openings", "--enrich-holdings", "--contact-append", "--legacy-number-only", "--core-only"].some(flag => args.includes(flag))
     && requiresInvitationCountClosure(manifest)) {
@@ -102,9 +125,18 @@ function createOutput() {
 // The registered target is resolved before the checkpoint binding is built, so a checkpoint can only
 // ever be compared against the target its registry names - never against a literal in this script.
 const registered = loadRegisteredTarget(option("--credentials"));
+assertNextBusinessPopulation(population, registered.migrationProfile === NEXT_MIGRATION_PROFILE);
+expectedContinuationImports(manifest, registered.migrationProfile === NEXT_MIGRATION_PROFILE);
+if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
+    const file = manifest.files.continuations, rows = [];
+    if (file) for await (const row of readRows(join(dataset, file.file))) rows.push(row);
+    verifyNextContinuationRows(manifest, rows, mod("order/legacy-continuation-calc").admitLegacyEvidence);
+}
+if (execute) assertNextMigrationWriteReady(registered);
 
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
-const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...(registered.instance ? {instance: registered.instance} : {}) };
+const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
+    ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
     if (!checkpoint) return;
@@ -115,7 +147,10 @@ function assertCheckpointBinding(checkpoint) {
     if (checkpoint.pending && !recover) throw new Error("PENDING_TRANSACTION_READ_ONLY_RECOVERY_REQUIRED");
 }
 assertCheckpointBinding(state);
+if (sourceScopeVerification && state?.sourceScopeVerification && JSON.stringify(sourceScopeVerification) !== JSON.stringify(state.sourceScopeVerification))
+    throw new Error("SELECTED_SCOPE_CHECKPOINT_CHANGED");
 state ??= { schema: "zzsh.local-legacy-load.v1", binding, status: "STARTED", startedAt: new Date().toISOString(), phases: {}, pending: null, queries: 0, quarantine: [], checkpoints: 0 };
+if (sourceScopeVerification) state.sourceScopeVerification = sourceScopeVerification;
 if (strictBatch) state.strictBatch = true;
 if (executionWindow) state.executionWindow = executionWindow;
 if (expectedSchema) state.schemaHashes = expectedSchema;
@@ -154,7 +189,8 @@ function assertResource(resource, checkpoint) {
     if (resource.database !== binding.database || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset)
         throw new Error("RES:"+JSON.stringify([resource.database,binding.database,resource.oid,expectedOid,resource.nonce,expectedNonce,resource.pendingReset]));
     const instance = resource.instance ? {host:resource.instance.host ?? "127.0.0.1",port:Number(resource.instance.port ?? 55432),systemIdentifier:resource.instance.systemIdentifier ?? null} : null;
-    if (JSON.stringify(instance) !== JSON.stringify(registered.instance) || String(resource.lockKey ?? "806006") !== registered.lockKey) throw new Error("REGISTERED_INSTANCE_CHANGED");
+    if (JSON.stringify(instance) !== JSON.stringify(registered.instance) || (resource.migrationProfile ?? null) !== registered.migrationProfile
+        || String(resource.lockKey ?? "806006") !== registered.lockKey) throw new Error("REGISTERED_INSTANCE_CHANGED");
     const reservation = resource.protectedDataset;
     const strictRound = status => isStrictRoundReservation(status) || status === round06Reservation;
     if ((strictRound(reservation?.bootstrapReservation) || reservation?.status === round06Reservation) && !strictBatch) throw new Error("CHECKPOINT_STRICT_BATCH_CHANGED");
@@ -180,11 +216,20 @@ function assertRegisteredRole(resource) {
         || typeof registeredRoleOid !== "string" || credentials.migration.oid !== registeredRoleOid)
         throw new Error("REGISTERED_MIGRATION_CREDENTIAL_REQUIRED");
 }
+function readStartingResource() {
+    const currentCheckpoint = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
+    assertCheckpointBinding(currentCheckpoint);
+    if (currentCheckpoint) state = currentCheckpoint;
+    const startingResource = JSON.parse(readFileSync(registered.sourceFile));
+    assertResource(startingResource, currentCheckpoint);
+    assertRegisteredRole(startingResource);
+    if(fundsSourceBinding&&state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
+    return startingResource;
+}
 assertRegisteredRole(registered);
 const maintenance = new Client(maintenanceConnection(registered, { user: "zzsh", password: readFileSync(process.env.DB_PASSWORD_FILE ?? join(ROOT, "apps/api/.secrets/postgres_password"), "utf8").trim(), applicationName: "core-full-legacy-lock", connectionTimeoutMillis: 3000, statement_timeout: 5000, lock_timeout: 500 }));
 const pool = new Pool(targetConnection(registered, { user: credentials.migration.name, password: credentials.migration.password, applicationName: "core-full-legacy-import", max: 1, connectionTimeoutMillis: 3000, statement_timeout: 600000, lock_timeout: 1000 }));
-const subject = mod("auth/identity-subject"), subjectKey = subject.deriveIdentitySubjectKey(readFileSync(process.env.USER_IDENTITY_SUBJECT_HMAC_KEY_FILE ?? "E:/zzsh/zzsh/apps/api/.secrets/user_identity_subject_hmac", "utf8").trim());
-let client, held = false, unsafeConnection;
+let client, held = false, unsafeConnection, fenceEpoch, fenceHeld = false;
 const gameIds = new Map();
 const domainFile = name => manifest.files[name] ? join(dataset, manifest.files[name].file) : null;
 async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBody) {
@@ -199,12 +244,13 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBod
     const outcomes = [], quarantine = [];
     try {
         await client.query("BEGIN");
+        if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
         await beforeBatch?.(batch);
         for (const [offset, row] of batch.entries()) {
             // Batch-body mode: one call writes the whole chunk in a few jsonb_to_recordset statements.
             // It must return one outcome per row so created/replayed accounting stays exact.
             if (batchBody) {
-                const produced = await batchBody(batch);
+                const produced = await batchBody(batch, start);
                 if (!Array.isArray(produced) || produced.length !== batch.length) throw new Error("BATCH_BODY_OUTCOME_SHAPE_INVALID");
                 outcomes.push(...produced);
                 break;
@@ -239,6 +285,7 @@ async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBod
         state.pending = { ...batchIntent, stage: "COMMIT_INTENT" };
         save();
         assertRoundWindow();
+        if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
         commitSent = true;
         if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("ROUND_COMMIT_ACK_NOT_CONFIRMED");
         commitAck = true;
@@ -320,14 +367,39 @@ async function runBatches(domain, items, chunkBody, batchSize = 500) {
 }
 async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
     return runItems(domain, readRows(file), body, batchSize); }
-async function applyUsers() { await runPhase("users", async (row) => { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, actor); if (row.trustedIdentityNumber) {
+async function applyUser(row, profiles) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, actor); if (row.trustedIdentityNumber) {
     const wanted = subject.identitySubjectDigest(row.trustedIdentityNumber, subjectKey);
     const old = (await client.query("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject WHERE user_id=$1", [row.userId])).rows[0];
     if (old && (old.subject_digest !== wanted || old.source !== "LEGACY_IMPORT"))
         throw new Error("LEGACY_SUBJECT_BINDING_CONFLICT");
     if (!old)
         await subject.recordLegacyIdentitySubject(client, row.userId, row.trustedIdentityNumber, subjectKey);
-} return result; }); }
+    if (hasIdentityProfiles) {
+        if (!row.legacyIdentityProfile) throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_MISSING");
+        const entry = { binding: { userId: row.userId, sourceRef: "la_user:" + row.sourceId,
+            sourceDigest: row.sourceDigest, subjectDigest: wanted }, details: row.legacyIdentityProfile };
+        if (profiles) profiles.push(entry);
+        else await identityProfile.recordLegacyIdentityProfile(client, entry.binding, entry.details, profileKey, subjectKey);
+    }
+} else if (hasIdentityProfiles && (row.input.evidence.status.realNameBound || row.legacyIdentityProfile)) {
+    throw new Error("LEGACY_IDENTITY_SUBJECT_SOURCE_MISSING");
+} return result; }
+async function applyUsers() {
+    if (!strictBatch) return runPhase("users", row => applyUser(row));
+    const file = domainFile("users"); if (!file) return;
+    return runBatches("users", readRows(file), async (batch, start) => {
+        const results = [], profiles = [];
+        for (const [offset, row] of batch.entries()) {
+            try { results.push(await applyUser(row, profiles)); }
+            catch (error) { try { event({ event: "STRICT_ROW_REJECTED", domain: "users", index: start + offset, status: error?.status ?? null }); } catch { } throw error; }
+        }
+        if (profiles.length) {
+            try { await identityProfile.recordLegacyIdentityProfiles(client, profiles, profileKey, subjectKey); }
+            catch (error) { try { event({ event: "STRICT_BATCH_REJECTED", domain: "users", start, count: profiles.length, status: error?.status ?? null }); } catch { } throw error; }
+        }
+        return results;
+    }, 100);
+}
 async function applyAccounts() { await runPhase("accounts", async (row) => { const gameId = gameIds.get(row.gameCode); if (!gameId)
     throw new Error("TARGET_GAME_NOT_BOUND"); const input = { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.sourceId, sourceDigest: row.sourceDigest, evidenceRef: row.evidenceRef, owner: { legacyId: row.ownerLegacyId, sourceDigest: row.ownerSourceDigest }, gameId }; const result = await mod("legacy-load/legacy-account-seam").createLegacyOwnerRentalAccount(client, input, actor); const observationVersionId = await mod("supply/legacy-observation").recordLegacyObservation(client, result.accountId, { sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, evidenceRef: input.evidenceRef, inventory: [] }, actor); if (row.snapshot && row.sourceUpdatedAt && mod("supply/legacy-listing-read").legacyReadSourceAllowed(Number(row.sourceStatus), row.sourceDeleted))
     await mod("supply/legacy-listing-read").recordLegacyReadSnapshot(client, result.accountId, { observationVersionId, sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, sourceStatus: Number(row.sourceStatus), sourceDeleted: row.sourceDeleted, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: input.evidenceRef, snapshot: row.snapshot }, actor); return result; }); }
@@ -348,14 +420,10 @@ try {
     held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
-    // A previous writer may have finished while this invocation was validating its inputs.
-    const currentCheckpoint = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
-    assertCheckpointBinding(currentCheckpoint);
-    if (currentCheckpoint) state = currentCheckpoint;
-    const startingResource = JSON.parse(readFileSync(registered.sourceFile));
-    assertResource(startingResource, currentCheckpoint);
-    assertRegisteredRole(startingResource);
-    if(fundsSourceBinding&&state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
+    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE && !recover)
+        fenceEpoch = await captureMaintenanceLockEpoch(maintenance, registered);
+    let startingResource;
+    if (!fenceEpoch) startingResource = readStartingResource();
     client = await pool.connect();
     // pg emits socket errors separately from rejecting the active query.
     client.on("error", error => { unsafeConnection ??= error; });
@@ -367,6 +435,11 @@ try {
     assertLiveTarget(registered, actual);
     if (actual.role_oid !== credentials.migration.oid || actual.oid !== expectedOid || actual.nonce !== expectedNonce)
         throw new Error("TARGET_IDENTITY_CHANGED");
+    if (fenceEpoch) {
+        await acquireMigrationSessionFence(client, registered, fenceEpoch); fenceHeld = true;
+        // A predecessor may have finished while this process waited for the target fence.
+        startingResource = readStartingResource();
+    }
     resetRunCleanup();
     if(refundAttemptsBinding&&state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");
     if (recover) {
@@ -418,7 +491,7 @@ try {
         save();
         if (contactAppend || numberOnly) {
             const { applyContactAppend, applyNumberBindings } = await import("./local-target-contact-append.mjs");
-            const ctx = { client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event };
+            const ctx = { client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE };
             if (numberOnly) await applyNumberBindings(ctx);
             else {
                 await applyContactAppend(ctx, { applyUsers, applyAccounts, applyOrders, display: { directory: option("--display-plan"), sha256: option("--display-plan-sha") },
@@ -450,7 +523,7 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }
@@ -470,6 +543,7 @@ catch (error) {
     process.exitCode = 1;
 }
 finally {
+    let fencedProtectionHandled = false;
     if (client) {
         if (!recover && !unsafeConnection && !state.rollbackConfirmed) {
             try {
@@ -477,10 +551,26 @@ finally {
                 state.rollbackConfirmed = true;
             } catch (error) { unsafeConnection = error; }
         }
+        if (fenceHeld) {
+            fencedProtectionHandled = true;
+            if (checkpointOwned && (strictBatch || state.pending || Object.values(state.phases).some(phase => phase.nextIndex > 0))) {
+                try {
+                    const resourceState = JSON.parse(readFileSync(registered.sourceFile));
+                    assertResource(resourceState, state);
+                    protectDataset(resourceState, state.status);
+                    writeLoadCheckpoint(registered.sourceFile, resourceState);
+                    state.protectionRecorded = true;
+                } catch (error) { unsafeConnection ??= error; process.exitCode = 1; }
+            }
+            if (!unsafeConnection) {
+                try { await releaseMigrationSessionFence(client, registered); state.targetFenceReleased = true; }
+                catch (error) { state.targetFenceReleased = false; unsafeConnection = error; process.exitCode = 1; }
+            } else state.targetFenceReleased = false;
+        }
         client.release(unsafeConnection);
     }
     try { await pool.end(); state.poolClosed = true; } catch { state.poolClosed = false; process.exitCode=1; }
-    if (checkpointOwned && (strictBatch || state.pending || Object.values(state.phases).some(phase => phase.nextIndex > 0))) {
+    if (!fencedProtectionHandled && checkpointOwned && (strictBatch || state.pending || Object.values(state.phases).some(phase => phase.nextIndex > 0))) {
         try {
             const resourceState = JSON.parse(readFileSync(registered.sourceFile));
             assertResource(resourceState, state);
@@ -498,7 +588,8 @@ finally {
         }
     }
     try { await maintenance.end(); state.maintenanceClosed = true; } catch { state.maintenanceClosed = false; process.exitCode=1; }
-    if(checkpointOwned && (!state.poolClosed || !state.unlock || !state.maintenanceClosed || !state.rollbackConfirmed)) process.exitCode=1;
+    if(checkpointOwned && (!state.poolClosed || !state.unlock || !state.maintenanceClosed || !state.rollbackConfirmed
+        || registered.migrationProfile === NEXT_MIGRATION_PROFILE && state.targetFenceReleased !== true)) process.exitCode=1;
     state.updatedAt = new Date().toISOString();
     try {
         save();

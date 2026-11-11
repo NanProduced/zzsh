@@ -24,6 +24,15 @@ test('R07 proof inputs reject old instance, changed server and incomplete admin 
  const old=structuredClone(receipts);old.staff.serverBindingSha256='c'.repeat(64);assert.throws(()=>validateR07BootstrapProofInputs(input,registered,profile,old));
  const partial=structuredClone(receipts);partial.bosses.unlock=false;assert.throws(()=>validateR07BootstrapProofInputs(input,registered,profile,partial));
 });
+test('bootstrap readback checks next-round profile and all target instances',()=>{
+ const nextInstance={...instance,port:55435},migrationProfile='LOCAL_MIGRATION_NEXT_V1';
+ const nextTarget={...target,instance:nextInstance,migrationProfile},nextRegistry=normalizeRegisteredTarget({database:target.database,marker:'zzsh:regression-test:v1',oid:target.oid,nonce,instance:nextInstance,migrationProfile,
+  roles:{migration:{name:'migration',oid:'790'},runtime:{name:'runtime',oid:'789'}}});
+ const nextInput={...input,target:nextTarget},nextReceipts={bosses:{...receipts.bosses,target:nextTarget},staff:{...receipts.staff,target:nextTarget},policy:{...receipts.policy,target:nextTarget}};
+ assert.doesNotThrow(()=>validateR07BootstrapProofInputs(nextInput,nextRegistry,profile,nextReceipts));
+ assert.throws(()=>validateR07BootstrapProofInputs({...nextInput,target:{...nextTarget,migrationProfile:undefined}},nextRegistry,profile,nextReceipts));
+ assert.throws(()=>validateR07BootstrapProofInputs(nextInput,nextRegistry,profile,{...nextReceipts,staff:receipts.staff}));
+});
 test('readback requires exact new administrators, no old sessions, and actual approved policy relations',()=>{
  const result=verifyR07BootstrapRows(profile,policy,rows,0,[p]);assert.equal(result.admins.count,4);assert.equal(result.policy.onlyNewBossRelations,true);
  assert.doesNotThrow(()=>verifyR07BootstrapRows(profile,policy,rows,0,[{...p,effective_at:policy.effectiveAtUtc}]));

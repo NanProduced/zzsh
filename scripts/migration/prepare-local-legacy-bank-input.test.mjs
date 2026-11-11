@@ -65,6 +65,11 @@ test("R07 keyring evidence is target-specific and cannot reuse an R06 receipt",(
  assert.throws(()=>assertLegacyBankKeyringProof({...proof,schema:'zzsh.r06-bank-keyring-receipt.v1'},target));
  assert.throws(()=>assertLegacyBankKeyringProof({...proof,target:{...proof.target,instance:{...instance,systemIdentifier:'999'}}},target));
  assert.throws(()=>assertLegacyBankKeyringProof({...proof,backupMatches:false},target));
+ const next={...target,round:'next',migrationProfile:'LOCAL_MIGRATION_NEXT_V1',instance:{...instance,port:55435}};
+ const nextProof={...proof,schema:'zzsh.local-bank-keyring-receipt.v1',target:{...proof.target,instance:next.instance,migrationProfile:next.migrationProfile}};
+ assert.doesNotThrow(()=>assertLegacyBankKeyringProof(nextProof,next));
+ assert.throws(()=>assertLegacyBankKeyringProof(proof,next));
+ assert.throws(()=>assertLegacyBankKeyringProof({...nextProof,target:{...nextProof.target,migrationProfile:undefined}},next));
 });
 
 test("R07 bank source proof binds the current dump snapshot and never claims a database write",()=>{
@@ -73,6 +78,8 @@ test("R07 bank source proof binds the current dump snapshot and never claims a d
  assert.throws(()=>assertLegacyBankSourceProof({...proof,schema:'zzsh.r06-bank-source-validation.v1'},7,proof.sourceReceiptSha256,proof.sourceBindingSha256));
  assert.throws(()=>assertLegacyBankSourceProof(proof,7,'c'.repeat(64),proof.sourceBindingSha256));
  assert.throws(()=>assertLegacyBankSourceProof({...proof,plaintextRowsPersisted:true},7,proof.sourceReceiptSha256,proof.sourceBindingSha256));
+ assert.doesNotThrow(()=>assertLegacyBankSourceProof({...proof,schema:'zzsh.local-bank-source-validation.v1'},'next',proof.sourceReceiptSha256,proof.sourceBindingSha256));
+ assert.throws(()=>assertLegacyBankSourceProof(proof,'next',proof.sourceReceiptSha256,proof.sourceBindingSha256));
 });
 
 test("R07 bank schema evidence comes from fresh schema and exact independent core readback",()=>{
@@ -80,7 +87,7 @@ test("R07 bank schema evidence comes from fresh schema and exact independent cor
  const ref=n=>({path:'evidence-'+n,sha256:String(n).repeat(64)}),roundInput=ref(1),roundReceiptRef=ref(2),readbackRef=ref(3);
  const target={oid:'123',nonce,instance,migrationRoleOid:'790',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED',schemaHashes:['f'.repeat(64)]};
  const round={schema:'zzsh.local-round.v1',target,dataset:{sha256:dataset},source:{sha256:source}};
- const roundReceipt={schema:'zzsh.local-round-receipt.v1',status:'DATASET_AND_GROWTH_ACK_READBACK_PASS',inputSha256:roundInput.sha256,datasetSha256:dataset,sourceReceiptSha256:source,target,completion:{status:'COMPLETE',dataset:'PASS'},finishedAt:'2026-11-06T00:00:00Z',stages:[{name:'readback',status:'ACK',code:0,signal:null,metrics:{evidenceSha256:readbackRef.sha256}}]};
+ const roundReceipt={schema:'zzsh.local-round-receipt.v1',status:'DATASET_AND_GROWTH_ACK_READBACK_PASS',inputSha256:roundInput.sha256,datasetSha256:dataset,sourceReceiptSha256:source,target,completion:{status:'COMPLETE',dataset:'PASS',growth:'PASS'},finishedAt:'2026-11-06T00:00:00Z',stages:[{name:'readback',status:'ACK',code:0,signal:null,metrics:{evidenceSha256:readbackRef.sha256}}]};
  const readback={schema:'zzsh.local-dataset-readback.v1',status:'CORE_SOURCE_TARGET_EXACT_READBACK_PASSED',sourceDatasetSha256:dataset,resource:{database:'zzsh_test_regression',oid:'123',nonce,instance},differenceCount:0,targetWrites:0,rollbackConfirmed:true,lockReleased:true,connectionsClosed:true,financialHistory:{walletEffectsFromObservation:false,arrivalVerified:false,counts:{}}};
  const schema={status:'CLEAN_SCHEMA_INSTALLED',oid:'123',nonce,instance,finalOrdinal:160,journalSha256:journal,historySha256:history,hashes:target.schemaHashes,commitAck:true,migrationAck:true,readbackRollbackAck:true,readbackClientClosed:true,unlockAck:true,maintenanceClosed:true};
  const base={database:'zzsh_test_regression',oid:'123',nonce,instance,marker:'zzsh:regression-test:v1'};
@@ -91,6 +98,22 @@ test("R07 bank schema evidence comes from fresh schema and exact independent cor
  assert.throws(()=>makeR07BankSchemaEvidence({...options,schema:{...schema,unlockAck:false}}));
  assert.throws(()=>makeR07BankSchemaEvidence({...options,readback:{...readback,differenceCount:1}}));
  assert.throws(()=>makeR07BankSchemaEvidence({...options,runtime:{...runtime,actualResource:{...runtime.actualResource,instance:{...instance,systemIdentifier:'999'}}}}));
+ const i={...instance,port:55435},migrationProfile='LOCAL_MIGRATION_NEXT_V1',t={...target,instance:i,migrationProfile};
+ const nextOptions={...options,round:{...round,target:t,bootstrapEvidence:{schema:ref(4)}},roundReceipt:{...roundReceipt,target:t},readback:{...readback,targetFence:'HELD_UNTIL_ROLLBACK',resource:{...readback.resource,instance:i,migrationProfile}},
+  schema:{...schema,instance:i,migrationProfile,runtimeAclReadback:true,targetFence:'HELD_ACROSS_SCHEMA_AND_ACL',targetFenceReleased:true,initialBaseline:'release_production_0174',initialSeedReadback:{status:'INITIAL_SEEDS_AND_COMMENTS_VERIFIED'},initialBaselineManifestSha256:'a'.repeat(64),initialTailSeedProofSha256:'a'.repeat(64),releaseCommit:'a'.repeat(40)},runtime:{...runtime,resource:{...runtime.resource,instance:i,migrationProfile},actualResource:{...runtime.actualResource,instance:i,migrationProfile}},
+  registry:{...registry,instance:i,migrationProfile}};
+ const next=makeR07BankSchemaEvidence(nextOptions);assert.equal(next.proof.schema,'zzsh.local-bank-schema-proof.v1');assert.equal(next.proof.target.round,'next');
+ assert.throws(()=>assertFinalLegacyBankSchema(next.proof,next.final,nextOptions.registry));
+ assert.doesNotThrow(()=>assertFinalLegacyBankSchema(next.proof,next.final,nextOptions.registry,undefined,undefined,{round:nextOptions.round,schema:nextOptions.schema}));
+ assert.throws(()=>assertFinalLegacyBankSchema(next.proof,next.final,nextOptions.registry,undefined,undefined,{round:nextOptions.round,schema:{...nextOptions.schema,releaseCommit:undefined}}));
+ for(const change of [{status:'SCHEMA_STOPPED'},{runtimeAclReadback:false},{targetFenceReleased:false},{commitAck:false},{unlockAck:false}])
+  assert.throws(()=>assertFinalLegacyBankSchema(next.proof,next.final,nextOptions.registry,undefined,undefined,{round:nextOptions.round,schema:{...nextOptions.schema,...change}}));
+ assert.throws(()=>assertFinalLegacyBankSchema(next.proof,next.final,nextOptions.registry,undefined,undefined,{round:{...nextOptions.round,bootstrapEvidence:{schema:ref(5)}},schema:nextOptions.schema}));
+ assert.throws(()=>makeR07BankSchemaEvidence({...nextOptions,schema:{...nextOptions.schema,initialSeedReadback:undefined}}));
+ assert.throws(()=>makeR07BankSchemaEvidence({...nextOptions,readback:{...nextOptions.readback,targetFence:undefined}}));
+ assert.throws(()=>makeR07BankSchemaEvidence({...nextOptions,readback:{...nextOptions.readback,resource:{...nextOptions.readback.resource,migrationProfile:undefined}}}));
+ assert.throws(()=>makeR07BankSchemaEvidence({...nextOptions,registry:{...nextOptions.registry,migrationProfile:undefined}}));
+ assert.throws(()=>makeR07BankSchemaEvidence({...nextOptions,runtime:{...nextOptions.runtime,actualResource:{...nextOptions.runtime.actualResource,migrationProfile:undefined}}}));
 });
 
 test("只接受完整 ACK 的 0157 之后最终 schema；中间 0156 或目标漂移拒绝", () => {
@@ -126,6 +149,8 @@ test("审批只绑定目标、来源、schema、构建、计划摘要与窗口�
   assert(!JSON.stringify(result).includes("synthetic-name")); assert(!JSON.stringify(result).includes("0000000000000015"));
   const r07={...input,target:{round:7,databaseOid:123}},r07Plan={...plan,binding:{...plan.binding,target:r07.target}};
   assert.equal(makeLegacyBankAuthority(r07,inputSha,r07Plan,planSha,window,"r07-bank-review").purpose,"ROUND_07_BANK_IMPORT");
+  const next={...input,target:{round:'next',databaseOid:123}},nextPlan={...plan,binding:{...plan.binding,target:next.target}};
+  assert.equal(makeLegacyBankAuthority(next,inputSha,nextPlan,planSha,window,"next-bank-review").purpose,"LOCAL_MIGRATION_BANK_IMPORT");
 });
 test("目标、源、schema、构建或原计划不一致以及无效窗口均拒绝生成", () => {
   for (const altered of [{ ...plan, inputSha256: "f".repeat(64) }, { ...plan, schemaHistorySha256: "f".repeat(64) },

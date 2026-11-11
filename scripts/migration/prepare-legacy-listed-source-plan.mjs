@@ -1,16 +1,15 @@
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { readSourceRows } from './local-source-adapter.mjs';
-import { verifyRoundBoundSourcePlan } from './legacy-listed-round-source.mjs';
+import { readBoundListedAccounts, verifyRoundBoundSourcePlan } from './legacy-listed-round-source.mjs';
 
 const args=process.argv.slice(2), option=name=>{const i=args.indexOf(name);return i<0?undefined:args[i+1]};
-if(!args.includes('--prepare')){console.log(JSON.stringify({action:'PLAN',requires:['--prepare','--round-input','--round-input-sha','--core-receipt','--core-receipt-sha','--scope-audit','--scope-audit-sha','--source-binding','--policy-bundle','--policy-authority','--oid','--expected-count','--not-before','--expires-at','--out'],connections:0,credentialReads:0}));process.exit(0)}
-const root=resolve('E:/zzsh-local-state/restricted'),privatePath=x=>{const p=resolve(x??'');if(!isAbsolute(x??'')||!p.toLowerCase().startsWith(root.toLowerCase()+'\\'))throw new Error('PRIVATE_PATH_REQUIRED');return p};
+if(!args.includes('--prepare')){console.log(JSON.stringify({action:'PLAN',requires:['--prepare','--round-input','--round-input-sha','--core-receipt','--core-receipt-sha','--scope-audit','--scope-audit-sha','--source-binding','--policy-bundle','--policy-authority','--oid','--expected-count','--not-before','--expires-at','--out'],sameCaptureAlsoRequires:['--batch-manifest','--batch-manifest-sha','--batch-index'],connections:0,credentialReads:0}));process.exit(0)}
+const root=resolve('E:/zzsh-local-state/restricted'),privatePath=x=>{const p=resolve(x??'');if(!isAbsolute(x??'')||!p.toLowerCase().startsWith(root.toLowerCase()+'\\'))throw new Error('PRIVATE_PATH_REQUIRED');for(let at=p;;at=dirname(at)){if(existsSync(at)&&lstatSync(at).isSymbolicLink())throw new Error('LISTED_REPARSE_POINT_REFUSED');if(at.toLowerCase()===root.toLowerCase())break}return p};
 const sha=x=>createHash('sha256').update(x).digest('hex'),read=x=>JSON.parse(readFileSync(x,'utf8'));
 const require=createRequire(import.meta.url),assert=(x,m)=>{if(!x)throw new Error(m)};
 const started=performance.now(),roundFile=privatePath(option('--round-input')),roundBytes=readFileSync(roundFile),roundSha=sha(roundBytes);
@@ -20,6 +19,7 @@ assert(sha(coreBytes)===option('--core-receipt-sha')&&sha(auditBytes)===option('
 const audit=JSON.parse(auditBytes),policyFile=privatePath(option('--policy-bundle')),authorityFile=privatePath(option('--policy-authority'));
 const bindingFile=resolve(option('--source-binding')??''),out=privatePath(option('--out'));
 assert(isAbsolute(option('--source-binding')??'')&&!existsSync(out),'NEW_PRIVATE_OUTPUT_REQUIRED');
+for(let at=bindingFile;at!==dirname(at);at=dirname(at))assert(!lstatSync(at).isSymbolicLink(),'LISTED_REPARSE_POINT_REFUSED');
 assert(/^\d+$/.test(option('--oid')??'')&&round.target?.oid===option('--oid'),'EXPECTED_TARGET_OID_REQUIRED');
 const count=Number(option('--expected-count'));assert(Number.isSafeInteger(count)&&count>0&&count===audit.accounts?.length,'EXPECTED_SOURCE_COUNT_REQUIRED');
 assert(isAbsolute(round.apiDist??'')&&round.buildFiles&&typeof round.buildFiles==='object','ROUND_BUILD_REQUIRED');
@@ -33,17 +33,25 @@ const {canonicalize}=require(join(round.apiDist,'supply/content-hash.js'));
 const policy=read(policyFile),authority=read(authorityFile),policySha=sha(canonicalize(policy)),authoritySha=sha(canonicalize(authority));
 assert(policySha===audit.policyBundleCanonicalSha256&&authoritySha===audit.policyAuthorityCanonicalSha256,'SOURCE_POLICY_CHANGED');
 const binding={schema:'zzsh.legacy-listed-round-binding.v1',roundInputFile:roundFile,roundInputSha256:roundSha,coreReceiptFile:coreFile,coreReceiptSha256:sha(coreBytes),scopeAuditFile:auditFile,scopeAuditSha256:sha(auditBytes),sourceDir:round.source.path,window:{notBefore:option('--not-before'),expiresAt:option('--expires-at')},sourceBindingFile:bindingFile,sourceBindingSha256:sha(readFileSync(bindingFile)),policyBundleFile:policyFile,policyBundleSha256:policySha,policyAuthorityFile:authorityFile,policyAuthoritySha256:authoritySha,loaderSha256:compiled.loader,helperSha256:sha(readFileSync(helperPath)),creditGuaranteeEnabled:args.includes('--credit-guarantee'),expectedAccountCount:count};
-const temporary={roundBinding:binding},ctx={oid:round.target.oid,nonce:round.target.nonce,instance:round.target.instance,credentials:round.credentials,actorFile:round.actor.path,apiDist:round.apiDist,creditGuaranteeEnabled:binding.creditGuaranteeEnabled,compiled};
-const verified=verifyRoundBoundSourcePlan(temporary,ctx,canonicalize);
+if(option('--batch-manifest')){
+ const manifestFile=privatePath(option('--batch-manifest')),bytes=readFileSync(manifestFile),manifest=JSON.parse(bytes),index=Number(option('--batch-index'));
+ assert(sha(bytes)===option('--batch-manifest-sha')&&Number.isSafeInteger(index)&&index>0&&Array.isArray(manifest.batches)&&index<=manifest.batches.length,'LISTED_BATCH_BINDING_REQUIRED');
+ const policyFiles=manifest.batches.map((_,i)=>{const file=manifest.batches.length===1?'policy.json':`policy-${String(i+1).padStart(4,'0')}.json`;return {file,sha256:sha(readFileSync(privatePath(join(dirname(manifestFile),file))))};});
+ binding.batch={schema:'zzsh.listed-same-capture-batch-binding.v1',manifestFile,manifestSha256:sha(bytes),index,policyFiles};
+}
+if(binding.batch)assert(compiled['supply/legacy-listed-pricing']===sha(readFileSync(join(round.apiDist,'supply/legacy-listed-pricing.js'))),'ROUND_BUILD_CHANGED');
+const parseInteger=binding.batch?require(join(round.apiDist,'supply/legacy-listed-pricing.js')).legacyPriceInteger:undefined;
+const temporary={roundBinding:binding},ctx={oid:round.target.oid,nonce:round.target.nonce,instance:round.target.instance,migrationProfile:round.target.migrationProfile,credentials:round.credentials,actorFile:round.actor.path,apiDist:round.apiDist,creditGuaranteeEnabled:binding.creditGuaranteeEnabled,compiled,parseInteger};
+const verified=await verifyRoundBoundSourcePlan(temporary,ctx,canonicalize);
 assert(policy.supplement?.sourceReceiptSha256===round.source.sha256&&authority.policyBundleSha256===policySha,'SOURCE_POLICY_BINDING_CHANGED');
 const candidates=policy.supplement.accountSourceDigests;assert(Array.isArray(candidates)&&candidates.length===count,'POLICY_SOURCE_COUNT_CHANGED');
 const wanted=new Map(candidates.map(x=>[x.id,x.sha256])),audited=new Map(verified.audit.accounts.map(x=>[x.sourceId,x.sourceDigest]));
 assert(wanted.size===count&&audited.size===count&&[...wanted].every(([id,d])=>audited.get(id)===d),'AUDITED_ACCOUNT_SET_CHANGED');
 const receipt=read(join(round.source.path,'receipt.json'));assert(receipt.files?.accounts?.file==='accounts.jsonl','SOURCE_ACCOUNT_FILE_INVALID');
-const sourceFile=join(round.source.path,receipt.files.accounts.file),digest=createHash('sha256');
-for await(const c of createReadStream(sourceFile))digest.update(c);assert(digest.digest('hex')===receipt.files.accounts.sha256,'SOURCE_ACCOUNTS_CHANGED');
-const raw=new Map();for await(const row of readSourceRows(sourceFile))if(wanted.has(row.id)){assert(!raw.has(row.id),'SOURCE_ACCOUNT_DUPLICATE');raw.set(row.id,row)}
-assert(raw.size===count,'SOURCE_ACCOUNT_MISSING');const listings=[];
+const sourceFile=join(round.source.path,receipt.files.accounts.file);
+const scanned=verified.batch??await readBoundListedAccounts(sourceFile,receipt.files.accounts,wanted,canonicalize),raw=scanned.accounts;
+if(!verified.batch){const afterDigest=createHash('sha256');for await(const c of createReadStream(sourceFile))afterDigest.update(c);assert(afterDigest.digest('hex')===receipt.files.accounts.sha256,'SOURCE_ACCOUNTS_CHANGED_DURING_READ');}
+assert(Number.isSafeInteger(receipt.files.accounts.rows)&&scanned.captured===receipt.files.accounts.rows&&raw.size===count,'SOURCE_ACCOUNT_MISSING');const listings=[];
 for(const [id,expected] of wanted){
  const row=raw.get(id),sourceDigest=sha(canonicalize(row));assert(sourceDigest===expected&&row.status==='3'&&row.is_delete==='0','SOURCE_FACT_CHANGED');
  assert(['0','1'].includes(row.is_full_payout)&&['default','custom','fast'].includes(row.ratio_type),'SOURCE_LISTING_INVALID');
@@ -55,5 +63,5 @@ const plan={schema:'zzsh.listed-source-continuity-plan.v2',createdAt:new Date().
 mkdirSync(out);const who=spawnSync('whoami',['/user','/fo','csv','/nh'],{encoding:'utf8',windowsHide:true}),sid=/S-1-5-[0-9-]+/.exec(who.stdout)?.[0];assert(who.status===0&&sid,'CURRENT_SID_REQUIRED');
 assert(spawnSync('icacls',[out,'/inheritance:r','/grant:r',`*${sid}:(OI)(CI)F`,'*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F'],{windowsHide:true}).status===0,'OUTPUT_ACL_FAILED');
 const bytes=JSON.stringify(plan,null,2)+'\n';writeFileSync(join(out,'source-plan.json'),bytes,{flag:'wx'});
-const receiptOut={status:'SOURCE_PLAN_PREPARED_NO_DATABASE',sourcePlanSha256:sha(bytes),roundInputSha256:roundSha,coreReceiptSha256:sha(coreBytes),scopeAuditSha256:sha(auditBytes),accounts:count,wallMs:performance.now()-started,dbConnections:0,credentialReads:0,targetWrites:0};
+const receiptOut={status:'SOURCE_PLAN_PREPARED_NO_DATABASE',sourcePlanSha256:sha(bytes),roundInputSha256:roundSha,coreReceiptSha256:sha(coreBytes),scopeAuditSha256:sha(auditBytes),capturedAccounts:scanned.captured,accounts:count,wallMs:performance.now()-started,dbConnections:0,credentialReads:0,targetWrites:0};
 writeFileSync(join(out,'receipt.json'),JSON.stringify(receiptOut,null,2)+'\n',{flag:'wx'});console.log(JSON.stringify(receiptOut));

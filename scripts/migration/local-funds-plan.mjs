@@ -1,13 +1,21 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { readSourceRows, sourceFinanceObservation } from "./local-source-adapter.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, isExactLegacyRefundRelationship, LEGACY_REFUND_RELATIONSHIP_POLICY, NEXT_CONTINUATION_COMMISSION_POLICY, NEXT_CONTINUATION_POLICY, readBoundSourceRows, sourceFinanceObservation } from "./local-source-adapter.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
 async function fileSha(file) { const h=createHash("sha256"); for await(const bytes of createReadStream(file)) h.update(bytes); return h.digest("hex"); }
 const accountFields=["id","user_id","no","status","is_delete","pay_is","pay_money","pay_time","create_pay_time","pay_way","order_sn","leshua_order_id","yj_order_id","transaction_id","return_is","service_id","team_id","base_bot","update_time","pay_url_present","pay_url_sha256"];
 const paymentFields=["id","order_id","order_type","pay_way","pay_order_sn","pay_money","pay_is","pay_time","create_time"];
 const pick=(row,fields)=>Object.fromEntries(fields.filter(k=>Object.hasOwn(row,k)).map(k=>[k,row[k]]));
+
+/** Old sealed packages keep their original fingerprint; new packages require a nonblank order number. */
+export function isPreparedRefundRelationshipVerified(refund,order,policy){
+ if(policy==null)return order?.user_id===refund.user_id&&order?.order_sn===refund.order_sn;
+ if(policy!==LEGACY_REFUND_RELATIONSHIP_POLICY)throw Error('LEGACY_REFUND_RELATIONSHIP_POLICY_UNSUPPORTED');
+ return isExactLegacyRefundRelationship(refund,order);
+}
 
 /**
  * Empty history coverage is one entry per subject and source kind, so a full-source round would hold
@@ -72,6 +80,11 @@ export function continuationCommissionEffects(rows,mod){
  const model=mod("order/legacy-continuation-model"),users=mod("supply/legacy-user-migration");
  return rows.flatMap(({body})=>body.source.commissions.filter(c=>c.status==='1').map(c=>({dutyId:model.legacyEconomicDutyId(body.orderId,'COMMISSION',c.id),kind:'COMMISSION',sourceRecordId:c.id,amountCents:model.legacyPlanYuanToCents(c.storedEarnings),beneficiaryUserId:users.legacyOwnerUserId('legacy_mysql_restore','la_user',c.beneficiaryId),level:c.level,ratio:c.ratio,sourceDigest:body.sourceDigest,status:'PENDING',settledBy:null})));
 }
+export function assertPendingCommissionCoverage(rows,source){
+ const seen=new Set();for(const row of rows){const raw=source.get(row?.sourceRecord?.id);
+  if(!raw||seen.has(raw.id)||row.parentLegacyOrderId!==raw.order_id||!isDeepStrictEqual(row.sourceRecord,raw))throw Error('FUNDS_PENDING_COMMISSION_SOURCE_SET_CHANGED');seen.add(raw.id);}
+ if(seen.size!==source.size)throw Error('FUNDS_PENDING_COMMISSION_SOURCE_SET_CHANGED');
+}
 
 const restrictedWithdrawalFields=["real_name","account","money_qr_code","apply_remark","pay_desc","pay_search_result","audit_remark","transfer_voucher","transfer_remark","bank_card_no","bank_name","mobile","admin_id"];
 /** Old payout destinations are evidence only; never a new beneficiary, verified bank binding or usable URL. */
@@ -92,21 +105,26 @@ export async function prepareLocalFundsPlan({manifest,domainFile,mod,fundsSource
  if(sha(receiptBytes)!==manifest.sourceReceiptSha256)throw Error("FUNDS_CAPTURE_BINDING_CHANGED");
  const receipt=JSON.parse(receiptBytes),canonical=mod("supply/content-hash").canonicalize;
  const selected={};
- for(const domain of ["users","accounts","orders"]){selected[domain]=new Map();for await(const row of readSourceRows(domainFile(domain)))selected[domain].set(row.sourceId,row);}
+ for(const domain of ["users","accounts","orders"]){selected[domain]=new Map();for await(const row of readBoundSourceRows(domainFile(domain),manifest.files[domain])){
+  if(typeof row.sourceId!=="string"||selected[domain].has(row.sourceId))throw Error("FUNDS_SELECTED_SOURCE_DUPLICATE:"+domain);
+  selected[domain].set(row.sourceId,row);
+ }}
   const selectedCounts = {};
-  const source = {};
-  for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds"]){
-  const file=receipt.files[domain];if(!file||file.file!==basename(file.file)||await fileSha(join(manifest.source,file.file))!==file.sha256)throw Error("FUNDS_SOURCE_FILE_CHANGED:"+domain);
+  const source = {}, continuationCommissionSource = [];
+  const verifyContinuation=manifest.domains?.continuations?.preparedEvidence?.policy===NEXT_CONTINUATION_POLICY;
+  for(const domain of ["accounts","orders","earnings","withdraws","distributionOrders","pays","refunds",...(verifyContinuation?['tradePolicy']:[])]){
+  const file=receipt.files[domain];if(!file||file.file!==basename(file.file))throw Error("FUNDS_SOURCE_FILE_CHANGED:"+domain);
   source[domain]=[];
-  for await(const row of readSourceRows(join(manifest.source,file.file))){
-   const keep=domain==="accounts"||domain==="orders"?selected[domain].has(row.id):domain==="pays"?(row.order_type==="1"?selected.orders.has(row.order_id):row.order_type==="2"&&selected.accounts.has(row.order_id)):selected.users.has(row.user_id);
+  for await(const row of readBoundSourceRows(join(manifest.source,file.file),file)){
+   if(domain==='distributionOrders'&&selected.orders.has(row.order_id))continuationCommissionSource.push(row);
+   const keep=domain==='tradePolicy'?true:domain==="accounts"||domain==="orders"?selected[domain].has(row.id):domain==="pays"?(row.order_type==="1"?selected.orders.has(row.order_id):row.order_type==="2"&&selected.accounts.has(row.order_id)):selected.users.has(row.user_id);
    if(keep)source[domain].push(row);
   }
   const domainMeta = manifest.domains[domain] ?? {};
   // A domain marked as retained source-relation evidence keeps its full-source count, so the selected
   // count is not comparable to it; record it instead of asserting equality against a different scope.
   const retainedAsEvidence = String(domainMeta.disposition ?? "").startsWith("RETAINED_SOURCE_RELATION_EVIDENCE");
-  const expected = domainMeta.selected ?? domainMeta.source;
+  const expected = domain==='tradePolicy'?file.rows:domainMeta.selected ?? domainMeta.source;
   if (!retainedAsEvidence && source[domain].length !== expected) throw Error("FUNDS_SELECTED_DENOMINATOR_CHANGED:" + domain);
   selectedCounts[domain] = source[domain].length;
 }
@@ -120,9 +138,9 @@ if (fundsSource) {
   for(const domain of ["accounts","earnings","withdraws"]){
    const file=supplement.files[domain],comparison=supplement.sourceSupplement.domains?.[domain];
    if(!comparison||comparison.remainingIds!==0||comparison.comparedRows!==receipt.files[domain].rows||comparison.expectedCommonSha256!==comparison.actualCommonSha256)throw Error("FUNDS_SUPPLEMENT_SOURCE_COMPARISON_NOT_CLOSED:"+domain);
-   if(!file||file.file!==basename(file.file)||file.rows!==receipt.files[domain].rows||await fileSha(join(fundsSource.path,file.file))!==file.sha256)throw Error("FUNDS_SUPPLEMENT_FILE_CHANGED:"+domain);
+   if(!file||file.file!==basename(file.file)||file.rows!==receipt.files[domain].rows)throw Error("FUNDS_SUPPLEMENT_FILE_CHANGED:"+domain);
    const prior=new Map(source[domain].map(row=>[row.id,row])),replacement=[];
-   for await(const row of readSourceRows(join(fundsSource.path,file.file))){
+   for await(const row of readBoundSourceRows(join(fundsSource.path,file.file),file)){
     const original=prior.get(row.id);if(!original)continue;
     for(const [key,value]of Object.entries(original))if(canonical(value)!==canonical(row[key]))throw Error("FUNDS_SUPPLEMENT_COMMON_FIELD_DRIFT:"+domain+":"+key);
     replacement.push(row);prior.delete(row.id);
@@ -136,16 +154,16 @@ if (fundsSource) {
  if(refundAttemptsSource){
   const bytes=readFileSync(join(refundAttemptsSource.path,"receipt.json"));if(sha(bytes)!==refundAttemptsSource.sha256)throw Error("REFUND_ATTEMPT_RECEIPT_CHANGED");
   const extra=JSON.parse(bytes);if(extra.status!=="CAPTURED_READ_ONLY"||!extra.rollbackConfirmed||!extra.clientClosed||extra.containerId!==receipt.containerId||extra.database!==receipt.database||extra.sourceSupplement?.baseReceiptSha256!==manifest.sourceReceiptSha256||extra.files.refunds?.sha256!==receipt.files.refunds.sha256)throw Error("REFUND_ATTEMPT_SOURCE_BINDING_CHANGED");
-  for(const file of Object.values(extra.files))if(file.file!==basename(file.file)||await fileSha(join(refundAttemptsSource.path,file.file))!==file.sha256)throw Error("REFUND_ATTEMPT_FILE_CHANGED");
+  for(const [name,file] of Object.entries(extra.files))if(file.file!==basename(file.file)||(!['refundLogs','sourceParentBindings'].includes(name)&&await fileSha(join(refundAttemptsSource.path,file.file))!==file.sha256))throw Error("REFUND_ATTEMPT_FILE_CHANGED");
   refundAttemptReceiptSha256=refundAttemptsSource.sha256;
   const parents=new Map(source.refunds.map(row=>[row.id,row])),seen=new Set(),statusCounts={},amount=mod("finance/personal-finance-read").sourceYuanToCents;let total=0n;
-  for await(const raw of readSourceRows(join(refundAttemptsSource.path,extra.files.refundLogs.file))){
+  for await(const raw of readBoundSourceRows(join(refundAttemptsSource.path,extra.files.refundLogs.file),extra.files.refundLogs)){
    const parent=parents.get(raw.record_id);if(!parent||seen.has(raw.id))throw Error("REFUND_ATTEMPT_PARENT_OR_ID_NOT_CLOSED");seen.add(raw.id);
    const child={sourceEntity:'la_refund_log',sourceId:raw.id,sourceRecordId:raw.record_id,legacyUserId:raw.user_id,legacyOperatorId:raw.handle_id,sourceNumber:raw.sn,amountCents:amount(raw.refund_amount),orderAmountCents:amount(raw.order_amount),sourceStatus:raw.refund_status,createdEpoch:raw.create_time,updatedEpoch:raw.update_time,subjectMatchesParent:raw.user_id===parent.user_id,sourceDigest:sha(canonical(raw)),restrictedSourceRef:'restricted-refund-attempt:'+refundAttemptsSource.sha256+':la_refund_log:'+raw.id,messagePresence:raw.refund_msg===null?'NULL':raw.refund_msg===''?'EMPTY':'PRESENT',messageSha256:sha(canonical(raw.refund_msg))};
    if(!refundAttempts.has(raw.record_id))refundAttempts.set(raw.record_id,[]);refundAttempts.get(raw.record_id).push(child);statusCounts[raw.refund_status]=(statusCounts[raw.refund_status]??0)+1;total+=BigInt(child.amountCents);
   }
   if(seen.size!==extra.files.refundLogs.rows)throw Error("REFUND_ATTEMPT_DENOMINATOR_CHANGED");
-  for await(const row of readSourceRows(join(refundAttemptsSource.path,extra.files.sourceParentBindings.file))){
+  for await(const row of readBoundSourceRows(join(refundAttemptsSource.path,extra.files.sourceParentBindings.file),extra.files.sourceParentBindings)){
    const parent=parents.get(row.record_id),order=parent?.order_type==='order'?orderById.get(parent.order_id):null;
    if(!seen.has(row.id)||row.parent_source_entity!=='la_refund_record'||!parent||parent.id!==row.parent_record_id||parent.user_id!==row.parent_user_id||parent.order_type!==row.parent_order_type||parent.order_id!==row.parent_order_id||!order||row.order_source_entity!=='la_order'||row.resolved_order_id!==order.id||['user_id','sale_user_id','order_sn','pay_money','order_status','is_delete'].some(k=>row['order_'+({order_sn:'sn',pay_money:'pay_money',order_status:'status',is_delete:'is_delete'}[k]??k)]!==order[k]))throw Error("REFUND_ATTEMPT_TYPED_PARENT_DRIFT");
   }
@@ -176,7 +194,9 @@ if (fundsSource) {
    if(domain==="pays")subjectId=raw.order_type==="1"?orderById.get(raw.order_id)?.user_id:accountById.get(raw.order_id)?.user_id;
    if(domain==="refunds"&&raw.order_type!=="order")throw Error("FUNDS_REFUND_TYPE_UNKNOWN");
    const subject=selected.users.get(subjectId);if(!subject||seen.has(raw.id))throw Error("FUNDS_SUBJECT_OR_SOURCE_ID_INVALID:"+domain);seen.add(raw.id);
-   const observed=domain==="pays"||domain==="refunds"?{kind:domain==="pays"?"HISTORICAL_PAYMENT":"HISTORICAL_REFUND",row:{...raw,userId:subjectId,relationship:domain==="pays"||orderById.get(raw.order_id)?.user_id===subjectId&&orderById.get(raw.order_id)?.order_sn===raw.order_sn?"VERIFIED":"UNRESOLVED"}}:sourceFinanceObservation(domain,raw);
+   const order=domain==='refunds'?orderById.get(raw.order_id):undefined;
+   const refundLinked=isPreparedRefundRelationshipVerified(raw,order,manifest.refundRelationshipPolicy);
+   const observed=domain==="pays"||domain==="refunds"?{kind:domain==="pays"?"HISTORICAL_PAYMENT":"HISTORICAL_REFUND",row:{...raw,userId:subjectId,relationship:domain==="pays"||refundLinked?"VERIFIED":"UNRESOLVED"}}:sourceFinanceObservation(domain,raw);
    if(domain==="withdraws"&&fundsSource)Object.assign(observed.row,safeLegacyWithdrawalEvidence(raw,"restricted-funds-source:"+fundsSource.sha256+":la_withdraw_apply:"+raw.id,canonical));
    if(domain==='refunds'&&refundAttemptsSource)Object.assign(observed.row,{refundAttempts:refundAttempts.get(raw.id)??[],sourceRefundFlags:refundFlags.get(raw.id)??[]});
    const key=subject.userId+":"+observed.kind;
@@ -217,14 +237,23 @@ if (fundsSource) {
  const listingDepositExclusion={schema:"zzsh.listing-deposit-exclusion.v1",policy:"NOT_MIGRATED_OWNER_CONFIRMED_NO_OUTSTANDING",
   sourcePayments:listingDepositPays.length,sourcePaymentAmountCents:listingDepositPays.reduce((n,raw)=>n+BigInt(mod("finance/personal-finance-read").sourceYuanToCents(raw.pay_money)),0n).toString(),
   sourceAccountsWithPaidMark:source.accounts.filter(raw=>raw.pay_is==="1").length,sourceAccountsWithReturnMark:source.accounts.filter(raw=>raw.return_is==="1").length,targetRows:0};
- let completedPending=0,continuationPending=0,pendingAmount=0n;
+ let completedPending=0,continuationPending=0,pendingAmount=0n;const pendingSource=new Map();
  for(const row of source.distributionOrders)if(row.status==="1"&&row.is_delete==="0"){
+  if(verifyContinuation&&(row.order_type!=='1'||pendingSource.has(row.id)))throw Error('FUNDS_PENDING_COMMISSION_SOURCE_INVALID');pendingSource.set(row.id,row);
   const parent=orderById.get(row.order_id);if(parent?.order_status==="4")completedPending++;else if(["3","8","9"].includes(parent?.order_status))continuationPending++;else throw Error("FUNDS_PENDING_COMMISSION_PARENT_NOT_CLOSED");
   pendingAmount+=BigInt(mod("finance/personal-finance-read").sourceYuanToCents(row.earnings));
  }
- const continuationRows=[];for await(const row of readSourceRows(domainFile("continuations")))continuationRows.push(row);
- const pendingRows=[];for await(const row of readSourceRows(domainFile("pending-commissions")))pendingRows.push(row);
- if(pendingRows.length!==completedPending+continuationPending||continuationRows.reduce((n,r)=>n+r.source.commissions.length,0)!==continuationPending)throw Error("FUNDS_PENDING_COMMISSION_WRITER_SOURCE_GAP");
+ const continuationRows=[];for await(const row of readBoundSourceRows(domainFile("continuations"),manifest.files.continuations))continuationRows.push(row);
+ const pendingRows=[];for await(const row of readBoundSourceRows(domainFile("pending-commissions"),manifest.files["pending-commissions"]))pendingRows.push(row);
+ if(verifyContinuation)assertPendingCommissionCoverage(pendingRows,pendingSource);
+ const continuationPolicy=manifest.domains?.continuations?.preparedEvidence;
+ if(verifyContinuation){
+  if(continuationPolicy.commissionPolicy!==NEXT_CONTINUATION_COMMISSION_POLICY)throw Error('CONTINUATION_COMMISSION_POLICY_UNPROVEN');
+  assertContinuationSourceCoverage(continuationRows,source);
+  assertContinuationCommissionCoverage(continuationRows,continuationCommissionSource,manifest.sourceRef);
+ }
+ const continuationPendingRows=continuationRows.reduce((n,r)=>n+r.source.commissions.filter(c=>c.status==='1').length,0);
+ if(pendingRows.length!==completedPending+continuationPending||continuationPendingRows!==continuationPending)throw Error("FUNDS_PENDING_COMMISSION_WRITER_SOURCE_GAP");
  const pendingCommissionCoverage={selected:pendingRows.length,completedDutyCandidates:completedPending,continuationEvidence:continuationPending,recordedAmountCents:pendingAmount.toString(),targetDuties:"TARGET_PARENT_AND_RECEIPT_CHECK_REQUIRED"};
  summary.guarantees={selected:0,planned:0,writer:0,policyExcluded:true,listingDeposit:listingDepositExclusion};
  for(const [domain,count]of Object.entries(summary))if(count.selected!==count.planned)throw Error("FUNDS_SOURCE_PLAN_MISMATCH:"+domain);

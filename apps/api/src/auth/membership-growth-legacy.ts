@@ -208,6 +208,7 @@ export type LegacyCoveragePort = {
   persist(client: Pick<PoolClient, "query">, record: LegacyCoverageRecord): Promise<LegacyCoverageRecord>;
   readByFingerprint(client: Pick<PoolClient, "query">, subjectUserId: string, fingerprint: string): Promise<LegacyCoverageRecord | null>;
   readByExecutionKey(client: Pick<PoolClient, "query">, subjectUserId: string, executionKey: string): Promise<LegacyCoverageRecord | null>;
+  readForWrite(client: Pick<PoolClient, "query">, subjectUserId: string, executionKey: string, fingerprint: string): Promise<{ record: LegacyCoverageRecord; matchedByKey: boolean } | null>;
 };
 
 export type LegacyGrowthWriteResult = { inserted: number; replayed: number; coverage: "INSERTED" | "REPLAYED"; fingerprint: string; executionKey: string };
@@ -225,13 +226,12 @@ const EXEC_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 /** Runs inside the caller's (Q H4) transaction, on the same client as authorize/audit/idempotency. */
 export async function writePreparedLegacyGrowth(client: Pick<PoolClient, "query">, prepared: Prepared, port: LegacyCoveragePort, executionKey: string): Promise<LegacyGrowthWriteResult> {
   if (!EXEC_KEY.test(executionKey)) throw new LegacyGrowthConflictError("execution-key-invalid", -1);
-  const byKey = await port.readByExecutionKey(client, prepared.subjectUserId, executionKey);
-  if (byKey) {
-    if (byKey.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`execution:${executionKey}`, -1); // same key, changed body
-    return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: byKey.fingerprint, executionKey };
+  const existing = await port.readForWrite(client, prepared.subjectUserId, executionKey, prepared.fingerprint);
+  if (existing?.matchedByKey) {
+    if (existing.record.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`execution:${executionKey}`, -1); // same key, changed body
+    return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey };
   }
-  const byFp = await port.readByFingerprint(client, prepared.subjectUserId, prepared.fingerprint);
-  if (byFp) return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: byFp.fingerprint, executionKey: byFp.executionKey ?? executionKey };
+  if (existing) return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey: existing.record.executionKey ?? executionKey };
   const { inserted, replayed } = await writeLegacyGrowthContributionRows(client, prepared.rows);
   const stored = await port.persist(client, { ...prepared.record, executionKey });
   if (stored.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`version:${prepared.fingerprint}`, -1);

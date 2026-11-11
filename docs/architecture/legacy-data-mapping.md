@@ -21,6 +21,7 @@ Owner 已核实旧平台当前没有未退的上架保证金，目标新平台�
 - 元金额按十进制文本精确转整数分，账务不用浮点。单价保原精度，经正式报价/计算后再按对应合同落分；不得用`Number*100`、预先截两位或隐式舍入掩盖误差。DTO沿精确CNY金额合同。
 - 原Unix秒、null/零时间与目标UTC时点分别记录；新合同支持微秒的地方不降为毫秒。展示时区不改变原生效时间，不以导入日重启期限。
 - 合法零、合法空、缺源、隔离、未授权、失败及渠道UNKNOWN保持区别。源行摘要、文件SHA、映射/展示摘要及结果摘要对应不同对象，不能互换或为对齐而覆盖原件。
+- 旧租赁退款的订单关联须同时核对原订单 ID、退款主体及非空原订单号；任一不一致或缺失时保留原始退款为关联待核，不能据 ID 硬连到另一用户订单，也不以旧退款成功标记冒充渠道到账。旧充值退款是不同来源类型，未完成专门适配时停止核实。新准备包使用 `legacy-refund-relationship-v2`，历史封存包继续按其原判定与指纹恢复。
 - 当前业务范围保留迁移截点正在上架的账号，以及至少一笔旧租赁付款单（`la_pay_order.order_type=1`）标记成功（`pay_is=1`）的订单和关联账号；其余订单、非在架且无保留订单的账号不迁。旧订单自身标记已付款但找不到成功的租赁付款记录时也直接排除；旧上架保证金付款不能作为租赁付款。来源标记只用于本次筛选，不等于独立核实汇聚到账，标记不一致须保留统计和来源依据。
 
 ## 源字段到目标及页面
@@ -29,14 +30,14 @@ Owner 已核实旧平台当前没有未退的上架保证金，目标新平台�
 
 | 规则ID | MySQL源字段及转换 | PostgreSQL目标与双端消费 |
 | --- | --- | --- |
-| IO-ID-01/02 | `la_user.id/sn/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用→FROZEN（0103 前为DEACTIVATED）。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。 |
+| IO-ID-01/02 | `la_user.id/sn/mobile/nickname/is_delete/is_disable`；确定性`legacyOwnerUserId`映射，删除优先CANCELLED、停用→FROZEN（0103 前为DEACTIVATED）。旧实名事实不冒充新渠道核验，未知年龄不补成年。 | `zzsh_auth_user."user"`、`zzsh_iam.user_identity_state`及迁移审计；本人身份接口→账户/安全页，Admin用户目录。源口令及旧token不进入公开DTO。旧实名资料按 `la_user.real_name/id_card` 加密保存到 `user_legacy_identity_profile`，另保留主体摘要，默认只返回脱敏资料；完整资料仅经独立权限和成功审计读取。历史迁入库不会自动补齐该表，须按同版脚本从同一源快照写入并独立读回。 |
 | IO-ID-04/05 | 旧管理员、角色和旧菜单不迁入新平台。 | 管理 realm 与权限按新平台正式入口初始化；Admin 导航或按钮可见不构成授权。 |
 | IO-BANK-01 | `la_user_bank` 的当前绑卡按旧用户来源与目标用户唯一对应承接；多个旧用户记录了同一卡号本身不表示冲突。缺字段、用户映射不明或目标已有绑定不覆盖。 | `zzsh_order.withdrawal_bank_binding` 使用版本化保护钥加密并保留原来源审计；旧绑定直接沿用，不要求用户重新输入或确认。旧提现申请快照不是当前绑卡来源；旧卡不代表银行归属已核验，提现的实名、账号及渠道门槛仍独立生效。 |
 | SUP-SOURCE-001/002 | `la_rental_accounts.id/user_id/game_id`核目标关联；同一13列原行重算原12列投影及含`is_full_payout`的摘要，flag只接受原0/1。 | `zzsh_supply.rental_account`、`legacy_supply_map`及不可变read/display snapshot；包赔声明另写`listing_version.attributes`，不伪造号主接受。用户列表/详情/上架与Admin监管复用同源绑定。 |
 | SUP-QTY-004/005 | `haff`的恢复M数量×1000000一次；`level6_bullet_num`原组数×60一次；AWM/Barrett保发数，甲/盔/咖啡保件数。已归一化base输入不能再乘。 | `zzsh_supply.legacy_listing_display_snapshot.snapshot.resources`、正式`inventory_line(version_id,item_id).quantity`绑定`billable_item`单位；卡片/详情/上架与Admin目录/价格。旧订单实际消耗另走订单合同。 |
 | SUP-QTY-006 | `top_insure_card_num`新旧均为天；保原数，不换张、不乘租期。 | `billable_item.code=df_billable_top_insure_card,unit=DAY`及库存；报价每1天、结算按确认天数差。错误PIECE身份不得用于新交易，历史引用不按现目录追改。 |
 | SUP-ATTR-007/008 | `insure_lv/grading_lv/login_way/vit_lv/bear_lv/dive_lv/character_lv/secret_kd`按显式枚举/精度映射；`processing_time_start/end`转可证时段，未知不补全天；风险与公开属性分开。 | display snapshot及正式`listing_version.attributes`；`publishing-options`与公共attributeDisplay→详情/上架，Admin监管/目录。真实箱码不能被测试box-a/b代替；后台风险事实不外泄。 |
-| SUP-MODE-009/PRICE-011/TERM-012 | `ratio_type`映ordinary/custom/fast；B只取已证`base_bot`，不反推。历史`price_tenant/extra_goods_total_price_tenant/deposit_amount/rental_days`保原义。 | 一般当前价由`price_version/price_line`、`term_option`和受审release/政策构成。原在架账号的已授权测试承接使用同源 MySQL 设置及旧普通客规则冻结基础价，保留旧 B、价差、政策摘要及逐项物资来源；旧站同截点缓存未知，正式切换前复核。新会员和礼遇基于冻结价计算，不把历史静态租客价当当前价。Web显示服务器报价；Admin规则与双边价。旧四档计价枚举不是新会员产品。 |
+| SUP-MODE-009/PRICE-011/TERM-012 | `ratio_type`映ordinary/custom/fast；B只取已证`base_bot`，不反推。历史`price_tenant/extra_goods_total_price_tenant/deposit_amount/rental_days`保原义。 | 一般当前价由`price_version/price_line`、`term_option`和受审release/政策构成。原在架账号的已授权测试承接使用同源 MySQL 设置及旧普通客规则冻结基础价，保留旧 B、价差、政策摘要及逐项物资来源；旧站同截点缓存未知，正式切换前复核。同快照 V2 政策须由支持该证据版本的数据库守卫接纳，旧 V1 证据不重写。新会员和礼遇基于冻结价计算，不把历史静态租客价当当前价。Web显示服务器报价；Admin规则与双边价。旧四档计价枚举不是新会员产品。 |
 | SUP-DISPLAY-018 | 历史快照中已冻结的哈夫币base数量与该行租金可作展示折算；用整数精确计算、沿既有HALF_UP显示万/元，零租金或缺数量保持未知。 | `historicalQuote.haffRent`只供HAFF_BASE行的展示参考，不用物资合计/押金，不代表已取回原`base_bot`或`ownerRatioB`。不写回源快照/历史单价，不参与报价或结算。逐项物资价须核对实际源字段、政策和有效时点，不能拿现行价或合计分摊。 |
 | SUP-CATALOG-013/MEDIA-017 | `la_dict_type/la_dict_data`保资源/皮肤字典身份；`knife_skin/agent_skin/weapon_skin/gold_skin`是持有声明，不等于新skinId。原图URL/path不证明目标asset字节或归属。 | `zzsh_supply.billable_item/skin/listing_skin`分别保存字典和持有关系；媒体须另核sourceRef→`media_asset`→`listing_media`。无图不造URL，私有凭证不作封面；ECS文件迁OSS与数据库字段转换分别验收，发布媒体门禁仍有效。 |
 | SUP-SKIN-019 | 旧红皮/金皮分组只留来源对照，不推导类型或品质。类型使用已核ownerKind，三角洲近战作为独立外观，不创建刀型父级；品质取同游戏字典并区分官方/平台参考依据，未知保持null。典藏与默认状态独立，不自动加价。目录配图不证明账号持有，持有仍须来源声明→skinId映射。 | 复用`skin.owner_kind/owner_id/firearm_id/rarity_code`及`skin_owner/firearm/skin_rarity`，新增品质证据、典藏、默认状态和图片来源。公开摘要为`ownerKind/rarityCode/rarityName/rarityBasis/isCollectible/defaultState`；新报价冻结本次摘要，旧冻结快照不补写缺失字段。新/改绑品质须启用品质及显式证据，无关编辑可保留旧停用品质或缺证据值。公开图片仍核同游戏、审核、衍生图及分类祖先；展示与推荐政策不改写历史资金事实。 |
@@ -54,6 +55,8 @@ Owner 已核实旧平台当前没有未退的上架保证金，目标新平台�
 后补皮肤持有采用规则 `SUP-SKIN-020`：服务端受信上下文绑定封存四列、来源截点、来源与目标摘要、映射规则及目录版本，写入前重算完整集合，并核对实际账号和观察版本。附加事实保存在 `zzsh_supply.legacy_skin_holding`，不修改不可变观察的子表；合法空集合覆盖旧关联，缺列、歧义或未核词条保持未知。同观察版本存在附加持有事实时，公开详情、ANY/ALL筛选与新草稿继承共同采用该完整集合（含合法空）；不存在时才回退原listing_skin，原生版本仍读取自身关系。新草稿后续按正常声明合同编辑；目录配图仍不证明持有。数据库约束和运行权限须随对应迁移部署，不能只更新读取代码。
 
 既有9项来源歧义（影锋、AUG-气象感应、K416-命运、M4棱镜攻势、M7棱镜攻势、QBZ95-王牌之剑、SCAR-电玩、Vctor-冲锋枪-美杜莎、腾龙-气象感应）继续按`SOURCE_AMBIGUOUS`阻止持有准入。`buildLegacySkinIndex/mapLegacySkinHolding`优先保留该来源规则；目录后来VERIFIED、补图或修名都不能自动解除歧义，跨字段同名仍是不同source tuple。
+
+新一轮完整采集将账号四列、字典类型与字典条目绑定同一来源快照；除既有规则外，还从该快照识别相关字段的同名重复来源，涉及账号继续隔离待核。字典显示名与值不一致且被账号引用时，也不能直接推断持有关系。旧来源包和既有 v1 回执继续使用原规则，不改写历史证据。
 
 显式新批次使用 `SUP-SKIN-021` / `legacy-skin-holdings-source-v2` 时，可携带独立受审的 `legacy-skin-exact-mapping.v2`。overlay绑定源提取及字典SHA、同字段当前字典及历史来源、同游戏确切目标ID/namespace/field/token/名称/所属类型、目录修订和审阅依据；其SHA同时进入admission、持有摘要与审计，writer再核实际目录的VERIFIED、启用及表单可见条件。只对逐项审定的来源tuple优先采用该确切目标，不按模糊名称、当前列表顺序或新目录有图猜持有，不启用旧停用项。旧v1包不接受v2 overlay，也不追改既有持有、原键或1.3.2来源规则；新批次执行与页面效果另行验收。
 

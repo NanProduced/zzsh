@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
 import { assertBankNoSymlinkPath, assertFinalLegacyBankSchema, makeR07UpgradedBankSchemaEvidence, assertLegacyBankKeyringProof, assertLegacyBankSourceProof, assertWindowsBankAcl, relativeBankSecretPath, requireFinalR06ApiDist, requireFinalR07ApiDist } from "./prepare-local-legacy-bank-input.mjs";
 import { bankCleanupPassed, describeLocalLegacyBankRun, executeLocalLegacyBankRun, prepareLocalLegacyBankRun, readbackLocalLegacyBankRun, recordBankCleanup, releaseLocalLegacyBankRun } from "./local-legacy-bank-runner.mjs";
-import { assertLiveTarget, loadRegisteredTarget, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationSessionFence, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, guardedMigrationTargetPool, loadRegisteredTarget, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, sameMigrationProfile, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertDistributionCoreReadback, assertRegisteredDistributionTarget } from "./local-distribution-qualification-plan.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -41,9 +41,10 @@ function jsFiles(dir, prefix = "") {
 async function main() {
   if (modes.length !== 1 || process.version !== "v24.20.0") fail();
   const mode = modes[0], inputSha256 = option("--input-sha"), input = pinned(protectedPath(option("--input")), inputSha256);
-  if (input.schema !== "zzsh.local-legacy-bank-input.v1" || ![6,7].includes(input.target?.round) || input.lockId !== 806006
+  if (input.schema !== "zzsh.local-legacy-bank-input.v1" || ![6,7,'next'].includes(input.target?.round) || input.lockId !== 806006
     || input.target.database !== "zzsh_test_regression" || !hex(input.buildSha256) || !hex(input.schemaJournalSha256)
     || !hex(input.schemaHistorySha256) || !input.buildFiles || !input.toolFiles) fail();
+  if (mode === "--execute") assertNextMigrationWriteReady(input.target.round === 'next' ? { migrationProfile:NEXT_MIGRATION_PROFILE } : input.target);
   const out = protectedPath(option("--out"), true); if (existsSync(out)) fail(); failureOut = out;
   const output = (name, value) => writePrivate(join(out, name), value);
   const dataset = pinned(protectedPath(input.dataset?.path), input.dataset?.sha256);
@@ -54,7 +55,7 @@ async function main() {
   const operator = { userId: actor.id ?? actor.actorId ?? actor.userId, sessionId: actor.sessionId };
   if (actor.realm !== "admin" || !operator.userId || !operator.sessionId) fail();
 
-  const r07=input.target.round===7, credentialsPath=r07 ? protectedPath(input.credentials?.path) : join(secretRoot,"local-postgresql/regression_test/credentials.json");
+  const r07=input.target.round===7||input.target.round==='next', credentialsPath=r07 ? protectedPath(input.credentials?.path) : join(secretRoot,"local-postgresql/regression_test/credentials.json");
   if(r07){assertWindowsBankAcl(dirname(credentialsPath));assertWindowsBankAcl(credentialsPath);if(!hex(input.credentials?.sha256)||sha(readFileSync(credentialsPath))!==input.credentials.sha256)fail();}
   const registryDir = dirname(credentialsPath), registry = JSON.parse(readFileSync(join(registryDir, "resource.json"))),
     credentials = JSON.parse(readFileSync(credentialsPath)), registered=loadRegisteredTarget(credentialsPath), t = input.target;
@@ -68,7 +69,7 @@ async function main() {
   const require = createRequire(join(root, "apps/api/package.json"));
   function verifyFiles() {
     const current=loadRegisteredTarget(credentialsPath);
-    if(current.pendingReset || JSON.stringify([current.instance,current.database,current.oid,current.nonce,current.marker,current.owner,current.runtimeRole,current.runtimeRoleOid,current.migrationRole,current.migrationRoleOid,current.lockKey])
+    if(current.pendingReset || !sameMigrationProfile(current,registered) || JSON.stringify([current.instance,current.database,current.oid,current.nonce,current.marker,current.owner,current.runtimeRole,current.runtimeRoleOid,current.migrationRole,current.migrationRoleOid,current.lockKey])
       !==JSON.stringify([registered.instance,registered.database,registered.oid,registered.nonce,registered.marker,registered.owner,registered.runtimeRole,registered.runtimeRoleOid,registered.migrationRole,registered.migrationRoleOid,registered.lockKey])
       || r07 && sha(readFileSync(credentialsPath))!==input.credentials.sha256)fail();
     if(r07)requireFinalR07ApiDist(root,apiDir);else requireFinalR06ApiDist(root, apiDir);
@@ -94,7 +95,13 @@ async function main() {
   const swap = r07 ? null : pinned(protectedPath(final.swapReceipt?.path), final.swapReceipt?.sha256);
   const sourceProof = pinned(protectedPath(input.evidence?.sourceProof?.path), input.evidence?.sourceProof?.sha256);
   const keyringProof = pinned(protectedPath(input.evidence?.keyringProof?.path), input.evidence?.keyringProof?.sha256);
-  assertFinalLegacyBankSchema(schemaProof, final, registry, stage, swap);
+  let original;
+  if(schemaProof.schema==='zzsh.local-bank-schema-proof.v1'){
+    const round=pinned(protectedPath(schemaProof.roundInput?.path),schemaProof.roundInput?.sha256),ref=round.bootstrapEvidence?.schema;
+    assert.deepEqual(ref,schemaProof.schemaReceipt,'LEGACY_BANK_SCHEMA_RECEIPT_CHANGED');
+    original={round,schema:pinned(protectedPath(ref?.path),ref?.sha256)};
+  }
+  assertFinalLegacyBankSchema(schemaProof, final, registry, stage, swap, original);
   if(schemaProof.schema==='zzsh.round07-bank-schema-proof.v2'){
     const refs=schemaProof.upgradeRefs,values=Object.fromEntries(['oldProof','oldFinal','upgradePlan','upgradeExecution','upgradeReadback','liveReadback'].map(k=>[k,pinned(protectedPath(refs?.[k]?.path),refs?.[k]?.sha256)]));
     const checked=makeR07UpgradedBankSchemaEvidence({...values,registry,refs,finalPath:schemaProof.finalReceipt.path});
@@ -142,9 +149,14 @@ async function main() {
   const options = { ...bankRuntime, protection: { currentKeyVersion: input.keyring.version, keyFor: bankRuntime.protection.keyFor } };
   const { Client, Pool } = require("pg"), base = { host: registered.host, port: registered.port, database: t.database,
     statement_timeout: 30000, lock_timeout: 1000, connectionTimeoutMillis: 3000, application_name: "zzsh-local-legacy-bank" };
-  const writePool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 1 });
+  const nextTarget = t.round === 'next';
+  const writePool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 1,
+    ...(nextTarget ? { idleTimeoutMillis: 0 } : {}) });
   const readPool = new Pool({ ...base, user: credentials.runtime.name, password: credentials.runtime.password, max: 1 });
   const schemaPool = new Pool({ ...base, user: credentials.migration.name, password: credentials.migration.password, max: 1 });
+  let writePoolError;
+  writePool.on('error', error => { writePoolError ??= error; });
+  writePool.on('connect', client => client.on('error', error => { writePoolError ??= error; }));
   const maintenanceChecks = [], schemaChecks = []; let poolClosures;
   async function closePools() {
     if (!poolClosures) {
@@ -154,15 +166,18 @@ async function main() {
     return poolClosures;
   }
   const cleanupPassed = pools => bankCleanupPassed(maintenanceChecks, schemaChecks, pools);
+  async function verifyRuntimeIdentity(client) {
+    const identity = (await client.query(targetIdentityQuery())).rows[0]; assertLiveTarget(registered, identity, "runtime");
+    if (!identity || Number(identity.oid) !== t.databaseOid || identity.database !== t.database || identity.role !== t.runtimeUser
+      || Number(identity.role_oid) !== t.runtimeRoleOid || identity.owner !== t.owner || Number(identity.owner_oid) !== t.ownerOid
+      || identity.marker !== t.marker || identity.nonce !== t.nonce || identity.read_only !== "on") fail();
+  }
   async function assertSchema() {
     const check = { runtimeRollbackAck: false, migrationRollbackAck: false };
     const c = await readPool.connect(); let begun = false, destroy = false;
     try {
       await c.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); begun = true;
-      const identity = (await c.query(targetIdentityQuery())).rows[0];assertLiveTarget(registered,identity,"runtime");
-      if (!identity || Number(identity.oid) !== t.databaseOid || identity.database !== t.database || identity.role !== t.runtimeUser
-        || Number(identity.role_oid) !== t.runtimeRoleOid || identity.owner !== t.owner || Number(identity.owner_oid) !== t.ownerOid
-        || identity.marker !== t.marker || identity.nonce !== t.nonce) fail();
+      await verifyRuntimeIdentity(c);
       check.runtimeRollbackAck = (await c.query("ROLLBACK"))?.command === "ROLLBACK"; if (!check.runtimeRollbackAck) fail(); begun = false;
     } finally { try { if (begun) await c.query("ROLLBACK"); } catch { destroy = true; } finally { c.release(destroy ? true : undefined); } }
     const migration = await schemaPool.connect(); begun = false; destroy = false;
@@ -180,17 +195,52 @@ async function main() {
   }
   async function withMaintenanceLock(fn) {
     const lock = new Client({ ...base, database: "postgres", user: credentials.migration.name, password: credentials.migration.password });
-    let locked = false; const check = { acquired: false, unlockAck: false, maintenanceClosed: false };
+    let locked = false, fenceAcquired = false, fencePid, lockError;
+    const check = { acquired: false, unlockAck: false, maintenanceClosed: false, ...(nextTarget ? { requiresFence:true, targetFenceReleased:false } : {}) };
+    lock.on('error', error => { lockError ??= error; });
     try {
       await lock.connect();
       const role = (await lock.query("SELECT current_user AS role,oid::text AS oid,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user")).rows[0];
       if (!role || role.role !== credentials.migration.name || role.oid !== String(credentials.migration.oid) || role.rolsuper || role.rolcreaterole || role.rolbypassrls) fail();
       locked = (await lock.query("SELECT pg_try_advisory_lock($1) AS ok", [input.lockId])).rows[0]?.ok === true; check.acquired = locked; if (!locked) fail();
-      await assertSchema(); await fn();
+      let guard;
+      if (nextTarget) {
+        const epoch = await captureMaintenanceLockEpoch(lock, registered), client = await writePool.connect();
+        try {
+          assertLiveTarget(registered, (await client.query(targetIdentityQuery())).rows[0], 'runtime');
+          await acquireMigrationSessionFence(client, registered, epoch); fenceAcquired = true; fencePid = client.processID;
+          if (!Number.isInteger(fencePid) || fencePid <= 0) fail();
+        } catch (error) { client.release(true); throw error; }
+        client.release();
+        const pool = guardedMigrationTargetPool(writePool, async c => {
+          if (c.getTransactionStatus?.() !== 'I' || c.processID !== fencePid || lockError || writePoolError) fail();
+        });
+        const verifyWrite = async c => {
+          if (c.getTransactionStatus?.() !== 'T' || c.processID !== fencePid || lockError || writePoolError) fail();
+          await assertMigrationFenceHeld(c, registered, epoch);
+          if (lockError || writePoolError) fail();
+        };
+        const verifyRead = async () => {
+          const c = await pool.connect(); let discard = false;
+          try { await assertMigrationFenceHeld(c, registered, epoch); if (lockError || writePoolError) fail(); }
+          catch (error) { discard = true; throw error; }
+          finally { c.release(discard); }
+        };
+        guard = { writePool:pool, verifyWrite, verifyRead };
+      }
+      await assertSchema(); if (guard) await guard.verifyRead(); await fn(guard); if (guard) await guard.verifyRead();
     } finally {
+      if (fenceAcquired) {
+        let client, discard = false;
+        try {
+          client = await writePool.connect(); if (client.processID !== fencePid) fail();
+          await releaseMigrationSessionFence(client, registered); check.targetFenceReleased = true;
+        } catch { discard = true; }
+        finally { if (client) client.release(discard); }
+      }
       try { if (locked) check.unlockAck = (await lock.query("SELECT pg_advisory_unlock($1) AS ok", [input.lockId])).rows[0]?.ok === true; } catch { /* outcome stays unknown */ }
       try { await lock.end(); check.maintenanceClosed = true; } catch { /* outcome stays unknown */ }
-      maintenanceChecks.push(check); if (locked && (!check.unlockAck || !check.maintenanceClosed)) fail();
+      maintenanceChecks.push(check); if (locked && (!check.unlockAck || !check.maintenanceClosed || check.requiresFence && !check.targetFenceReleased)) fail();
     }
   }
   let token;
@@ -214,13 +264,13 @@ async function main() {
       || canonicalize(prior.binding) !== canonicalize(plan.binding) || canonicalize(prior.counts) !== canonicalize(plan.counts) || prior.commitment !== plan.commitment) fail();
     let report;
     if (mode === "--readback") {
-      report = await readbackLocalLegacyBankRun(token, { buildSha256: input.buildSha256, verifyBuild, withMaintenanceLock, readPool });
+      report = await readbackLocalLegacyBankRun(token, { buildSha256: input.buildSha256, verifyBuild, withMaintenanceLock, readPool, verifyReadTarget: verifyRuntimeIdentity });
     } else {
       const authority = pinned(protectedPath(option("--authority")), option("--authority-sha"));
       if (authority.inputSha256 !== inputSha256 || authority.planSha256 !== option("--plan-sha") || authority.schemaJournalSha256 !== input.schemaJournalSha256
         || authority.schemaHistorySha256 !== input.schemaHistorySha256) fail();
       let marked = false;
-      const lockAndReserve = fn => withMaintenanceLock(async () => {
+      const lockAndReserve = fn => withMaintenanceLock(async guard => {
         const markerDir = protectedPath(join(restricted, `round06-bank-attempt-${t.databaseOid}-${sha(JSON.stringify([t.nonce, plan.binding.source.sourceDumpSha256])).slice(0, 32)}`), true);
         if (existsSync(markerDir)) fail();
         writePrivate(join(markerDir, "init.json"), { schema: "zzsh.local-legacy-bank-attempt-directory.v1", status: "RESERVED", startedAt: new Date().toISOString() });
@@ -228,7 +278,7 @@ async function main() {
         const marker = join(markerDir, "attempt.json"); let fd;
         try { fd = openSync(marker, "wx", 0o600); writeFileSync(fd, JSON.stringify({ schema: "zzsh.local-legacy-bank-attempt.v1", inputSha256, planSha256: option("--plan-sha"), startedAt: new Date().toISOString() })); fsyncSync(fd); }
         finally { if (fd !== undefined) closeSync(fd); }
-        await fn();
+        await fn(guard);
       });
       let batchesReady = false;
       const persistBatch = async value => {
@@ -244,7 +294,8 @@ async function main() {
         try { fd = openSync(path, "wx", 0o600); writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); fsyncSync(fd); }
         finally { if (fd !== undefined) closeSync(fd); }
       };
-      report = await executeLocalLegacyBankRun(token, { authority, buildSha256: input.buildSha256, verifyBuild, withMaintenanceLock: lockAndReserve, writePool, readPool, persistBatch });
+      report = await executeLocalLegacyBankRun(token, { authority, buildSha256: input.buildSha256, verifyBuild, withMaintenanceLock: lockAndReserve,
+        writePool, readPool, verifyReadTarget: verifyRuntimeIdentity, persistBatch });
       report.attemptReserved = marked;
     }
     report.planStages = plan.stages;

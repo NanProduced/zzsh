@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { assertSourceSupplementFields, sourceJsonLine } from './local-source-adapter.mjs';
+import { assertCapturedSourceOrigin, assertSourceSupplementFields, sourceJsonLine } from './local-source-adapter.mjs';
 
 export const ACCOUNT_EXTRA_FIELDS = Object.freeze(['awm_number','helmet','armor','is_sayyid']);
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -37,10 +37,12 @@ function validateFileEntry(entry, expectedFile) {
 }
 
 /** Matching a registered restore and common fields does not prove when omitted fields last changed. */
-export function validateCaptureBindings(base, supplement, binding) {
+export function validateCaptureBindings(base, supplement, binding, bindingSha) {
   if (!captureIdentity(base)||!captureIdentity(supplement)||!validTimes(base)||!validTimes(supplement)) throw Error('SOURCE_CAPTURE_IDENTITY_OR_ROLLBACK_INVALID');
   if (Date.parse(supplement.startedAt)<Date.parse(base.finishedAt)) throw Error('SUPPLEMENT_CAPTURE_TIME_INVALID');
-  if (binding?.schema!=='zzsh.local-source-origin.v1' || binding.container?.name!=='zzsh-mysql-restore'
+  const old=binding?.schema==='zzsh.local-source-origin.v1'&&binding.container?.name==='zzsh-mysql-restore';
+  const next=binding?.schema==='zzsh.local-source-origin.v2'&&/^zzsh-migration-mysql-[a-z0-9-]+$/.test(binding.container?.name??'');
+  if ((!old&&!next)
     || binding.container.id!==base.containerId || binding.container.id!==supplement.containerId
     || binding.source?.database!==base.database || binding.source.database!==supplement.database
     || !digestPattern.test(binding.restoreRecord?.dumpSha256??'') || !isAbsolute(binding.restoreRecord?.dumpPath??'')
@@ -48,6 +50,7 @@ export function validateCaptureBindings(base, supplement, binding) {
     || Date.parse(binding.restoreRecord.exportStartedAt)>Date.parse(binding.restoreRecord.cutoff)
     || Date.parse(binding.restoreRecord.cutoff)>Date.parse(base.startedAt)
     || typeof binding.restoreRecord.cutoffMeaning!=='string' || !binding.restoreRecord.cutoffMeaning) throw Error('REGISTERED_RESTORE_BINDING_INVALID');
+  if(next){assertCapturedSourceOrigin(base,binding,bindingSha);assertCapturedSourceOrigin(supplement,binding,bindingSha);}
   validateFileEntry(base.files?.accounts,'accounts.jsonl');
   validateFileEntry(supplement.files?.accountDisplay,'accountDisplay.jsonl');
   const prior=base.files.accounts,extra=supplement.files.accountDisplay;
@@ -143,7 +146,7 @@ async function main() {
   try {
     const baseReceiptPath=join(baseDir,'receipt.json'),supplementReceiptPath=join(supplementDir,'receipt.json');noLinks(baseReceiptPath);noLinks(supplementReceiptPath);
     const base=readBoundJson(baseReceiptPath,option('--base-sha')),supplement=readBoundJson(supplementReceiptPath,option('--supplement-sha')),binding=readBoundJson(bindingPath,option('--source-binding-sha'));
-    validateCaptureBindings(base,supplement,binding);
+    validateCaptureBindings(base,supplement,binding,option('--source-binding-sha'));
     const captureToolSha=sha(readFileSync(new URL('./capture-local-source.mjs',import.meta.url)));
     validateSupplementTool(supplement,{toolSha256:captureToolSha,supportToolSha256:receipt.adapterSha256,accountExtraToolSha256:receipt.toolSha256});
     const dumpPath=absolute(binding.restoreRecord.dumpPath),dumpSha=await fileHash(dumpPath);
@@ -154,7 +157,7 @@ async function main() {
     if(typeof canonicalize!=='function'||await fileHash(canonicalizerPath)!==canonicalizerSha)throw Error('CANONICALIZER_CHANGED_OR_UNAVAILABLE');
     const baseFile=join(baseDir,base.files.accounts.file),supplementFile=join(supplementDir,supplement.files.accountDisplay.file);noLinks(baseFile);noLinks(supplementFile);
     Object.assign(receipt,{baseCaptureReceiptSha256:option('--base-sha'),baseAccountsSha256:base.files.accounts.sha256,supplementCaptureReceiptSha256:option('--supplement-sha'),supplementAccountsSha256:supplement.files.accountDisplay.sha256,sourceBindingSha256:option('--source-binding-sha'),sourceDumpSha256:dumpSha,canonicalizerSha256:canonicalizerSha,
-      baseCapture:{startedAt:base.startedAt,finishedAt:base.finishedAt},supplementCapture:{startedAt:supplement.startedAt,finishedAt:supplement.finishedAt,toolSha256:captureToolSha},sourceIdentity:{containerId:binding.container.id,database:binding.source.database,principal:base.identity.principal,sourceCutoff:binding.restoreRecord.cutoff,sourceCutoffMeaning:binding.restoreRecord.cutoffMeaning,provenance:'REGISTERED_RESTORE_BINDING_NOT_FRESH_RESTORE_ATTESTATION'},rollbackConfirmed:true,clientClosed:true});
+      baseCapture:{startedAt:base.startedAt,finishedAt:base.finishedAt},supplementCapture:{startedAt:supplement.startedAt,finishedAt:supplement.finishedAt,toolSha256:captureToolSha},sourceIdentity:{containerId:binding.container.id,database:binding.source.database,principal:base.identity.principal,sourceCutoff:binding.restoreRecord.cutoff,sourceCutoffMeaning:binding.restoreRecord.cutoffMeaning,provenance:binding.schema==='zzsh.local-source-origin.v2'?'RESTORE_BOUND_EXPORT_CONSISTENCY_NOT_VERIFIED':'REGISTERED_RESTORE_BINDING_NOT_FRESH_RESTORE_ATTESTATION'},rollbackConfirmed:true,clientClosed:true});
     const partial=join(out,'account-extra.jsonl.partial'),digest=createHash('sha256');let rows=0;fd=openSync(partial,'wx');
     receipt.counts=await compareAccountRows(verifiedSourceRows(baseFile,base.files.accounts.sha256),verifiedSourceRows(supplementFile,supplement.files.accountDisplay.sha256),base.files.accounts.fields,supplement.files.accountDisplay.fields,canonicalize,row=>{const bytes=Buffer.from(sourceJsonLine(row));writeFileSync(fd,bytes);digest.update(bytes);rows++;});
     if(receipt.counts.baseRows!==base.files.accounts.rows||receipt.counts.supplementRows!==supplement.files.accountDisplay.rows)throw Error('CAPTURE_RECEIPT_ROW_COUNT_CHANGED');

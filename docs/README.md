@@ -21,6 +21,7 @@
 - [公开交易统计读取](architecture/public-trade-activity.md)
 - [内容管理、资源格式与存储](architecture/content-management.md)
 - [系统配置、媒体存储与新环境初始化](operations/media-storage.md)
+- [首次部署初始化配置清单](operations/initial-deployment-configuration.md)（账号、政策、内容和环境配置；区别首次部署与后续发版）
 - [部署配置与第三方凭据准备](operations/deployment-prerequisites.md)
 - [线上团队测试服务器准备](operations/team-test-server.md)
 - [香港内部测试服 Compose 运行说明](operations/ecs-test-compose.md)

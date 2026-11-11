@@ -8,7 +8,9 @@ const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 export function openingReviewResource(ctx) {
   return { host: "127.0.0.1", port: Number(ctx.targetPort ?? 55432), database: "zzsh_test_regression",
     oid: Number(ctx.state.binding.oid), owner: ctx.state.resource.owner, marker: ctx.state.resource.marker,
-    role: ctx.state.resource.role, roleOid: Number(ctx.state.resource.role_oid) };
+    role: ctx.state.resource.role, roleOid: Number(ctx.state.resource.role_oid),
+    ...(ctx.state.binding.migrationProfile ? { migrationProfile: ctx.state.binding.migrationProfile,
+      systemIdentifier: ctx.state.binding.instance?.systemIdentifier, nonce: ctx.state.binding.nonce } : {}) };
 }
 
 /** Original stored balances use their independently reviewed economic proofs, never a sum of flows. */

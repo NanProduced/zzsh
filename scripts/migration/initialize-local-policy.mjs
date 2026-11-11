@@ -3,6 +3,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
+import { assertNextMigrationWriteReady, isRegisteredMigrationInstance } from "./local-target-registry.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const security = "/api/v1/admin/security/approvals/";
@@ -79,7 +80,9 @@ export function assertPolicyRuntimeBinding(input, binding, bindingBytes) {
     if (sha(bindingBytes) !== input.serverBinding.sha256 || binding.resource?.database !== input.target.database || String(binding.resource.oid ?? binding.resource.resourceOid) !== input.target.oid || binding.resource.nonce !== input.target.nonce || binding.NoIM !== true || binding.imProvisioner !== false || binding.imIdentityRepository !== false || binding.imAppId !== false) fail("EXACT_OPENED_NO_IM_RUNTIME_BINDING_REQUIRED");
     if (input.target.instance || binding.status === "R07_BOOTSTRAP_API_LISTENING") {
         const instance = input.target.instance, equal = value => value?.host === instance.host && value?.port === instance.port && value?.systemIdentifier === instance.systemIdentifier;
-        if (instance?.host !== "127.0.0.1" || instance.port !== 55433 || !/^[0-9]+$/.test(instance.systemIdentifier ?? "") || !/^[1-9][0-9]*$/.test(input.target.migrationRoleOid ?? "")
+        if (!isRegisteredMigrationInstance({ host: instance?.host, port: instance?.port, instance, migrationProfile: input.target.migrationProfile })
+          || !/^[1-9][0-9]*$/.test(input.target.migrationRoleOid ?? "")
+          || [binding.resource,binding.actualResource].some(value=>(value?.migrationProfile??null)!==(input.target.migrationProfile??null))
           || !equal(binding.resource.instance) || !equal(binding.actualResource?.instance) || binding.status !== "R07_BOOTSTRAP_API_LISTENING"
           || binding.port !== 4242 || binding.origins?.apiOrigin !== "http://127.0.0.1:4242"
           || binding.actualResource?.read_only !== "on" || String(binding.actualResource?.migration_role_oid) !== String(input.target.migrationRoleOid)
@@ -97,6 +100,7 @@ export function buildPolicyDraft(template, effectiveAtUtc, now = Date.now()) {
 
 /** Fixed formal policy flow; authority and idempotency stay in the existing API. No database or resource lock. */
 export async function runPolicyInitialization({ profile, template, effectiveAtUtc, apiOrigin, commandKeyPrefix, write, fetcher = fetch, now = Date.now(), target, provenance }) {
+    assertNextMigrationWriteReady(target);
     const started = performance.now(), startedAt = new Date().toISOString();
     validateProfile(profile); apiOrigin = localOrigin(apiOrigin);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,88}$/.test(commandKeyPrefix ?? "")) fail("STABLE_POLICY_COMMAND_PREFIX_REQUIRED");
@@ -193,6 +197,7 @@ async function main() {
     const bytes = readFileSync(option("--input")); if (sha(bytes) !== option("--input-sha")) fail("POLICY_INPUT_SHA_MISMATCH");
     const input = JSON.parse(bytes);
     if (input.kind !== "FORMAL_LOCAL_MEMBERSHIP_POLICY_INITIALIZATION_V1" || input.target?.database !== "zzsh_test_regression" || !input.target.oid || !input.target.nonce) fail("EXACT_POLICY_TARGET_INPUT_REQUIRED");
+    assertNextMigrationWriteReady(input.target);
     const bindingBytes = readFileSync(input.serverBinding.file), binding = JSON.parse(bindingBytes);
     assertPolicyRuntimeBinding(input, binding, bindingBytes);
     const contentBytes = readFileSync(input.contentManifest.file); if (sha(contentBytes) !== input.contentManifest.sha256) fail("POLICY_CONTENT_MANIFEST_SHA_MISMATCH");

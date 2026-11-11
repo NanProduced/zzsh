@@ -14,6 +14,7 @@ import {
 import { deriveDashboardPreset, type DashboardPreset } from "./admin-dashboard-preset";
 import { readAdminGameScope, type AdminGameScope } from "./admin-scope";
 import {
+  ADMIN_BOOTSTRAP_LOCK,
   assignAdministratorAccess,
   assignAdministratorGameScope,
   createAdministrator,
@@ -164,6 +165,7 @@ export type AuthSecurityOptions = {
   userSmsConfiguration?: import("./sms-templates").SmsTemplateConfiguration;
   /** Stable identity-only HMAC key; independent from rotating authentication secrets. */
   userIdentitySubjectKey?: Buffer;
+  userLegacyIdentityProfileKey?: Buffer;
   userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
   settlementAdmission?: import("../order/joinpay-collection-profile").FormalCollectionAdmission;
   userObligationReader: UserObligationReader;
@@ -193,7 +195,6 @@ export type AdminContext = {
   sessionLocked: boolean;
 };
 
-const SECURITY_ADVISORY_LOCK = 805101;
 const RECOVERY_TTL_MS = 10 * 60 * 1000;
 const SECURITY_RATE_LIMIT_MAX_FAILURES = 5;
 const SECURITY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -797,21 +798,8 @@ async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requ
   }
   const passwordHash = await options.hashPassword(password);
   const result = await withTransaction(options.pool, async (client) => {
-    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [SECURITY_ADVISORY_LOCK]);
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [ADMIN_BOOTSTRAP_LOCK]);
     const now = new Date();
-    const bosses = await client.query<{ id: string; status: AdminContext["security"]["status"]; bootstrapExpiresAt: Date | null; firstActivatedAt: Date | null }>(
-      `SELECT "admin_user_id" AS id, "status", "bootstrap_expires_at" AS "bootstrapExpiresAt", "first_activated_at" AS "firstActivatedAt"
-         FROM "zzsh_iam"."admin_security" WHERE "is_boss" = true FOR UPDATE`,
-    );
-    const expiredPendingBosses = bosses.rows.filter((boss) => boss.status === "PENDING_ENROLLMENT" && !boss.firstActivatedAt && (!boss.bootstrapExpiresAt || boss.bootstrapExpiresAt.getTime() <= now.getTime()));
-    if (expiredPendingBosses.length > 0) {
-      await setAuditContext(client, "system", undefined, undefined, requestId);
-      for (const boss of expiredPendingBosses) {
-        // Controlled reinitialization only removes an expired bootstrap identity with no immutable activation evidence.
-        await client.query(`DELETE FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1`, [boss.id]);
-        await client.query(`DELETE FROM "zzsh_auth_admin"."user" WHERE "id" = $1`, [boss.id]);
-      }
-    }
     const remainingBosses = await client.query<{ id: string; username: string | null }>(
       `SELECT s."admin_user_id" AS id, u."username" AS username FROM "zzsh_iam"."admin_security" s
        LEFT JOIN "zzsh_auth_admin"."user" u ON u."id" = s."admin_user_id" WHERE s."is_boss" = true FOR UPDATE OF s`,
@@ -838,8 +826,8 @@ async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requ
     );
     await client.query(
       `INSERT INTO "zzsh_iam"."admin_security" ("admin_user_id", "status", "is_boss", "password_change_required", "bootstrap_expires_at")
-       VALUES ($1, 'PENDING_ENROLLMENT', true, true, $2)`,
-      [id, new Date(now.getTime() + 15 * 60 * 1000)],
+       VALUES ($1, 'PENDING_ENROLLMENT', true, true, NULL)`,
+      [id],
     );
     await recordAudit(client, {
       actorType: "system",
@@ -875,14 +863,18 @@ async function activateEnrollment(request: NodeRequest, response: NodeResponse, 
   await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     // Bootstrap lock order: admin_security, then the activation audit mutation.
-    const locked = await client.query<{ status: string; passwordChangeRequired: boolean; bootstrapExpiresAt: Date | null; bootstrapUsedAt: Date | null; firstActivatedAt: Date | null }>(
-      `SELECT "status", "password_change_required" AS "passwordChangeRequired", "bootstrap_expires_at" AS "bootstrapExpiresAt", "bootstrap_used_at" AS "bootstrapUsedAt", "first_activated_at" AS "firstActivatedAt"
+    const locked = await client.query<{ status: string; isBoss: boolean; passwordChangeRequired: boolean; bootstrapExpiresAt: Date | null; unlimitedInitialEnrollment: boolean; bootstrapUsedAt: Date | null; firstActivatedAt: Date | null }>(
+      `SELECT "status", "is_boss" AS "isBoss", "password_change_required" AS "passwordChangeRequired",
+              CASE WHEN "bootstrap_expires_at" = 'infinity'::timestamptz THEN NULL ELSE "bootstrap_expires_at" END AS "bootstrapExpiresAt",
+              COALESCE("bootstrap_expires_at" = 'infinity'::timestamptz, false) AS "unlimitedInitialEnrollment",
+              "bootstrap_used_at" AS "bootstrapUsedAt", "first_activated_at" AS "firstActivatedAt"
          FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
       [context.userId],
     );
     if (locked.rows[0]?.status !== "PENDING_ENROLLMENT") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator enrollment is not pending");
     if (locked.rows[0]?.passwordChangeRequired) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Password change required");
-    if (!locked.rows[0].bootstrapExpiresAt || locked.rows[0].bootstrapExpiresAt.getTime() <= Date.now() || locked.rows[0].bootstrapUsedAt) {
+    const unlimitedFirstEnrollment = !locked.rows[0].firstActivatedAt && (locked.rows[0].isBoss || locked.rows[0].unlimitedInitialEnrollment);
+    if (locked.rows[0].bootstrapUsedAt || (!unlimitedFirstEnrollment && (!locked.rows[0].bootstrapExpiresAt || locked.rows[0].bootstrapExpiresAt.getTime() <= Date.now()))) {
       throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator bootstrap has expired");
     }
     await client.query(`UPDATE "zzsh_iam"."admin_security"
@@ -1196,7 +1188,8 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
       const pendingWindow = target.rows[0].isBoss ? "15 minutes" : "7 days";
       await client.query(`UPDATE "zzsh_iam"."admin_security"
          SET "status" = $1,
-             "bootstrap_expires_at" = CASE WHEN $1 = 'PENDING_ENROLLMENT' AND ("bootstrap_expires_at" IS NULL OR "bootstrap_expires_at" <= clock_timestamp()) THEN clock_timestamp() + $3::interval ELSE "bootstrap_expires_at" END,
+             "bootstrap_expires_at" = CASE WHEN $1 = 'PENDING_ENROLLMENT' AND "is_boss" AND "first_activated_at" IS NULL THEN NULL
+               WHEN $1 = 'PENDING_ENROLLMENT' AND ("bootstrap_expires_at" IS NULL OR "bootstrap_expires_at" <= clock_timestamp()) THEN clock_timestamp() + $3::interval ELSE "bootstrap_expires_at" END,
              "updated_at" = clock_timestamp()
          WHERE "admin_user_id" = $2`, [nextStatus, targetAdminId, pendingWindow]);
       resultingStatus = nextStatus;

@@ -1,0 +1,29 @@
+{
+  "schema": "zzsh.initial-seed-contract.v1",
+  "baseline": "release_production_0174",
+  "baselineMigrationHash": "9b66df678e44853d93a1bb96423e0277d64d5ffc1ed4f077540e393164280aa5",
+  "baselineSeedProofSha256": "b46e08de03ca21a0410bfce0c1a5f84d6c90b7c4bc4ca9a1430753688ea7b9fc",
+  "reference": {
+    "method": "INDEPENDENT_CANONICAL_REPLAY",
+    "sourceCount": 189,
+    "sourceChainSha256": "567319880fc75d5db2588b4c43b3ea8f00edb8e32235f21eda65620db6c89f58",
+    "through": "0188_poststart_support_cancel"
+  },
+  "reviewedTarget": {
+    "method": "INITIAL_PLUS_TAIL_READBACK",
+    "sourceCount": 196,
+    "sourceChainSha256": "a4c767f7ef181920529629650db788af81c9994a2b7bdcae73d7ef58194b6143",
+    "through": "0195_approval_center_link"
+  },
+  "evidence": "独立参考库重放至0188；0174生产基线加尾链至0195的隔离目标种子读回通过。0195仅移除运营预设的包赔审批权限；0189–0195未独立重放完整旧链。",
+  "tables": {
+    "zzsh_iam.admin_permission": { "count": 89, "sha256": "0d985e26301fa485dd5db253c4ac3a26538e2284364bb56f00956e2a0b31369c" },
+    "zzsh_iam.admin_role": { "count": 2, "sha256": "c3715dbd1ff7e15f7c371828c3ac10ac59c1eef4ed2e25603dda9afcc4226df9" },
+    "zzsh_iam.admin_role_permission": { "count": 91, "sha256": "7b6d220de24a06728545f3b880baf06e1e0d53fc0d716dd628d50b3534124b0a" },
+    "zzsh_iam.approval_template": { "count": 7, "sha256": "d6e362fb41fac17575de235486280b12fa217a0d9bb6c1d57943bcf52389ed17" },
+    "zzsh_supply.profile_avatar_policy": { "count": 1, "sha256": "c27d68640efecd01efdd6217165593a0f29a17953dd7fc3bed832abf93eaafe2" },
+    "zzsh_order.settlement_refund_policy": { "count": 1, "sha256": "2179607a4d80a1a8a6aa7faebb77c88af751413511d3c37c62ca42d9b1ec70c9" },
+    "zzsh_order.legacy_duty_finance_contract": { "count": 1, "sha256": "b28648ac8ab07324c8d325fcd25746d2b9e7a1c3c0da682a30c38e3148c0d4ab" },
+    "zzsh_order.opening_auto_confirm_policy": { "count": 1, "sha256": "b3b03f2011d13975bd84428072e5415dd5222373ca9b43875771a4d675c998c2" }
+  }
+}

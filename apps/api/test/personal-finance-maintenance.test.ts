@@ -75,6 +75,22 @@ async function admitted(f=fixture(),i=input(),r=review(i),mode?:'recover'){
  const scope=await api.bindReviewedFinanceOpeningAdmission(f.client,actor,r,mode);
  return {...f,i,r,scope};
 }
+test('next-round finance admission binds the exact local endpoint, cluster and database epoch',async()=>{
+ const i=input(),r=review(i),next:any={...resource,database:'zzsh_test_regression',marker:'zzsh:regression-test:v1',owner:'zzsh',role:'zzsh_regression_migration',
+  port:55435,migrationProfile:'LOCAL_MIGRATION_NEXT_V1',systemIdentifier:'12345',nonce:'a'.repeat(24)};
+ r.resource=next;const f=fixture();f.state.resource={...next};Object.assign(f.client.connectionParameters,{host:next.host,port:next.port,database:next.database,user:next.role});
+ assert.equal(maintenance.isReviewedFinanceMaintenanceEndpoint(next),true);
+ await assert.doesNotReject(api.bindReviewedFinanceOpeningAdmission(f.client,actor,r));
+ for(const change of [{migrationProfile:undefined},{systemIdentifier:undefined},{nonce:'bad'},{port:55434},{host:'192.0.2.1'},
+  {database:'another_db'},{role:'zzsh_regression_runtime'}])assert.equal(maintenance.isReviewedFinanceMaintenanceEndpoint({...next,...change} as any),false);
+ for(const key of ['nonce','systemIdentifier']){const old=f.state.resource[key];f.state.resource[key]='9';await assert.rejects(api.bindReviewedFinanceOpeningAdmission(f.client,actor,r));f.state.resource[key]=old;}
+ for(const key of ['nonce','systemIdentifier','migrationProfile']){
+  const changed={...r,resource:{...next,[key]:'different'}};
+  await assert.rejects(api.authorizeMaintenanceBatch(f.client,actor,[r,changed]));
+ }
+ f.client.connectionParameters.port=55433;await assert.rejects(api.bindReviewedFinanceOpeningAdmission(f.client,actor,r));assert.equal(f.state.writes,0);
+ const saved=process.env.NODE_ENV;process.env.NODE_ENV='production';try{assert.equal(maintenance.isReviewedFinanceMaintenanceEndpoint(next),false);}finally{if(saved===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=saved;}
+});
 function recoveryEvidence(f:any,plan:any){
  const i=f.i,p=i.proof,o=plan.observations[0];
  f.state.recoveryRows={basis:[{userId:p.userId,sourceSystem:p.source.sourceSystem,sourceEntity:'la_user',sourceId:p.source.sourceId,identityDigest:p.source.identityDigest,sourceDigest:p.sourceDigest,cutoff:i.cutoff,coveredCount:1,coveredDigest:p.coveredDigest,rootKind:'LEGACY_OPENING',rootType:'LEGACY_MYSQL',rootSystem:p.source.sourceSystem,rootEntity:'la_user',rootSourceId:p.source.sourceId,rootSubject:p.userId,rootRole:'WALLET_HOLDER'}],covered:p.coveredSet.map((row:any)=>({row})),observations:[{userId:p.userId,sourceSystem:o.sourceSystem,legacyUserId:o.legacyUserId,sourceEntity:o.sourceEntity,sourceId:o.sourceId,sourceDigest:o.sourceDigest,sourceEventAt:o.sourceEventAt,included:true,canonical:o.sourceCanonical,observationUserId:p.userId,observationBasis:plan.basisId,observationDigest:o.sourceDigest,observationCanonical:o.sourceCanonical,observationIncluded:true}],ledger:[{line:1,account:'LEGACY_OPENING_SOURCE',debit:'110',credit:'0',subject:null},{line:2,account:'WALLET_AVAILABLE',debit:'0',credit:'110',subject:p.userId}],audit:[{}]};

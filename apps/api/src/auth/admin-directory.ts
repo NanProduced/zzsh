@@ -42,6 +42,7 @@ import {
 
 const STAFF_ENROLLMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ROLE_CODE_PATTERN = /^[a-z][a-z0-9_]{1,62}$/;
+export const ADMIN_BOOTSTRAP_LOCK = 805101;
 
 type AdminContext = {
   userId: string;
@@ -109,7 +110,7 @@ export async function listAdministrators(
         s."status",
         s."is_boss" AS "isBoss",
         s."password_change_required" AS "passwordChangeRequired",
-        s."bootstrap_expires_at" AS "bootstrapExpiresAt",
+        CASE WHEN s."bootstrap_expires_at" = 'infinity'::timestamptz THEN NULL ELSE s."bootstrap_expires_at" END AS "bootstrapExpiresAt",
         s."first_activated_at" AS "firstActivatedAt",
         s."game_scope_mode" AS "scopeMode",
         u."createdAt" AS "createdAt",
@@ -237,7 +238,7 @@ export async function readAdministratorDetail(
         s."status",
         s."is_boss" AS "isBoss",
         s."password_change_required" AS "passwordChangeRequired",
-        s."bootstrap_expires_at" AS "bootstrapExpiresAt",
+        CASE WHEN s."bootstrap_expires_at" = 'infinity'::timestamptz THEN NULL ELSE s."bootstrap_expires_at" END AS "bootstrapExpiresAt",
         s."bootstrap_used_at" AS "bootstrapUsedAt",
         s."first_activated_at" AS "firstActivatedAt",
         u."createdAt" AS "createdAt",

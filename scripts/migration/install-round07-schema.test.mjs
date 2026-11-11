@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { normalizeRegisteredTarget } from './local-target-registry.mjs';
-import { assertR07RegistrationReceipt, validateR07SchemaRequest, validateR07FinalJournal, schemaInitialBaseline, assertSchemaBaselineHistory, assertInitialDatabaseReadback } from './install-round07-schema.mjs';
+import { assertR07RegistrationReceipt, validateR07SchemaRequest, validateR07FinalJournal, schemaInitialBaseline, assertSchemaBaselineHistory, assertInitialDatabaseReadback, assertSchemaToolBinding } from './install-round07-schema.mjs';
 
 const instance={host:'127.0.0.1',port:55433,systemIdentifier:'12345'},nonce='a'.repeat(24),digest='b'.repeat(64);
 const target={oid:'123',nonce,instance,migrationRoleOid:'790',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED'};
@@ -19,6 +19,27 @@ test('schema install requires an exact isolated instance, epoch, roles and reser
  assert.throws(()=>validateR07SchemaRequest(request,normalizeRegisteredTarget({...raw,instance:{...instance,port:55432}})));
  assert.throws(()=>validateR07SchemaRequest({...request,datasetSha256:'d'.repeat(64)},registry));
  assert.throws(()=>validateR07SchemaRequest(request,normalizeRegisteredTarget({...raw,protectedDataset:{...raw.protectedDataset,epoch:{oid:'124',nonce}}})));
+});
+
+test('next-round schema requires its own registered profile, port and registration receipt',()=>{
+ const nextInstance={...instance,port:55435},profile='LOCAL_MIGRATION_NEXT_V1';
+ const registry=normalizeRegisteredTarget({...raw,instance:nextInstance,migrationProfile:profile});
+ const tools=Object.fromEntries(['install-round07-schema.mjs','business-initial-seeds.mjs','business-initial-tail-seeds.mjs',
+  'local-target-registry.mjs','local-distribution-qualification-plan.mjs','local-load-checkpoint.mjs','../local-auth.mjs',
+  '../../apps/api/src/database/business-migration-compat.ts'].map(name=>[name,digest]));
+ const nextTarget={...target,instance:nextInstance,migrationProfile:profile},nextRequest={...request,target:nextTarget,initialBaseline:'release_production_0174',initialBaselineManifestSha256:digest,schemaTools:tools,releaseCommit:'a'.repeat(40)};
+ assert.doesNotThrow(()=>validateR07SchemaRequest(nextRequest,registry));
+ assert.throws(()=>validateR07SchemaRequest({...nextRequest,schemaTools:undefined},registry),/SCHEMA_TOOL_BINDING_INVALID/);
+ assert.throws(()=>validateR07SchemaRequest({...nextRequest,releaseCommit:undefined},registry),/SCHEMA_RELEASE_COMMIT_REQUIRED/);
+ assert.throws(()=>assertSchemaToolBinding(tools,{...tools,'business-initial-tail-seeds.mjs':'f'.repeat(64)}),/SCHEMA_TOOL_CHANGED/);
+ assert.throws(()=>assertSchemaToolBinding({...tools,unexpected:digest},tools),/SCHEMA_TOOL_BINDING_INVALID/);
+ assert.throws(()=>validateR07SchemaRequest({...nextRequest,initialBaseline:undefined,initialBaselineManifestSha256:undefined},registry),/SCHEMA_NEXT_BASELINE_REQUIRED/);
+ assert.throws(()=>validateR07SchemaRequest({...nextRequest,initialBaseline:'release_production_0153'},registry),/SCHEMA_NEXT_BASELINE_REQUIRED/);
+ for(const bad of [{...nextTarget,migrationProfile:undefined},{...nextTarget,instance:{...nextInstance,port:55433}}])
+  assert.throws(()=>validateR07SchemaRequest({...nextRequest,target:bad},registry));
+ const receipt={status:'MIGRATION_TARGET_REGISTERED',oid:registry.oid,nonce:registry.nonce,instance:nextInstance,roleReadback:true,unlockAck:true,maintenanceClosed:true};
+ assert.doesNotThrow(()=>assertR07RegistrationReceipt(receipt,registry));
+ assert.throws(()=>assertR07RegistrationReceipt({...receipt,status:'R07_TARGET_REGISTERED'},registry));
 });
 
 test('schema install defaults to an offline plan',()=>{

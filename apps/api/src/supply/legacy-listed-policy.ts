@@ -33,22 +33,28 @@ export function readLegacyListedPolicy(canonical: string, expected: PolicyBindin
     || typeof authority.authorityRef!=="string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(authority.authorityRef)
     || typeof authority.instruction!=="string" || !authority.instruction.trim() || authority.instruction.length>500)reject();
   const p = bundle?.supplement, dump = bundle?.dumpVerification;
-  if (bundle?.schema !== "legacy-listed-policy-evidence-v1" || bundle.verifierSha256 !== expected.dumpVerifierSha256
-    || bundle.temporalLimit !== "DUMP_AND_LATER_RESTORE_AGREE_CAPTURE_OMITTED_SPREADS_NO_PROOF_OF_INTERMEDIATE_UNCHANGED"
+  const sameCapture = bundle?.schema === "legacy-listed-policy-evidence-v2";
+  if ((!sameCapture && bundle?.schema !== "legacy-listed-policy-evidence-v1") || bundle.verifierSha256 !== expected.dumpVerifierSha256
+    || bundle.temporalLimit !== (sameCapture ? "SAME_MYSQL_SNAPSHOT_RUNTIME_REDIS_NOT_CAPTURED" : "DUMP_AND_LATER_RESTORE_AGREE_CAPTURE_OMITTED_SPREADS_NO_PROOF_OF_INTERMEDIATE_UNCHANGED")
     || !p || sha256Hex(canonicalize(p)) !== bundle.supplementSha256
     || dump?.schema !== "zzsh.legacy-listing-dump-policy-check.v1" || dump.sourceDumpSha256 !== expected.dumpSha256
     || dump.gameId !== expected.legacyGameId || dump.matchCounts?.game !== 1 || dump.matchCounts?.fastConfig !== 1
     || typeof dump.sourceCutoff !== "string" || !Number.isFinite(Date.parse(dump.sourceCutoff))
     || dump.sourceCutoffMeaning !== "OWNER_LOCAL_DUMP_EXPORT_COMPLETED_NOT_PROVEN_PRODUCTION_STOP_WRITE_CUTOFF") reject();
-  if (!p || p.schema !== "legacy-listed-policy-supplement-v1" || p.sourceReceiptSha256 !== expected.sourceReceiptSha256
+  if (!p || p.schema !== (sameCapture ? "legacy-listed-policy-capture-v2" : "legacy-listed-policy-supplement-v1") || p.sourceReceiptSha256 !== expected.sourceReceiptSha256
     || p.sourceBindingSha256 !== expected.sourceBindingSha256 || p.dumpSha256 !== expected.dumpSha256
     || !/^[a-f0-9]{64}$/.test(p.containerId ?? "") || p.rollbackConfirmed !== true
     || p.identity?.database !== "sg_zzsh_restore" || p.identity.readOnly !== 1 || p.identity.isolation !== "REPEATABLE-READ"
     || p.identity.accessMode !== "READ ONLY" || p.identity.txState !== "ACTIVE"
-    || !["TEN_EXACT_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL","EXACT_LISTED_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL"].includes(p.comparison)
-    || p.comparison === "TEN_EXACT_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL" && expected.expectedAccountCount !== 10
-    || p.temporalLimit !== "TWO_SPREAD_FIELDS_WERE_NOT_IN_BASE_CAPTURE"
-    || [p.baseCaptureStartedAt,p.baseCaptureFinishedAt,p.startedAt,p.finishedAt].some((value: unknown) => typeof value !== "string" || !Number.isFinite(Date.parse(value)))
+    || (sameCapture
+      ? p.comparison !== "ACCOUNTS_AND_POLICY_SAME_CAPTURE" || p.temporalLimit !== "RUNTIME_REDIS_NOT_CAPTURED" || p.clientClosed !== true
+      : !["TEN_EXACT_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL","EXACT_LISTED_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL"].includes(p.comparison)
+        || p.comparison === "TEN_EXACT_ROWS_AND_CAPTURED_MATERIAL_POLICY_IDENTICAL" && expected.expectedAccountCount !== 10
+        || p.temporalLimit !== "TWO_SPREAD_FIELDS_WERE_NOT_IN_BASE_CAPTURE")
+    || (sameCapture ? [p.baseCaptureStartedAt,p.baseCaptureFinishedAt] : [p.baseCaptureStartedAt,p.baseCaptureFinishedAt,p.startedAt,p.finishedAt])
+      .some((value: unknown) => typeof value !== "string" || !Number.isFinite(Date.parse(value)))
+    || sameCapture && (Date.parse(p.baseCaptureStartedAt) > Date.parse(p.baseCaptureFinishedAt)
+      || Date.parse(dump.sourceCutoff) > Date.parse(p.baseCaptureStartedAt))
     || !Array.isArray(p.accountSourceDigests) || p.accountSourceDigests.length !== expected.expectedAccountCount
     || p.accountSourceDigests.some((x: any) => !/^[1-9]\d{0,23}$/.test(x?.id ?? "") || !/^[a-f0-9]{64}$/.test(x?.sha256 ?? ""))
     || new Set(p.accountSourceDigests.map((x: any) => x.id)).size !== expected.expectedAccountCount
@@ -69,10 +75,11 @@ export function readLegacyListedPolicy(canonical: string, expected: PolicyBindin
   } catch { return reject(); }
   // This self-contained, non-path policy record travels with PostgreSQL. Raw source accounts and
   // local filenames remain outside it; the reviewed evidence package is bound by its digest.
-  const frozen = { schema:"legacy-listed-policy-frozen-v1", sourceSystem:"legacy_mysql_restore", sourceEntity:"la_rental_accounts",
+  const frozen = { schema:sameCapture ? "legacy-listed-policy-frozen-v2" : "legacy-listed-policy-frozen-v1", sourceSystem:"legacy_mysql_restore", sourceEntity:"la_rental_accounts",
     evidenceBundleSha256:expected.proofSha256, sourceReceiptSha256:expected.sourceReceiptSha256, sourceBindingSha256:expected.sourceBindingSha256,
     dumpSha256:expected.dumpSha256, verifierSha256:expected.dumpVerifierSha256, sourceCutoff:dump.sourceCutoff, sourceCutoffMeaning:dump.sourceCutoffMeaning,
-    baseCaptureStartedAt:p.baseCaptureStartedAt, baseCaptureFinishedAt:p.baseCaptureFinishedAt, supplementStartedAt:p.startedAt, supplementFinishedAt:p.finishedAt,
+    baseCaptureStartedAt:p.baseCaptureStartedAt, baseCaptureFinishedAt:p.baseCaptureFinishedAt,
+    ...(!sameCapture ? {supplementStartedAt:p.startedAt, supplementFinishedAt:p.finishedAt} : {}),
     temporalLimit:bundle.temporalLimit, accountSourceDigests:p.accountSourceDigests, sourceAccountCount:expected.expectedAccountCount, legacyGameId:expected.legacyGameId,
     policyAuthority:{decision:authority.decision,scope:authority.scope,runtimeCacheKnowledge:authority.runtimeCacheKnowledge,productionCutover:authority.productionCutover,authorityRef:authority.authorityRef,authoritySha256:expected.authoritySha256},
     ordinarySpread:games[0].profitDot, fastSpread:fast[0].value, salePrices };

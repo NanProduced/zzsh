@@ -1,10 +1,55 @@
 import { createHash } from "node:crypto";
-import { createReadStream, readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
-import { assertSourceSupplementFields, readSourceRows } from "./local-source-adapter.mjs";
+import { assertSourceSupplementFields, inspectLegacySkinDictionaryCapture, readBoundSourceRows, readVerifiedSourceRows } from "./local-source-adapter.mjs";
 
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const AMBIGUOUS = ["影锋", "AUG-气象感应", "K416-命运", "M4棱镜攻势", "M7棱镜攻势", "QBZ95-王牌之剑", "SCAR-电玩", "Vctor-冲锋枪-美杜莎", "腾龙-气象感应"];
+
+/** Additional duplicate source tuples must not silently resolve through the target catalog. */
+export function deriveAdditionalSkinAmbiguities(dictionaryRows,types,knownRules,fields) {
+  if (!Array.isArray(dictionaryRows) || !(types instanceof Map) || !Array.isArray(knownRules) || !Array.isArray(fields)) throw new Error("SKIN_DYNAMIC_SOURCE_INVALID");
+  const groups=new Map(),nonExactTokens=new Set(),known=new Set(knownRules.map(rule=>rule.field+"\0"+rule.token));
+  for (const row of dictionaryRows) {
+    const field=types.get(row?.type_id)?.dict_type;
+    if (fields.includes(field) && row.name!==row.value) for (const value of [row.name,row.value])
+      if (typeof value==="string" && value.trim()) nonExactTokens.add(field+"\0"+value.trim());
+    if (typeof row?.value!=="string" || !row.value || row.name!==row.value) continue;
+    if (!groups.has(row.value)) groups.set(row.value,[]);groups.get(row.value).push(row);
+  }
+  const additionalRules=[];
+  for (const [token,matches] of groups) {
+    if (matches.length<2) continue;
+    const matchedFields=[...new Set(matches.map(row=>types.get(row.type_id)?.dict_type).filter(field=>fields.includes(field)))].sort();
+    if (!matchedFields.length) continue;
+    const sources=matches.map(row=>{
+      const type=types.get(row.type_id),id=Number(row.id),typeId=Number(row.type_id);
+      if (!type || typeof type.dict_type!=="string" || !type.dict_type || !Number.isSafeInteger(id) || id<1
+        || !Number.isSafeInteger(typeId) || typeId<1 || !["0","1"].includes(row.is_delete)) throw new Error("SKIN_DYNAMIC_DICTIONARY_INVALID");
+      return {dictField:type.dict_type,dictTypeId:typeId,dictDataId:id,state:row.is_delete==="1"?"HISTORICAL_SOFT_DELETED":"CURRENT"};
+    });
+    if (new Set(sources.map(row=>row.dictField+":"+row.dictTypeId+":"+row.dictDataId)).size!==sources.length) throw new Error("SKIN_DYNAMIC_DICTIONARY_DUPLICATE");
+    for (const field of matchedFields) if (!known.has(field+"\0"+token)) additionalRules.push({field,token,decision:"SOURCE_AMBIGUOUS",sources});
+  }
+  additionalRules.sort((a,b)=>a.field<b.field?-1:a.field>b.field?1:a.token<b.token?-1:a.token>b.token?1:0);
+  return {additionalRules,nonExactTokens};
+}
+
+export function useDynamicSkinDictionaryRules(manifest,sourceReceipt,dictionaryReceipt,sourceSha256,dictionarySha256) {
+  const capture=inspectLegacySkinDictionaryCapture(sourceReceipt);
+  if (capture.status!=="SAME_SNAPSHOT_DYNAMIC_RULES") {
+    if (manifest.skinDictionaryEvidence?.status && manifest.skinDictionaryEvidence.status!=="LEGACY_FIXED_RULES") throw new Error("HOLDINGS_DYNAMIC_SOURCE_PROOF_MISSING");
+    return false;
+  }
+  if (manifest.skinDictionaryEvidence?.status!==capture.status) throw new Error("HOLDINGS_DYNAMIC_SOURCE_PROOF_MISSING");
+  if (sourceSha256!==manifest.sourceReceiptSha256 || dictionarySha256!==manifest.sourceReceiptSha256
+    || inspectLegacySkinDictionaryCapture(dictionaryReceipt).status!==capture.status) throw new Error("HOLDINGS_DYNAMIC_SOURCE_NOT_SAME_CAPTURE");
+  return true;
+}
+
+export function hasNonExactSkinSourceToken(columns,fields,split,nonExactTokens) {
+  return fields.some(field=>split(columns[field]).some(token=>nonExactTokens.has(field+"\0"+token)));
+}
 
 async function boundCapture(ctx, directory, expectedSha, name) {
   const path = resolve(directory ?? "");
@@ -12,12 +57,11 @@ async function boundCapture(ctx, directory, expectedSha, name) {
   const bytes = readFileSync(join(path, "receipt.json"));
   if (hash(bytes) !== expectedSha) throw new Error("SKIN_SOURCE_RECEIPT_SHA_MISMATCH");
   const receipt = JSON.parse(bytes), entry = receipt.files[name];
-  const original = JSON.parse(readFileSync(join(ctx.manifest.source, "receipt.json")));
+  const originalBytes = readFileSync(join(ctx.manifest.source, "receipt.json"));
+  if (hash(originalBytes) !== ctx.manifest.sourceReceiptSha256) throw new Error("HOLDINGS_BASE_RECEIPT_CHANGED");
+  const original = JSON.parse(originalBytes);
   if (receipt.status !== "CAPTURED_READ_ONLY" || !receipt.rollbackConfirmed || !receipt.clientClosed || receipt.containerId !== original.containerId || receipt.database !== original.database || !entry || entry.file !== basename(entry.file)) throw new Error("SKIN_SOURCE_NOT_CONFIRMED");
-  const file = join(path, entry.file), digest = createHash("sha256");
-  for await (const bytes of createReadStream(file)) digest.update(bytes);
-  if (digest.digest("hex") !== entry.sha256) throw new Error("SKIN_SOURCE_FILE_SHA_MISMATCH");
-  return { receipt, entry, file };
+  return { receipt, entry, file: join(path, entry.file), original };
 }
 
 /** Four source columns remain source declarations. Names or catalog media never imply ownership. */
@@ -35,24 +79,28 @@ export async function applyHoldingDomain(ctx, options) {
     const body = modules.parseLegacySkinMappingOverlay(JSON.parse(bytes)); mappingOverlay = { sha256: hash(canonical(body)), body };
   } else if (options.mappingOverlaySha256) throw new Error("REVIEWED_HOLDING_OVERLAY_FILE_REQUIRED");
   if (modules.LEGACY_SKIN_FIELDS.some(field => !source.entry.fields.includes(field))) throw new Error("FOUR_SOURCE_SKIN_FIELDS_NOT_OBSERVED");
-  const rawBase = new Map();
-  for await (const row of readSourceRows(join(ctx.manifest.source, "accounts.jsonl"))) rawBase.set(row.id, row);
+  const rawBase = new Map(), baseAccounts = source.original.files?.accounts;
+  if (!baseAccounts || baseAccounts.file !== basename(baseAccounts.file)) throw new Error("HOLDINGS_BASE_ACCOUNTS_REQUIRED");
+  await readVerifiedSourceRows(join(ctx.manifest.source, baseAccounts.file), baseAccounts, row => {
+    if (rawBase.has(row.id)) throw new Error("DUPLICATE_HOLDING_SOURCE_ID");
+    rawBase.set(row.id, row);
+  });
   const sourceCount = rawBase.size;
   const columnsById = new Map(); let compared = 0;
-  for await (const row of readSourceRows(source.file)) {
+  await readVerifiedSourceRows(source.file, source.entry, row => {
     assertSourceSupplementFields(rawBase.get(row.id), row);
     rawBase.delete(row.id);
     if (columnsById.has(row.id)) throw new Error("DUPLICATE_HOLDING_SOURCE_ID");
     columnsById.set(row.id, { columns: Object.fromEntries(modules.LEGACY_SKIN_FIELDS.map(field => [field, row[field]])), updatedAt: row.update_time });
     compared++;
-  }
+  });
   if (compared !== sourceCount || rawBase.size) throw new Error("HOLDING_SOURCE_DENOMINATOR_CHANGED");
-  const dictionaryRows = []; for await (const row of ctx.readRows(dictionary.file)) dictionaryRows.push(row);
+  const dictionaryRows = []; await readVerifiedSourceRows(dictionary.file, dictionary.entry, row => dictionaryRows.push(row));
   const types = new Map();
-  for await (const row of ctx.readRows(dictionaryTypes.file)) {
+  await readVerifiedSourceRows(dictionaryTypes.file, dictionaryTypes.entry, row => {
     if (types.has(row.id) || typeof row.dict_type !== "string" || !row.dict_type) throw new Error("DICTIONARY_TYPE_CONTEXT_UNBOUND");
     types.set(row.id, row);
-  }
+  });
   if (mappingOverlay) {
     if (mappingOverlay.body.sourceReceiptSha256 !== options.dictionarySha256 || mappingOverlay.body.sourceExtractSha256 !== source.entry.sha256 || mappingOverlay.body.sourceDictionarySha256 !== dictionary.entry.sha256) throw new Error("HOLDING_OVERLAY_SOURCE_EXTRACT_CHANGED");
     for (const mapping of mappingOverlay.body.mappings) {
@@ -66,6 +114,11 @@ export async function applyHoldingDomain(ctx, options) {
     if (matches.length < 2 || matches.some(row => !/^[1-9]\d*$/.test(row.id) || !/^[1-9]\d*$/.test(row.type_id) || !["0", "1"].includes(row.is_delete) || !types.has(row.type_id))) throw new Error("RETAINED_SKIN_AMBIGUITY_NOT_SOURCE_PROVED");
     return { field, token, decision: "SOURCE_AMBIGUOUS", sources: matches.map(row => ({ dictField: types.get(row.type_id).dict_type, dictTypeId: Number(row.type_id), dictDataId: Number(row.id), state: row.is_delete === "1" ? "HISTORICAL_SOFT_DELETED" : "CURRENT" })) };
   });
+  let nonExactTokens=new Set(),dynamicRules=false;
+  if (useDynamicSkinDictionaryRules(ctx.manifest,source.receipt,dictionary.receipt,options.sourceSha256,options.dictionarySha256)) {
+    const dynamic=deriveAdditionalSkinAmbiguities(dictionaryRows,types,tokenRules,modules.LEGACY_SKIN_FIELDS);
+    tokenRules.push(...dynamic.additionalRules);nonExactTokens=dynamic.nonExactTokens;dynamicRules=true;
+  }
   const gameId = ctx.state.gameBindings.delta;
   const catalogRevision = (await ctx.client.query("SELECT catalog_revision::text revision FROM zzsh_supply.game WHERE id=$1", [gameId])).rows[0]?.revision;
   if (mappingOverlay && (mappingOverlay.body.catalogRevision !== catalogRevision || mappingOverlay.body.gameId !== gameId)) throw new Error("HOLDING_OVERLAY_CATALOG_CONTEXT_CHANGED");
@@ -87,14 +140,15 @@ export async function applyHoldingDomain(ctx, options) {
   else {
     const targetMap = new Map((await ctx.client.query("SELECT legacy_id,account_id,version_id,source_digest FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts'")).rows.map(row => [row.legacy_id, row]));
     const targetBindingsSha256 = hash(canonical([...targetMap.values()].sort((a, b) => a.legacy_id < b.legacy_id ? -1 : 1)));
-    sourceContext = { schema: mappingOverlay ? "legacy-skin-holdings-source-v2" : "legacy-skin-holdings-source-v1", ...(mappingOverlay ? { mappingOverlay } : {}), sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceExtractSha256: source.entry.sha256, sourceCutoff: ctx.manifest.sourceCutoff.endsWith("Z") ? ctx.manifest.sourceCutoff : new Date(ctx.manifest.sourceCutoff).toISOString(), targetBindingsSha256, tokenRulesVersion: "SUP-SKIN-020-nine-source-ambiguities-v1", tokenRulesExtractSha256: options.dictionarySha256, tokenRules, gameId, catalogRevision };
+    sourceContext = { schema: mappingOverlay ? "legacy-skin-holdings-source-v2" : "legacy-skin-holdings-source-v1", ...(mappingOverlay ? { mappingOverlay } : {}), sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", sourceExtractSha256: source.entry.sha256, sourceCutoff: ctx.manifest.sourceCutoff.endsWith("Z") ? ctx.manifest.sourceCutoff : new Date(ctx.manifest.sourceCutoff).toISOString(), targetBindingsSha256, tokenRulesVersion: dynamicRules ? "SUP-SKIN-source-dictionary-ambiguities-v2" : "SUP-SKIN-020-nine-source-ambiguities-v1", tokenRulesExtractSha256: options.dictionarySha256, tokenRules, gameId, catalogRevision };
     ready = []; const isolated = [], reasonCounts = {};
-    for await (const account of ctx.readRows(ctx.domainFile("accounts"))) {
+    for await (const account of readBoundSourceRows(ctx.domainFile("accounts"), ctx.manifest.files.accounts)) {
       const original = columnsById.get(account.sourceId), target = targetMap.get(account.sourceId);
       if (!target || target.source_digest !== account.sourceDigest) throw new Error("HOLDING_TARGET_MAP_NOT_BOUND");
       const holding = modules.mapLegacySkinHolding({ accountKey: account.sourceId, gameId, columns: original.columns }, index, catalogRevision);
       const sourceUpdatedAtUtc = ctx.mod("order/legacy-order-read").legacyEpochTimestamp(original.updatedAt);
       const reasons = [...holding.unobservedColumns.map(field => "UNOBSERVED:" + field), ...holding.pending.map(row => "PENDING:" + row.namingState), ...holding.unresolved.map(row => row.reason)];
+      if (dynamicRules && hasNonExactSkinSourceToken(original.columns,modules.LEGACY_SKIN_FIELDS,modules.splitLegacySkinColumn,nonExactTokens)) reasons.push("SOURCE_DICTIONARY_NAME_VALUE_MISMATCH");
       if (!sourceUpdatedAtUtc || Date.parse(sourceUpdatedAtUtc) > Date.parse(ctx.manifest.sourceCutoff)) reasons.push("SOURCE_UPDATED_AT_NOT_BOUND");
       if (reasons.length) {
         isolated.push({ sourceId: account.sourceId, reasons: [...new Set(reasons)], holding });

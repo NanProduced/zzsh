@@ -12,7 +12,7 @@ function fixture(variation = "") {
     if (path.endsWith("/templates")) body = { templates: template || variation === "wrong-template" || variation === 'not-eligible' ? [{ operationCode: "distribution.policy.publish", triggerCondition: "distribution.policy.publish.requested", version: 1, candidates: !configured && (variation === 'empty-template' || variation === 'version-conflict') ? [] : [{ username: variation === "wrong-template" ? "another" : "boss-two", isBoss: true, eligible: variation !== 'not-eligible' }] }] : [] };
     else if (path.endsWith("/templates/update")) { if (variation === 'version-conflict') { res.status(409).json({}); return; } template = true; configured = true; body = {}; }
     else if (path.endsWith("/requests/decision")) { assert.equal(req.body.password, "private-two"); assert.equal(req.body.totpCode, "code-otp-two"); body = { requestId: "r1", status: "APPROVED" }; }
-    else if (path.endsWith("/requests/execute")) { assert.equal(req.body.password, "private-one"); assert.equal(req.body.totpCode, "code-otp-one"); if (variation === "unknown") throw Error("lost commit acknowledgement"); body = { requestId: "r1", status: "EXECUTED", executionStatus: "SUCCEEDED", resultCode: "DISTRIBUTION_POLICY_INITIALIZED", businessResultRef: "policy_1" }; }
+    else if (path.endsWith("/requests/execute")) { assert.equal(req.body.password, "private-one"); assert.equal(req.body.totpCode, "code-otp-one"); if (variation === "unknown") throw Error("lost commit acknowledgement"); if (variation === 'http-503') { res.status(503).json({}); return; } if (variation === 'no-response') return; body = variation === 'bad-success' ? {} : { requestId: "r1", status: "EXECUTED", executionStatus: "SUCCEEDED", resultCode: "DISTRIBUTION_POLICY_INITIALIZED", businessResultRef: "policy_1" }; }
     else if (path.endsWith("/requests/detail")) body = { requestId: "r1", status: "EXECUTED", operation: { code: "distribution.policy.publish" }, decision: { decision: "APPROVED", approver: { id: "boss2" } }, execution: { status: "SUCCEEDED", resultCode: "DISTRIBUTION_POLICY_INITIALIZED", resultDetail: "policy_1", executor: { id: "boss1" } } };
     else if (path.endsWith("/requests")) body = { requestId: "r1", approvalRequestId: "r1", status: "PENDING" };
     else throw Error("unexpected path");
@@ -75,6 +75,16 @@ test("unknown execution outcome retains the original key without automatic retry
   assert(Number.isFinite(f.summary.steps.at(-1).elapsedMs));
   assert.equal(f.calls.filter(c => c.url.endsWith("/requests/execute")).length, 1);
   assert(!/private-one|private-two|otp-one|otp-two|cookie-one|cookie-two/.test(JSON.stringify(f.summary)));
+});
+
+test('server errors or malformed success preserve the original approval request for readback', async () => {
+  for (const variation of ['http-503', 'no-response', 'bad-success']) {
+    const f = fixture(variation); await assert.rejects(runNativeDistributionApproval(f.params), /DISTRIBUTION_APPROVAL_OUTCOME_UNKNOWN:execute/);
+    assert.equal(f.summary.pending.step, 'execute'); assert.equal(f.summary.pending.sent, true);
+    assert.equal(f.summary.pending.idempotencyKey, f.params.plan.approvalKey + ':execute');
+    assert.equal(f.summary.steps.at(-1).status, 'OUTCOME_UNKNOWN');
+    assert.equal(f.calls.filter(c => c.url.endsWith('/requests/execute')).length, 1);
+  }
 });
 
 test("invalid admin session or target identity stops before every policy write", async () => {

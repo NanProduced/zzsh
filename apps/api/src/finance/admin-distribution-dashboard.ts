@@ -142,12 +142,16 @@ function scopeSql(alias: string, values: unknown[], context: DashboardAccess) {
   return gameScopeSql(`${alias}.game_id`, `$${values.length - 1}`, `$${values.length}`);
 }
 
-export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false, beneficiary?: string, nativeOriginAvailable = false, participantView = false) {
+export async function dashboardVersion(c: PoolClient, context: DashboardAccess, legacyAvailable: boolean, dutiesAvailable = false, coverageAvailable = false, beneficiary?: string, nativeOriginAvailable = false, participantView = false, options: { includeNetwork?: boolean } = {}) {
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
   const beneficiaryParameter = beneficiary ? `$${values.push(beneficiary)}::text` : null;
   const subject = (column: string) => beneficiaryParameter ? ` AND ${column}=${beneficiaryParameter}` : "";
-  const digest = (table: string) => `(SELECT encode(sha256(convert_to(COALESCE(string_agg(encode(sha256(convert_to(payload,'UTF8')),'hex'),'' ORDER BY id),''),'UTF8')),'hex') FROM ${table})`;
+  const digest = (table: string, compact = false) => compact
+    // Hash rows before sorting to reduce temporary I/O; both IDs are unique.
+    ? `(SELECT encode(sha256(convert_to(COALESCE(string_agg(row_digest,'' ORDER BY id),''),'UTF8')),'hex') FROM (SELECT id,encode(sha256(convert_to(payload,'UTF8')),'hex') row_digest FROM ${table} OFFSET 0) compact)`
+    : `(SELECT encode(sha256(convert_to(COALESCE(string_agg(encode(sha256(convert_to(payload,'UTF8')),'hex'),'' ORDER BY id),''),'UTF8')),'hex') FROM ${table})`;
   const name = context.directoryRead ? "u.name" : "NULL::text";
+  const includeNetwork = context.scope.network === "AVAILABLE" && options.includeNetwork !== false;
   // Hash only visible domain facts: unrelated games, ledger events and hidden names cannot disturb a page.
   const row = (await c.query(`WITH visible_earnings AS (
     SELECT e.id,jsonb_build_array(e.id,e.version,e.state,e.amount_cents::text,e.recovery_required_cents::text,e.due_at,e.created_at,
@@ -188,16 +192,16 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
       LEFT JOIN visible_legacy_duties d ON d.id=p.id`
       : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_participants AS (
-    ${context.scope.network === "AVAILABLE" ? `SELECT p.user_id id,jsonb_build_array(p.user_id,p.revision,p.eligibility,p.commission_frozen,p.level_code,p.policy_version_id,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.source_digest,ph.current_version_id,${name})::text payload
+    ${includeNetwork ? `SELECT p.user_id id,jsonb_build_array(p.user_id,p.revision,p.eligibility,p.commission_frozen,p.level_code,p.policy_version_id,p.inviter_knowledge,p.leader_knowledge,p.invitees_knowledge,p.source_type,p.source_digest,ph.current_version_id,${name})::text payload
       FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_auth_user."user" u ON u.id=p.user_id
       LEFT JOIN zzsh_order.distribution_policy_version pv ON pv.id=p.policy_version_id
       LEFT JOIN zzsh_order.distribution_policy_head ph ON ph.scope=pv.scope WHERE TRUE${subject("p.user_id")}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_relations AS (
-    ${context.scope.network === "AVAILABLE" ? `SELECT r.id,jsonb_build_array(r.id,r.type,r.parent_user_id,r.child_user_id,r.source_type,r.policy_version_id)::text payload FROM zzsh_order.invitation_relation r${beneficiaryParameter ? ` WHERE r.parent_user_id=${beneficiaryParameter} OR r.child_user_id=${beneficiaryParameter}` : ""}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
+    ${includeNetwork ? `SELECT r.id,jsonb_build_array(r.id,r.type,r.parent_user_id,r.child_user_id,r.source_type,r.policy_version_id)::text payload FROM zzsh_order.invitation_relation r${beneficiaryParameter ? ` WHERE r.parent_user_id=${beneficiaryParameter} OR r.child_user_id=${beneficiaryParameter}` : ""}` : "SELECT NULL::text id,NULL::text payload WHERE FALSE"}
   ), visible_coverage AS (
-    ${coverageAvailable&&context.scope.network==='AVAILABLE'?`SELECT c.id,jsonb_build_array(c.id,c.user_id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,c.source_cutoff)::text payload FROM zzsh_order.personal_finance_observation_coverage c WHERE c.source_kind='HISTORICAL_DISTRIBUTION'${subject('c.user_id')}`:'SELECT NULL::text id,NULL::text payload WHERE FALSE'}
+    ${coverageAvailable&&includeNetwork?`SELECT c.id,jsonb_build_array(c.id,c.user_id,c.source_count,c.imported_count,c.isolated_count,c.imported_set_digest,c.source_cutoff)::text payload FROM zzsh_order.personal_finance_observation_coverage c WHERE c.source_kind='HISTORICAL_DISTRIBUTION'${subject('c.user_id')}`:'SELECT NULL::text id,NULL::text payload WHERE FALSE'}
   ), visible_native_birth AS (
-    ${nativeOriginAvailable&&context.scope.network==='AVAILABLE'?`SELECT p.user_id id,EXISTS(SELECT 1 FROM zzsh_order.wallet_coverage c
+    ${nativeOriginAvailable&&includeNetwork?`SELECT p.user_id id,EXISTS(SELECT 1 FROM zzsh_order.wallet_coverage c
       JOIN zzsh_order.finance_opening_basis b ON b.id=c.basis_id AND b.user_id=c.user_id
       JOIN zzsh_iam.user_identity_state s ON s.user_id=c.user_id JOIN zzsh_order.native_user_insert_proof n ON n.user_id=c.user_id
       WHERE c.user_id=p.user_id AND c.origin='NATIVE_GENESIS' AND b.source_kind='NATIVE_GENESIS' AND b.available_cents=0 AND b.covered_count=0 AND NULLIF(s.provider,'')<>'legacy_mysql_restore'
@@ -205,7 +209,7 @@ export async function dashboardVersion(c: PoolClient, context: DashboardAccess, 
         AND NOT EXISTS(SELECT 1 FROM zzsh_order.personal_finance_observation h WHERE h.user_id=c.user_id AND h.source_kind='HISTORICAL_DISTRIBUTION'))::text payload
       FROM zzsh_order.distribution_participant p WHERE p.source_type='NATIVE_REGISTRATION'${subject('p.user_id')}`:'SELECT NULL::text id,NULL::text payload WHERE FALSE'}
   ) SELECT ${digest('visible_earnings')} native,${digest('visible_events')} events,${digest('visible_legacy')} legacy,
-    ${digest('visible_participants')} participants,${digest('visible_relations')} relations,${digest('visible_legacy_effects')} effects,${digest('visible_coverage')} coverage,${digest('visible_native_birth')} native_birth`, values)).rows[0];
+    ${digest('visible_participants',true)} participants,${digest('visible_relations')} relations,${digest('visible_legacy_effects')} effects,${digest('visible_coverage',true)} coverage,${digest('visible_native_birth')} native_birth`, values)).rows[0];
   if (!row) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Distribution version unavailable");
   return createHash("sha256").update(canonicalize({ ...row, legacyAvailable })).digest("hex");
 }
@@ -463,7 +467,7 @@ export async function readAdminDistributionOverviewSection(c:PoolClient,context:
     const [unified,participants]=[await readUnifiedDistributionOverview(c,context,f,sources,false),await participantCounts(c,context)];
     return{contractVersion:DASHBOARD_VERSION,section,asOf,scope:context.scope,applied:f,current:unified.current,flow:unified.flow,trend:unified.trend,recordSummary:unified.recordSummary,recent:unified.recent,participants};
   }
-  const values:unknown[]=[],scope=scopeSql('o',values,context),source=unifiedDistributionSourceSql(sources.legacy,sources.duties,scope,context.directoryRead);
+  const values:unknown[]=[],scope=scopeSql('o',values,context),source=unifiedDistributionSourceSql(sources.legacy,sources.duties,scope,context.directoryRead,undefined,undefined,f.rankingBasis==='PERIOD_SETTLED_FLOW');
   let credited="state='SETTLED'";
   if(f.rankingBasis==='PERIOD_SETTLED_FLOW'){values.push(rangeStart(f.from),rangeEnd(f.to));credited=`settled_at>=$${values.length-1}::timestamptz AND settled_at<$${values.length}::timestamptz`;}
   const amount=f.rankingBasis==='PERIOD_SETTLED_FLOW'?'source_amount_cents':'amount_cents';
@@ -495,7 +499,8 @@ export function mapEarningRow(row: any, directoryRead: boolean): DashboardEarnin
 }
 
 export async function readAdminDistributionEarnings(c: PoolClient, context: DashboardAccess, f: DashboardFilters, key?: ListingCursorKey, limitOverride?: number, token?: string | null, prepared?: { sources: { native: boolean; legacy: boolean }; version: string; asOf: string; duties?: boolean }) {
-  const sources = prepared?.sources ?? await ready(c), includeLegacy=sources.legacy&&f.source!=='NATIVE', version = prepared?.version ?? await dashboardVersion(c, context, includeLegacy, 'duties' in sources && sources.duties === true, false, f.beneficiary), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
+  // The earnings list does not read the invitation network; its changes must not invalidate this snapshot.
+  const sources = prepared?.sources ?? await ready(c), includeLegacy=sources.legacy&&f.source!=='NATIVE', version = prepared?.version ?? await dashboardVersion(c, context, includeLegacy, 'duties' in sources && sources.duties === true, false, f.beneficiary, false, false, { includeNetwork: false }), asOf = prepared?.asOf ?? (await c.query(`SELECT clock_timestamp()::text AS at`)).rows[0]!.at;
   if (f.source === "LEGACY" && !sources.legacy) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Legacy distribution source unavailable");
   const values: unknown[] = [], nativeScope = scopeSql("o", values, context);
   const beneficiaryParameter = f.beneficiary ? `$${values.push(f.beneficiary)}` : undefined;

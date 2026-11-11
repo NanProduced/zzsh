@@ -1,27 +1,28 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
-import { readSourceRows } from "./local-source-adapter.mjs";
+import { readBoundSourceRows } from "./local-source-adapter.mjs";
 import { verifyLegacyListedPolicyDump } from "./verify-legacy-listed-policy-dump.mjs";
-import { validateLegacyListedExecutionPlan } from "./legacy-listed-execution-plan.mjs";
+import { assertSameCapturePolicyMigration, isSameCaptureListedPolicy, readListedCompiledProof, validateLegacyListedExecutionPlan, validateListedExecutionCheckpoint, readListedExecutionProof, readVerifiedLegacySkinIds } from "./legacy-listed-execution-plan.mjs";
 import { inspectDeferredLegacyCredit, lockDeferredLegacyCreditTables, deferredCreditGateForRow, requiresFullRollbackTrial, rejectUnmarkedObservation } from "./legacy-listed-provisional-credit.mjs";
-import { verifyRoundBoundSourcePlan, validateRoundTrialReceipt } from "./legacy-listed-round-source.mjs";
-import { advisoryLockSql, assertLiveTarget, loadRegisteredTarget, maintenanceConnection, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { verifyRoundBoundSourcePlan, validateRoundTrialReceipt, verifySameCaptureListedPolicySource } from "./legacy-listed-round-source.mjs";
+import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 
 const require = createRequire(import.meta.url);
 const args = process.argv.slice(2);
 const option = flag => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
-const mode = ["--prepare", "--trial", "--execute", "--recover"].filter(flag => args.includes(flag));
+const mode = ["--prepare", "--trial", "--execute", "--recover", "--readback"].filter(flag => args.includes(flag));
 if (mode.length === 0) {
   console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression",
     prepare: ["--prepare", "--input", "--input-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist", "--source-dir", "--source-receipt-sha", "--source-binding", "--policy-bundle", "--policy-bundle-sha", "--policy-authority", "--policy-authority-sha"],
     execute: ["--execute", "--input", "--input-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist", "--maintenance-password-file"],
     trial: "Same prepared input and lock as execute. Runs each candidate in its own transaction and confirms rollback.",
-    recover: "Same prepared input and original execution --out; reads original receipt only.", connections: 0, credentialReads: 0 }));
+    recover: "Same prepared input and original execution --out; reads original receipt only.",
+    readback: ["--readback", "--input", "--input-sha", "--checkpoint", "--checkpoint-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist"],
+    connections: 0, credentialReads: 0 }));
   process.exit(0);
 }
 if (mode.length !== 1 || process.version !== "v24.20.0") throw new Error("EXPLICIT_MODE_AND_NODE_BASELINE_REQUIRED");
@@ -54,38 +55,24 @@ if (inputSha !== option("--input-sha") || !/^\d+$/.test(oid ?? "") || !/^[a-z0-9
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json")));
 const credentials = JSON.parse(readFileSync(credentialsFile));
 const registered = loadRegisteredTarget(credentialsFile);
+if (action === "--trial" || action === "--execute") assertNextMigrationWriteReady(registered);
 const roleKind = action === "--execute" || action === "--trial" ? "migration" : "runtime";
 const role = credentials[roleKind];
 if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || credentials.database !== resource.database || registered.oid !== oid || registered.nonce !== nonce || resource.oid !== oid || resource.nonce !== nonce || resource.pendingReset
   || role?.name !== resource.roles?.[roleKind]?.name || role?.oid !== resource.roles?.[roleKind]?.oid
   || role?.name !== (roleKind === "migration" ? registered.migrationRole : registered.runtimeRole)
   || role?.oid !== (roleKind === "migration" ? registered.migrationRoleOid : registered.runtimeRoleOid)) throw new Error("TARGET_BINDING_INVALID");
-const moduleNames = ["auth/auth-security", "auth/security-core", "database/business-migrations", "order/order", "order/legacy-continuation-model", "supply/content-hash", "supply/funding-authority",
-  "supply/legacy-display-snapshot", "supply/legacy-listing-read", "supply/legacy-published-reference", "supply/legacy-trade-takeover", "supply/publishing", "supply/supply-util",
-  "supply/legacy-listed-source-quote", "supply/legacy-listed-policy", "supply/legacy-listed-source", "supply/legacy-listed-pricing", "supply/legacy-listed-quote",
-  "supply/pricing", "supply/delta-rental", "supply/decimal", "supply/legacy-observation", "supply/funding-policy", "supply/full-payout-terms", "credit/credit-guarantee"];
 const moduleFile = name => join(apiDist, name + ".js");
-const compiled = Object.fromEntries(moduleNames.map(name => [name, sha(readFileSync(moduleFile(name)))]));
-compiled.policyDumpVerifier = sha(readFileSync(new URL('./verify-legacy-listed-policy-dump.mjs', import.meta.url)));
-compiled.sourceAdapter = sha(readFileSync(new URL('./local-source-adapter.mjs', import.meta.url)));
-compiled.planValidator = sha(readFileSync(new URL('./legacy-listed-execution-plan.mjs', import.meta.url)));
-compiled.loader = sha(readFileSync(fileURLToPath(import.meta.url)));
-compiled.targetRegistry = sha(readFileSync(new URL('./local-target-registry.mjs', import.meta.url)));
-compiled.provisionalCreditVerifier = sha(readFileSync(new URL('./legacy-listed-provisional-credit.mjs', import.meta.url)));
-if (input.roundBinding) compiled.roundSourceVerifier = sha(readFileSync(new URL('./legacy-listed-round-source.mjs', import.meta.url)));
-const migrationsFolder=resolve(apiDist,'../../migrations/business');
-const migrationTag='0156_legacy_listed_quote',migrationBytes=readFileSync(join(migrationsFolder,`${migrationTag}.sql`));
-const migrationJournal=JSON.parse(readFileSync(join(migrationsFolder,'meta/_journal.json'),'utf8'));
-const migrationEntry=migrationJournal.entries.find(entry=>entry.tag===migrationTag);
-if(!migrationEntry || !Number.isSafeInteger(migrationEntry.when))throw new Error('LISTED_MIGRATION_JOURNAL_INVALID');
-compiled.listedMigration = sha(migrationBytes);
-compiled.migrationJournal = sha(readFileSync(join(migrationsFolder,'meta/_journal.json')));
+const evidenceText=action==='--prepare' ? readFileSync(privatePath(option('--policy-bundle')),'utf8')
+  : input.rows?.[0]?.body?.intake?.legacyQuoteEvidence?.policyCanonical;
+const sameCapture=isSameCaptureListedPolicy(evidenceText);
+const {compiled,migrationsFolder,migrationEntry,sameCaptureMigrationEntry}=readListedCompiledProof(apiDist,{roundBound:Boolean(input.roundBinding),sameCapture});
 const mod = name => require(moduleFile(name));
 const { canonicalize } = mod("supply/content-hash");
 const { readLegacyPublishedReference } = mod("supply/legacy-published-reference");
 const { prepareLegacyTradeIntake, takeoverLegacyTrade } = mod("supply/legacy-trade-takeover");
-const { readPublishingAccount, readDeclaration, readCurrentVersion } = mod("supply/publishing");
-const { readLegacyDeclaredSkins } = mod("supply/legacy-listing-read");
+const { readPublishingAccount, readDeclaration, readCurrentVersion, listingDetail } = mod("supply/publishing");
+const { readLegacySkinHolding } = mod("supply/legacy-listing-read");
 const { legacyDisplayDigest } = mod("supply/legacy-display-snapshot");
 const { createProductionSupplyGateReader } = mod("supply/funding-authority");
 const { readGuaranteeContext, CREDIT_GUARANTEE_THRESHOLD } = mod("credit/credit-guarantee");
@@ -101,22 +88,32 @@ const { validateOwnerDepositAmount } = mod("supply/funding-policy");
 const { legacyPlanYuanToCents } = mod("order/legacy-continuation-model");
 const { assertBusinessMigrationPrefix } = mod("database/business-migrations");
 const operation = "supply.legacy.trade_takeover";
-const { Client } = require("pg");
 const target = { database: resource.database, oid, nonce, actorId: actor.id, instance: registered.instance, lockKey: registered.lockKey,
+  ...(registered.migrationProfile ? {migrationProfile:registered.migrationProfile} : {}),
   migrationRoleOid: registered.migrationRoleOid, runtimeRoleOid: registered.runtimeRoleOid };
-const client = new Client(targetConnection(registered, { user: role.name, password: role.password,
-  applicationName: "legacy-listed-accounts-" + action.slice(2), connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 }));
 const creditGuaranteeEnabled = action === "--prepare" ? args.includes("--credit-guarantee") : input.creditGuaranteeEnabled === true;
+let sealedDependencies;
 if (input.schema === 'zzsh.listed-source-continuity-plan.v2' || input.sourcePlanSchema === 'zzsh.listed-source-continuity-plan.v2' || input.roundBinding) {
-  verifyRoundBoundSourcePlan(input, { oid, nonce, instance:registered.instance, credentials: credentialsFile, actorFile: option('--actor-file'), apiDist,
+  sealedDependencies=await verifyRoundBoundSourcePlan(input, { oid, nonce, instance:registered.instance, migrationProfile:registered.migrationProfile, credentials: credentialsFile, actorFile: option('--actor-file'), apiDist,
     sourceDir: option('--source-dir'), sourceReceiptSha: option('--source-receipt-sha'), sourceBinding: option('--source-binding'),
     policyBundle: option('--policy-bundle'), policyBundleSha: option('--policy-bundle-sha'),
     policyAuthority: option('--policy-authority'), policyAuthoritySha: option('--policy-authority-sha'), creditGuaranteeEnabled,
-    allowExpiredReadOnly: action === '--recover', compiled }, canonicalize);
+    allowExpiredReadOnly: action === '--recover' || action === '--readback', compiled, parseInteger:mod('supply/legacy-listed-pricing').legacyPriceInteger }, canonicalize);
 }
+const runtimeRequire=sealedDependencies?.dependencyLayout?createRequire(join(sealedDependencies.dependencyLayout.sourceRoot,'apps/api/package.json')):require;
+const { Client } = runtimeRequire("pg");
+if(sealedDependencies?.dependencyLayout){
+  const sourceRoot=sealedDependencies.dependencyLayout.sourceRoot,dependencies=new Map(sealedDependencies.dependencyProof.closureFiles);
+  for(const file of Object.keys(require.cache))if(file.toLowerCase().includes('node_modules')){
+    const name=relative(sourceRoot,file).replaceAll('\\','/');
+    if(!name||name.startsWith('../')||isAbsolute(name)||dependencies.get(name)!==sha(readFileSync(file)))throw new Error('LISTED_DEPENDENCY_CHANGED');
+  }
+}
+const client = new Client(targetConnection(registered, { user: role.name, password: role.password,
+  applicationName: "legacy-listed-accounts-" + action.slice(2), connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 1000 }));
 const gate = composeSupplyGateWithOrderOccupancy(createProductionSupplyGateReader({ creditGuaranteeEnabled }));
 const phase = join(out, "checkpoint.json");
-let transaction = false, commitSent = false, maintenance;
+let transaction = false, commitSent = false, maintenance, lockHeld = false, fenceEpoch, fenceHeld = false, targetFenceReleased = false, response, failure;
 async function readReviewedSource() {
   const directory=privatePath(option('--source-dir')), receiptBytes=readFileSync(join(directory,'receipt.json'));
   const receipt=JSON.parse(receiptBytes), receiptSha=sha(receiptBytes);
@@ -132,17 +129,23 @@ async function readReviewedSource() {
     || sourceBinding.source?.database!==receipt.database || policy.supplement?.sourceReceiptSha256!==receiptSha
     || sourceBinding.restoreRecord?.dumpSha256!==policy.supplement?.dumpSha256)throw new Error('SOURCE_PACKAGE_BINDING_CHANGED');
   const accountPath=join(directory,'accounts.jsonl'),tradePath=join(directory,'tradePolicy.jsonl');
-  if(sha(readFileSync(accountPath))!==receipt.files.accounts.sha256 || sha(readFileSync(tradePath))!==receipt.files.tradePolicy.sha256)throw new Error('SOURCE_CAPTURE_FILE_CHANGED');
-  const original=[];for await(const row of readSourceRows(tradePath))if(row.type==='expendConfig')original.push(row);
+  const sourceSettings=[];for await(const row of readBoundSourceRows(tradePath,receipt.files.tradePolicy))sourceSettings.push(row);
+  const original=sourceSettings.filter(row=>row.type==='expendConfig');
   const observed=(policy.supplement.settingRows??[]).filter(row=>row.type==='expendConfig');
   const sortRows=rows=>[...rows].sort((a,b)=>a.id.localeCompare(b.id));
   if(original.length!==14 || canonicalize(sortRows(original))!==canonicalize(sortRows(observed)))throw new Error('SOURCE_MATERIAL_POLICY_CHANGED');
+  if(policy.schema==='legacy-listed-policy-evidence-v2'){
+    if(receipt.files?.games?.file!=='games.jsonl')throw new Error('SOURCE_GAME_POLICY_INVALID');
+    const gamePath=join(directory,'games.jsonl');
+    const games=[];for await(const row of readBoundSourceRows(gamePath,receipt.files.games))games.push(row);
+    verifySameCaptureListedPolicySource(policy,receipt,games,sourceSettings,canonicalize,mod('supply/legacy-listed-pricing').legacyPriceInteger);
+  }
   const gameIds=policy.supplement.gameRows?.map(row=>row.id);
   if(!Array.isArray(gameIds)||gameIds.length!==1)throw new Error('SOURCE_GAME_POLICY_INVALID');
   const dump=await verifyLegacyListedPolicyDump(sourceBinding.restoreRecord,gameIds[0]);
   if(canonicalize(dump)!==canonicalize(policy.dumpVerification))throw new Error('SOURCE_DUMP_POLICY_CHANGED');
   const requested=new Set(input.listings.map(row=>row.sourceId)),accounts=new Map();
-  for await(const row of readSourceRows(accountPath))if(requested.has(row.id)){
+  for await(const row of readBoundSourceRows(accountPath,receipt.files.accounts))if(requested.has(row.id)){
     if(accounts.has(row.id))throw new Error('SOURCE_ACCOUNT_DUPLICATE');
     const canonical=canonicalize(row),sourceDigest=sha(canonical),entry=policy.supplement.accountSourceDigests?.find(x=>x.id===row.id);
     if(!entry || entry.sha256!==sourceDigest)throw new Error('SOURCE_ACCOUNT_DIGEST_CHANGED');
@@ -152,6 +155,8 @@ async function readReviewedSource() {
     accounts.set(row.id,{raw:row,canonical,sourceDigest,policyBinding});
   }
   if(accounts.size!==requested.size || requested.size!==input.listings.length)throw new Error('SOURCE_ACCOUNT_POPULATION_MISMATCH');
+  if(sha(readFileSync(accountPath))!==receipt.files.accounts.sha256 || sha(readFileSync(tradePath))!==receipt.files.tradePolicy.sha256
+    || policy.schema==='legacy-listed-policy-evidence-v2'&&sha(readFileSync(join(directory,'games.jsonl')))!==receipt.files.games.sha256)throw new Error('SOURCE_CAPTURE_FILE_CHANGED');
   return {accounts,policyCanonical,receiptSha,policySha,authoritySha,accountsFileSha256:receipt.files.accounts.sha256};
 }
 const actionBody = (row, intake, receiptSha) => ({ batchId: `legacy-listed-${receiptSha}`, intake, reviewedDeclaration: {
@@ -217,8 +222,8 @@ async function prepareRow(row, reviewed) {
   const observation=(await client.query(`SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2 AND origin='LEGACY_OBSERVATION'`,[r.version_id,account.id])).rows[0];
   if(!observation)return {sourceId:row.sourceId,blocked:'SOURCE_OBSERVATION_MISSING'};
   const declaration = await readDeclaration(client, observation);
-  const skins = await readLegacyDeclaredSkins(client, r.version_id, account.game_id);
-  if (skins.some(skin => !skin.isPublic)) return { sourceId: row.sourceId, blocked: "CURRENT_SKIN_CATALOG_REVIEW_REQUIRED" };
+  const skins = await readVerifiedLegacySkinIds(client, account.id, r.version_id, account.game_id, readLegacySkinHolding);
+  if (skins.blocked) return { sourceId: row.sourceId, blocked: skins.blocked };
   const source = { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.sourceId,
     sourceDigest, expectedObservationVersionId: r.version_id, expectedOwnerUserId: account.owner_user_id, expectedGameId: account.game_id };
   const canonical = canonicalize({ sourceSystem: source.sourceSystem, sourceEntity: source.sourceEntity, legacyId: row.sourceId,
@@ -227,7 +232,7 @@ async function prepareRow(row, reviewed) {
   if (row.sourceFieldEvidenceDigest && sha(canonical) !== row.sourceFieldEvidenceDigest) throw new Error("SOURCE_FIELD_DIGEST_CHANGED");
   const intake = { accountId: account.id, source, display: r.snapshot, title: declaration.title, description: declaration.description,
     depositYuan: raw.deposit_amount, isFullPayout: fullPayout, ownerRatioB, termOptionCode: terms[0].code,
-    pricingOptionCode: "", skins: skins.map(skin => skin.id), entitlements: declaration.entitlements, media: [],
+    pricingOptionCode: "", skins: skins.skinIds, entitlements: declaration.entitlements, media: [],
     sourceFieldEvidence: { canonical, digest: sha(canonical), extractSha256: r.extract_sha256, evidenceRef: r.evidence_ref },
     legacyQuoteEvidence:{sourceCanonical:sourceRow.canonical,policyCanonical:reviewed.policyCanonical,policyBinding:sourceRow.policyBinding} };
   const titleBasis=row.titleBasis??`三角洲行动 · ${raw.haff}M哈夫币`;
@@ -290,19 +295,26 @@ async function runPublication(row) {
 }
 
 try {
-  if (action === "--execute" || action === "--trial") {
+  if (action === "--execute" || action === "--trial" || registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
     const passwordFile = option("--maintenance-password-file");
     if (!isAbsolute(passwordFile ?? "")) throw new Error("MAINTENANCE_LOCK_CREDENTIAL_REQUIRED");
     maintenance = new Client(maintenanceConnection(registered, { user: "zzsh",
       password: readFileSync(passwordFile, "utf8").trim(), connectionTimeoutMillis: 3000, statement_timeout: 5000,
       applicationName: "legacy-listed-maintenance-lock" }));
     await maintenance.connect();
-    if (!(await maintenance.query(advisoryLockSql(registered, "try"))).rows[0]?.ok) throw new Error("RESOURCE_MAINTENANCE_BUSY");
+    lockHeld = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0]?.ok === true;
+    if (!lockHeld) throw new Error("RESOURCE_MAINTENANCE_BUSY");
+    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) fenceEpoch = await captureMaintenanceLockEpoch(maintenance, registered);
   }
   await client.connect();
+  if (fenceEpoch) {
+    assertLiveTarget(registered, (await client.query(targetIdentityQuery())).rows[0], roleKind);
+    await acquireMigrationSessionFence(client, registered, fenceEpoch); fenceHeld = true;
+  }
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); transaction = true;
   const live = (await client.query(targetIdentityQuery())).rows[0];
   assertLiveTarget(registered, live, roleKind);
+  if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
   if (live.oid !== oid || live.nonce !== nonce || live.marker !== "zzsh:regression-test:v1" || live.role !== role.name
     || live.role_oid !== role.oid) throw new Error("LIVE_TARGET_CHANGED");
   await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
@@ -314,6 +326,7 @@ try {
       has_table_privilege($3,'zzsh_supply.legacy_listed_policy_evidence','INSERT,UPDATE,DELETE,TRUNCATE') OR has_table_privilege($3,'zzsh_supply.legacy_listed_quote_evidence','INSERT,UPDATE,DELETE,TRUNCATE') AS runtime_writes`,
       [compiled.listedMigration,String(migrationEntry.when),credentials.runtime.name])).rows[0];
     if(!witness?.installed || !witness.evidence_ready || !witness.runtime_reads || witness.runtime_writes)throw new Error('LISTED_MIGRATION_OR_RUNTIME_ACL_NOT_READY');
+    if(sameCapture)await assertSameCapturePolicyMigration(client,compiled.sameCaptureMigration,sameCaptureMigrationEntry.when,compiled.sameCaptureGuard);
   }
   if (action === "--prepare") {
     if (!["zzsh.listed-source-continuity-plan.v1", "zzsh.listed-source-continuity-plan.v2"].includes(input.schema) || !Array.isArray(input.listings) || input.listings.length<1 || input.listings.length>10000
@@ -321,13 +334,13 @@ try {
     const reviewed=await readReviewedSource();
     const rows = [];
     for (const row of input.listings) rows.push(await prepareRow(row,reviewed));
-    await client.query("ROLLBACK"); transaction = false;
+    if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("LISTED_PREPARE_ROLLBACK_UNCONFIRMED"); transaction = false;
     newPrivateDirectory(out);
     const bytes = JSON.stringify({ schema: "zzsh.legacy-listed-execution-plan.v2", target, compiled, sourcePlanSha256: inputSha,
       sourceReceiptSha256:reviewed.receiptSha,policyBundleSha256:reviewed.policySha,policyAuthoritySha256:reviewed.authoritySha,sourceAccountCount:input.listings.length,creditGuaranteeEnabled, ...(input.roundBinding ? {sourcePlanSchema:input.schema,roundBinding:input.roundBinding} : {}), rows }, null, 2) + "\n";
     writeFileSync(join(out, "plan.json"), bytes, { flag: "wx" });
-    console.log(JSON.stringify({ status: "PREPARED_TARGET_READ_ONLY", ready: rows.filter(row => row.body).length,
-      blocked: rows.filter(row => row.blocked), planSha256: sha(bytes) }));
+    response = { status: "PREPARED_TARGET_READ_ONLY", ready: rows.filter(row => row.body).length,
+      blocked: rows.filter(row => row.blocked), planSha256: sha(bytes) };
   } else {
     const rows = validateLegacyListedExecutionPlan(input,target,compiled,canonicalize,binding);
     for(const row of rows)if(row.deferredCredit && (row.deferredCredit.kind!=='FROZEN_QUOTE_REQUIRED'||!/^[1-9]\d*$/.test(row.deferredCredit.creditRevision??'')||!input.creditGuaranteeEnabled||row.priorVersion))throw new Error('DEFERRED_CREDIT_PLAN_INVALID');
@@ -347,19 +360,42 @@ try {
       const published = receipt?.response_body?.state === "PUBLISHED" && (await client.query(`SELECT 1 FROM zzsh_supply.listing_publication
         WHERE account_id=$1 AND version_id=$2 AND rule_release_id=$3 AND content_hash=$4 AND source='LEGACY_APPROVED'`,
       [row.body.intake.accountId, receipt.response_body.versionId, receipt.response_body.releaseId, receipt.response_body.contentHash])).rowCount === 1;
-      console.log(JSON.stringify({ status: published ? "ORIGINAL_PUBLICATION_RECOVERED" : "UNKNOWN", sourceId: row.sourceId }));
+      response = { status: published ? "ORIGINAL_PUBLICATION_RECOVERED" : "UNKNOWN", sourceId: row.sourceId };
     }
-    await client.query("ROLLBACK"); transaction = false;
+    let readback,checkpointFile,checkpointSha;
+    if(action === "--readback"){
+      checkpointFile=privatePath(option('--checkpoint'));
+      const bytes=readFileSync(checkpointFile);checkpointSha=sha(bytes);
+      if(checkpointSha!==option('--checkpoint-sha'))throw new Error('LISTED_CHECKPOINT_SHA_CHANGED');
+      const entries=validateListedExecutionCheckpoint(JSON.parse(bytes),inputSha,target,rows,canonicalize);
+      readback=await readListedExecutionProof(client,entries,{readPublishingAccount,listingDetail,gate});
+      if(sha(readFileSync(checkpointFile))!==checkpointSha || sha(readFileSync(privatePath(inputFile)))!==inputSha)
+        throw new Error('LISTED_READBACK_INPUT_CHANGED');
+    }
+    const rollback=await client.query("ROLLBACK"); transaction = false;
+    if(rollback.command!=='ROLLBACK')throw new Error('LISTED_READBACK_ROLLBACK_UNCONFIRMED');
+    if(action === "--readback"){
+      newPrivateDirectory(out);
+      const bytes=JSON.stringify({schema:'zzsh.legacy-listed-batch-readback.v1',...readback,inputSha,checkpointSha,target,
+        checkedAt:new Date().toISOString(),rollbackConfirmed:true,targetWrites:0,
+        scope:'ONE_BATCH_CURRENT_PUBLIC_LISTING',limitations:['POINT_IN_TIME_ONLY','SOURCE_BATCH_CLOSURE_NOT_ASSESSED','RESTORE_AND_BROWSER_NOT_ASSESSED']},null,2)+'\n';
+      writeFileSync(join(out,'readback.json'),bytes,{flag:'wx'});
+      response = {status:readback.status,expected:readback.expected,committed:readback.committed,
+        rentable:readback.rentable,differences:readback.differences.length,readbackSha256:sha(bytes),targetWrites:0};
+      if(readback.differences.length)process.exitCode=1;
+    }
     if (action === "--trial") {
       newPrivateDirectory(out);
       const results = [];
       for (const row of rows) {
         await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ"); transaction = true;
+        if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
         if(row.deferredCredit){await lockDeferredLegacyCreditTables(client);const others=(await client.query("SELECT count(*)::int n FROM pg_stat_activity WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND pid<>pg_backend_pid()")).rows[0];if(others?.n!==0)throw new Error('DEFERRED_REQUIRES_EXCLUSIVE_MAINTENANCE');}
         let result;
         try {
           const publication = await runPublication(row);
           await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+          if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
           result = { sourceId: row.sourceId, state: publication.replayed ? "ALREADY_PUBLISHED" : "READY" };
         } catch (error) {
           if (![400, 403, 409].includes(error.status)) throw error;
@@ -371,8 +407,8 @@ try {
         results.push(result);
         writeLoadCheckpoint(join(out, "trial.json"), { inputSha, target, results, rollbackAcknowledged: results.length });
       }
-      console.log(JSON.stringify({ status: "TRIAL_ROLLED_BACK", ready: results.filter(row => row.state === "READY").length,
-        replayed: results.filter(row => row.state === "ALREADY_PUBLISHED").length, rejected: results.filter(row => row.state === "REJECTED").length }));
+      response = { status: "TRIAL_ROLLED_BACK", ready: results.filter(row => row.state === "READY").length,
+        replayed: results.filter(row => row.state === "ALREADY_PUBLISHED").length, rejected: results.filter(row => row.state === "REJECTED").length };
     }
     if (action === "--execute") {
       newPrivateDirectory(out);
@@ -381,10 +417,12 @@ try {
         checkpoint.pending = { scope: row.scope, key: row.key, fingerprint: row.fingerprint, stage: "BEFORE_BEGIN" };
         writeLoadCheckpoint(phase, checkpoint);
         await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ"); transaction = true;
+        if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
         if(row.deferredCredit){await lockDeferredLegacyCreditTables(client);const others=(await client.query("SELECT count(*)::int n FROM pg_stat_activity WHERE datid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND pid<>pg_backend_pid()")).rows[0];if(others?.n!==0)throw new Error('DEFERRED_REQUIRES_EXCLUSIVE_MAINTENANCE');}
         const result = await runPublication(row);
         checkpoint.pending.stage = "COMMIT_INTENT";
         writeLoadCheckpoint(phase, checkpoint);
+        if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
         commitSent = true;
         const ack = await client.query("COMMIT");
         transaction = false;
@@ -394,10 +432,31 @@ try {
         writeLoadCheckpoint(phase, checkpoint);
         commitSent = false;
       }
-      console.log(JSON.stringify({ status: "COMMIT_ACK_REVIEW_REQUIRED", completed: checkpoint.completed.length, blocked: input.rows.length - rows.length }));
+      response = { status: "COMMIT_ACK_REVIEW_REQUIRED", completed: checkpoint.completed.length, blocked: input.rows.length - rows.length };
     }
   }
-} finally {
-  try { if (transaction && !commitSent) await client.query("ROLLBACK"); }
-  finally { try { await client.end(); } finally { if (maintenance) await maintenance.end(); } }
+} catch (error) { failure = error; }
+finally {
+  if (transaction && !commitSent) try { if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw Error("LISTED_CLEANUP_ROLLBACK_UNCONFIRMED"); transaction = false; }
+  catch (error) { failure ??= error; }
+  if (fenceHeld && !transaction && !commitSent) try { await releaseMigrationSessionFence(client, registered); targetFenceReleased = true; }
+  catch (error) { failure ??= error; }
+  try { await client.end(); } catch (error) { failure ??= error; }
+  if (maintenance) {
+    if (lockHeld) try { if ((await maintenance.query(advisoryLockSql(registered, "unlock"))).rows[0]?.ok !== true) throw Error("LISTED_UNLOCK_UNCONFIRMED"); }
+    catch (error) { failure ??= error; }
+    try { await maintenance.end(); } catch (error) { failure ??= error; }
+  }
+  if (fenceEpoch && !targetFenceReleased) failure ??= Error("LISTED_TARGET_FENCE_RELEASE_UNCONFIRMED");
 }
+if (failure) throw failure;
+if (fenceEpoch && response) {
+  const artifact = { '--prepare':'plan.json', '--trial':'trial.json', '--execute':'checkpoint.json', '--readback':'readback.json' }[action];
+  if (artifact) {
+    const file = join(out, artifact), value = JSON.parse(readFileSync(file));
+    writeLoadCheckpoint(file, { ...value, targetFence:'HELD_DURING_OPERATION', targetFenceReleased:true });
+    if (action === '--prepare') response.planSha256 = sha(readFileSync(file));
+    if (action === '--readback') response.readbackSha256 = sha(readFileSync(file));
+  }
+}
+if (response) console.log(JSON.stringify({ ...response, ...(fenceEpoch ? {targetFence:'HELD_DURING_OPERATION',targetFenceReleased} : {}) }));

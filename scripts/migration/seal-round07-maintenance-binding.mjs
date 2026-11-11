@@ -5,6 +5,7 @@ import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivate } from '../local-auth.mjs';
+import { isRegisteredMigrationInstance } from './local-target-registry.mjs';
 
 const restricted=resolve('E:/zzsh-local-state/restricted'),runtime=resolve('E:/zzsh-local-state/runtime');
 const sha=x=>createHash('sha256').update(x).digest('hex'),hex=x=>/^[a-f0-9]{64}$/.test(x??'');
@@ -21,15 +22,17 @@ const normalPath=x=>typeof x==='string'?x.replaceAll('\\','/').replace(/\/+$/,''
 export function makeR07MaintenanceBinding({round,receipt,binding,roundSha,receiptSha,buildSha,runtimeSha}){
  const t=round?.target,i=t?.instance,r=binding?.resource,a=binding?.actualResource;
  assert([roundSha,receiptSha,buildSha,runtimeSha].every(hex)&&round?.schema==='zzsh.local-round.v1'
-   &&t?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&i?.host==='127.0.0.1'&&i.port===55433&&/^[0-9]+$/.test(i.systemIdentifier??'')
+   &&t?.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'&&isRegisteredMigrationInstance({host:i?.host,port:i?.port,instance:i,migrationProfile:t?.migrationProfile})
    &&receipt?.inputSha256===roundSha&&receipt.datasetSha256===round.dataset?.sha256
    &&['DATASET_AND_GROWTH_ACK_READBACK_PASS','DATASET_AND_GROWTH_REVALIDATED_PASS'].includes(receipt.status)&&receipt.completion?.status==='COMPLETE'
    &&String(receipt.target?.oid)===t.oid&&receipt.target?.nonce===t.nonce&&equalInstance(receipt.target?.instance,i)
+   &&(receipt.target?.migrationProfile??null)===(t.migrationProfile??null)
    &&binding?.status==='R07_BOOTSTRAP_API_LISTENING'&&binding.port===4242&&binding.origins?.apiOrigin==='http://127.0.0.1:4242'
    &&Number.isSafeInteger(binding.pid)&&binding.pid>0&&typeof binding.stopFile==='string'&&Number.isFinite(Date.parse(binding.at))
    &&binding.NoIM===true&&binding.financialCommandCapabilities===false&&binding.workersEnabled===false&&binding.formalAppMounted===true
    &&binding.maintenanceLockReleased===true&&binding.maintenanceClosed===true
-   &&[r,a].every(x=>x?.database==='zzsh_test_regression'&&String(x.oid??x.resourceOid)===t.oid&&x.nonce===t.nonce&&x.marker==='zzsh:regression-test:v1'&&equalInstance(x.instance,i))
+   &&[r,a].every(x=>x?.database==='zzsh_test_regression'&&String(x.oid??x.resourceOid)===t.oid&&x.nonce===t.nonce&&x.marker==='zzsh:regression-test:v1'&&equalInstance(x.instance,i)
+     &&(x.migrationProfile??null)===(t.migrationProfile??null))
    &&a.read_only==='on'&&String(a.migration_role_oid)===String(t.migrationRoleOid)
    &&round.bootstrapEvidence?.runtime?.sha256===runtimeSha&&round.bootstrapEvidence?.bundle?.sha256===binding.copyManifestSha256
    &&round.dependencyBinding?.buildManifest?.sha256===buildSha&&normalPath(round.apiDist)&&normalPath(round.apiDist)===normalPath(binding.compiledRoot),

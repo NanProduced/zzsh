@@ -6,7 +6,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writePrivate } from '../local-auth.mjs';
 import { isolatedDistributionBuild } from './local-distribution-qualification-plan.mjs';
-import { ROUND_MODULES, ROUND_SCRIPTS } from './local-round-dependencies.mjs';
+import { ROUND_MODULES, ROUND_SCRIPTS, distributionDependencyRequirements, listedDependencyRequirements, optionalRoundSourceScripts } from './local-round-dependencies.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),restricted=resolve('E:/zzsh-local-state/restricted');
 const sha=x=>createHash('sha256').update(x).digest('hex'),hex=x=>/^[a-f0-9]{64}$/.test(x??'');
@@ -35,15 +35,17 @@ async function main(){
  const manifest=checked(buildFile,option('--build-sha'),resolve(root,'tmp')),sourceManifest=checked(sourceFile,option('--source-sha'),resolve(root,'tmp')),bundle=checked(bundleFile,option('--bundle-sha'),restricted);
  assert(sourceManifest?.schema==='zzsh.round07-source-snapshot.v1'&&resolve(sourceManifest.sourceSnapshot).toLowerCase()===resolve(snapshot).toLowerCase(),'R07_DEPENDENCY_SOURCE_CHANGED');
  assertBundleLineage(bundle,manifest,option('--build-sha'),option('--source-sha'));
- for(const name of ROUND_SCRIPTS){const source=join(sourceRoot,'scripts/migration',name),original=join(snapshot,'scripts/migration',name);
-  assert(lstatSync(source).isFile()&&!lstatSync(source).isSymbolicLink()&&lstatSync(original).isFile()&&!lstatSync(original).isSymbolicLink()&&sha(readFileSync(source))===sha(readFileSync(original)),'R07_DEPENDENCY_SCRIPT_CHANGED:'+name);}
+ const listedDependencies=listedDependencyRequirements(sourceManifest),distributionDependencies=distributionDependencyRequirements(sourceManifest),optionalScripts=optionalRoundSourceScripts(sourceManifest);
+ for(const name of new Set([...ROUND_SCRIPTS,...optionalScripts,...listedDependencies.scripts,...distributionDependencies.scripts])){const source=join(sourceRoot,'scripts/migration',name),original=join(snapshot,'scripts/migration',name);
+  assert(lstatSync(source).isFile()&&!lstatSync(source).isSymbolicLink()&&lstatSync(original).isFile()&&!lstatSync(original).isSymbolicLink()&&sha(readFileSync(source))===sha(readFileSync(original)),'R07_DEPENDENCY_SCRIPT_CHANGED:'+name);
+  if([...optionalScripts,...listedDependencies.scripts,...distributionDependencies.scripts].includes(name))assert(sourceManifest.files.find(row=>row.path==='scripts/migration/'+name).sha256===sha(readFileSync(source)),'R07_DEPENDENCY_SCRIPT_CHANGED:'+name);}
  const prefix=manifest.layout.apiDistDir.replaceAll('\\','/')+'/',listed=Object.fromEntries(manifest.components.api.filter(x=>x.path?.startsWith(prefix)&&x.path.endsWith('.js')).map(x=>[x.path.slice(prefix.length),x.sha256]));
  const actual=tree(api);const actualJs=Object.fromEntries(Object.entries(actual).filter(([name])=>name.endsWith('.js')));
  assert(sorted(listed)===sorted(actualJs),'R07_DEPENDENCY_API_CHANGED');
  for(const name of ['package-lock.json','node_modules/.package-lock.json']){const e=manifest.components.api.find(x=>x.path===name);assert(e&&sha(readFileSync(join(sourceRoot,name)))===e.sha256&&sha(readFileSync(join(root,name)))===e.sha256,'R07_DEPENDENCY_LOCK_CHANGED');}
  const bases=[join(root,'apps/api/node_modules'),join(root,'node_modules')],targets=[join(sourceRoot,'apps/api/node_modules'),join(sourceRoot,'node_modules')];
  process.env.NODE_PATH=bases.join(';');Module._initPaths();const require=createRequire(join(root,'apps/api/package.json'));
- for(const name of ['pg','@nestjs/common','@nestjs/core','drizzle-orm','reflect-metadata'])require(name);for(const name of ROUND_MODULES)require(join(api,name+'.js'));
+ for(const name of ['pg','@nestjs/common','@nestjs/core','drizzle-orm','reflect-metadata'])require(name);for(const name of new Set([...ROUND_MODULES,...listedDependencies.modules,...distributionDependencies.modules]))require(join(api,name+'.js'));
  const packages=new Map();for(const file of Object.keys(require.cache)){
   if(!file.toLowerCase().includes('node_modules'))continue;const index=bases.findIndex(base=>topLevelPackage(file,base)!==null);assert(index>=0,'R07_DEPENDENCY_OUTSIDE_WORKTREE');
   const name=topLevelPackage(file,bases[index]),key=index+':'+name;packages.set(key,{name,index,source:join(bases[index],name),target:join(targets[index],name)});

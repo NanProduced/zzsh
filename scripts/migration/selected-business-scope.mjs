@@ -35,6 +35,7 @@ export function planSelectedBusinessScope(source) {
   for (const account of accounts) {
     if (typeof account?.id !== "string" || !account.id) throw new Error("SELECTED_SCOPE_ACCOUNT_KEY_INVALID");
     if (accountIds.has(account.id)) throw new Error("SELECTED_SCOPE_ACCOUNT_KEY_DUPLICATE");
+    if (!["0", "1", "2", "3", "4", "5", "6"].includes(account.status) || !["0", "1"].includes(account.is_delete)) throw new Error("SELECTED_SCOPE_ACCOUNT_STATE_UNKNOWN");
     accountIds.add(account.id);
   }
   for (const order of orders) {
@@ -48,6 +49,7 @@ export function planSelectedBusinessScope(source) {
   const paidByOrder = new Set();
   for (const pay of pays) {
     if (pay?.order_type !== "1") continue;
+    if (!["0", "1"].includes(pay.pay_is)) throw new Error("SELECTED_SCOPE_RENTAL_PAYMENT_STATE_UNKNOWN");
     const key = pay?.order_id;
     if (typeof key !== "string" || !key) continue;
     if (pay.pay_is === "1") paidByOrder.add(key);

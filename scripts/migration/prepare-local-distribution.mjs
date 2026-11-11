@@ -6,7 +6,7 @@ import {basename,delimiter,dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 import {validateProfile,writePrivate} from '../local-auth.mjs';
-import {assertDistributionCoreReadback,assertDistributionPolicyReceipt,assertDistributionSourceBindings,assertQualificationPlanBinding,assertQualificationPolicy,assertQualificationRecoveryEvidence,assertQualificationRenewalEvidence,assertQualificationConstraintRetryEvidence,assertRegisteredDistributionTarget,buildLegacyQualificationPlan,isolatedDistributionBuild,privateDistributionPath,reviewedDistributionActor} from './local-distribution-qualification-plan.mjs';
+import {assertDistributionCoreReadback,assertDistributionPolicyReceipt,assertDistributionSourceBindings,assertQualificationPlanBinding,assertQualificationPolicy,assertQualificationRecoveryEvidence,assertQualificationRenewalEvidence,assertQualificationConstraintRetryEvidence,assertRegisteredDistributionTarget,buildLegacyQualificationPlan,isolatedDistributionBuild,normalizedDistributionPolicyFormat,privateDistributionPath,reviewedDistributionActor,validatedLegacyDistributionPayload} from './local-distribution-qualification-plan.mjs';
 import {loadRegisteredTarget} from './local-target-registry.mjs';
 import {inspectRoundDependencyLayout,assertRoundDependencyProof} from './local-round-dependencies.mjs';
 
@@ -23,6 +23,19 @@ function sourceContext(input,candidatePath){const capture=pinned(join(privatePat
 function coreContext(input,evidence){const round=pinned(evidence?.roundReceipt?.path,evidence?.roundReceipt?.sha256),readback=pinned(evidence?.readback?.path,evidence?.readback?.sha256);return assertDistributionCoreReadback(round,readback,{roundInputSha256:evidence.roundInputSha256,readbackSha256:evidence.readback.sha256,datasetSha256:input.dataset.sha256,sourceSha256:input.source.sha256,target:input.target})}
 function output(value,receipt,out,name){out=privatePath(out,true);assert.equal(basename(out),name);assert(!existsSync(dirname(out)),'SEALED_OUTPUT_DIRECTORY_EXISTS');writePrivate(out,value);receipt.output=out;receipt.outputSha256=sha(readFileSync(out));writePrivate(join(dirname(out),'seal-receipt.json'),receipt);return receipt}
 
+/** Explicit workflow windows may only narrow the already approved round window. */
+export function distributionInputWindow(parent, requested, now = Date.now()) {
+  if (requested?.notBefore === undefined && requested?.expiresAt === undefined)
+    return { notBefore: new Date(now-3000).toISOString(), expiresAt: new Date(now+25*60*1000).toISOString() };
+  const utc = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(Date.parse(value)).toISOString().slice(0,19) === value.slice(0,19);
+  assert([parent?.notBefore,parent?.expiresAt,requested?.notBefore,requested?.expiresAt].every(utc), 'DISTRIBUTION_WORKFLOW_WINDOW_INVALID');
+  const start=Date.parse(requested.notBefore),end=Date.parse(requested.expiresAt);
+  assert(start>=Date.parse(parent.notBefore)&&end<=Date.parse(parent.expiresAt)&&start<=now&&now<end&&end-start<=30*60000,
+    'DISTRIBUTION_WORKFLOW_WINDOW_INVALID');
+  return {notBefore:new Date(start).toISOString(),expiresAt:new Date(end).toISOString()};
+}
+
 export async function main(args=process.argv.slice(2)){
   if(!args.length){console.log(JSON.stringify({status:'PLAN_ONLY',phases:['input','authority'],connections:0,credentialReads:0,financialWrites:0}));return;}
   const [phase,...rest]=args;assert(['input','authority'].includes(phase),'DISTRIBUTION_SEAL_PHASE_REQUIRED');
@@ -36,14 +49,17 @@ export async function main(args=process.argv.slice(2)){
     assert(['reused','captured'].includes(v['source-mode']),'SOURCE_MODE_REQUIRED');
     let at=performance.now();const input=pinned(v['round-input'],v['round-sha']);assert.equal(input.schema,'zzsh.local-round.v1');targetContext(input);
     sourceContext(input,v.candidate);const coreEvidence={roundInputSha256:v['round-sha'],roundReceipt:{path:privatePath(v['round-receipt']),sha256:v['round-receipt-sha']},readback:{path:privatePath(v['core-readback']),sha256:v['core-readback-sha']}};
-    const financialObservations=coreContext(input,coreEvidence),sourceValidationMs=Math.round(performance.now()-at);at=performance.now();
+    const financialObservations=coreContext(input,coreEvidence),originalRound=pinned(coreEvidence.roundReceipt.path,coreEvidence.roundReceipt.sha256),
+      policyFormat=input.growth?.packageLayout==='PACKED_V2'?'SOURCE_API_NORMALIZED_V1':undefined;
+    normalizedDistributionPolicyFormat(policyFormat,originalRound);
+    const sourceValidationMs=Math.round(performance.now()-at);at=performance.now();
     const actor=read(privatePath(v.actor)),profile=validateProfile(read(privatePath(v.profile))),one=profile.actors['boss-one'],two=profile.actors['boss-two'];
     assert(one?.realm==='admin'&&two?.realm==='admin'&&one.userId!==two.userId&&actor.realm==='admin'&&(actor.id??actor.actorId)===one.userId&&actor.sessionId&&actor.resourceOid===input.target.oid&&actor.nonce===input.target.nonce&&one.origin===two.origin,'NEW_TARGET_BOSS_ACTOR_REQUIRED');
     for(const p of [v['session-one'],v['session-two']])assert(Array.isArray(read(privatePath(p)).cookies),'REGISTERED_SESSION_STATE_REQUIRED');
     const actorInputMs=Math.round(performance.now()-at);at=performance.now();const build=buildFiles(v.build);
     for(const name of ['finance/distribution-policy-store.js','finance/controlled-regression-resource.js','finance/legacy-invitation-facts-maintenance.js','auth/auth-runtime.js','auth/auth-security.js','auth/approval-audit.js'])assert(build.files[name],`BUILD_MODULE_MISSING:${name}`);
     const approvalBuild=readFileSync(join(build.api,'auth/approval-audit.js'),'utf8');assert(approvalBuild.includes('expected-version:')&&approvalBuild.includes('approval-template-v1'),'TEMPLATE_CAS_BUILD_REQUIRED');
-    const buildSealMs=Math.round(performance.now()-at),now=Date.now(),window={notBefore:new Date(now-3000).toISOString(),expiresAt:new Date(now+25*60*1000).toISOString()};
+    const buildSealMs=Math.round(performance.now()-at),now=Date.now(),window=distributionInputWindow(input.window,{notBefore:v['not-before'],expiresAt:v['expires-at']},now);
     const recoveryArgs=['recover-failure','recover-failure-sha','recover-plan','recover-plan-sha','recover-guard','recover-guard-sha','recover-repair-guard','recover-repair-guard-sha'],hasRecovery=recoveryArgs.some(name=>v[name]!==undefined);
     let recovery;if(hasRecovery){assert(recoveryArgs.every(name=>typeof v[name]==='string'&&v[name].length>0),'DISTRIBUTION_RECOVERY_REFS_REQUIRED');
       const checked=(path,expected)=>{const value=pin(path);assert.equal(value.sha256,expected,'DISTRIBUTION_RECOVERY_REF_CHANGED');return value;};
@@ -65,7 +81,7 @@ export async function main(args=process.argv.slice(2)){
       const checked=name=>{const value=pin(v[name]);assert.equal(value.sha256,v[name+'-sha'],'DISTRIBUTION_CONSTRAINT_RETRY_REF_CHANGED');return value;};
       qualificationConstraintRetry={failure:checked('retry-failure'),inspection:checked('retry-inspection'),previousPlan:checked('retry-previous-plan'),previousInput:checked('retry-previous-input'),previousAuthority:checked('retry-previous-authority'),priorRecoveryInput:checked('retry-prior-recovery-input'),upgradePlan:checked('retry-upgrade-plan'),upgradeExecution:checked('retry-upgrade-execution'),upgradeReadback:checked('retry-upgrade-readback'),buildManifest:checked('retry-build-manifest')};
       const prior=read(qualificationConstraintRetry.previousAuthority.path);assert(Date.parse(prior.expiresAt)<=now,'DISTRIBUTION_RETRY_REQUIRES_EXPIRED_WINDOW');}
-    value={schema:'zzsh.local-round.v1',target:input.target,source:input.source,dataset:input.dataset,credentials:input.credentials,actor:pin(v.actor),apiDist:build.api,buildFiles:build.files,window,distribution:{scope:'NATIVE',coreEvidence,candidate:pin(v.candidate),...(recovery?{recovery}:{}),...(qualificationRecovery?{qualificationRecovery}:{}),...(qualificationRenewal?{qualificationRenewal}:{}),...(qualificationConstraintRetry?{qualificationConstraintRetry}:{}),lockfileSha256:sha(readFileSync(join(root,'package-lock.json'))),approval:{profile:pin(v.profile),firstActor:'boss-one',secondActor:'boss-two',sessions:{'boss-one':pin(v['session-one']),'boss-two':pin(v['session-two'])},apiOrigin:one.origin,adminOrigin:'http://127.0.0.1:4231',userOrigin:'http://127.0.0.1:4230',adminSecret:secret('auth_admin_secret'),userSecret:secret('auth_user_secret')}}};
+    value={schema:'zzsh.local-round.v1',target:input.target,source:input.source,dataset:input.dataset,credentials:input.credentials,actor:pin(v.actor),apiDist:build.api,buildFiles:build.files,window,distribution:{scope:'NATIVE',...(policyFormat?{policyFormat}:{}),coreEvidence,candidate:pin(v.candidate),...(recovery?{recovery}:{}),...(qualificationRecovery?{qualificationRecovery}:{}),...(qualificationRenewal?{qualificationRenewal}:{}),...(qualificationConstraintRetry?{qualificationConstraintRetry}:{}),lockfileSha256:sha(readFileSync(join(root,'package-lock.json'))),approval:{profile:pin(v.profile),firstActor:'boss-one',secondActor:'boss-two',sessions:{'boss-one':pin(v['session-one']),'boss-two':pin(v['session-two'])},apiOrigin:one.origin,adminOrigin:'http://127.0.0.1:4231',userOrigin:'http://127.0.0.1:4230',adminSecret:secret('auth_admin_secret'),userSecret:secret('auth_user_secret')}}};
     receipt={status:input.target.bootstrapReservation==='ROUND07_BOOTSTRAP_RESERVED'?'SEALED_R07_DISTRIBUTION_INPUT':'SEALED_R06_DISTRIBUTION_INPUT',targetOid:input.target.oid,scope:'NATIVE',apiBuildFiles:Object.keys(build.files).length,notBefore:window.notBefore,expiresAt:window.expiresAt,sourceReceiptSha256:input.source.sha256,datasetSha256:input.dataset.sha256,coreReadbackSha256:coreEvidence.readback.sha256,financialObservations,sourceMode:v['source-mode'],timings:{sourceValidationMs,actorInputMs,buildSealMs},connections:0,financialWrites:0};
   }else{
     for(const name of ['review-ref','attempt','request-id'])assert(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(v[name]??''),'REVIEW_IDENTIFIER_REQUIRED:'+name);
@@ -79,9 +95,11 @@ export async function main(args=process.argv.slice(2)){
       const layout=inspectRoundDependencyLayout({apiDist:round.apiDist,bundlePath:round.bootstrapEvidence.bundle.path,bundleSha256:round.bootstrapEvidence.bundle.sha256,buildManifestPath:b.buildManifest.path,buildManifestSha256:b.buildManifest.sha256,sourceSnapshot:b.sourceSnapshot,sourceManifestPath:b.sourceManifest.path,sourceManifestSha256:b.sourceManifest.sha256});assertRoundDependencyProof(proof,layout);moduleDirs=layout.moduleDirs;}
     process.env.NODE_PATH=moduleDirs.join(delimiter);Module._initPaths();
     const require=createRequire(import.meta.url),{canonicalize}=require(join(build.api,'supply/content-hash.js'));
-    const binding={inputSha256:v['input-sha'],datasetSha256:input.dataset.sha256,sourceDigest:input.source.sha256,candidateSha256:d.candidate.sha256,scope:d.scope,target:{oid:input.target.oid,nonce:input.target.nonce,database:registry.database,marker:registry.marker,migrationRoleOid:input.target.migrationRoleOid,instance:registry.instance},expectedParticipants:manifest.domains.users.ready,buildDigest:sha(canonicalize(input.buildFiles)),toolFiles:plan.toolFiles};
+    const binding={inputSha256:v['input-sha'],datasetSha256:input.dataset.sha256,sourceDigest:input.source.sha256,candidateSha256:d.candidate.sha256,scope:d.scope,target:{oid:input.target.oid,nonce:input.target.nonce,database:registry.database,marker:registry.marker,migrationRoleOid:input.target.migrationRoleOid,instance:registry.instance,...(input.target.migrationProfile?{migrationProfile:input.target.migrationProfile}:{})},expectedParticipants:manifest.domains.users.ready,buildDigest:sha(canonicalize(input.buildFiles)),toolFiles:plan.toolFiles};
     assertQualificationPlanBinding(plan,binding,canonicalize);
-    const candidate=pinned(d.candidate.path,d.candidate.sha256),payload=candidate.approvalPayloads.find(p=>p.config.scope===d.scope);
+    const candidate=pinned(d.candidate.path,d.candidate.sha256),sourcePayload=candidate.approvalPayloads.find(p=>p.config.scope===d.scope),
+      originalRound=pinned(d.coreEvidence.roundReceipt.path,d.coreEvidence.roundReceipt.sha256),fresh=normalizedDistributionPolicyFormat(d.policyFormat,originalRound),
+      payload=validatedLegacyDistributionPayload(sourcePayload,require(join(build.api,'finance/distribution-policy-change.js')).parseDistributionPolicyChange,canonicalize,fresh);
     assertQualificationPolicy(plan,buildLegacyQualificationPlan({participants:[],packets:[],payload,sourceDigest:input.source.sha256,canonicalize,projectQualification:()=>{},expectedParticipants:0}),canonicalize);
     const q=d.qualificationRecovery;
     if(q){const evidence=Object.fromEntries(['failure','inspection','guard','previousPlan','previousInput','previousAuthority'].map(name=>[name,pinned(q[name]?.path,q[name]?.sha256)]));

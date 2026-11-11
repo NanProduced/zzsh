@@ -32,6 +32,8 @@ export type LegacyGrowthMaintenanceApproval = {
 } & ({ schema: "legacy-growth-maintenance-approval-v1"; resource: CreditInitializationTestMetadataResource }
   | { schema: "legacy-growth-maintenance-approval-v2"; resource: CreditInitializationCommentResource });
 export type LegacyGrowthMaintenanceRun = { mode: LegacyGrowthMaintenanceMode; input: LegacyGrowthMaintenanceInput };
+export const LEGACY_GROWTH_PRECOMMIT_GUARD_VERSION = "v1";
+export const LEGACY_GROWTH_TARGET_FENCE_GUARD_VERSION = "v1";
 const HEX = /^[a-f0-9]{64}$/, REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/, KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const MAX_WINDOW_MS = 24 * 60 * 60 * 1000;
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -105,7 +107,7 @@ export class LegacyGrowthMaintenanceOutcomeError extends Error {
 }
 
 /** One client for authorization, idempotency, contributions, coverage, audit and final window check. */
-export async function runLegacyGrowthMaintenanceApply(pool: Pick<Pool, "connect">, input: LegacyGrowthMaintenanceInput, port: LegacyCoveragePort): Promise<Awaited<ReturnType<typeof applyLegacyGrowthMaintenance>>> {
+export async function runLegacyGrowthMaintenanceApply(pool: Pick<Pool, "connect">, input: LegacyGrowthMaintenanceInput, port: LegacyCoveragePort, beforeCommit?: (client: PoolClient) => Promise<void>): Promise<Awaited<ReturnType<typeof applyLegacyGrowthMaintenance>>> {
   const preserved: LegacyGrowthMaintenancePreserved = { operation: LEGACY_GROWTH_MAINTENANCE_OPERATION, executionKey: input.executionKey, businessFingerprint: legacyGrowthMaintenanceFingerprint(input), coverageFingerprint: null, sourceReceiptDigest: null, businessPackageSha256: input.businessPackageSha256, actorAdminId: input.execution.actorAdminId, approvalRef: input.execution.approvalRef, attempt: input.execution.attempt };
   let client: PoolClient;
   try { client = await pool.connect(); } catch (cause) { throw new LegacyGrowthMaintenanceOutcomeError("NOT_COMMITTED", preserved, false, cause); }
@@ -115,11 +117,17 @@ export async function runLegacyGrowthMaintenanceApply(pool: Pick<Pool, "connect"
     const result = await applyLegacyGrowthMaintenance(client, input, port);
     preserved.coverageFingerprint = result.receipt.coverageFingerprint; preserved.sourceReceiptDigest = result.receipt.sourceReceiptDigest;
     await assertCreditInitializationWindowOpen(client, input.execution);
-    commitSent = true; await client.query("COMMIT"); return result;
+    if (beforeCommit) await beforeCommit(client);
+    commitSent = true;
+    if ((await client.query("COMMIT")).command !== "COMMIT") throw new Error("GROWTH_COMMIT_ACK_UNCONFIRMED");
+    return result;
   } catch (cause) {
     if (commitSent) { broken = true; throw new LegacyGrowthMaintenanceOutcomeError("COMMIT_UNKNOWN", preserved, false, cause); }
     let acknowledged = false, rollbackError: unknown;
-    try { await client.query("ROLLBACK"); acknowledged = true; } catch (error) { broken = true; rollbackError = error; }
+    try {
+      if ((await client.query("ROLLBACK")).command !== "ROLLBACK") throw new Error("GROWTH_ROLLBACK_ACK_UNCONFIRMED");
+      acknowledged = true;
+    } catch (error) { broken = true; rollbackError = error; }
     throw new LegacyGrowthMaintenanceOutcomeError("NOT_COMMITTED", preserved, acknowledged, cause, rollbackError);
   } finally { client.release(broken ? true : undefined); }
 }

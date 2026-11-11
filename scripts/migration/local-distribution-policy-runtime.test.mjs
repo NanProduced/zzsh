@@ -24,12 +24,28 @@ test('rejected policy recovery binds the old 503, unchanged source and original 
 });
 
 test("expired or changed build prevents the actual approval COMMIT", async () => {
-  const statements = [], rawQuery = async sql => { statements.push(sql); return {}; }, rawRelease = () => {};
+  const statements = [], rawQuery = async sql => { statements.push(sql); return { command: sql }; }, rawRelease = () => {};
   const client = { query: rawQuery, release: rawRelease }, pool = { connect: async () => client, query: async () => ({}) };
   const guarded = guardedApprovalPool(pool, () => { throw Error("window expired"); });
   const c = await guarded.connect(); await c.query("BEGIN");
   assert.throws(() => c.query("COMMIT"), /window expired/); await c.query("ROLLBACK"); c.release();
   assert.deepEqual(statements, ["BEGIN", "ROLLBACK"]); assert.equal(c.query, rawQuery); assert.equal(c.release, rawRelease);
+});
+
+test('approval transaction command tags must acknowledge the requested outcome', async () => {
+  for (const [statement, returned] of [['COMMIT', 'ROLLBACK'], ['ROLLBACK', 'UNKNOWN']]) {
+    const original = async sql => ({ command: sql === statement ? returned : sql }), client = { query: original, release() {} };
+    const guarded = guardedApprovalPool({ connect: async () => client }, () => {}), c = await guarded.connect();
+    await assert.rejects(c.query(statement), new RegExp('DISTRIBUTION_APPROVAL_' + statement + '_ACK_UNCONFIRMED'));
+    c.release(); assert.equal(c.query, original);
+  }
+});
+
+test('an asynchronously lost maintenance lock blocks approval COMMIT', async () => {
+  const statements = [], raw = async sql => { statements.push(sql); return { command: sql }; }, client = { query: raw, release() {} };
+  const guarded = guardedApprovalPool({ connect: async () => client }, async () => { throw Error('lock lost'); });
+  const c = await guarded.connect(); await c.query('BEGIN'); await assert.rejects(c.query('COMMIT'), /lock lost/); await c.query('ROLLBACK'); c.release();
+  assert.deepEqual(statements, ['BEGIN', 'ROLLBACK']);
 });
 
 test("busy regression maintenance lock stops before opening a policy database pool", async () => {

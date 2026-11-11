@@ -21,6 +21,14 @@ test('accepts the dedicated R07 PostgreSQL secret only for a bound loopback inst
   assert.throws(()=>creditMaintenanceSecretLocation(path,secrets,changed,restricted),/CREDIT_MAINTENANCE_SECRET_PATH_INVALID/);
 });
 
+test('next-round secret is bound to its separate profile and cannot reuse an R07 secret path',()=>{
+ const path=join(secrets,'migration-postgres-fixture-01','postgres_password'),next={...target,migrationProfile:'LOCAL_MIGRATION_NEXT_V1',instance:{...target.instance,port:55435}};
+ assert.equal(creditMaintenanceSecretLocation(path,secrets,next,restricted),path);
+ assert.throws(()=>creditMaintenanceSecretLocation(path,secrets,target,restricted),/CREDIT_MAINTENANCE_SECRET_PATH_INVALID/);
+ assert.throws(()=>creditMaintenanceSecretLocation(join(secrets,'round07-postgres-fixture-01','postgres_password'),secrets,next,restricted),/CREDIT_MAINTENANCE_SECRET_PATH_INVALID/);
+ assert.throws(()=>creditMaintenanceSecretLocation(path,secrets,{...next,instance:{...next.instance,port:55433}},restricted),/CREDIT_MAINTENANCE_SECRET_PATH_INVALID/);
+});
+
 test('rejects sibling, traversal, other secret names, and non-absolute paths',()=>{
  for(const path of [join(secrets,'round07-postgres-20261106-01','other'),join(secrets,'other','postgres_password'),
   join(secrets,'round07-postgres-20261106-01','..','postgres_password-extra'),join(restricted+'-other','postgres_password'),

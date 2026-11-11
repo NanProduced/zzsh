@@ -64,6 +64,7 @@ import { mountSystemConfigurationHandlers } from "../system/system-configuration
 import { mountAdminOverview } from "./admin-overview";
 import { mountAdminDashboard } from "./admin-dashboard";
 import { deriveIdentitySubjectKey } from "./identity-subject";
+import { legacyIdentityProfileKey } from "./legacy-identity-profile";
 import { loadUserProviderRuntime } from "./user-provider-runtime";
 import type { UserSmsSender } from "./aliyun-user-providers";
 import type { SmsTemplateConfiguration } from "./sms-templates";
@@ -124,6 +125,7 @@ type AuthRuntimeConfig = {
   adminOrigin: string;
   userSecret: string;
   userIdentitySubjectKey?: Buffer;
+  userLegacyIdentityProfileKey?: Buffer;
   userSmsSender?: UserSmsSender;
   userSmsConfiguration?: SmsTemplateConfiguration;
   userRealNamePolicy?: { dailyLimit: number; minIntervalSeconds: number };
@@ -868,6 +870,16 @@ export function loadAuthRuntimeConfig(
   if (identityMasterKey !== undefined && (identityMasterKey.length < 32 || [userSecret, adminSecret, userThrottleHmacKey].includes(identityMasterKey))) {
     throw new ConfigurationError("Identity subject HMAC requires a stable independent secret of at least 32 characters");
   }
+  const legacyProfileSecret = env.USER_LEGACY_IDENTITY_PROFILE_KEY !== undefined || env.USER_LEGACY_IDENTITY_PROFILE_KEY_FILE !== undefined
+    ? readSecret(env, "USER_LEGACY_IDENTITY_PROFILE_KEY", "USER_LEGACY_IDENTITY_PROFILE_KEY_FILE", workingDirectory) : undefined;
+  if (legacyProfileSecret !== undefined && (!identityMasterKey || [identityMasterKey, userSecret, adminSecret, userThrottleHmacKey].includes(legacyProfileSecret))) {
+    throw new ConfigurationError("Legacy identity profile requires an independent protection key and identity subject key");
+  }
+  let legacyProfileKey: Buffer | undefined;
+  if (legacyProfileSecret !== undefined) {
+    try { legacyProfileKey = legacyIdentityProfileKey(legacyProfileSecret); }
+    catch { throw new ConfigurationError("Legacy identity profile key must be canonical base64url for 32 bytes"); }
+  }
   const userProviders = loadUserProviderRuntime(env, workingDirectory);
   if (userProviders.realNameProvider && identityMasterKey === undefined) throw new ConfigurationError("Real name verification requires USER_IDENTITY_SUBJECT_HMAC_KEY or _FILE");
   const identityLimit = (name: string, maximum: number): number => {
@@ -914,6 +926,7 @@ export function loadAuthRuntimeConfig(
     adminOrigin,
     userSecret,
     userIdentitySubjectKey: identityMasterKey === undefined ? undefined : deriveIdentitySubjectKey(identityMasterKey),
+    userLegacyIdentityProfileKey: legacyProfileKey,
     ...userProviders,
     ...(userRealNamePolicy ? { userRealNamePolicy } : {}),
     settlementRecordingEnabled: settlementEnabled,
@@ -1281,6 +1294,7 @@ export async function mountAuthHandlers(
     securityVerificationBudget: options.securityVerificationBudget ?? { inFlight: 0 },
     realNameProvider: options.realNameProvider ?? { ...createFakeRealNameProvider("UNKNOWN"), available: false },
     userIdentitySubjectKey: options.userIdentitySubjectKey,
+    userLegacyIdentityProfileKey: options.userLegacyIdentityProfileKey,
     userRealNamePolicy: options.userRealNamePolicy,
     userSmsConfiguration: options.userSmsConfiguration,
     settlementAdmission: options.joinpayCollection?.admission,

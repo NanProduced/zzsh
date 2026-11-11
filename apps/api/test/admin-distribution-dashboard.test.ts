@@ -78,6 +78,9 @@ test("version hashes visible revisions and optional sources, without unrelated e
   assert.match(calls.at(-1)!.sql, /r\.parent_user_id,r\.child_user_id/);
   assert.match(calls.at(-1)!.sql, /lo\.source_entity='la_order'/, 'version join covers the frozen legacy-order key');
   assert.match(calls.at(-1)!.sql, /u\.name/);
+  for (const name of ['visible_participants','visible_coverage']) {
+    assert.ok(calls.at(-1)!.sql.includes(`row_digest FROM ${name} OFFSET 0`), name);
+  }
 });
 
 test("hidden directory names cannot participate in dashboard list searches; ID searches remain usable", async () => {
@@ -171,6 +174,29 @@ test('installed but empty historical source does not prove ranking coverage',asy
  assert.equal(read.section,'EARNINGS_RANKING');assert.ok('ranking' in read);
  assert.deepEqual(read.ranking.items,[]);assert.equal(read.ranking.knowledge,'PARTIAL');
  assert.deepEqual(read.ranking.reasonCodes,['HISTORICAL_COVERAGE_NOT_CLOSED']);
+});
+
+test('settled stock ranking skips credit timestamps while period ranking retains them and its date bounds',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const client={query:async(sql:string,values:unknown[])=>{
+  calls.push({sql,values});
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('ranking_rows AS'))return{rows:[{user_id:'person',name:'User',roles:['OWNER_REFERRAL'],cents:'100',count:'1'}]};
+  throw Error('Unexpected query');
+ }} as any;
+ const filters=filtersForTest(),stock=await readAdminDistributionOverviewSection(client,dashboardContext(),filters,'EARNINGS_RANKING');
+ const stockQuery=calls.find(call=>call.sql.includes('ranking_rows AS'))!;
+ assert.equal(stock.section,'EARNINGS_RANKING');assert.equal(stock.ranking.items[0]?.cents,'100');
+ assert.doesNotMatch(stockQuery.sql,/legacy_log_candidates|legacy_credits/);
+ assert.match(stockQuery.sql,/WHERE state='SETTLED'/);
+ calls.length=0;
+ const period=await readAdminDistributionOverviewSection(client,dashboardContext(),{...filters,rankingBasis:'PERIOD_SETTLED_FLOW'},'EARNINGS_RANKING');
+ const periodQuery=calls.find(call=>call.sql.includes('ranking_rows AS'))!;
+ assert.equal(period.section,'EARNINGS_RANKING');assert.equal(period.ranking.items[0]?.cents,'100');
+ assert.match(periodQuery.sql,/legacy_log_candidates/);assert.match(periodQuery.sql,/legacy_credits/);
+ assert.match(periodQuery.sql,/settled_at>=\$3::timestamptz AND settled_at<\$4::timestamptz/);
+ assert.deepEqual(periodQuery.values,['admin-1',true,'2026-10-01T00:00:00+08:00','2026-11-01T00:00:00+08:00']);
 });
 
 // Synthetic SQL response contract; this is not a PostgreSQL or migration acceptance fixture.
@@ -555,6 +581,24 @@ test('native-only earnings exclude irrelevant historical sources from both page 
  const version=calls.find(sql=>sql.includes('WITH visible_earnings AS'))!,page=calls.find(sql=>sql.includes('WITH rows AS'))!;
  for(const sql of [version,page])assert.doesNotMatch(sql,/FROM zzsh_order\.personal_finance_observation/);
  assert.match(page,/FROM zzsh_order\.rental_referral_earning/);
+});
+
+test('earnings pagination versions its own facts without hashing the invitation network',async()=>{
+ const calls:string[]=[];let earningRevision='1';
+ const client={query:async(sql:string)=>{calls.push(sql);
+  if(sql.includes('to_regclass'))return{rows:[{native:true,legacy:true,duties:true}]};
+  if(sql.includes('WITH visible_earnings AS'))return{rows:[{native:earningRevision,events:'e',legacy:'l',effects:'x'}]};
+  if(sql.includes('clock_timestamp'))return{rows:[{at:'2026-11-02T00:00:00Z'}]};
+  if(sql.includes('count(*)::text AS total'))return{rows:[{total:'0'}]};return{rows:[]};
+ }} as any;
+ const filters=filtersForTest(),context=dashboardContext(true),key={keyId:'test',secret:'x'.repeat(32)};
+ const first=await readAdminDistributionEarnings(client,context,filters,key);
+ const versionSql=calls.find(sql=>sql.includes('WITH visible_earnings AS'))!;
+ assert.doesNotMatch(versionSql,/FROM zzsh_order\.distribution_participant|FROM zzsh_order\.invitation_relation/);
+ for(const source of ['rental_referral_earning','rental_referral_transition','personal_finance_observation','legacy_order_duty'])assert.ok(versionSql.includes(source),source);
+ await readAdminDistributionEarnings(client,context,{...filters,page:2},key,undefined,first.snapshot);
+ earningRevision='2';
+ await assert.rejects(readAdminDistributionEarnings(client,context,{...filters,page:2},key,undefined,first.snapshot),(error:any)=>error.status===409);
 });
 
 test('earnings page resolves settlement times once for the selected source-qualified records',async()=>{

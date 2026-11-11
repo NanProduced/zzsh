@@ -1,7 +1,22 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {NEXT_MIGRATION_PROFILE} from './local-target-registry.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
+
+/** Keep authorization and fencing inside the actual transaction's BEGIN/COMMIT boundary. */
+export function guardCreditPoolClient(client,{afterBegin,beforeCommit}){
+ assert(typeof client?.query==='function'&&typeof afterBegin==='function'&&typeof beforeCommit==='function','CREDIT_POOL_GUARD_INVALID');
+ const query=client.query.bind(client);
+ client.query=(sql,...params)=>{
+  if(sql==='BEGIN'||sql==='BEGIN READ ONLY')return query(sql,...params).then(async result=>{
+   assert.equal(result.command,'BEGIN','CREDIT_BEGIN_ACK_UNCONFIRMED');await afterBegin(client,sql==='BEGIN READ ONLY');return result;});
+  if(sql==='COMMIT')return Promise.resolve().then(()=>beforeCommit(client)).then(()=>query(sql,...params)).then(result=>{assert.equal(result.command,'COMMIT','CREDIT_COMMIT_ACK_UNCONFIRMED');return result;});
+  if(sql==='ROLLBACK')return query(sql,...params).then(result=>{assert.equal(result.command,'ROLLBACK','CREDIT_ROLLBACK_ACK_UNCONFIRMED');return result;});
+  return query(sql,...params);
+ };
+ return client;
+}
 
 /** The original target cohort is frozen before any formal credit batch is approved. */
 export function creditRowsDigest(rows){
@@ -32,7 +47,8 @@ export function assertCreditPlanReady(plan){
  assert(plan?.schema==='zzsh.local-credit-initialization-receipt.v1'&&plan.status==='PREPARED_NOT_APPROVED'&&r?.balanced===true&&r.unknown===0&&r.eventWithoutState===0
   &&plan.otherEventWithoutState===0&&Array.isArray(plan.batches)
   &&Number.isSafeInteger(r.batched)&&r.batched>=0&&r.batched===plan.batches.reduce((n,b)=>n+b.userCount,0)
-  &&plan.unlockAck===true&&plan.poolClosed===true&&plan.lockClosed===true,'CREDIT_PLAN_REQUIRES_REVIEW');
+  &&plan.unlockAck===true&&plan.poolClosed===true&&plan.lockClosed===true
+  &&(plan.binding?.epoch?.migrationProfile!==NEXT_MIGRATION_PROFILE||plan.targetFence==='HELD_DURING_CREDIT_STAGE'&&plan.targetFenceReleased===true),'CREDIT_PLAN_REQUIRES_REVIEW');
 }
 
 export function assertCreditAuthority(authority,plan,planSha256,actor,now=Date.now()){

@@ -59,6 +59,23 @@ test("missing native profile capability preserves recorded source while a denied
  assert.ok(seen.includes("ROLLBACK TO SAVEPOINT identity_display_read"));
 });
 
+test("migrated identity self display reads only masks tied to the current legacy subject", async () => {
+ const statements:string[]=[];
+ const client={query:async(sql:string)=>{
+  statements.push(sql);
+  if(sql.includes("to_regclass('zzsh_iam.user_identity_verified_profile')"))return{rows:[{ready:false}]};
+  if(sql.includes("to_regclass('zzsh_iam.user_legacy_identity_profile')"))return{rows:[{ready:true}]};
+  if(sql.includes("FROM zzsh_iam.user_legacy_identity_profile p"))return{rows:[{nameMask:"合**名",documentMask:"990000********123X"}]};
+  throw new Error("unexpected query");
+ }} as unknown as PoolClient;
+ const display=await readIdentityDisplay(pgIdentityDisplayStore(client),"user","VERIFIED");
+ assert.equal(display.identityDisplay?.realNameMasked,"合**名");
+ assert.equal("identityDisplaySource" in display && display.identityDisplaySource,"RECORDED_SOURCE");
+ const query=statements.find(sql=>sql.includes("FROM zzsh_iam.user_legacy_identity_profile p"))!;
+ assert.doesNotMatch(query,/ciphertext|authentication_tag|nonce/);
+ assert.match(query,/s\.provider_reference=p\.source_ref/); assert.match(query,/b\.source='LEGACY_IMPORT'/);
+});
+
 test("display read: verified/recorded, not recorded, not verified, store unavailable, no value leak on error", async () => {
   const store = (row: { realName: string; idCardNo: string } | null, err?: object): IdentityDisplayStore => ({ read: async () => { if (err) throw err; return row; } });
   const ok = await readIdentityDisplay(store({ realName: "测试人", idCardNo: "000000200001010000" }), "u", "VERIFIED");

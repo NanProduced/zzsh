@@ -1,6 +1,6 @@
 import type {PoolClient} from 'pg';
 import {recordAudit} from '../auth/security-core';
-import {authorizeFinanceMaintenance,isReviewedFinanceMaintenanceResource} from './personal-finance-maintenance';
+import {authorizeFinanceMaintenance,isReviewedFinanceMaintenanceEndpoint,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {canonicalize} from '../supply/content-hash';
 import {ensureOnlyFields,invalid,conflict,forbidden,withIdempotency,fingerprintRequest} from '../supply/supply-util';
 import {prepareLegacyInvitationFacts,invitationFactHash,invitationFactTypes,invitationFactSourceDigest,invitationFactCodeId,legacyInvitationFactsOperation,legacyInvitationCountsOperation,projectLegacyInvitationQualification,type LegacyInvitationFactsInput,type LegacyInvitationRawFact,type LegacyInvitationFactSource} from './legacy-invitation-facts';
@@ -9,7 +9,7 @@ import {readLegacyDistributionQualifications} from './admin-distribution-read';
 import {readDistributionPolicyRowInTransaction} from './distribution-policy-store';
 
 type Actor={userId:string;sessionId:string;requestId:string};
-export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:{host:'127.0.0.1';port:number;database:string;oid:number;owner:string;ownerOid:number;marker:string;role:string;roleOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string;systemIdentifier?:string};
+export type LegacyInvitationFactsReview={ref:string;attempt:string;actor:{userId:string;sessionId:string};resource:FinanceOpeningReview['resource']&{ownerOid:number};notBefore:string;expiresAt:string;sourceDigest:string;bodyDigest:string;phase:'IMPORT'|'COUNTS'|'QUALIFY';nonce?:string;systemIdentifier?:string};
 export type LegacyInvitationFactsAdmission=Readonly<{kind:'REVIEWED_LEGACY_INVITATION_FACTS'}>;
 export type LegacyQualificationIndex=Readonly<{kind:'REVIEWED_LEGACY_QUALIFICATION_INDEX'}>;
 type IndexedFact={sourceDigest:string;projection:ReturnType<typeof projectLegacyInvitationQualification>};
@@ -24,11 +24,13 @@ function cloneCountsReview(r:LegacyInvitationFactsReview):boolean{
   &&typeof r.systemIdentifier==='string'&&/^[0-9]+$/.test(r.systemIdentifier)&&r.systemIdentifier!=='7704972584346443810';
 }
 function reviewShape(r:LegacyInvitationFactsReview){
- ensureOnlyFields(r,['ref','attempt','actor','resource','notBefore','expiresAt','sourceDigest','bodyDigest','phase','nonce','systemIdentifier']);ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','ownerOid','marker','role','roleOid']);
+ ensureOnlyFields(r,['ref','attempt','actor','resource','notBefore','expiresAt','sourceDigest','bodyDigest','phase','nonce','systemIdentifier']);ensureOnlyFields(r.actor,['userId','sessionId']);ensureOnlyFields(r.resource,['host','port','database','oid','owner','ownerOid','marker','role','roleOid','migrationProfile','systemIdentifier','nonce']);
  const clone=cloneCountsReview(r);if(r.systemIdentifier!==undefined&&!clone)throw invalid('Delivery clone only admits exact reviewed count closure');
+ if(clone&&(r.resource.migrationProfile!==undefined||r.resource.systemIdentifier!==undefined||r.resource.nonce!==undefined)
+  ||r.resource.migrationProfile!==undefined&&r.nonce!==undefined&&r.nonce!==r.resource.nonce)throw invalid('Invitation target profile or epoch differs');
  if(r.phase==='QUALIFY'&&r.resource.database==='zzsh_test_regression'&&(typeof r.nonce!=='string'||!/^[a-z0-9_]{12,40}$/.test(r.nonce)))throw invalid('Exact qualification regression epoch required');
  if(![r.ref,r.attempt,r.actor.userId,r.actor.sessionId].every(x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/.test(x))||!hex.test(r.sourceDigest)||!hex.test(r.bodyDigest)||!['IMPORT','COUNTS','QUALIFY'].includes(r.phase)
-  ||r.resource.host!=='127.0.0.1'||!clone&&![55432,55433].includes(r.resource.port)||r.resource.database==='zzsh_test_regression'&&!isReviewedFinanceMaintenanceResource(r.resource)||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
+  ||r.resource.host!=='127.0.0.1'||!clone&&!isReviewedFinanceMaintenanceEndpoint(r.resource)||r.resource.database==='zzsh_test_regression'&&!isReviewedFinanceMaintenanceResource(r.resource)||r.resource.oid===2220718||!/^(zzsh_dev_daily|zzsh_test_[a-z0-9_]+)$/.test(r.resource.database)
   ||![r.resource.oid,r.resource.ownerOid,r.resource.roleOid].every(x=>Number.isSafeInteger(x)&&x>0&&x<=4294967295)||![r.resource.owner,r.resource.role].every(x=>/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(x))
   ||typeof r.resource.marker!=='string'||!r.resource.marker||r.resource.marker.length>1024||/[\x00-\x1f\x7f]/.test(r.resource.marker)
   ||![r.notBefore,r.expiresAt].every(x=>typeof x==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(x)&&Number.isFinite(Date.parse(x)))||Date.parse(r.expiresAt)<=Date.parse(r.notBefore))throw invalid('Exact internal invitation fact review required');
@@ -39,10 +41,11 @@ async function resource(c:PoolClient,actor:Actor,r:LegacyInvitationFactsReview,r
  const row=(await c.query(`/* invitation-facts resource */ SELECT d.oid::int AS oid,current_database() AS database,pg_get_userbyid(d.datdba) AS owner,d.datdba::int AS "ownerOid",
   shobj_description(d.oid,'pg_database') AS marker,current_user AS role,r.oid::int AS "roleOid",clock_timestamp() AS now,current_setting('transaction_read_only') AS read_only,current_setting('zzsh.regression_run',true) AS nonce,
   (SELECT count(*)::int FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='zzsh_order' AND t.relname IN('distribution_participant','distribution_invite_code','invitation_relation') AND pg_get_userbyid(t.relowner)=current_user) AS owned,
-  zzsh_order.distribution_policy_contract_version()>=2 AS complete${cloneCountsReview(r)?`,(SELECT system_identifier::text FROM pg_control_system()) AS "systemIdentifier"`:''}
+  zzsh_order.distribution_policy_contract_version()>=2 AS complete${cloneCountsReview(r)||r.resource.migrationProfile!==undefined?`,(SELECT system_identifier::text FROM pg_control_system()) AS "systemIdentifier"`:''}
   FROM pg_database d JOIN pg_roles r ON r.rolname=current_user WHERE d.datname=current_database()`)).rows[0];
  if(!row||['oid','database','owner','ownerOid','marker','role','roleOid'].some(k=>row[k]!==r.resource[k as keyof LegacyInvitationFactsReview['resource']])||r.nonce!==undefined&&row.nonce!==r.nonce
-  ||cloneCountsReview(r)&&row.systemIdentifier!==r.systemIdentifier||row.owned!==3||row.complete!==true||!planOnly&&!recover&&row.read_only!=='off')throw conflict('Invitation target identity, table ownership or contract differs');
+  ||cloneCountsReview(r)&&row.systemIdentifier!==r.systemIdentifier||r.resource.migrationProfile!==undefined&&(row.systemIdentifier!==r.resource.systemIdentifier||row.nonce!==r.resource.nonce)
+  ||row.owned!==3||row.complete!==true||!planOnly&&!recover&&row.read_only!=='off')throw conflict('Invitation target identity, table ownership or contract differs');
  const now=new Date(row.now).getTime();if(!Number.isFinite(now)||now<Date.parse(r.notBefore)||!recover&&now>=Date.parse(r.expiresAt))throw forbidden('Invitation fact execution window is not active');
 }
 async function admitted(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInput,scope:LegacyInvitationFactsAdmission,phase:'IMPORT'|'COUNTS',recover=false){

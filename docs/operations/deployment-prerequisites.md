@@ -1,6 +1,6 @@
 # 部署配置准备
 
-团队线上测试与正式环境使用同一业务代码和权限合同，分别准备域名、数据库、Bucket、第三方应用和凭据。测试环境中的模拟付款必须明确标识；不得把本地受控成功当作渠道或银行到账。本文是配置准备清单，不是部署验收。
+团队线上测试与正式环境使用同一业务代码和权限合同，分别准备域名、数据库、Bucket、第三方应用和凭据。测试环境中的模拟付款必须明确标识；不得把本地受控成功当作渠道或银行到账。首次账号、政策与内容的逐项清单及实现状态见[首次部署初始化配置清单](initial-deployment-configuration.md)。本文是配置准备清单，不是部署验收。
 
 API参考模板为 `apps/api/.env.deployment.example`，Next参考 `apps/web/.env.deployment.example`。部署使用 `npm run start:prod -w @zzsh/api` 或直接运行编译后的main，不自动加载本机 `.env`，由服务管理器注入；本地dev/start脚本仍显式使用Node的 `--env-file-if-exists=.env`。`*_FILE` 使用相对API工作目录的 `.secrets/` 路径，文件只对服务身份与维护者可读；不要在聊天、仓库、前端或日志中粘贴真实值。占位项必须替换，模板不能直接作为可运行配置。
 
@@ -18,7 +18,7 @@ API参考模板为 `apps/api/.env.deployment.example`，Next参考 `apps/web/.en
 | 汇聚收款/退款 | 商户/产品权限、官方接口文档版本和签名样例、签名/验签密钥版本、通知URL、QR允许host、查询/通知与退役原钥保留策略 | `JOINPAY_COLLECTION_CONFIG_FILE`、`JOINPAY_REFUND_CONFIG_FILE`；JSON分别引用 `JOINPAY_COLLECTION_KEY_*(_FILE)`、`JOINPAY_REFUND_KEY_*(_FILE)`。当前渠道没有沙盒，测试账号也不等于无真实资金风险 |
 | 汇聚提现/账户查询 | 对应商户产品、原目标与银行编码合同、官方证据/签名版本、通知URL及查询能力 | `JOINPAY_PAYOUT_CONFIG_FILE`、`JOINPAY_ACCOUNTS_CONFIG_FILE`，钥引用 `JOINPAY_PAYOUT_KEY_*(_FILE)`、`JOINPAY_ACCOUNT_KEY_*(_FILE)`（ACCOUNT为单数）。设置 `USER_WITHDRAWAL_POLICY(_FILE)` 时，真实出款的已审核策略须与共享业务规则一致；具体JSON见各 `*-runtime.ts` 导出类型与[资金规格](../architecture/payments-and-funds.md) |
 | 银行资料保护 | 独立AES-GCM保护钥、当前keyVersion与历史keyring、恢复保管人 | `WITHDRAWAL_BANK_BINDING_CONFIG_FILE`、`WITHDRAWAL_BANK_KEY_*(_FILE)`。不得换钥后丢弃旧版本；资料保存不证明银行实名或代付到账 |
-| 经营政策与文书 | 平台经营主体、联系方式；平台服务/隐私/出租/包赔/提前结束正文；真实分销比例、最低计提、期限及审批主体 | 通过正式Admin草稿→封存→生效/双人审批；不在 `.env` 填默认比例、不从本地fixture当正式政策，不修改旧订单快照 |
+| 经营政策与文书 | 平台经营主体、联系方式；平台服务/隐私/出租/包赔/提前结束正文；真实分销比例、最低计提和期限 | 首次部署应采用经确认的初始配置，不以已激活 Boss 或管理平台审批作为前提；新初始化入口尚待接入。后续变更按对应业务权限及版本规则办理；不从本地 fixture 当正式政策，不修改旧订单快照 |
 
 短信、实名与OSS的RAM授权按用途分开，优先短期凭据/实例角色与最小权限。**现有OSS适配器只有启动时静态凭据，没有STS自动续期**，不能仅注入一次临时Token就宣称长期可用；生产持续凭据供应仍须实际落实。[阿里云凭据安全建议](https://open.aliyun.com/credential-security)、[OSS权限机制](https://help.aliyun.com/zh/oss/how-to-control-access-permissions-on-oss/)。
 

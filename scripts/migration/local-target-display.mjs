@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
-import { resolve, join, basename } from "node:path";
+import { resolve, join, basename, dirname } from "node:path";
+import { assertDisplayCaptureCoverage, assertDisplayCaptureRow, verifyDisplayCaptureInputs } from "./local-source-adapter.mjs";
 
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 
@@ -12,6 +13,17 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
   if (hash(bytes) !== manifestSha256) throw new Error("DISPLAY_MANIFEST_SHA_MISMATCH");
   const manifest = JSON.parse(bytes);
   if (manifest.status !== "DISPLAY_SUPPLEMENT_PREPARED_TARGET_NOT_RUN" || manifest.datasetSha256 !== ctx.state.binding.datasetSha256 || manifest.commonFieldDifferences !== 0 || manifest.file !== basename(manifest.file) || !/^[a-f0-9]{64}$/.test(manifest.extractSha256 ?? "")) throw new Error("DISPLAY_SOURCE_NOT_BOUND");
+  if(ctx.manifest.identityProfiles){
+    assertDisplayCaptureCoverage(manifest);
+    const sourceDir=resolve(ctx.manifest.source??'');
+    if(!sourceDir.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\"))throw new Error("DISPLAY_CAPTURE_SOURCE_REQUIRED");
+    const sourceBytes=readFileSync(join(sourceDir,'receipt.json'));
+    if(hash(sourceBytes)!==ctx.manifest.sourceReceiptSha256)throw new Error("DISPLAY_CAPTURE_SOURCE_REQUIRED");
+    const source=JSON.parse(sourceBytes),contentHash=ctx.mod('supply/content-hash');
+    if(source.status!=='CAPTURED_READ_ONLY'||source.rollbackConfirmed!==true||source.clientClosed!==true)throw new Error('DISPLAY_CAPTURE_SOURCE_REQUIRED');
+    ctx.state.displayCapturePreflight=await verifyDisplayCaptureInputs({sourceDir,sourceEntry:source.files?.accounts,
+      accountsDir:dirname(ctx.domainFile('accounts')),accountsEntry:ctx.manifest.files?.accounts,displayDir:path,display:manifest,canonicalize:contentHash.canonicalize});
+  }
   const file = join(path, manifest.file), digest = createHash("sha256");
   for await (const bytes of createReadStream(file)) digest.update(bytes);
   if (digest.digest("hex") !== manifest.sha256) throw new Error("DISPLAY_INPUT_SHA_MISMATCH");
@@ -24,6 +36,7 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
   const idFor = row => accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId);
   let bindings;
   await ctx.runItems("accountDisplay", ctx.readRows(file), async row => {
+    if(ctx.manifest.identityProfiles)assertDisplayCaptureRow(row.snapshot);
     const id = idFor(row), original = bindings.get(id);
     if (!original) { const error = new Error("TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"); error.status = 409; error.code = "TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"; throw error; }
     if (original.source_digest !== row.baseSourceDigest || original.source_updated_at !== row.sourceUpdatedAt) throw new Error("TARGET_ACCOUNT_SNAPSHOT_SOURCE_DRIFT");

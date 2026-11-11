@@ -57,7 +57,7 @@ async function mount(t, options = {}) {
     const address = new URL(String(url), browser.location.href); const params = Object.fromEntries(address.searchParams); calls.push({ pathname: address.pathname, params, method: init.method ?? 'GET', body: init.body });
     if (options.sensitiveProfile && address.pathname === `/api/bff/admin/users/${subject}/sensitive-profile`) {
       assert.equal(init.method, 'POST', 'sensitive read uses the existing read-only POST contract'); sensitiveSignal = init.signal;
-      const reply = () => json({ userId: subject, phoneNumber: 'SYNTHETIC_PHONE_VISIBLE', realName: null, identityNumber: null, availability: { phoneNumber: 'AVAILABLE', realName: 'NOT_RECORDED', identityNumber: 'NOT_RECORDED' } });
+      const reply = () => json(options.sensitiveData ?? { userId: subject, phoneNumber: 'SYNTHETIC_PHONE_VISIBLE', realName: null, identityNumber: null, availability: { phoneNumber: 'AVAILABLE', realName: 'NOT_RECORDED', identityNumber: 'NOT_RECORDED' } });
       if (options.deferSensitive) return new Promise(resolve => { releaseSensitive = () => resolve(reply()); });
       return reply();
     }
@@ -113,6 +113,21 @@ test('missing identity details and registration facts stay unavailable rather th
   const identity = h.host.querySelector('.udv-identity'); assert.equal(identity.querySelectorAll('dd')[0].textContent, '无查看权限'); assert.equal(identity.querySelectorAll('dd')[1].textContent, '无查看权限');
   assert.match(identity.textContent, /188\*\*\*\*1101/); assert.equal(namedButton('查看明文'), undefined); assert.match(h.host.querySelector('.udv-user-header').textContent, /待核/);
   assert.equal(h.host.querySelector('.udv-user-header').textContent.includes('2026'), false); assert.equal(h.host.querySelector('.udv-wallet strong').textContent, '待核'); assert.equal(h.host.textContent.includes('普通会员'), false);
+});
+
+test('legacy identity defaults to masks and reveals original values only after the authorized action', async t => {
+  const display = { realNameMasked: '合**名', idCardMasked: '990000********123X', maskingVersion: 'identity-mask-v1' };
+  const h = await mount(t, { user: { identity: { ...rawUser.identity, display } }, sensitiveProfile: true,
+    permissions: [...defaultPermissions, 'user.identity.sensitive.read'], sensitiveData: { userId: subject, phoneNumber: null,
+      realName: 'SYNTHETIC_NAME', identityNumber: 'SYNTHETIC_DOCUMENT', availability: { phoneNumber: 'NOT_RECORDED', realName: 'AVAILABLE', identityNumber: 'AVAILABLE' } } });
+  await click(namedButton('展开实名与联系方式')); await waitFor(() => h.host.querySelector('.udv-identity'));
+  const identity = h.host.querySelector('.udv-identity');
+  assert.match(identity.textContent, /合\*\*名/); assert.match(identity.textContent, /990000\*{8}123X/);
+  assert.equal(identity.textContent.includes('SYNTHETIC_NAME'), false);
+  await click(namedButton('查看明文')); await waitFor(() => identity.textContent.includes('SYNTHETIC_NAME'));
+  assert.match(identity.textContent, /SYNTHETIC_DOCUMENT/);
+  await click(namedButton('隐藏明文')); assert.equal(identity.textContent.includes('SYNTHETIC_NAME'), false);
+  assert.match(identity.textContent, /合\*\*名/);
 });
 
 for (const [phoneRevealed, expected] of [[true, /联系方式已授权展示/], [false, /联系方式已脱敏/], [undefined, /实名资料按需查看/]]) {
