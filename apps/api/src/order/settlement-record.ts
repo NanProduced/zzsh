@@ -663,7 +663,9 @@ function probe(order: LockedOrder, openingId: string, basis: Basis, lines: Settl
     capturedAmount: basis.captured,
     fullPayout: basis.fullPayout,
     fullPayoutPolicyRef: basis.fundingPolicyRef,
-    ...(basis.settlementPricing?{pricingMode:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio}:{}),
+    ...(basis.settlementPricing?.schema === "settlement-pricing-v3"
+      ? {pricingMode:"FIXED_FEE_TOTAL_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio,fixedFeeRate:basis.settlementPricing.fixedFeeRate}
+      : basis.settlementPricing ? {pricingMode:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio} : {}),
     haff: lines.find((line) => line.pricingKind === "HAFF_RATIO") ?? basis.haff,
     items: lines.filter((line) => line.pricingKind !== "HAFF_RATIO"),
   };

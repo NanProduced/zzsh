@@ -136,6 +136,12 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
  assert.equal(settled.ok,true,settled.reasons.join(','));assert.equal(settled.amounts!.ownerNet.amount,'0.09');
  assert.equal(settled.amounts!.platformServiceFee?.amount,'0.01');assert.equal(settled.amounts!.membershipDiscount?.amount,'0.01');
  const source=readFileSync(resolve(tree,path),'utf8'),build=load(source,'payloadFor'),project=load(source,'projectSettlementBody');
+ const probe=load(source,'probe');
+ const probed=probe({id:'order',renterUserId:'renter',ownerUserId:'owner'},'opening',{
+  quoteDigest:'quote',paymentDigest:'payment',deposit:'0.00',captured:'0.09',fullPayout:'NOT_SELECTED',fundingPolicyRef:null,settlementPricing:basis,haff:toLine(haff),
+ },[toLine(haff),toLine(item)],'NORMAL','settlement');
+ assert.equal(probed.ok,true,probed.reasons.join(','));
+ assert.equal(probed.amounts.platformServiceFee.amount,'0.01');assert.equal(probed.amounts.membershipDiscount.amount,'0.01');
  const payload=build({order:{id:'order',renterUserId:'renter',ownerUserId:'owner'},openingId:'opening',openingVersion:1,
   basis:{settlementPricing:basis},lines:[toLine(haff),toLine(item)],kind:'SYSTEM',endReason:'NORMAL',early:false,result:settled,
   proposedOwnerNet:null,proposedRenterRefund:null,reason:null,base:{versionId:null,versionNo:0,decisionDigest:'digest',intake:null}});
