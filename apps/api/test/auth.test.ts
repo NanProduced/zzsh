@@ -939,6 +939,13 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
     assert.equal(secondBootstrap.body?.username, "zz00002");
     const adminTwoId = secondBootstrap.body?.adminUserId as string;
     assert.notEqual(initialAdminId, adminTwoId);
+    const initialBossWindows = await runtimePool.query<{ bootstrapExpiresAt: Date | null }>(
+      `SELECT "bootstrap_expires_at" AS "bootstrapExpiresAt" FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = ANY($1::text[])`,
+      [[initialAdminId, adminTwoId]],
+    );
+    assert.equal(initialBossWindows.rows.length, 2);
+    assert.ok(initialBossWindows.rows.every((row) => row.bootstrapExpiresAt === null));
+    // Pre-upgrade unactivated Boss rows may still carry the old deadline.
     await runtimePool.query(`UPDATE "zzsh_iam"."admin_security" SET "bootstrap_expires_at" = clock_timestamp() - interval '1 second' WHERE "admin_user_id" = $1`, [initialAdminId]);
     const expiredBootstrapAdmin = cookieJar();
     assert.equal((await request(base, "/api/auth/admin/sign-in/username", { username: initialAdminUsername.toUpperCase(), password: BOSS_ONE_TEMP_PASSWORD }, expiredBootstrapAdmin, ADMIN_ORIGIN)).response.status, 200);
@@ -951,12 +958,13 @@ test("M2 business migration and Better Auth realms enforce the basic boundary", 
       name: "Boss One Reinitialized",
       password: BOSS_ONE_TEMP_PASSWORD,
     }, cookieJar(), ADMIN_ORIGIN);
-    assert.equal(reinitializedBootstrap.response.status, 200);
-    const adminId = reinitializedBootstrap.body?.adminUserId as string;
-    assert.notEqual(adminId, initialAdminId);
-    const adminUsername = reinitializedBootstrap.body?.username as string;
-    assert.equal(adminUsername, initialAdminUsername);
-    assert.equal(reinitializedBootstrap.body?.passwordChangeRequired, true);
+    assert.equal(reinitializedBootstrap.response.status, 409);
+    const adminId = initialAdminId;
+    const adminUsername = initialAdminUsername;
+    const preservedPendingBoss = await runtimePool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 AND "is_boss" AND "status" = 'PENDING_ENROLLMENT'`, [adminId],
+    );
+    assert.equal(preservedPendingBoss.rows[0]?.count, "1");
     const thirdBootstrap = await request(base, "/api/v1/admin/security/bootstrap", {
       bootstrapSecret: ADMIN_BOOTSTRAP_SECRET,
       email: "boss-three@example.invalid",
