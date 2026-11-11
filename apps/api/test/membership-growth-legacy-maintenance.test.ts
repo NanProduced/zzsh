@@ -158,6 +158,7 @@ test("READ preview derives original T facts without receipt/audit/write/owner pr
 test("K1 writes same-client contribution/coverage/audit/idempotency; same-key replay returns exact original response in new window", async () => {
   const db = fixture(), i = input(); const first = await db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port));
   assert.equal(first.replayed, false); assert.equal(first.receipt.inserted, 3); assert.equal(first.receipt.replayed, 0); assert.equal(first.receipt.coverageExecutionKey, i.executionKey);
+  assert.deepEqual(db.portLog, ["read-write", "persist"]);
   assert(db.sqlLog.some((s) => s.includes("set_config('zzsh.actor_type'")), "fresh writes bind actor/session/request on that client");
   assert.equal(db.committed().contributions.size, 3); assert.equal(db.committed().coverage.size, 1); assert.equal(db.committed().idempotency.size, 1); assert.equal(db.committed().audits, 1);
   const calls = db.portLog.length, fresh = prepareLegacyGrowthMaintenanceInput(i.businessPackageBytes, i.businessPackageSha256, { ...context(), execution: { ...context().execution, approvalRef: "another-window", attempt: 2 } });
@@ -198,13 +199,24 @@ test("same original receipt partial -> new business package COMPLETE appends cov
   const old = await db.read(() => readLegacyGrowthMaintenanceReceipt(db.client, partial, db.port)); assert.equal(old.state, "FOUND"); if (old.state === "FOUND") assert.deepEqual(old.receipt, a.receipt);
 });
 
-test("persist unique-winner port seam binds the actual canonical key read after persist, not requested/writer result key", async () => {
+test("persist unique-winner port seam binds the actual canonical key, not requested/writer result key", async () => {
   const db = fixture(), i = input(), source = JSON.parse(i.businessPackageBytes) as LegacyGrowthMaintenancePackage, prepared = prepareLegacyGrowthBackfill({ ...source.source, packageDigest: i.businessPackageSha256 }); assert(prepared.ok);
   for (const r of prepared.rows) db.committed().contributions.set(JSON.stringify([r.contribution.userId, r.contribution.sourceKey, r.contribution.revision]), r.sourceDigest);
   db.setCompetingKey("growth-other-winner-0009");
   const result = await db.write(() => applyLegacyGrowthMaintenance(db.client, i, db.port)); assert.equal(result.receipt.coverageExecutionKey, "growth-other-winner-0009"); assert.equal(result.receipt.inserted, 0);
   const recovered = await db.read(() => readLegacyGrowthMaintenanceReceipt(db.client, i, db.port)); assert.equal(recovered.state, "FOUND");
   // Synthetic port interleaving only. Real PG unique constraints/waits require Q's separate database window.
+});
+
+test("a malformed returned coverage record fails closed and rolls back all new evidence", async () => {
+  const db = fixture(), badPort: LegacyCoveragePort = { ...db.port, async persist(client, record) {
+    const stored = await db.port.persist(client, record);
+    return { ...stored, receiptDigest: "0".repeat(64) };
+  } };
+  await assert.rejects(() => db.write(() => applyLegacyGrowthMaintenance(db.client, input(), badPort)), (e: unknown) =>
+    typeof e === "object" && e !== null && "code" in e && e.code === "EVIDENCE_UNAVAILABLE");
+  assert.equal(db.committed().contributions.size, 0); assert.equal(db.committed().coverage.size, 0);
+  assert.equal(db.committed().idempotency.size, 0); assert.equal(db.committed().audits, 0);
 });
 
 test("current frozen/revoked/suspended/locked operator blocks fresh, replay and recovery before any exact-key receipt read", async () => {
