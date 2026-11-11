@@ -487,9 +487,7 @@ type AcceptanceBase = { versionId: string | null; versionNo: number; decisionDig
 
 async function acceptanceBase(client: PoolClient, orderId: string): Promise<AcceptanceBase> {
   const current = (await client.query<{ id: string; versionNo: number; approvalStatus: string | null }>(
-    `SELECT v.id, v.version_no AS "versionNo",
-            CASE WHEN r.status IN ('PENDING','APPROVED') AND r.expires_at <= clock_timestamp()
-                 THEN 'EXPIRED' ELSE r.status END AS "approvalStatus"
+    `SELECT v.id, v.version_no AS "versionNo", r.status AS "approvalStatus"
        FROM zzsh_order.settlement_version v
        LEFT JOIN zzsh_iam.approval_request r ON r.id = v.approval_request_id
       WHERE v.order_id = $1 AND v.superseded_at IS NULL
@@ -650,21 +648,18 @@ function needsEarlyReason(result: SettlementComputation): boolean {
   return result.early === true && result.reasons.includes("END_REASON_INCONSISTENT") && other.length === 0;
 }
 
-/** Approval expiry applies even before an IAM action persists the EXPIRED status. */
-async function readSettlementApproval(client: PoolClient, requestId: string, asOf?: string) {
+async function readSettlementApproval(client: PoolClient, requestId: string) {
   return (await client.query<{ status: string; requestedBy: string; decidedBy: string | null; payloadHash: string; expiresAt: string }>(
-    `SELECT CASE WHEN status IN ('PENDING','APPROVED') AND expires_at <= COALESCE($2::timestamptz, clock_timestamp()) THEN 'EXPIRED'
-                 ELSE status END AS status,
-            requested_by AS "requestedBy", decided_by AS "decidedBy", operation_payload_hash AS "payloadHash",
+    `SELECT status, requested_by AS "requestedBy", decided_by AS "decidedBy", operation_payload_hash AS "payloadHash",
             expires_at::text AS "expiresAt"
        FROM zzsh_iam.approval_request WHERE id = $1`,
-    [requestId, asOf ?? null],
+    [requestId],
   )).rows[0];
 }
 
 async function readyFacts(client: PoolClient, version: {
   id: string; versionHash: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; early: boolean; initiatorParty: ConfirmationParty; approvalRequestId: string | null;
-}, asOf?: string): Promise<{ ready: boolean; reasons: string[] }> {
+}): Promise<{ ready: boolean; reasons: string[] }> {
   const decisions = (await client.query<{ party: string; action: string }>(
     `SELECT party, action FROM zzsh_order.settlement_decision WHERE settlement_version_id = $1`,
     [version.id],
@@ -672,8 +667,7 @@ async function readyFacts(client: PoolClient, version: {
   const hit = (party: string, action: string) => decisions.some((row) => row.party === party && row.action === action);
   let opsApproval: { status: "APPROVED" | "PENDING" | "REJECTED"; requesterId: string; approverId: string; payloadHash: string } | null = null;
   if (version.approvalRequestId) {
-    const approval = await readSettlementApproval(client, version.approvalRequestId, asOf);
-    if (approval?.status === "EXPIRED") return { ready: false, reasons: ["OPS_APPROVAL_EXPIRED"] };
+    const approval = await readSettlementApproval(client, version.approvalRequestId);
     if (approval && (approval.status === "APPROVED" || approval.status === "PENDING" || approval.status === "REJECTED")) {
       opsApproval = { status: approval.status, requesterId: approval.requestedBy, approverId: approval.decidedBy ?? "", payloadHash: approval.payloadHash };
     }
@@ -1644,26 +1638,15 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
     [SETTLEMENT_ADJUST_OPERATION, SETTLEMENT_ADJUST_TRIGGER],
   )).rows[0];
   if (!template) throw new SecurityApiError(404, "NOT_FOUND", "Approval template not found");
-  const candidates = (await client.query<{ adminUserId: string }>(
-    `SELECT admin_user_id AS "adminUserId" FROM zzsh_iam.approval_template_candidate WHERE template_id = $1 ORDER BY admin_user_id`,
-    [template.id],
-  )).rows;
-  if (candidates.length < 1) return blocked(["OPS_APPROVAL_MISSING"]);
   const approvalId = `approval_req_${randomUUID().replaceAll("-", "")}`;
   const summary = input.reason.trim().slice(0, 240);
   await client.query(
     `INSERT INTO zzsh_iam.approval_request (
        id, template_id, template_version, operation_code, trigger_condition, payload_version, operation_payload,
        operation_payload_hash, summary, requested_by, status, expires_at)
-     VALUES ($1, $2, $3, $4, $5, 1, $6::jsonb, $7, $8, $9, 'PENDING', clock_timestamp() + interval '24 hours')`,
+     VALUES ($1, $2, $3, $4, $5, 1, $6::jsonb, $7, $8, $9, 'PENDING', 'infinity'::timestamptz)`,
     [approvalId, template.id, template.version, SETTLEMENT_ADJUST_OPERATION, SETTLEMENT_ADJUST_TRIGGER, hashed.raw, hashed.hash, summary, actor.userId],
   );
-  for (const candidate of candidates) {
-    await client.query(
-      `INSERT INTO zzsh_iam.approval_request_candidate (request_id, admin_user_id, source, template_version) VALUES ($1, $2, 'TEMPLATE', $3)`,
-      [approvalId, candidate.adminUserId, template.version],
-    );
-  }
   await recordAudit(client, {
     actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, action: "approval.request.created",
     objectType: "approval_request", objectId: approvalId, outcome: "SUCCESS", requestId: input.requestId,
@@ -1700,9 +1683,7 @@ async function manualGap(client: PoolClient, version: { kind: "SYSTEM" | "MANUAL
   if (version.kind !== "MANUAL_ADJUSTMENT") return null;
   if (!version.approvalRequestId) return "OPS_APPROVAL_MISSING";
   const approval = await readSettlementApproval(client, version.approvalRequestId);
-  if (approval?.status === "EXPIRED") return "OPS_APPROVAL_EXPIRED";
   if (!approval || approval.status !== "APPROVED" || !approval.decidedBy) return "OPS_APPROVAL_MISSING";
-  if (approval.decidedBy === approval.requestedBy) return "OPS_SELF_APPROVE";
   if (approval.payloadHash !== version.versionHash) return "OPS_PAYLOAD_STALE";
   return null;
 }
@@ -1890,19 +1871,18 @@ async function postReadySettlement(
          FROM zzsh_iam.approval_request WHERE id = $1 FOR SHARE`,
       [version.approvalRequestId],
     )).rows[0];
-    if (!row || row.status !== "APPROVED" || !row.decidedBy || row.decidedBy === row.requestedBy || row.payloadHash !== version.versionHash) {
+    if (!row || row.status !== "APPROVED" || !row.decidedBy || row.payloadHash !== version.versionHash) {
       throw conflict("OPS_APPROVAL_MISSING");
     }
     approval = { requestedBy: row.requestedBy, decidedBy: row.decidedBy, expiresAt: row.expiresAt, payloadHash: row.payloadHash };
   }
   const postedAt = (await client.query<{ postedAt: string }>(`SELECT clock_timestamp()::text AS "postedAt"`)).rows[0]!.postedAt;
-  const readiness = await readyFacts(client, version, postedAt);
+  const readiness = await readyFacts(client, version);
   if (!readiness.ready) {
     const waitReasons = new Set(["RENTER_CONFIRMATION_MISSING", "OWNER_CONFIRMATION_MISSING", "SUPPORT_REVIEW_MISSING", "PARTY_REJECTED"]);
     if (!requireReady && readiness.reasons.length > 0 && readiness.reasons.every((reason) => waitReasons.has(reason))) return;
     throw conflict(readiness.reasons[0] ?? "SETTLEMENT_NOT_READY");
   }
-  if (approval && Date.parse(approval.expiresAt) <= Date.parse(postedAt)) throw conflict("OPS_APPROVAL_EXPIRED");
 
   const postingId = `spost_${randomUUID().replaceAll("-", "")}`;
   const header = (await client.query<{ postedAt: string; refundDueAt: string }>(

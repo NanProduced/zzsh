@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 
 import { handleAdminApprovalRoute, evaluateApprovalActions, assertApprovalAction, hashApprovalPayload, requestScope, virtualRequestStatus } from "../src/auth/approval-audit";
-import { projectApprovalBusinesses, approvalRegistration, APPROVAL_EXECUTION_MODE } from "../src/auth/approval-business";
+import { projectApprovalBusinesses, approvalRegistration, APPROVAL_EXECUTION_MODE, APPROVAL_REGISTERED_OPERATION_CODES, approvalDecisionRequiresTotp, membershipBusinessPermission, membershipDecisionRequiresBoss } from "../src/auth/approval-business";
 
 const unifiedPricingFixture = { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price_fixture", payableRatio: "1", costBasisRef: "price_fixture" };
 
@@ -20,6 +20,8 @@ type FixtureActor = {
   rolePermissions?: string[];
   deniedPermissions?: string[];
   gameScope?: { mode: string; gameIds: string[] };
+  /** 角色层级是权限并集按最高权限算；SUPPORT_ONLY 在服务端硬拦 approve/reject。 */
+  decisionRole?: "BOSS" | "OPS" | "SUPPORT_ONLY";
 };
 
 type FixtureRequest = {
@@ -42,6 +44,8 @@ type FixtureRequest = {
   decisionReason: string | null;
   supersedesRequestId: string | null;
   supersededByRequestId: string | null;
+  /** OBJECT_GAME_SQL 反查出的所属游戏；结算调整与冲回靠它做范围判定。 */
+  objectGameId?: string | null;
 };
 
 type Fixture = {
@@ -159,7 +163,15 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
       const codes = [...new Set([...(actor.rolePermissions ?? []), ...(actor.permissions ?? [])])].filter((code) => !denied.has(code));
       return { rows: codes.map((permissionCode) => ({ permissionCode })), rowCount: codes.length };
     }
-    if (text.includes('FROM "zzsh_iam"."admin_user_role"')) return { rows: [], rowCount: 0 };
+    if (text.includes('FROM "zzsh_iam"."admin_user_role"')) {
+      // lockActor 读已分配角色 id；本 harness 不建模角色锁，返回空即可避免多余的 FOR UPDATE 查询。
+      if (text.includes('AS "roleId"')) return { rows: [], rowCount: 0 };
+      // loadDecisionRoleRank：BOSS 由 isBoss 短路；其余账号默认按运营(OPS)，显式 SUPPORT_ONLY 的账号才是纯客服。
+      const actor = actorById.get(String(values[0]));
+      const role = actor?.decisionRole ?? "OPS";
+      return { rows: [{ code: role === "SUPPORT_ONLY" ? "role_preset_support" : "role_preset_ops", canApprove: true }], rowCount: 1 };
+    }
+    if (text.includes('SELECT "id" FROM "zzsh_iam"."admin_role"')) return { rows: (values[0] as string[]).filter(Boolean).map((id) => ({ id })), rowCount: 0 };
     if (text.includes('"game_scope_mode"')) {
       const actor = actorById.get(String(values[0]));
       return { rows: [{ mode: actor?.gameScope?.mode ?? "ALL_GAMES", gameIds: actor?.gameScope?.gameIds ?? [] }], rowCount: 1 };
@@ -309,6 +321,15 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
       const rows = (fixture.settlementDecisions ?? []).filter((row) => (values[0] as string[]).includes(String(row.versionId)));
       return { rows, rowCount: rows.length };
     }
+    // 批准即生效的对象新鲜度前置：结算版本仍为当前版且未过账；政策草稿之后没有更新版本。
+    if (text.includes("AS fresh") && text.includes("settlement_version")) return { rows: [{ fresh: true, posted: false }], rowCount: 1 };
+    if (text.includes("AS newer") && text.includes("membership_growth_policy")) return { rows: [{ newer: false }], rowCount: 1 };
+    if (text.includes('SELECT count(*)::text AS count FROM "zzsh_iam"."approval_request"')) return { rows: [{ count: String(state.requests.size) }], rowCount: 1 };
+    // requestScope 现在先按角色算可见范围：$1 是当前账号，$2 是「运营及以上」布尔，$3 是申请 id。
+    if (text.includes('AS allowed') && text.includes('FROM "zzsh_iam"."approval_request" r WHERE r."id"')) {
+      const row = state.requests.get(String(values[2]));
+      return { rows: [{ allowed: Boolean(row) && (row?.requestedBy === String(values[0]) || values[1] === true) }], rowCount: 1 };
+    }
     if (text.includes('FROM "zzsh_iam"."approval_request"')) {
       if (text.includes('SELECT "requested_by" AS "requestedBy"')) {
         const row = state.requests.get(String(values[0]));
@@ -365,7 +386,8 @@ async function call(view: ReturnType<typeof harness>, actorId: string, method: s
 
 const BOSS: FixtureActor = { id: "admin_boss", username: "zz00001", status: "ACTIVE", isBoss: true, twoFactorEnabled: true, permissions: [] };
 const REQUESTER: FixtureActor = { id: "admin_requester", username: "zz00002", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.create", "approval.request.read", "approval.request.execute", "approval.request.add_approver"] };
-const CANDIDATE: FixtureActor = { id: "admin_candidate", username: "zz00003", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.approve", "approval.request.read", "membership.entitlement.decide"] };
+// 批准即生效：决定与执行是同一人，审批人必须同时具备 DECIDE 与 EXECUTE 业务权限。
+const CANDIDATE: FixtureActor = { id: "admin_candidate", username: "zz00003", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.approve", "approval.request.read", "membership.entitlement.decide", "membership.entitlement.execute"] };
 
 function baseFixture(extra: Partial<Fixture> = {}): Fixture {
   return {
@@ -389,31 +411,34 @@ function entitlementAmendmentFixture() {
   return { fixture, row, finalPayload, body: { requestId: row.id, decision: "APPROVE", expectedPayloadHash: row.operationPayloadHash, finalPayload } };
 }
 
-test("amended entitlement approval persists a separate hash and execution consumes that exact decision once", async () => {
+test("amended entitlement approval persists a separate hash and the decision itself executes that exact payload", async () => {
   const { fixture, row, finalPayload, body } = entitlementAmendmentFixture();
   const view = harness(fixture), original = JSON.stringify(row.operationPayload), finalHash = hashApprovalPayload(finalPayload).hash;
-  const first = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" });
+  let effective: any;
+  const executor = async (input: any) => { effective = input; return { resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED" }; };
+  // 批准即生效：GENERIC_TRANSACTION 在决定所在同一事务里直接执行，不再有单独的 /execute 端点。
+  const first = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" }, executor);
   assert.equal(first.status, 200, JSON.stringify(first));
-  assert.equal(first.body.finalPayloadHash, finalHash);
-  assert.equal(first.body.requestPayloadHash, row.operationPayloadHash);
-  assert.equal(JSON.stringify(view.state.requests.get(row.id)?.operationPayload), original);
+  assert.equal(first.body.status, "EXECUTED", JSON.stringify(first.body));
+  assert.equal(first.body.executionStatus, "SUCCEEDED");
+  assert.equal(first.body.resultCode, "MEMBERSHIP_ENTITLEMENT_GRANTED");
+  assert.equal(first.body.approvedPayloadHash, finalHash, "the decision receipt names the approved payload hash");
+  assert.deepEqual(effective.operationPayload, hashApprovalPayload(finalPayload).value, "the executor consumes the amended decision payload");
+  assert.equal(effective.operationPayloadHash, finalHash);
+  assert.equal(JSON.stringify(view.state.requests.get(row.id)?.operationPayload), original, "the original request snapshot is never rewritten");
   assert.equal(view.state.decisionRows.get(row.id)?.finalPayloadHash, finalHash);
-  const replay = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" });
+  assert.equal(view.state.requests.get(row.id)?.status, "EXECUTED");
+  assert.equal(view.state.executions, 1, "one approval_execution receipt is written in the decision transaction");
+  assert.equal(view.state.audits, 2, "approval.request.approved plus approval.execution.completed");
+  const replay = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "idem_amended_1" }, executor);
   assert.equal(replay.body.idempotencyReplay, true);
   assert.equal(view.state.decisions, 1);
+  assert.equal(view.state.executions, 1, "a replay must not repeat the business effect");
   const conflict = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", { ...body, finalPayload: { ...finalPayload, reason: "同键不得替换已批准内容" } }, { "idempotency-key": "idem_amended_1" });
   assert.equal(conflict.status, 409);
   const recover = await call(view, CANDIDATE.id, "GET", `/approvals/recovery?operation=approval.request.decide&key=idem_amended_1&requestId=${row.id}`);
   assert.equal(recover.status, 200, JSON.stringify(recover));
-  assert.equal(recover.body.receipt.finalPayloadHash, finalHash);
-  let effective: any;
-  const execute = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": "idem_execute_final" }, async (input) => { effective = input; return { resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED" }; });
-  assert.equal(execute.status, 200, JSON.stringify(execute));
-  assert.deepEqual(effective.operationPayload, hashApprovalPayload(finalPayload).value);
-  assert.equal(effective.operationPayloadHash, finalHash);
-  const executeReplay = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": "idem_execute_final" });
-  assert.equal(executeReplay.body.idempotencyReplay, true);
-  assert.equal(view.state.executions, 1);
+  assert.equal(recover.body.receipt.approvedPayloadHash, finalHash);
   const detail = await call(view, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
   assert.equal(detail.status, 200, JSON.stringify(detail));
   assert.equal(detail.body.operation.payloadHash, row.operationPayloadHash);
@@ -436,8 +461,8 @@ test("only a currently eligible approver receives the limited entitlement amendm
   assert.equal(own.body.entitlementAmendment, null);
   const wrongScope = harness({ ...fixture, actors: [BOSS, REQUESTER, { ...CANDIDATE, gameScope: { mode: "SELECTED_GAMES", gameIds: ["other_game"] } }] });
   const scoped = await call(wrongScope, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
-  assert.equal(scoped.body.entitlementAmendment, null);
-  assert.equal(scoped.body.business.summaryAvailable, false);
+  // 游戏范围外的运营现在打不开这张申请详情（N2 与 R2 一致）。
+  assert.equal(scoped.status, 404, JSON.stringify(scoped.body));
 });
 
 test("amended approval rejects stale hashes, frozen target changes, unsupported operations and oversized bodies before decision write", async () => {
@@ -463,50 +488,50 @@ test("amended approval rejects stale hashes, frozen target changes, unsupported 
   }
 });
 
-test("execute fails closed on a corrupt or missing decision while legacy null overrides keep the original snapshot", async () => {
-  for (const variant of ["hash", "partial", "actor", "missing", "legacy"] as const) {
-    const { fixture, row, finalPayload } = entitlementAmendmentFixture();
-    fixture.requests = [{ ...row, status: "APPROVED", decidedBy: CANDIDATE.id }];
-    const finalHash = hashApprovalPayload(finalPayload).hash;
-    fixture.decisions = variant === "missing" ? [] : [{ requestId: row.id, decision: "APPROVED", approverId: variant === "actor" ? BOSS.id : CANDIDATE.id, finalPayload: variant === "partial" || variant === "legacy" ? null : finalPayload, finalPayloadHash: variant === "legacy" ? null : variant === "hash" ? "a".repeat(64) : finalHash }];
-    const view = harness(fixture); let called = 0;
-    const result = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: row.id }, { "idempotency-key": `idem_corrupt_${variant}` }, async (input: any) => { called += 1; assert.equal(input.operationPayloadHash, row.operationPayloadHash); assert.deepEqual(input.operationPayload, row.operationPayload); return { resultCode: "MEMBERSHIP_ENTITLEMENT_GRANTED" }; });
-    assert.equal(result.status, variant === "legacy" ? 200 : 409, JSON.stringify(result));
-    assert.equal(called, variant === "legacy" ? 1 : 0);
+test("retired mutation endpoints (execute, add-candidate, template update) return 409 without touching state", async () => {
+  const view = harness(baseFixture());
+  for (const path of ["/approvals/requests/execute", "/approvals/requests/add-candidate", "/approvals/templates/update"]) {
+    const result = await call(view, BOSS.id, "POST", path, { requestId: "approval_req_target" }, { "idempotency-key": "idem_retired_" + path });
+    assert.equal(result.status, 409, path + ": " + JSON.stringify(result.body));
+    assert.equal(result.code, "CONFLICT");
   }
+  assert.equal(view.state.decisions, 0);
+  assert.equal(view.state.executions, 0);
+  assert.equal(view.state.audits, 0);
+  assert.equal(view.state.requestCandidates.length, 1, "retired writes must not mutate any state");
 });
 
 test("approval writes reject a missing or malformed Idempotency-Key before touching state", async () => {
-  const view = harness(baseFixture({ requests: [requestFixture({ status: "APPROVED", decidedBy: BOSS.id })] }));
-  const missing = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" });
+  const view = harness(baseFixture());
+  const body = { requestId: "approval_req_target", decision: "APPROVE" };
+  const missing = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body);
   assert.equal(missing.status, 400);
   assert.equal(missing.code, "MISSING_IDEMPOTENCY_KEY");
-  assert.equal(view.state.executions, 0);
+  assert.equal(view.state.decisions, 0);
 
-  const malformed = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "has spaces" });
+  const malformed = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, { "idempotency-key": "has spaces" });
   assert.equal(malformed.status, 400);
   assert.equal(malformed.code, "INVALID_ARGUMENT");
-  assert.equal(view.state.executions, 0);
+  assert.equal(view.state.decisions, 0);
 });
 
-test("same key and same body replays the original receipt without a second write", async () => {
-  const view = harness(baseFixture({ requests: [requestFixture({ status: "APPROVED", decidedBy: CANDIDATE.id })] }));
-  const body = { requestId: "approval_req_target" };
+test("same key and same body replays the original decision receipt without a second write", async () => {
+  const view = harness(baseFixture());
+  const body = { requestId: "approval_req_target", decision: "APPROVE" };
   const key = { "idempotency-key": "idem_first" };
-  const first = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", body, key);
+  const first = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, key);
   assert.equal(first.status, 200, JSON.stringify(first.body));
   assert.equal(first.body.idempotencyReplay, false);
   assert.equal(first.body.approvalRequestId, "approval_req_target");
   const audits = view.state.audits;
-  const executions = view.state.executions;
-  assert.equal(executions, 1);
+  const decisions = view.state.decisions;
+  assert.equal(decisions, 1);
 
-  const replay = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", body, key);
+  const replay = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", body, key);
   assert.equal(replay.status, 200);
   assert.equal(replay.body.idempotencyReplay, true);
   assert.equal(replay.body.approvalRequestId, first.body.approvalRequestId, "replay must return the original business id");
-  assert.equal(replay.body.resultCode, first.body.resultCode);
-  assert.equal(view.state.executions, executions, "replay must not add an execution row");
+  assert.equal(view.state.decisions, decisions, "replay must not add a decision row");
   assert.equal(view.state.audits, audits, "replay must not append audit");
 });
 
@@ -530,11 +555,13 @@ test("idempotency scope separates principal, operation and target", async () => 
   assert.equal(keys.length, 1);
   assert.ok(keys[0]!.includes('["admin","admin_candidate","approval.request.decide","approval_req_target"]'), keys[0]);
 
+  // 不同主体、同 key：不复用也不覆盖第一条回执；此处原单已 APPROVED，状态机给出确定的 409。
   const otherPrincipal = await call(view, BOSS.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "REJECT", reason: "他人不同主体" }, { "idempotency-key": "shared_key" });
-  assert.equal(otherPrincipal.status, 403);
+  assert.equal(otherPrincipal.status, 409);
   assert.equal(view.state.idempotency.size, 1, "a different principal must not reuse or overwrite the first receipt");
 
-  const otherOperation = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "shared_key" });
+  // 不同操作、同 key：不是决定命令的重放（/execute 已退役，改用建单命令）。
+  const otherOperation = await call(view, REQUESTER.id, "POST", "/approvals/requests", { operationCode: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary: "不同操作同 key" }, { "idempotency-key": "shared_key" });
   assert.equal(otherOperation.status, 200, JSON.stringify(otherOperation.body));
   assert.notEqual(otherOperation.body.idempotencyReplay, true, "a different operation kind on the same key is not a replay of the decision");
 
@@ -542,64 +569,19 @@ test("idempotency scope separates principal, operation and target", async () => 
   assert.equal(otherTarget.status, 404, "an unknown target on a reused key is not the first receipt");
 });
 
-test("template update replays keep a single version bump and a single audit", async () => {
+test("template configuration is retired: every update returns 409 without touching state", async () => {
   const view = harness(baseFixture());
   const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] };
   const first = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
-  assert.equal(first.status, 200, JSON.stringify(first.body));
-  const version = first.body.version;
+  assert.equal(first.status, 409, JSON.stringify(first.body));
+  assert.equal(first.code, "CONFLICT");
+  const version = view.state.templates[0]?.version;
   const audits = view.state.audits;
-
   const replay = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
-  assert.equal(replay.status, 200);
-  assert.equal(replay.body.version, version, "replay must not increment the template version");
-  assert.equal(view.state.audits, audits, "replay must not append a template audit");
-
-  const differentIntent = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, candidateUsernames: [BOSS.username, CANDIDATE.username] }, { "idempotency-key": "idem_tpl" });
-  assert.equal(differentIntent.status, 409);
-  assert.equal(differentIntent.code, "IDEMPOTENCY_KEY_REUSED");
-});
-
-test("versioned template update rejects stale candidates and replays the original result", async () => {
-  const view = harness(baseFixture());
-  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username], expectedVersion: 1 };
-  const accepted = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_versioned_tpl" });
-  assert.equal(accepted.status, 200, JSON.stringify(accepted.body)); assert.equal(accepted.body.version, 2);
-  const before = [...view.state.templateCandidates], audits = view.state.audits;
-  const replay = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_versioned_tpl" });
-  assert.equal(replay.status, 200); assert.equal(replay.body.version, 2); assert.equal(replay.body.idempotencyReplay, true);
-  assert.equal(view.state.audits, audits); assert.deepEqual(view.state.templateCandidates, before);
-  const stale = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, candidateUsernames: [BOSS.username] }, { "idempotency-key": "idem_stale_tpl" });
-  assert.equal(stale.status, 409); assert.deepEqual(view.state.templateCandidates, before); assert.equal(view.state.audits, audits);
-  const changed = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 2 }, { "idempotency-key": "idem_versioned_tpl" });
-  assert.equal(changed.status, 409); assert.equal(changed.code, "IDEMPOTENCY_KEY_REUSED");
-});
-
-test("template expectedVersion zero only creates a missing template; omitted field keeps the legacy contract", async () => {
-  const view = harness(baseFixture({ templates: [], templateCandidates: [] }));
-  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] };
-  const missing = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 1 }, { "idempotency-key": "idem_absent_stale" });
-  assert.equal(missing.status, 409); assert.equal(view.state.templates.length, 0);
-  const created = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 0 }, { "idempotency-key": "idem_absent_create" });
-  assert.equal(created.status, 200); assert.equal(created.body.version, 1);
-  const stale = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: 0 }, { "idempotency-key": "idem_absent_retry" });
-  assert.equal(stale.status, 409); assert.equal(view.state.templates[0]?.version, 1);
-  const legacy = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_legacy_template" });
-  assert.equal(legacy.status, 200); assert.equal(legacy.body.version, 2);
-  for (const invalid of [-1, 1.5, "1", null, 2147483648]) {
-    const denied = await call(view, BOSS.id, "POST", "/approvals/templates/update", { ...body, expectedVersion: invalid }, { "idempotency-key": "idem_invalid_version" });
-    assert.equal(denied.status, 400); assert.equal(view.state.templates[0]?.version, 2);
-  }
-});
-
-test("an existing pre-versioned template idempotency record still replays after upgrade", async () => {
-  const scope = JSON.stringify(["admin", BOSS.id, "approval.template.configure", null]);
-  const old = { fingerprint: "d4a45964dd502d13b906af11b27beee7b205870479d9b7a3dbd3265aa799f6fb", status: 200,
-    body: { templateId: "approval_tpl_1", version: 1, candidateCount: 1, status: "CONFIGURED" }, createdAt: new Date().toISOString() };
-  const view = harness(baseFixture(), [[scope + "|old_template_key", old]]);
-  const result = await call(view, BOSS.id, "POST", "/approvals/templates/update", { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] }, { "idempotency-key": "old_template_key" });
-  assert.equal(result.status, 200); assert.equal(result.body.idempotencyReplay, true); assert.equal(result.body.version, 1);
-  assert.equal(view.state.templates[0]?.version, 1); assert.equal(view.state.audits, 0);
+  assert.equal(replay.status, 409, "a retired endpoint never replays a stored receipt");
+  assert.equal(view.state.templates[0]?.version, version, "template version never bumps");
+  assert.equal(view.state.audits, audits, "no template audit is appended");
+  assert.equal(view.state.templateCandidates.length, 1, "candidate snapshots are no longer managed through the retired endpoint");
 });
 
 test("request creation replays return the original request id without a second request", async () => {
@@ -671,70 +653,69 @@ test("recovery read returns the safe receipt or an explicit UNRESOLVED", async (
   assert.equal((await call(view, REQUESTER.id, "GET", "/approvals/recovery?operation=approval.request.create&key=bad key")).status, 400);
 });
 
-test("decide rejects self request, missing second factor and non-candidate with the same reasons as the write", async () => {
-  const decider: FixtureActor = { id: "admin_decider", username: "zz00005", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.approve", "approval.request.read", "membership.entitlement.decide"] };
+test("self approval is allowed; only 2FA still blocks a decision; candidate snapshots no longer gate it", async () => {
+  const decider: FixtureActor = { id: "admin_decider", username: "zz00005", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.approve", "approval.request.read", "membership.entitlement.decide", "membership.entitlement.execute"] };
   const selfView = harness(baseFixture({
     actors: [BOSS, REQUESTER, decider],
     requests: [requestFixture({ requestedBy: decider.id })],
     requestCandidates: [{ requestId: "approval_req_target", adminUserId: decider.id }],
   }));
+  // 允许自批：decisionGate 不再产生 SELF_REQUEST_NOT_ALLOWED。
   const self = await call(selfView, decider.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "APPROVE" }, { "idempotency-key": "idem_self" });
-  assert.equal(self.status, 403);
-  assert.match(self.message, /SELF_REQUEST_NOT_ALLOWED/);
-  assert.equal(selfView.state.decisions, 0);
+  assert.equal(self.status, 200, JSON.stringify(self.body));
+  assert.equal(selfView.state.decisions, 1);
 
   const noFactor: FixtureActor = { ...decider, id: "admin_no2fa", username: "zz00008", twoFactorEnabled: false };
   const factorView = harness(baseFixture({ actors: [BOSS, REQUESTER, noFactor], requestCandidates: [{ requestId: "approval_req_target", adminUserId: noFactor.id }] }));
   const blocked = await call(factorView, noFactor.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "APPROVE" }, { "idempotency-key": "idem_2fa" });
   assert.equal(blocked.status, 403);
   assert.match(blocked.message, /TWO_FACTOR_REQUIRED/);
-  assert.equal(factorView.state.decisions, 0, "a candidate without 2FA cannot decide even with the generic permission");
+  assert.equal(factorView.state.decisions, 0, "2FA is still a hard gate even for an otherwise eligible decider");
 
+  // NOT_CANDIDATE 不再由决策门禁返回：不在候选名单里、但有审批权限的账号也能决定。
   const outsider = harness(baseFixture({ requestCandidates: [] }));
-  const rejected = await call(outsider, CANDIDATE.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "APPROVE" }, { "idempotency-key": "idem_out" });
-  assert.equal(rejected.status, 403);
-  assert.match(rejected.message, /NOT_CANDIDATE/);
+  const decided = await call(outsider, CANDIDATE.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "APPROVE" }, { "idempotency-key": "idem_out" });
+  assert.equal(decided.status, 200, JSON.stringify(decided.body));
+  assert.equal(outsider.state.decisions, 1);
 });
 
-test("an expired approved request keeps the expiry write and audit but yields a definite rejection", async () => {
+test("expiry is retired: a past expiresAt never rewrites status and the execute endpoint stays 409", async () => {
   const view = harness(baseFixture({ requests: [requestFixture({ status: "APPROVED", decidedBy: CANDIDATE.id, expiresAt: PAST })] }));
   const result = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "idem_expired" });
   assert.equal(result.status, 409);
   assert.equal(result.code, "CONFLICT");
-  assert.equal(view.state.requests.get("approval_req_target")?.status, "EXPIRED", "the expiry state must still commit");
-  assert.equal(view.state.audits, 1, "the expiry audit must still commit");
+  assert.equal(view.state.requests.get("approval_req_target")?.status, "APPROVED", "no EXPIRED state is ever written");
+  assert.equal(view.state.audits, 0, "no expiry audit is committed");
   assert.equal(view.state.executions, 0);
-
-  const replay = await call(view, REQUESTER.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "idem_expired" });
-  assert.equal(replay.status, 409, "the committed rejection is the original receipt");
-  assert.equal(replay.body.error.reasons.includes("EXPIRED"), true);
-  assert.equal(view.state.audits, 1, "replaying a rejected command must not append another audit");
 });
 
-test("settlement adjust never enters the membership executor", async () => {
-  const view = harness(baseFixture({ requests: [requestFixture({ operationCode: "order.settlement.adjust", status: "APPROVED", decidedBy: CANDIDATE.id })] }));
-  const result = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "idem_settle" }, async (input) => { throw new Error("executor must not run for " + input.operationCode); });
-  assert.equal(result.status, 409);
-  assert.match(result.message, /EXECUTION_MODE_SOURCE_BUSINESS/);
-  assert.equal(view.state.executions, 0, "a source-business operation must not create a generic execution row");
+test("settlement adjust approval stays at APPROVED and never enters the generic executor", async () => {
+  const view = harness(baseFixture({ requests: [requestFixture({ operationCode: "order.settlement.adjust", operationPayload: { orderId: "order_1" }, status: "PENDING" })] }));
+  let called = 0;
+  const result = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision: "APPROVE" }, { "idempotency-key": "idem_settle" }, async () => { called += 1; return { resultCode: "SHOULD_NOT_RUN" }; });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "APPROVED", "SOURCE_BUSINESS approval only writes the decision");
+  assert.equal(view.state.requests.get("approval_req_target")?.status, "APPROVED");
+  assert.equal(called, 0, "no generic executor runs for a source-business operation");
+  assert.equal(view.state.executions, 0, "no generic execution row is written");
 });
 
-test("an unregistered operation is explained, not executed", async () => {
+test("an unregistered operation is explained by its projection and never executed", async () => {
   const view = harness(baseFixture({ requests: [requestFixture({ operationCode: "custom.manual.thing", status: "APPROVED", decidedBy: CANDIDATE.id })] }));
-  const result = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "idem_unknown" }, async () => ({ resultCode: "SHOULD_NOT_RUN" }));
-  assert.equal(result.status, 409);
-  assert.match(result.message, /OPERATION_UNREGISTERED/);
-  assert.equal(view.state.executions, 0);
+  const retired = await call(view, BOSS.id, "POST", "/approvals/requests/execute", { requestId: "approval_req_target" }, { "idempotency-key": "idem_unknown" });
+  assert.equal(retired.status, 409, "the execute endpoint is retired regardless of the operation");
   const detail = await call(view, BOSS.id, "GET", "/approvals/requests/detail?requestId=approval_req_target");
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
   assert.equal(detail.body.business.summaryAvailable, false);
   assert.deepEqual(detail.body.business.restrictedReasonCodes, ["OPERATION_UNREGISTERED"]);
+  assert.equal(view.state.executions, 0);
 });
 
 test("eligibility covers business permission, game scope and executor assembly", () => {
   const access = { status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions: new Set(["approval.request.approve", "approval.request.execute", "approval.request.add_approver", "approval.request.create"]) };
   const grantedAccess = { ...access, permissions: new Set([...access.permissions, "membership.entitlement.decide", "membership.entitlement.execute", "membership.entitlement.revoke"]) };
   const row = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: { gameId: "game_a", userId: "user_a", kind: "FRIEND" }, status: "APPROVED" });
-  const base = { row, userId: CANDIDATE.id, access, twoFactorEnabled: true, gameScope: { mode: "ALL_GAMES" as const, gameIds: [] }, isCandidate: true, testOperationsEnabled: true, executorAssembled: true };
+  const base = { row, userId: CANDIDATE.id, access, twoFactorEnabled: true, gameScope: { mode: "ALL_GAMES" as const, gameIds: [] }, isCandidate: true, decisionRole: "OPS" as const, testOperationsEnabled: true, executorAssembled: true };
   const reasons = (input: typeof base) => evaluateApprovalActions(input).map((item) => [item.action, item.reasonCode]);
 
   assert.deepEqual(reasons(base), [["approve", "BUSINESS_PERMISSION_REQUIRED"], ["reject", "BUSINESS_PERMISSION_REQUIRED"], ["execute", "BUSINESS_PERMISSION_REQUIRED"], ["addCandidate", "PERMISSION_REQUIRED"], ["replace", "BUSINESS_PERMISSION_REQUIRED"], ["withdraw", "REQUESTER_ONLY"]]);
@@ -767,21 +748,39 @@ test("eligibility covers business permission, game scope and executor assembly",
   assert.equal(pendingGrant.find((item) => item.action === "execute")?.reasonCode, "STATUS_NOT_APPROVED");
   assert.equal(pendingGrant.find((item) => item.action === "approve")?.allowed, true);
   assert.equal(evaluateApprovalActions({ ...base, access: { ...grantedAccess, status: "FROZEN" } }).find((item) => item.action === "approve")?.reasonCode, "ACTOR_INACTIVE");
-  assert.equal(evaluateApprovalActions({ ...base, access: grantedAccess, row: { ...row, expiresAt: PAST } }).find((item) => item.action === "approve")?.reasonCode, "EXPIRED");
+  assert.equal(evaluateApprovalActions({ ...base, access: grantedAccess, row: { ...row, expiresAt: PAST } }).find((item) => item.action === "approve")?.reasonCode, "STATUS_NOT_PENDING", "a past expiresAt is inert: virtualRequestStatus returns the stored status and decisionGate never emits EXPIRED");
   assert.equal(evaluateApprovalActions({ ...base, access: grantedAccess, row: { ...row, operationPayload: { gameId: "game_a", entitlementId: "ent_1" }, operationCode: "membership.entitlement.revoke" }, targetEntitlementStatus: "REVOKED" }).find((item) => item.action === "execute")?.reasonCode, "TARGET_NOT_ACTIVE");
   assert.equal(evaluateApprovalActions({ ...base, access: grantedAccess, executorAssembled: false }).find((item) => item.action === "execute")?.reasonCode, "EXECUTOR_NOT_ASSEMBLED");
   assert.equal(evaluateApprovalActions({ ...base, includeStatePreconditions: false, access: grantedAccess }).find((item) => item.action === "execute")?.reasonCode, "OK", "replay authorization must not re-apply state preconditions");
 });
 
-test('self approval is allowed only for scoped compensation with its dedicated permission',()=>{
-  const row=requestFixture({operationCode:'order.compensation.grant',operationPayload:{gameId:'game_a'},status:'PENDING',requestedBy:CANDIDATE.id});
-  const access={status:'ACTIVE' as const,isBoss:false,passwordChangeRequired:false,permissions:new Set(['approval.request.approve','order.compensation.approve'])};
-  const base={row,userId:CANDIDATE.id,access,twoFactorEnabled:true,gameScope:{mode:'ALL_GAMES' as const,gameIds:[]},isCandidate:true,testOperationsEnabled:false,executorAssembled:true};
-  assert.equal(evaluateApprovalActions(base).find(action=>action.action==='approve')?.allowed,true);
-  assert.equal(evaluateApprovalActions({...base,access:{...access,permissions:new Set(['approval.request.approve'])}}).find(action=>action.action==='approve')?.reasonCode,'BUSINESS_PERMISSION_REQUIRED');
-  assert.equal(evaluateApprovalActions({...base,isCandidate:false}).find(action=>action.action==='approve')?.reasonCode,'NOT_CANDIDATE');
-  assert.equal(evaluateApprovalActions({...base,gameScope:{mode:'SELECTED_GAMES',gameIds:['other']}}).find(action=>action.action==='approve')?.reasonCode,'GAME_SCOPE_DENIED');
-  assert.equal(evaluateApprovalActions({...base,row:{...row,operationCode:'membership.entitlement.grant'}}).find(action=>action.action==='approve')?.reasonCode,'SELF_REQUEST_NOT_ALLOWED');
+test("self approval is allowed for every registered type; decisionGate no longer emits SELF_REQUEST_NOT_ALLOWED or NOT_CANDIDATE", () => {
+  // hasPermission 仍要求权限集含该码（isBoss 只解除 boss-only 限制），给 Boss 通用审批权。
+  const bossAccess = { status: "ACTIVE" as const, isBoss: true, passwordChangeRequired: false, permissions: new Set(["approval.request.approve"]) };
+  const base = { userId: BOSS.id, access: bossAccess, twoFactorEnabled: true, gameScope: { mode: "ALL_GAMES" as const, gameIds: [] }, isCandidate: true, decisionRole: "BOSS" as const, testOperationsEnabled: false, executorAssembled: true };
+  const selfRow = (operationCode: string, payload: Record<string, unknown> = {}) => requestFixture({ operationCode, operationPayload: payload, status: "PENDING", requestedBy: BOSS.id });
+  for (const operationCode of APPROVAL_REGISTERED_OPERATION_CODES) {
+    const approve = evaluateApprovalActions({ ...base, row: selfRow(operationCode, { gameId: "game_a", orderId: "order_1" }) }).find((item) => item.action === "approve")!;
+    assert.equal(approve.allowed, true, operationCode + " self-approve: " + approve.reasonCode);
+    assert.notEqual(approve.reasonCode, "SELF_REQUEST_NOT_ALLOWED");
+    assert.notEqual(approve.reasonCode, "NOT_CANDIDATE");
+  }
+  // 不在候选名单里也不再由决策门禁拒绝（NOT_CANDIDATE 退役）。
+  const notCandidate = evaluateApprovalActions({ ...base, isCandidate: false, row: selfRow("order.settlement.adjust") });
+  assert.equal(notCandidate.find((item) => item.action === "approve")?.allowed, true);
+  // 运营角色自批分销政策 / 结算调整 / 礼遇：不再有 SELF_REQUEST_NOT_ALLOWED。
+  const opsAccess = { status: "ACTIVE" as const, isBoss: false, passwordChangeRequired: false, permissions: new Set(["approval.request.approve", "personal.distribution.policy.manage", "membership.entitlement.decide", "membership.entitlement.execute"]) };
+  const opsBase = { ...base, userId: CANDIDATE.id, access: opsAccess, decisionRole: "OPS" as const };
+  const opsRow = (operationCode: string) => requestFixture({ operationCode, operationPayload: { gameId: "game_a" }, status: "PENDING", requestedBy: CANDIDATE.id });
+  for (const operationCode of ["distribution.policy.publish", "order.settlement.adjust", "membership.entitlement.grant"]) {
+    const approve = evaluateApprovalActions({ ...opsBase, row: opsRow(operationCode) }).find((item) => item.action === "approve")!;
+    assert.equal(approve.allowed, true, operationCode + " ops self-approve: " + approve.reasonCode);
+  }
+  // 游戏范围外仍拒绝；业务权限缺失仍拒绝。
+  const outOfScope = evaluateApprovalActions({ ...opsBase, gameScope: { mode: "SELECTED_GAMES" as const, gameIds: ["other"] }, row: opsRow("membership.entitlement.grant") });
+  assert.equal(outOfScope.find((item) => item.action === "approve")?.reasonCode, "GAME_SCOPE_DENIED");
+  const noBusiness = evaluateApprovalActions({ ...opsBase, access: { ...opsAccess, permissions: new Set(["approval.request.approve"]) }, row: opsRow("membership.entitlement.grant") });
+  assert.equal(noBusiness.find((item) => item.action === "approve")?.reasonCode, "BUSINESS_PERMISSION_REQUIRED");
 });
 
 test("business projection trims by permission and keeps money and result refs exact", async () => {
@@ -873,7 +872,9 @@ test("list projection query count stays constant as rows grow", async () => {
   assert.equal(singleResult.body.requests[0].payload, undefined, "the raw payload stays out of the list");
   assert.ok(singleResult.body.requests[0].actions.some((item: { action: string; allowed: boolean }) => item.action === "approve"));
   assert.equal(singleResult.body.requests[0].business.summaryAvailable, true);
-  assert.equal(singleResult.body.requests[0].candidateAvailability.eligible, 1);
+  assert.equal(singleResult.body.requests[0].candidateAvailability, undefined, "the unified list no longer carries a candidate snapshot");
+  assert.equal(singleResult.body.pendingCount, 1, "the unified list reports pendingCount");
+  assert.equal(singleResult.body.scope, "involved", "/requests/mine is an alias of the involved scope");
 });
 
 test("candidate without an eligible snapshot is explained instead of silently undecidable", async () => {
@@ -974,7 +975,7 @@ test("R2-1 game scope gates the create POST exactly like the recovery GET", asyn
   assert.equal(getReceipt.body.receipt, undefined);
 });
 
-test("R2-2 a registered request cannot supersede an unknown or expired one", async () => {
+test("a registered request can supersede a pending one; expiry and old-operation registration no longer block replacement", async () => {
   const legacyRow = requestFixture({ operationCode: "legacy.unknown.thing", requestedBy: REQUESTER.id });
   const view = harness(baseFixture({
     requests: [legacyRow],
@@ -987,28 +988,30 @@ test("R2-2 a registered request cannot supersede an unknown or expired one", asy
       { templateId: "approval_tpl_legacy", adminUserId: CANDIDATE.id },
     ],
   }));
+  // 旧操作未登记时替换仍被拒绝：replace 动作资格给出 OPERATION_UNREGISTERED。
   const blocked = await call(view, REQUESTER.id, "POST", "/approvals/requests", {
     operationCode: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary: "替代未知操作申请", supersedesRequestId: legacyRow.id,
   }, { "idempotency-key": "idem_supersede" });
   assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
   assert.match(blocked.message, /OPERATION_UNREGISTERED/);
   assert.equal(view.state.created, 0, "an unknown request must not be modified through a replacement");
-  assert.equal(view.state.requests.get(legacyRow.id)?.status, "PENDING", "the unknown request must keep its own state");
+  assert.equal(view.state.requests.get(legacyRow.id)?.status, "PENDING", "the unknown request keeps its own state");
 
+  // 有效期一律 infinity：过去的 expiresAt 不再阻止替换。
   const expiredRow = requestFixture({ id: "approval_req_expired", requestedBy: REQUESTER.id, expiresAt: PAST });
   const expiredView = harness(baseFixture({ requests: [expiredRow] }));
   const expiredReplace = await call(expiredView, REQUESTER.id, "POST", "/approvals/requests", {
     operationCode: "approval.test.execute", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary: "替代已过期申请", supersedesRequestId: expiredRow.id,
   }, { "idempotency-key": "idem_supersede_expired" });
-  assert.equal(expiredReplace.status, 409, JSON.stringify(expiredReplace.body));
-  assert.equal(expiredView.state.created, 0);
-  assert.equal(expiredView.state.requests.get(expiredRow.id)?.status, "PENDING", "an expired request is not cancelled by a replacement attempt");
+  assert.equal(expiredReplace.status, 200, JSON.stringify(expiredReplace.body));
+  assert.equal(expiredView.state.created, 1, "infinity expiry means a past expiresAt is inert");
+  assert.equal(expiredView.state.requests.get(expiredRow.id)?.status, "CANCELLED");
 
   const standaloneUnknown = await call(view, REQUESTER.id, "POST", "/approvals/requests", {
     operationCode: "legacy.unknown.thing", triggerCondition: "manual", payloadVersion: 1, payload: { outcome: "SUCCESS" }, summary: "独立未知操作仍可创建",
   }, { "idempotency-key": "idem_unknown_standalone" });
   assert.equal(standaloneUnknown.status, 200, JSON.stringify(standaloneUnknown.body));
-  assert.equal(view.state.created, 1, "creating an independent unknown request stays allowed; modifying one does not");
+  assert.equal(view.state.created, 1, "an independent unknown request is still allowed");
 });
 
 for (const change of ["unchanged", "old-scope-revoked", "old-permission-revoked", "old-missing"] as const) {
@@ -1056,7 +1059,7 @@ for (const change of ["unchanged", "old-scope-revoked", "old-permission-revoked"
   });
 }
 
-test("R2-3 candidate options and the append write both judge the request context", async () => {
+test("R2-3 candidate options still judge the request context; the append write is retired", async () => {
   const grantPayload = { gameId: "game_a", userId: "user_a", kind: "FRIEND", scopeKey: "s" };
   const grantRow = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: grantPayload, requestedBy: REQUESTER.id });
   const noDecide: FixtureActor = { id: "admin_nodecide", username: "zz00013", status: "ACTIVE", isBoss: false, twoFactorEnabled: true, permissions: ["approval.request.approve", "approval.request.read"] };
@@ -1075,15 +1078,15 @@ test("R2-3 candidate options and the append write both judge the request context
   const requesterDenied = await call(missingBusiness, REQUESTER.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
   assert.equal(requesterDenied.status, 403, "non-Boss requesters cannot regain candidate governance through old grants");
   const requesterAppend = await call(missingBusiness, REQUESTER.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: noDecide.username, reason: "旧授权不能扩权" }, { "idempotency-key": "idem_requester_append_denied" });
-  assert.equal(requesterAppend.status, 403);
+  assert.equal(requesterAppend.status, 409, "the append endpoint is retired for every caller");
   const picker = await call(missingBusiness, BOSS.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
   assert.equal(picker.status, 200, JSON.stringify(picker.body));
   assert.equal(picker.body.candidates.some((item: { username: string }) => item.username === noDecide.username), false, "a generic approver without the business decide permission is not choosable for this request");
   assert.equal(picker.body.excludedByReason.BUSINESS_PERMISSION_REQUIRED >= 1, true);
 
   const appendDenied = await call(missingBusiness, BOSS.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: noDecide.username, reason: "试图追加无业务权限者" }, { "idempotency-key": "idem_append_biz" });
-  assert.equal(appendDenied.status, 409, JSON.stringify(appendDenied.body));
-  assert.equal(missingBusiness.state.requestCandidates.length, 1, "the append write re-checks the same condition the picker applied");
+  assert.equal(appendDenied.status, 409);
+  assert.equal(missingBusiness.state.requestCandidates.length, 1, "a retired append changes no state");
 
   const wrongScopeView = harness(buildFixture(wrongScope));
   const scopePicker = await call(wrongScopeView, BOSS.id, "GET", "/approvals/candidate-options?requestId=" + grantRow.id);
@@ -1096,8 +1099,8 @@ test("R2-3 candidate options and the append write both judge the request context
   const qualified: FixtureActor = { ...noDecide, id: "admin_qualified", username: "zz00015", permissions: [...noDecide.permissions, "membership.entitlement.decide"] };
   const qualifiedView = harness(buildFixture(qualified));
   const appended = await call(qualifiedView, BOSS.id, "POST", "/approvals/requests/add-candidate", { requestId: grantRow.id, username: qualified.username, reason: "Boss 追加有业务资格者" }, { "idempotency-key": "idem_boss_append_qualified" });
-  assert.equal(appended.status, 200, JSON.stringify(appended.body));
-  assert.equal(qualifiedView.state.requestCandidates.length, 2);
+  assert.equal(appended.status, 409, "even a qualified candidate cannot be appended through the retired endpoint");
+  assert.equal(qualifiedView.state.requestCandidates.length, 1);
 
   const templateLevel = await call(missingBusiness, BOSS.id, "GET", "/approvals/candidate-options");
   assert.equal(templateLevel.status, 200, JSON.stringify(templateLevel.body));
@@ -1366,21 +1369,50 @@ test("approval business effective state follows interval truth at one read time"
   assert.deepEqual(batchStates, ["NOT_STARTED", "NOT_STARTED", "NOT_STARTED"]);
 });
 
-test("policy context explicit asOf preserves expiry microseconds while original approval callers retain the default clock", () => {
+test("virtualRequestStatus returns the stored status; expiry is never computed", () => {
   const row = { status: "APPROVED" as const, expiresAt: "2026-10-25T12:00:00.123457Z" };
   assert.equal(virtualRequestStatus(row, "2026-10-25T12:00:00.123456Z"), "APPROVED");
-  assert.equal(virtualRequestStatus(row, row.expiresAt), "EXPIRED");
-  assert.equal(virtualRequestStatus({ ...row, status: "PENDING" }, row.expiresAt), "EXPIRED");
+  assert.equal(virtualRequestStatus(row, row.expiresAt), "APPROVED", "a past asOf does not expire a request");
+  assert.equal(virtualRequestStatus({ ...row, status: "PENDING" }, row.expiresAt), "PENDING");
   assert.equal(virtualRequestStatus({ ...row, status: "EXECUTED" }, row.expiresAt), "EXECUTED");
+  assert.equal(virtualRequestStatus({ status: "PENDING", expiresAt: "infinity" }), "PENDING", "infinity is a plain value, not a deadline");
   const originalNow = Date.now;
-  try { Date.now = () => Date.parse(row.expiresAt); assert.equal(virtualRequestStatus(row), "EXPIRED", "the original writer's default millisecond behavior is unchanged"); }
+  try { Date.now = () => Date.parse(row.expiresAt); assert.equal(virtualRequestStatus(row), "APPROVED", "the default clock no longer changes the answer"); }
   finally { Date.now = originalNow; }
 });
 
-test("policy context can reuse the original request scope with the same transaction client and no locks", async () => {
-  const calls: unknown[][] = [], client = { query: async (sql: string, values: unknown[]) => { assert.match(sql, /requested_by/); assert.match(sql, /approval_request_candidate/); assert.doesNotMatch(sql, /FOR UPDATE|FOR SHARE|INSERT|UPDATE|DELETE/); calls.push(values); return { rows: [{ allowed: true }] }; } } as unknown as PoolClient;
-  assert.equal(await requestScope(client, "policy_viewer", "policy_request", false), true); assert.deepEqual(calls, [["policy_viewer", "policy_request"]]);
-  assert.equal(await requestScope(client, "boss_viewer", "policy_request", true), true); assert.equal(calls.length, 1, "existing Boss scope does not invent another role or query");
+test("requestScope keeps the Boss shortcut and narrows operator detail reads by type and game scope", async () => {
+  const sqls: string[] = [];
+  const requestRow = (overrides: Record<string, unknown> = {}) => ({
+    id: "approval_req_target", operationCode: "distribution.policy.publish", operationPayload: {},
+    requestedBy: "admin_requester", status: "PENDING", objectGameId: null, ...overrides,
+  });
+  const makeClient = (row: Record<string, unknown>, gameIds: string[] = []) => ({ query: async (sql: string) => {
+    sqls.push(sql);
+    if (sql.includes('FROM "zzsh_iam"."approval_request"')) return { rows: [row] };
+    if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: gameIds.length ? "SELECTED_GAMES" : "ALL_GAMES", gameIds }], rowCount: 1 };
+    if (sql.includes('FROM "zzsh_iam"."admin_user_role"')) return { rows: [{ code: "role_preset_ops", canApprove: true }], rowCount: 1 };
+    throw new Error("unexpected SQL: " + sql.slice(0, 120));
+  } }) as unknown as PoolClient;
+
+  const ops = makeClient(requestRow());
+  assert.equal(await requestScope(ops, "policy_viewer", "approval_req_target", false), true);
+  assert.match(sqls[0]!, /objectGameId|"game_id"/, "the request row carries the resolved object game id");
+  assert.ok(sqls.some((sql) => sql.includes("admin_user_role")), "detail reads resolve the current role");
+  assert.ok(sqls.some((sql) => sql.includes("game_scope_mode")), "detail reads resolve the current game scope");
+
+  // 游戏范围外的运营不能打开结算调整详情（R2 的可见性收口）。
+  const outOfScope = makeClient(requestRow({ operationCode: "order.settlement.adjust", operationPayload: { orderId: "order_1" }, objectGameId: "game_a" }), ["game_b"]);
+  assert.equal(await requestScope(outOfScope, "ops_b", "approval_req_target", false), false);
+  // 仅 Boss 的类型不对运营开放详情；本人提交的单始终可见。
+  const bossOnly = makeClient(requestRow({ operationCode: "membership.benefit.policy.publish" }));
+  assert.equal(await requestScope(bossOnly, "ops_b", "approval_req_target", false), false);
+  const own = makeClient(requestRow({ operationCode: "membership.benefit.policy.publish", requestedBy: "ops_b" }));
+  assert.equal(await requestScope(own, "ops_b", "approval_req_target", false), true);
+
+  sqls.length = 0;
+  assert.equal(await requestScope(makeClient(requestRow()), "boss_viewer", "approval_req_target", true), true);
+  assert.equal(sqls.length, 0, "an existing Boss scope short-circuits before any role or scope query");
 });
 
 test("withdrawal recovery keeps requester authority without execution rights for pending and source-business requests", async () => {
@@ -1409,4 +1441,184 @@ test("withdrawal recovery keeps requester authority without execution rights for
     assert.equal(otherCandidate.status, 403, "being a request candidate does not grant the requester's withdrawal receipt");
     assert.equal(otherCandidate.body.receipt, undefined);
   }
+});
+
+/** 决策门禁纯函数夹具：角色默认 OPS，权限并集覆盖全部业务审批权，行默认待审批。 */
+type DecisionContext = Parameters<typeof evaluateApprovalActions>[0];
+function decisionContext(row: ReturnType<typeof requestFixture>, overrides: Partial<DecisionContext> = {}): DecisionContext {
+  const base: DecisionContext = {
+    row,
+    userId: CANDIDATE.id,
+    access: {
+      status: "ACTIVE", isBoss: false, passwordChangeRequired: false,
+      permissions: new Set([
+        "approval.request.approve", "approval.request.create", "approval.request.read",
+        "approval.request.execute", "approval.request.add_approver",
+        "membership.entitlement.decide", "membership.entitlement.execute", "membership.entitlement.request",
+        "membership.policy.publish", "personal.distribution.policy.manage", "order.compensation.approve",
+      ]),
+    },
+    twoFactorEnabled: true,
+    gameScope: { mode: "ALL_GAMES", gameIds: [] },
+    isCandidate: true,
+    decisionRole: "OPS",
+    testOperationsEnabled: false,
+    executorAssembled: true,
+  };
+  return { ...base, ...overrides } as DecisionContext;
+}
+
+test("D1 a pure support role is hard-denied for approve/reject even with explicit grants, while withdraw/replace keep their own gates", () => {
+  const row = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: { gameId: "game_a", userId: "u", kind: "FRIEND" }, status: "PENDING", requestedBy: CANDIDATE.id });
+  const actions = evaluateApprovalActions(decisionContext(row, { decisionRole: "SUPPORT_ONLY" }));
+  for (const action of ["approve", "reject"] as const) {
+    const item = actions.find((entry) => entry.action === action)!;
+    assert.equal(item.allowed, false);
+    assert.equal(item.reasonCode, "SUPPORT_ROLE_DECISION_DENIED");
+  }
+  assert.throws(() => assertApprovalAction(actions, "approve"), (error: any) => error.status === 403 && /SUPPORT_ROLE_DECISION_DENIED/.test(error.message));
+  assert.equal(actions.find((entry) => entry.action === "withdraw")?.allowed, true, "withdraw is not role-hard-blocked");
+  assert.equal(actions.find((entry) => entry.action === "replace")?.allowed, true, "replace is not role-hard-blocked");
+});
+
+test("D1b a pure support account gets 403 SUPPORT_ROLE_DECISION_DENIED on the decision route but can still withdraw", async () => {
+  const support: FixtureActor = { ...CANDIDATE, id: "admin_support", username: "zz00020", decisionRole: "SUPPORT_ONLY", permissions: [...CANDIDATE.permissions, "approval.request.create", "membership.entitlement.request"] };
+  const view = harness(baseFixture({ actors: [BOSS, REQUESTER, support], requests: [requestFixture({ requestedBy: support.id })], requestCandidates: [{ requestId: "approval_req_target", adminUserId: support.id }] }));
+  for (const decision of ["APPROVE", "REJECT"]) {
+    const result = await call(view, support.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_target", decision, ...(decision === "REJECT" ? { reason: "客服不得决定" } : {}) }, { "idempotency-key": "idem_support_" + decision });
+    assert.equal(result.status, 403, decision + ": " + JSON.stringify(result.body));
+    assert.match(result.message, /SUPPORT_ROLE_DECISION_DENIED/);
+  }
+  assert.equal(view.state.decisions, 0);
+  const withdraw = await call(view, support.id, "POST", "/approvals/requests/withdraw", { requestId: "approval_req_target" }, { "idempotency-key": "idem_support_withdraw" });
+  assert.equal(withdraw.status, 200, "withdraw/replace are not role-hard-blocked");
+  assert.equal(view.state.requests.get("approval_req_target")?.status, "CANCELLED");
+});
+
+test("D2 support+ops is evaluated as OPS: distribution policy, entitlement and settlement adjust are approvable; membership benefit policy and compensation require BOSS_REVIEW_REQUIRED", () => {
+  const ops = decisionContext(requestFixture({ status: "PENDING" }), { decisionRole: "OPS" });
+  const approveOf = (operationCode: string, payload: Record<string, unknown> = {}) => evaluateApprovalActions({ ...ops, row: requestFixture({ operationCode, operationPayload: payload, status: "PENDING" }) }).find((item) => item.action === "approve")!;
+  for (const [code, payload] of [["distribution.policy.publish", {}], ["membership.entitlement.grant", { gameId: "game_a", userId: "u", kind: "FRIEND" }], ["order.settlement.adjust", { orderId: "o" }]] as const) {
+    const item = approveOf(code, payload);
+    assert.equal(item.allowed, true, code + ": " + item.reasonCode);
+  }
+  for (const code of ["membership.benefit.policy.publish", "order.compensation.grant"]) {
+    const item = approveOf(code, { gameId: "game_a" });
+    assert.equal(item.reasonCode, "BUSINESS_PERMISSION_REQUIRED", code);
+    assert.equal(item.nextStepCode, "BOSS_REVIEW_REQUIRED", code + " must be escalated to Boss");
+  }
+  assert.equal(membershipDecisionRequiresBoss("distribution.policy.publish"), false, "distribution policy publish is delegated to ops");
+  assert.equal(membershipBusinessPermission("membership.benefit.policy.publish", "REQUEST"), "membership.policy.draft");
+});
+
+test("D3 a personal DENY over a role grant still blocks approval", () => {
+  const row = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: { gameId: "game_a" }, status: "PENDING" });
+  const granted = decisionContext(row);
+  assert.equal(evaluateApprovalActions(granted).find((item) => item.action === "approve")?.allowed, true, "the role grant is enough on its own");
+  const denied = decisionContext(row, { access: { ...granted.access, permissions: new Set([...granted.access.permissions].filter((code) => code !== "approval.request.approve")) } });
+  const item = evaluateApprovalActions(denied).find((entry) => entry.action === "approve")!;
+  assert.equal(item.allowed, false);
+  assert.equal(item.reasonCode, "PERMISSION_REQUIRED", "a personal DENY is computed into effective access by loadEffectiveAdminAccess");
+});
+
+test("D4 a decider outside the target game returns GAME_SCOPE_DENIED", () => {
+  const row = requestFixture({ operationCode: "membership.entitlement.grant", operationPayload: { gameId: "game_a", userId: "u", kind: "FRIEND" }, status: "PENDING" });
+  const outOfScope = decisionContext(row, { gameScope: { mode: "SELECTED_GAMES" as const, gameIds: ["game_b"] } });
+  const item = evaluateApprovalActions(outOfScope).find((entry) => entry.action === "approve")!;
+  assert.equal(item.allowed, false);
+  assert.equal(item.reasonCode, "GAME_SCOPE_DENIED");
+  assert.throws(() => assertApprovalAction(evaluateApprovalActions(outOfScope), "approve"), (error: any) => error.status === 403);
+});
+
+test("D4 settlement adjustments are scoped by the order's game id, not by an absent payload gameId", () => {
+  const row = requestFixture({
+    operationCode: "order.settlement.adjust",
+    operationPayload: { orderId: "order_1", reason: "人工调整" },
+    objectGameId: "game_a",
+    status: "PENDING",
+  });
+  const inScope = decisionContext(row, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_a"] } });
+  assert.equal(evaluateApprovalActions(inScope).find((entry) => entry.action === "approve")?.allowed, true);
+  const outOfScope = decisionContext(row, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_b"] } });
+  const item = evaluateApprovalActions(outOfScope).find((entry) => entry.action === "approve")!;
+  assert.equal(item.allowed, false, "只管 B 游戏的运营不能批 A 游戏订单的资金调整");
+  assert.equal(item.reasonCode, "GAME_SCOPE_DENIED");
+  assert.throws(() => assertApprovalAction(evaluateApprovalActions(outOfScope), "approve"), (error: any) => error.status === 403);
+  // 反查不到订单游戏时，带范围限制的账号按失败关闭处理。
+  const unresolved = decisionContext({ ...row, objectGameId: null }, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_a"] } });
+  assert.equal(evaluateApprovalActions(unresolved).find((entry) => entry.action === "approve")?.reasonCode, "GAME_SCOPE_DENIED");
+});
+
+test("D5 self approval is allowed for all registered types including settlement adjust", () => {
+  const boss = decisionContext(requestFixture({ status: "PENDING" }), { userId: BOSS.id, decisionRole: "BOSS", access: { status: "ACTIVE", isBoss: true, passwordChangeRequired: false, permissions: new Set(["approval.request.approve"]) } });
+  for (const operationCode of APPROVAL_REGISTERED_OPERATION_CODES) {
+    const row = requestFixture({ operationCode, operationPayload: { gameId: "game_a", orderId: "o" }, status: "PENDING", requestedBy: BOSS.id });
+    const item = evaluateApprovalActions({ ...boss, row }).find((entry) => entry.action === "approve")!;
+    assert.equal(item.allowed, true, operationCode + " self-approve: " + item.reasonCode);
+    assert.notEqual(item.reasonCode, "SELF_REQUEST_NOT_ALLOWED");
+    assert.notEqual(item.reasonCode, "NOT_CANDIDATE");
+  }
+});
+
+test("D6 infinity never produces EXPIRED; virtualRequestStatus returns the real stored status and decisionGate never emits EXPIRED", async () => {
+  for (const status of ["PENDING", "APPROVED", "REJECTED", "EXECUTED"] as const) {
+    assert.equal(virtualRequestStatus({ status, expiresAt: "infinity" }), status);
+    assert.equal(virtualRequestStatus({ status, expiresAt: PAST }), status, "a past deadline is inert");
+  }
+  const row = requestFixture({ status: "PENDING", expiresAt: "infinity" });
+  const actions = evaluateApprovalActions(decisionContext(row));
+  assert.equal(actions.find((item) => item.action === "approve")?.allowed, true, "an infinity-expiry pending request is decidable");
+  assert.equal(actions.some((item) => item.reasonCode === "EXPIRED"), false, "decisionGate never emits EXPIRED");
+  const detail = await call(harness(baseFixture({ requests: [row] })), BOSS.id, "GET", "/approvals/requests/detail?requestId=approval_req_target");
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  assert.equal(detail.body.expiresAt, undefined, "the detail no longer outputs expiresAt and iso(infinity) yields null");
+});
+
+test("D7 approvalDecisionRequiresTotp is true only for the three high-impact approval types", () => {
+  const highImpact = new Set(["membership.benefit.policy.publish", "distribution.policy.publish", "order.compensation.grant"]);
+  for (const code of APPROVAL_REGISTERED_OPERATION_CODES) {
+    assert.equal(approvalDecisionRequiresTotp(code), highImpact.has(code), code);
+  }
+  assert.equal(approvalDecisionRequiresTotp("membership.entitlement.grant"), false);
+  assert.equal(approvalDecisionRequiresTotp("order.settlement.adjust"), false);
+  assert.equal(approvalDecisionRequiresTotp("approval.test.execute"), false);
+  assert.equal(approvalDecisionRequiresTotp("unknown.business"), false);
+});
+
+test("D8 the operation registry no longer registers distribution.earning.reverse", () => {
+  assert.equal(APPROVAL_REGISTERED_OPERATION_CODES.includes("distribution.earning.reverse"), false);
+  assert.equal(approvalRegistration("distribution.earning.reverse"), null);
+  assert.equal(APPROVAL_REGISTERED_OPERATION_CODES.includes("distribution.policy.publish"), true, "distribution policy publish remains registered and delegated to ops");
+  assert.equal(membershipDecisionRequiresBoss("distribution.policy.publish"), false);
+});
+
+test("N1 pendingCount counts only actionable rows and pure support never receives a badge count", async () => {
+  const support: FixtureActor = { ...CANDIDATE, id: "support_only", username: "support_only", decisionRole: "SUPPORT_ONLY", permissions: ["approval.request.read", "approval.request.create"] };
+  const ops: FixtureActor = { ...CANDIDATE, id: "ops_actor", username: "ops_actor", decisionRole: "OPS" };
+  const rows = [
+    requestFixture({ id: "req_pending_1", status: "PENDING", requestedBy: "support_only" }),
+    requestFixture({ id: "req_pending_2", status: "PENDING", requestedBy: "support_only" }),
+    requestFixture({ id: "req_closed", status: "EXECUTED", requestedBy: "support_only" }),
+  ];
+  const view = harness(baseFixture({ actors: [BOSS, REQUESTER, support, ops], requests: rows }));
+  const supportResult = await call(view, "support_only", "GET", "/approvals/requests?scope=pending&limit=1");
+  assert.equal(supportResult.status, 200, JSON.stringify(supportResult.body));
+  assert.equal(supportResult.body.scope, "involved", "纯客服的 pending 改写成 involved");
+  assert.equal(supportResult.body.pendingCount, undefined, "角标不能把客服自己提交的申请数算进去");
+
+  const opsResult = await call(view, "ops_actor", "GET", "/approvals/requests?scope=pending&limit=1");
+  assert.equal(opsResult.status, 200, JSON.stringify(opsResult.body));
+  assert.equal(opsResult.body.pendingCount, 2, "只算当前真能批的待审单，不把已结束的单算进角标");
+  assert.equal(opsResult.body.requests.length, 1, "先过滤后分页：limit=1 也能拿到一整页");
+  assert.ok(opsResult.body.nextCursor, "过滤后仍有下一页，不是空页配上 hasMore");
+});
+
+test("N4 malformed list filters return 400 instead of casting errors into 500", async () => {
+  const view = harness(baseFixture());
+  for (const query of ["timeFrom=not-a-date", "timeTo=2026-99-99", "status=NOT_A_STATUS", "operationCode=BAD%20CODE"]) {
+    const result = await call(view, CANDIDATE.id, "GET", "/approvals/requests?scope=pending&limit=5&" + query);
+    assert.equal(result.status, 400, query);
+  }
+  const valid = await call(view, CANDIDATE.id, "GET", "/approvals/requests?scope=pending&limit=5&timeFrom=2026-01-01T00:00:00Z&status=PENDING");
+  assert.equal(valid.status, 200, JSON.stringify(valid.body));
 });

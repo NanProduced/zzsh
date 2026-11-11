@@ -501,7 +501,7 @@ export function WorkspaceApp({
   return (
     <div className={`workspace-root min-h-svh ${theme === "dark" ? "dark" : ""}`}>
       <SidebarProvider style={{ "--sidebar-width": "250px" } as CSSProperties}>
-        <WorkspaceSidebar snapshot={snapshot} location={activeLocation} onNavigate={openPath} onSignOut={signOutAndClear} />
+        <WorkspaceSidebar snapshot={snapshot} location={activeLocation} onNavigate={openPath} onSignOut={signOutAndClear} refreshNonce={refreshNonce} />
         <SidebarInset>
           <WorkspaceTopbar
             pathname={active.path}

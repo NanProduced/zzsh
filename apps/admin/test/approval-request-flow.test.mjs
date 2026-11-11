@@ -56,13 +56,13 @@ test("unknown and missing projections remain unknown, without a client policy en
   const policy = requestPolicy(detail({ status: "FUTURE_STATUS", candidateAvailability: null, candidates: [] }));
   assert.equal(step(policy, "review").status, "unknown");
   assert.equal(step(policy, "approved").status, "unknown");
-  assert.equal(step(policy, "review").facts.find(fact => fact.label === "本单可处理").value, "未提供");
+  assert.equal(step(policy, "review").facts.some(fact => fact.label === "本单可处理"), false, "the new UI no longer exposes technical eligibility wording");
   assert.equal(step(policy, "review").statusLabel, "决定记录未读到");
   assert.equal(step(policy, "review").facts.find(fact => fact.label === "申请状态").value, "状态暂不识别，请刷新后核对");  // 未登记值不裸显代码，也不由客户端推断
   assert.equal("quorum" in step(policy, "review"), false);
   assert.equal("threshold" in policy, false);
   const missingEligibility = requestPolicy(detail({ candidates: [{ ...person }] }));
-  assert.equal(step(missingEligibility, "review").approvers[0].title, "通用资格未提供");
+  assert.equal(step(missingEligibility, "review").approvers[0].title, "暂不可审批", "eligibility is stated in plain words without a technical code");
 });
 
 test("execution receipt and actual business result are separate facts", () => {

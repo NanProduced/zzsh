@@ -710,7 +710,7 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
             <AlertDescription>
               {command.detailStatus === "PENDING" ? "审批通过并执行后才会生效。" : command.detailStatus === "REJECTED" ? "请核对原因后重新办理。" : command.detailStatus ? `审批状态：${statusView(command.detailStatus).label}。` : "审批通过后仍需确认业务执行结果。"}
             </AlertDescription>
-            {onOpenPath ? <AlertAction><Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看审批</Button></AlertAction> : null}
+            {onOpenPath ? <AlertAction><Button size="sm" variant="link" onClick={() => openApproval(command.requestId)}>查看申请</Button></AlertAction> : null}
           </Alert>
         ) : null}
         {!options && !optionsError ? <Skeleton className="h-12 w-full" aria-label="正在读取礼遇权限" /> : null}
@@ -778,7 +778,7 @@ function BenefitsWorkspace({ snapshot, initialUserId, initialGameId, refreshNonc
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-wrap justify-end gap-1.5">
-                            {item.approvalRequestId ? <Button size="sm" variant="ghost" onClick={() => openApproval(item.approvalRequestId)}>审批</Button> : null}
+                            {item.approvalRequestId ? <Button size="sm" variant="ghost" onClick={() => openApproval(item.approvalRequestId)}>查看申请</Button> : null}
                             {options.capability.canRequest && ["ACTIVE", "EXECUTED_PENDING_START"].includes(item.status) ? (
                               <>
                                 <Button size="sm" variant="outline" disabled={blocked} onClick={() => openEditor(item, "replace")}>替换/续期</Button>

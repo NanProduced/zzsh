@@ -3,7 +3,7 @@ import { ChevronRightIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { SidebarMenuButton, SidebarMenuItem, SidebarMenuSub } from "@/components/ui/sidebar";
+import { SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub } from "@/components/ui/sidebar";
 
 import { activeNavPath, navItemPaths, type NavLocation } from "./nav-path";
 import type { WorkspaceMenuItem } from "./nav-config";
@@ -46,6 +46,9 @@ export function WorkspaceNavItem({
           {item.icon ? <item.icon /> : null}
           <span className="grow">{item.label}</span>
         </SidebarMenuButton>
+        {item.badge ? (
+          <SidebarMenuBadge aria-label={`待我处理 ${item.badge} 件`}>{item.badge > 99 ? "99+" : item.badge}</SidebarMenuBadge>
+        ) : null}
       </SidebarMenuItem>
     );
   }

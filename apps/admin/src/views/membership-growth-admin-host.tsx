@@ -429,10 +429,10 @@ function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refreshNonce
     : approvalWrite.detailStatus === "APPROVED"
       ? "审批已通过，等待执行/发布；批准不等于已发布。"
       : approvalWrite.detailStatus === "PENDING"
-        ? "已提交审批，等待审批中心处理。"
+        ? "已提交审批，等待 Boss 审批。"
         : approvalWrite.detailStatus
           ? `审批状态：${statusView(approvalWrite.detailStatus).label}。`
-          : "已提交审批，等待审批中心处理。";
+          : "已提交审批，等待 Boss 审批。";
 
   useEffect(() => {
     if (state.status !== "ready" || !approvalWrite.requestId) return;

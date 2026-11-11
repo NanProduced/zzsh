@@ -13,6 +13,7 @@ import {
   validateDistributionReversalSubmission,
 } from '../src/finance/distribution-reversal-approval';
 import { evaluateApprovalActions } from '../src/auth/approval-audit';
+import { APPROVAL_TEST_OPERATION } from '../src/auth/approval-business';
 
 const payload = { schema: 'distribution-reversal-request.v1', earningId: 'earning_1', orderId: 'order_1', amountCents: '2500', full: true, reason: '客服核实的错发佣金' };
 const earningRow = { id: 'earning_1', order_id: 'order_1', amount_cents: '2500', state: 'SETTLED', beneficiary_role: 'OWNER_REFERRAL', game_id: 'delta', reversals: 0 };
@@ -123,35 +124,47 @@ test('the executor re-checks the operator and the deciding Boss against the orig
   } finally { restore(); }
 });
 
-test('approval actions and candidates fail closed for a reversal without a resolvable object scope', () => {
-  const access = { status: 'ACTIVE' as const, isBoss: false, passwordChangeRequired: false, permissions: new Set(['approval.request.approve', 'approval.request.execute', 'personal.distribution.policy.manage']) };
-  const row = (objectGameId: any) => ({ id: 'approval_rev', templateId: 't', templateVersion: 1, operationCode: 'distribution.earning.reverse', triggerCondition: 'manual', payloadVersion: 1,
+test('unregistered reversal operation has no initiation/decision/execution affordance; registered operations still fail closed on game scope', () => {
+  const access = { status: 'ACTIVE' as const, isBoss: false, passwordChangeRequired: false, permissions: new Set(['approval.request.create', 'approval.request.read', 'approval.request.approve', 'approval.request.execute', 'approval.request.add_approver', 'personal.distribution.policy.manage']) };
+  const row = (operationCode: string, objectGameId: any) => ({ id: 'approval_rev', templateId: 't', templateVersion: 1, operationCode, triggerCondition: 'manual', payloadVersion: 1,
     operationPayload: payload, operationPayloadHash: 'c'.repeat(64), summary: '冲回', requestedBy: 'other_1', status: 'APPROVED', statusReason: null, expiresAt: new Date(Date.now() + 600000), createdAt: new Date(), decidedAt: new Date(), decidedBy: 'boss_1', decisionReason: null, supersedesRequestId: null, supersededByRequestId: null, objectGameId });
-  const base = { userId: 'ops_1', access, twoFactorEnabled: true, isCandidate: true, testOperationsEnabled: false, executorAssembled: true };
+  // decisionRole 为新增必填入参：OPS 可审批，纯客服由服务端硬拦。
+  const base = { userId: 'ops_1', access, twoFactorEnabled: true, isCandidate: true, decisionRole: 'OPS' as const, testOperationsEnabled: true, executorAssembled: true };
   const reasons = (input: any) => evaluateApprovalActions(input).map(item => [item.action, item.reasonCode] as const);
-  const outside = reasons({ ...base, row: row('epsilon'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['alpha'] } });
-  assert.equal(outside.find(item => item[0] === 'execute')?.[1], 'GAME_SCOPE_DENIED', 'a withdrawn game scope removes the execute affordance');
-  const inside = reasons({ ...base, row: row('delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } });
-  assert.equal(inside.find(item => item[0] === 'execute')?.[1], 'OK');
-  const unresolvable = reasons({ ...base, row: row(null), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['alpha'] } });
-  assert.equal(unresolvable.find(item => item[0] === 'execute')?.[1], 'GAME_SCOPE_DENIED', 'a missing original object scope is never treated as global');
-  const allGames = reasons({ ...base, row: row('delta'), gameScope: { mode: 'ALL_GAMES' as const, gameIds: [] } });
-  assert.equal(allGames.find(item => item[0] === 'execute')?.[1], 'OK');
-  const pending = { ...row('delta'), status: 'PENDING' as const, decidedAt: null, decidedBy: null };
-  const bossApprove = reasons({ ...base, row: pending, access: { ...access, isBoss: true }, gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: [] } });
-  assert.equal(bossApprove.find(item => item[0] === 'approve')?.[1], 'OK', 'Boss decision keeps the contracted global reach');
-  const candidateApprove = reasons({ ...base, row: row('delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } });
-  assert.equal(candidateApprove.find(item => item[0] === 'approve')?.[1], 'BUSINESS_PERMISSION_REQUIRED', 'a non-Boss candidate is blocked by the Boss rule before scope');
+  const reason = (input: any, action: string) => reasons(input).find(item => item[0] === action)?.[1];
+
+  // distribution.earning.reverse 已从业务登记移除：无论对象游戏范围如何，审批/发起/候选动作一律 OPERATION_UNREGISTERED。
+  const unregistered = reasons({ ...base, row: row('distribution.earning.reverse', 'epsilon'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['alpha'] } });
+  for (const action of ['approve', 'reject', 'execute', 'replace', 'withdraw']) assert.equal(unregistered.find(item => item[0] === action)?.[1], 'OPERATION_UNREGISTERED', `${action} is unavailable for an unregistered operation`);
+  // addCandidate 的审批权是 Boss 专属，用 Boss 身份越过该前置后仍落到未登记判定。
+  assert.equal(reason({ ...base, access: { ...access, isBoss: true }, row: row('distribution.earning.reverse', 'delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } }, 'addCandidate'), 'OPERATION_UNREGISTERED');
+  // 即使对象范围不可解析、Boss 全局范围或 ALL_GAMES，下线类型也不会被放行。
+  assert.equal(reason({ ...base, row: row('distribution.earning.reverse', null), gameScope: { mode: 'ALL_GAMES' as const, gameIds: [] } }, 'execute'), 'OPERATION_UNREGISTERED');
+  assert.equal(reason({ ...base, row: row('distribution.earning.reverse', 'delta'), access: { ...access, isBoss: true }, gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: [] } }, 'execute'), 'OPERATION_UNREGISTERED');
+  // 纯客服硬拦优先于未登记判定。
+  assert.equal(reason({ ...base, decisionRole: 'SUPPORT_ONLY' as const, row: row('distribution.earning.reverse', 'delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } }, 'approve'), 'SUPPORT_ROLE_DECISION_DENIED');
+
+  // 对仍需保留的游戏范围断言，改用仍登记的审批类型。
+  const outside = reason({ ...base, row: row(APPROVAL_TEST_OPERATION, 'epsilon'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['alpha'] } }, 'execute');
+  assert.equal(outside, 'GAME_SCOPE_DENIED', 'a withdrawn game scope removes the execute affordance');
+  const inside = reason({ ...base, row: row(APPROVAL_TEST_OPERATION, 'delta'), gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: ['delta'] } }, 'execute');
+  assert.equal(inside, 'OK');
+  const allGames = reason({ ...base, row: row(APPROVAL_TEST_OPERATION, 'delta'), gameScope: { mode: 'ALL_GAMES' as const, gameIds: [] } }, 'execute');
+  assert.equal(allGames, 'OK');
+  const boss = reason({ ...base, row: row(APPROVAL_TEST_OPERATION, 'delta'), access: { ...access, isBoss: true }, gameScope: { mode: 'SELECTED_GAMES' as const, gameIds: [] } }, 'execute');
+  assert.equal(boss, 'OK', 'Boss decision keeps the contracted global reach');
 });
 
 /** Exercise the public recovery route: it assembles current action scope before any receipt lookup. */
-async function reversalRecoveryRouteFixture(scope: any, objectGameId: string | null = 'delta') {
+async function recoveryRouteFixture(scope: any, options: { objectGameId?: string | null; operationCode?: string } = {}) {
+  const operationCode = options.operationCode ?? 'distribution.earning.reverse';
+  const objectGameId = options.objectGameId === undefined ? 'delta' : options.objectGameId;
   const access = { ...operator(scope), permissions: new Set(['approval.request.read', 'approval.request.execute', 'personal.distribution.policy.manage']) };
   const restore = stubAccess({ ops_1: access });
   const sql: string[] = [];
   let body: any, responseStatus: number | undefined;
   const row = { id: 'approval_recovery_r3', templateId: 'template_1', templateVersion: 1,
-    operationCode: 'distribution.earning.reverse', triggerCondition: 'manual', payloadVersion: 1,
+    operationCode, triggerCondition: 'manual', payloadVersion: 1,
     operationPayload: payload, operationPayloadHash: 'c'.repeat(64), summary: '全额冲回', requestedBy: 'ops_1',
     status: 'EXECUTED', statusReason: null, expiresAt: new Date(0), createdAt: new Date(0),
     decidedAt: new Date(0), decidedBy: 'boss_1', decisionReason: null,
@@ -161,43 +174,46 @@ async function reversalRecoveryRouteFixture(scope: any, objectGameId: string | n
     if (query.includes('FROM "zzsh_iam"."approval_request" WHERE "id" = $1')) return { rows: [row] };
     if (query.includes('FROM "zzsh_iam"."approval_request_candidate"')) return { rows: [] };
     if (query.includes('WHERE u."id" = $1')) return { rows: [{ id: 'ops_1', username: 'ops_1', name: 'Operator', status: 'ACTIVE', isBoss: false, twoFactorEnabled: true }] };
+    // 统一审批口径新增的 SQL：决策角色层级与当前游戏范围（buildApprovalActionContext 会读取）。
+    if (query.includes('FROM "zzsh_iam"."admin_user_role"')) return { rows: [{ code: 'role_preset_ops', canApprove: true }] };
+    if (query.includes('admin_supply_scope')) return { rows: [{ mode: 'SELECTED_GAMES', gameIds: ['delta'] }] };
     if (query.includes('FROM "zzsh_supply"."idempotency_record"')) return { rows: [{ requestFingerprint: 'f'.repeat(64), responseStatus: 200,
-      responseBody: { approvalRequestId: row.id, status: 'EXECUTED', resultCode: 'DISTRIBUTION_REVERSAL_AUTHORIZED' }, createdAt: new Date(0) }] };
+      responseBody: { approvalRequestId: row.id, status: 'EXECUTED', resultCode: 'APPROVAL_EXECUTED' }, createdAt: new Date(0) }] };
     throw new Error('Unexpected recovery SQL: ' + query);
   }, async connect() { throw new Error('Recovery GET must not open a write transaction'); } };
   const response = { status(value: number) { responseStatus = value; return this; }, setHeader() { return this; }, json(value: unknown) { body = value; } };
   const { handleAdminApprovalRoute } = await import('../src/auth/approval-audit');
   return { sql, restore, response: () => ({ body, status: responseStatus }), run: () => handleAdminApprovalRoute({ method: 'GET',
     url: '/api/v1/admin/security/approvals/recovery?operation=approval.request.execute&key=recovery_r3&requestId=' + row.id, headers: {} },
-    response, 'read_recovery_r3', { pool, testOperationsEnabled: false, approvalOperationExecutor: async () => ({ resultCode: 'UNUSED' }) } as any,
+    response, 'read_recovery_r3', { pool, testOperationsEnabled: true, approvalOperationExecutor: async () => ({ resultCode: 'UNUSED' }) } as any,
     async () => ({ userId: 'ops_1', sessionId: 'session_1' } as any)) };
 }
 
-test('reversal recovery assembles the stored object game and denies a withdrawn scope before receipt lookup', async () => {
-  const fixture = await reversalRecoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['alpha'] });
+test('recovery of an unregistered reversal operation is denied before any receipt lookup', async () => {
+  const fixture = await recoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['alpha'] });
   try {
-    await assert.rejects(fixture.run(), (error: any) => error.status === 403 && error.code === 'FORBIDDEN' && /GAME_SCOPE_DENIED/.test(error.message));
+    await assert.rejects(fixture.run(), (error: any) => error.status === 409 && /OPERATION_UNREGISTERED/.test(error.message));
     assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 0);
     assert.equal(fixture.response().body, undefined);
   } finally { fixture.restore(); }
 });
 
-test('reversal recovery preserves the original executed receipt for the current original-game scope', async () => {
-  const fixture = await reversalRecoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['delta'] });
+test('recovery preserves the original executed receipt for a still-registered operation within its object game scope', async () => {
+  const fixture = await recoveryRouteFixture({ mode: 'SELECTED_GAMES', gameIds: ['delta'] }, { operationCode: APPROVAL_TEST_OPERATION });
   try {
     await fixture.run();
     assert.equal(fixture.response().status, 200);
     assert.equal(fixture.response().body.knowledge, 'KNOWN');
-    assert.equal(fixture.response().body.receipt.resultCode, 'DISTRIBUTION_REVERSAL_AUTHORIZED');
+    assert.equal(fixture.response().body.receipt.resultCode, 'APPROVAL_EXECUTED');
     assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 1);
     assert.equal(fixture.sql.filter(query => /^\s*(INSERT|UPDATE|DELETE)/i.test(query)).length, 0);
   } finally { fixture.restore(); }
 });
 
-test('reversal recovery fails closed when the stored original object game cannot be resolved', async () => {
-  const fixture = await reversalRecoveryRouteFixture({ mode: 'ALL_GAMES', gameIds: [] }, null);
+test('recovery of an unregistered reversal operation fails closed even with an unresolvable original object game', async () => {
+  const fixture = await recoveryRouteFixture({ mode: 'ALL_GAMES', gameIds: [] }, { objectGameId: null });
   try {
-    await assert.rejects(fixture.run(), (error: any) => error.status === 403 && /GAME_SCOPE_DENIED/.test(error.message));
+    await assert.rejects(fixture.run(), (error: any) => error.status === 409 && /OPERATION_UNREGISTERED/.test(error.message));
     assert.equal(fixture.sql.filter(query => query.includes('idempotency_record')).length, 0);
   } finally { fixture.restore(); }
 });

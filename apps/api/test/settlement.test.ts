@@ -378,15 +378,14 @@ test("an authorized support finalization is bound to the current system version 
  assert.equal(settlementConfirmationReady({...base,kind:"MANUAL_ADJUSTMENT",supportFinalizedVersionId:"set_v1"}).ready,false);
 });
 
-test("confirmation: manual adjustment needs non-self ops approval bound to current hash", () => {
+test("confirmation: manual adjustment allows self ops approval but stays bound to the current hash", () => {
   const missing = settlementConfirmationReady(confirm({ kind: "MANUAL_ADJUSTMENT" }));
   assert.equal(missing.ready, false);
   const self = settlementConfirmationReady(confirm({
     kind: "MANUAL_ADJUSTMENT",
     opsApproval: { status: "APPROVED", requesterId: "boss", approverId: "boss", payloadHash: "hash_v1" },
   }));
-  assert.equal(self.ready, false);
-  assert.ok(self.reasons.includes("OPS_SELF_APPROVE"));
+  assert.equal(self.ready, true, "self approval is allowed for settlement adjustments");
   const staleHash = settlementConfirmationReady(confirm({
     kind: "MANUAL_ADJUSTMENT",
     opsApproval: { status: "APPROVED", requesterId: "cs", approverId: "ops", payloadHash: "old" },

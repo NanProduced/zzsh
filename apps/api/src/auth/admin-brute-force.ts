@@ -10,7 +10,8 @@ import { ADMIN_CLIENT_IP_FORWARD_HEADER, DEFAULT_ADMIN_CLIENT_IP_CONFIG, type Ad
  * 管理员认证防爆破（仅管理员 realm）：Postgres 共享滑动窗口 + 渐进锁定 + 自托管 ALTCHA。
  * 任一存储/校验异常一律拒绝（fail closed）；用户 realm 不经过本模块。
  */
-export type AdminAuthScope = "sign-in" | "two-factor" | "step-up" | "recovery";
+/** 高影响审批批准时的动态码复核：独立的持久计数域，不与登录/复核互相消耗锁定。 */
+export type AdminAuthScope = "sign-in" | "two-factor" | "step-up" | "recovery" | "approval-totp";
 
 export const ADMIN_BRUTE_FORCE_POLICY = {
   windowSeconds: 15 * 60,

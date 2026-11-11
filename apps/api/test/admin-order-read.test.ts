@@ -538,7 +538,8 @@ test('progress: 双方、客服复核、人工批准分别使用原判定，不�
  const manual={...readyFacts,kind:'MANUAL_ADJUSTMENT'};
  assert.equal((await progressOf(manual)).ending.state,'PENDING_APPROVAL');
  assert.equal((await progressOf({...manual,approvalStatus:'PENDING',approvalRequestedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
- assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'PENDING_APPROVAL');
+ // 自批已放开（0048 约束、0162 过账函数与 0158 计提守卫同步去掉「申请人=批准人」条件）。
+ assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-a',approvalPayloadHash:'a'.repeat(64)})).ending.state,'READY');
  assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-b',approvalPayloadHash:'b'.repeat(64)})).ending.state,'PENDING_APPROVAL');
  assert.equal((await progressOf({...manual,approvalStatus:'APPROVED',approvalRequestedBy:'admin-a',approvalDecidedBy:'admin-b',approvalPayloadHash:'a'.repeat(64)})).ending.state,'READY');
  assert.equal((await progressOf({...readyFacts,kind:'UNRECOGNIZED'})).ending.state,'UNKNOWN');

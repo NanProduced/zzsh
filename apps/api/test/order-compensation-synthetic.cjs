@@ -14,9 +14,13 @@ const {readPersonalFinanceEntries}=require('../dist/src/finance/personal-finance
 const {readAdminBalanceActivity,parseActivityQuery}=require('../dist/src/finance/admin-finance-activity.js');
 const raw=new Pool({host:'127.0.0.1',port:5432,user:'postgres',database:'zzsh_order_comp_synth',max:6,statement_timeout:10000});
 const pool={async connect(){const c=await raw.connect();try{await c.query('SET ROLE synth_comp_runtime');return c;}catch(e){c.release();throw e;}},async query(...args){const c=await this.connect();try{return await c.query(...args);}finally{c.release();}}};
-const ctx=async()=>({userId:'synthetic_ops',sessionId:'synthetic_session'}),opts={pool,testOperationsEnabled:false,approvalOperationExecutor:executeOrderCompensation};
-async function call(method,path,body,key){let statusCode=0,result;const response={headersSent:false,status(n){statusCode=n;return this},setHeader(){return this},json(value){result=value;return this}};
- try{await handleAdminApprovalRoute({method,originalUrl:'/api/v1/admin/security'+path,body,headers:key?{'idempotency-key':key}:{}},response,'synthetic_trace',opts,ctx);return{status:statusCode,body:result};}
+// 默认用 Boss 身份；可传入非 Boss 运营验证服务端硬拦。审批写的前置动态码复核由本地桩提供，
+// 本合成库不接 Better Auth/ALTCHA，也不测防爆破（离线套件另有真实断言）。
+const contextFor=actor=>async()=>({userId:actor?.userId??'synthetic_ops',sessionId:actor?.sessionId??'synthetic_session'});
+const opts={pool,testOperationsEnabled:false,approvalOperationExecutor:executeOrderCompensation,
+ adminAuth:{api:{verifyTOTP:async()=>({status:true})}},rateLimitState:new Map(),securityVerificationBudget:{inFlight:0}};
+async function call(method,path,body,key,actor){let statusCode=0,result;const response={headersSent:false,status(n){statusCode=n;return this},setHeader(){return this},json(value){result=value;return this}};
+ try{await handleAdminApprovalRoute({method,originalUrl:'/api/v1/admin/security'+path,body,headers:key?{'idempotency-key':key}:{}},response,'synthetic_trace',opts,contextFor(actor));return{status:statusCode,body:result};}
  catch(e){if(typeof e.status==='number')return{status:e.status,error:e.message};throw e;}}
 (async()=>{
  const c=await raw.connect();try{
@@ -52,23 +56,26 @@ async function call(method,path,body,key){let statusCode=0,result;const response
  const body={operationCode:'order.compensation.grant',triggerCondition:'order.compensation.requested',payloadVersion:1,payload,summary:'synthetic native compensation'};
  const [a,b]=await Promise.all([call('POST','/approvals/requests',body,'idem_synth_native_a'),call('POST','/approvals/requests',body,'idem_synth_native_b')]);
  assert.deepEqual([a.status,b.status].sort(),[200,409],JSON.stringify({a,b}));const id=(a.status===200?a:b).body.approvalRequestId;
- const approved=await call('POST','/approvals/requests/decision',{requestId:id,decision:'APPROVE'},'idem_synth_native_decide');assert.equal(approved.status,200,JSON.stringify(approved));assert.equal(approved.body.status,'EXECUTED');
+ const approved=await call('POST','/approvals/requests/decision',{requestId:id,decision:'APPROVE',totpCode:'135790'},'idem_synth_native_decide');assert.equal(approved.status,200,JSON.stringify(approved));assert.equal(approved.body.status,'EXECUTED');
  const proof=(await raw.query(`SELECT count(*)::int AS cases,min(p.amount_cents)::text AS amount,bool_and(zzsh_order.order_compensation_posting_complete(p.id)) AS complete FROM zzsh_order.order_compensation_posting p WHERE p.approval_request_id=$1`,[id])).rows[0];
  assert.deepEqual(proof,{cases:1,amount:'3456',complete:true});
  const legacy=await pool.connect();let legacyBasis;try{legacyBasis=await compensationOrderBasis(legacy,'LEGACY','legacy_order_synthetic');assert.equal(legacyBasis.state,'LEGACY_REVIEW');}finally{legacy.release();}
  const legacyPayload={schema:'order-compensation.v1',orderId:legacyBasis.orderId,origin:'LEGACY',gameId:legacyBasis.gameId,ownerUserId:legacyBasis.ownerUserId,sourceDigest:legacyBasis.sourceDigest,amountCents:'1200',caseRef:'合成旧单事故-1',reason:'合成环境核对',evidenceRef:'合成凭证-2'};
  const legacyRequest=await call('POST','/approvals/requests',{...body,payload:legacyPayload},'idem_synth_legacy_create');assert.equal(legacyRequest.status,200,JSON.stringify(legacyRequest));
- const legacyId=legacyRequest.body.approvalRequestId,decision={requestId:legacyId,decision:'APPROVE'};
+ const legacyId=legacyRequest.body.approvalRequestId,decision={requestId:legacyId,decision:'APPROVE',totpCode:'135790'};
  const [first,second]=await Promise.all([call('POST','/approvals/requests/decision',decision,'idem_synth_legacy_decide'),call('POST','/approvals/requests/decision',decision,'idem_synth_legacy_decide')]);
  assert.equal(first.status,200,JSON.stringify(first));assert.equal(second.status,200,JSON.stringify(second));assert([first.body.idempotencyReplay,second.body.idempotencyReplay].includes(true));
  const legacyProof=(await raw.query(`SELECT count(*)::int AS cases,bool_and(zzsh_order.order_compensation_posting_complete(p.id)) AS complete FROM zzsh_order.order_compensation_posting p WHERE p.approval_request_id=$1`,[legacyId])).rows[0];assert.deepEqual(legacyProof,{cases:1,complete:true});
- const expiredBody={...body,payload:{...payload,caseRef:'合成过期事故-1'}};
- const expiredRequest=await call('POST','/approvals/requests',expiredBody,'idem_synth_expired_create');assert.equal(expiredRequest.status,200,JSON.stringify(expiredRequest));
- const expiredId=expiredRequest.body.approvalRequestId;
- const unsafeReplacement=await call('POST','/approvals/requests',{...expiredBody,payload:{...expiredBody.payload,caseRef:'不同事故-2'},supersedesRequestId:expiredId},'idem_synth_replace_reject');assert.equal(unsafeReplacement.status,400,JSON.stringify(unsafeReplacement));
- const fixture=await raw.connect();try{await fixture.query('RESET ROLE');assert.equal((await fixture.query('SELECT status FROM zzsh_iam.approval_request WHERE id=$1',[expiredId])).rows[0].status,'PENDING');await fixture.query('BEGIN');await fixture.query("SET LOCAL session_replication_role='replica'");await fixture.query("UPDATE zzsh_iam.approval_request SET expires_at=clock_timestamp()-interval '1 hour' WHERE id=$1",[expiredId]);await fixture.query('COMMIT');}catch(e){await fixture.query('ROLLBACK').catch(()=>{});throw e;}finally{fixture.release();}
- const replacement=await call('POST','/approvals/requests',expiredBody,'idem_synth_expired_retry');assert.equal(replacement.status,200,JSON.stringify(replacement));
- const expiredState=(await raw.query(`SELECT a.status,(SELECT count(*)::int FROM zzsh_order.order_compensation_posting p WHERE p.approval_request_id=a.id) AS postings FROM zzsh_iam.approval_request a WHERE a.id=$1`,[expiredId])).rows[0];assert.deepEqual(expiredState,{status:'EXPIRED',postings:0});
+ // 申请不再过期（expires_at 写 infinity），去掉旧的「人为改过期后重提」用例；
+ // 保留包赔不允许 supersedes 替换、并新增「非 Boss 运营被拒」的硬拦反例。
+ const retainedBody={...body,payload:{...payload,caseRef:'合成在途事故-1'}};
+ const retainedRequest=await call('POST','/approvals/requests',retainedBody,'idem_synth_retained_create');assert.equal(retainedRequest.status,200,JSON.stringify(retainedRequest));
+ const retainedId=retainedRequest.body.approvalRequestId;
+ const unsafeReplacement=await call('POST','/approvals/requests',{...retainedBody,payload:{...retainedBody.payload,caseRef:'不同事故-2'},supersedesRequestId:retainedId},'idem_synth_replace_reject');assert.equal(unsafeReplacement.status,400,JSON.stringify(unsafeReplacement));
+ const opsDenied=await call('POST','/approvals/requests/decision',{requestId:retainedId,decision:'APPROVE',totpCode:'135790'},'idem_synth_ops_denied',{userId:'synthetic_ops_denied',sessionId:'synthetic_session_ops'});
+ assert.equal(opsDenied.status,403,JSON.stringify(opsDenied));
+ const deniedState=(await raw.query(`SELECT a.status,(SELECT count(*)::int FROM zzsh_iam.approval_decision d WHERE d.request_id=a.id) AS decisions,(SELECT count(*)::int FROM zzsh_order.order_compensation_posting p WHERE p.approval_request_id=a.id) AS postings FROM zzsh_iam.approval_request a WHERE a.id=$1`,[retainedId])).rows[0];
+ assert.deepEqual(deniedState,{status:'PENDING',decisions:0,postings:0},'运营批包赔不写决定、不入账');
  const read=await pool.connect();try{
   const page=await readPersonalFinanceEntries(read,{userId:'synthetic_owner',sessionId:'synthetic_user_session'},{limit:20,cursor:null,bucket:'AVAILABLE',projectionVersion:3},undefined);
   const credits=page.items.filter(item=>item.sourceKind==='ORDER_COMPENSATION_PAID');assert.equal(credits.length,2);
@@ -79,7 +86,7 @@ async function call(method,path,body,key){let statusCode=0,result;const response
  const guard=await raw.connect();try{await guard.query('RESET ROLE');await guard.query('BEGIN');await guard.query('ALTER TABLE zzsh_order.finance_event DISABLE TRIGGER order_compensation_event_complete');await guard.query('SET ROLE synth_comp_runtime');assert.equal((await readCompensationCases(guard,'NATIVE',basis.orderId)).state,'UNAVAILABLE');await guard.query('ROLLBACK');}catch(e){await guard.query('ROLLBACK').catch(()=>{});throw e;}finally{guard.release();}
  const failure=await raw.connect();try{
   await failure.query('RESET ROLE');
-  for(const [file,requestId,expected] of [['order-compensation-synthetic-rollback.sql','synthetic_abort',/compensation approval and ledger are not closed/],['order-compensation-synthetic-denied.sql','synthetic_denied_request',/compensation approval permission unavailable/]]){
+  for(const [file,requestId,expected] of [['order-compensation-synthetic-rollback.sql','synthetic_abort',/compensation approval and ledger are not closed/],['order-compensation-synthetic-denied.sql','synthetic_denied_request',/compensation approval requires the Boss role|compensation approval permission unavailable/]]){
    const sql=readFileSync(join(__dirname,file),'utf8').replace(/\r\n/g,'\n').replace(/^\\set ON_ERROR_STOP on\s*/,'');
    const split=sql.indexOf('BEGIN;\nSET LOCAL ROLE synth_comp_runtime;');assert(split>0);
    await failure.query(sql.slice(0,split));

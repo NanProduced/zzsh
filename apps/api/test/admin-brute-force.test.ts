@@ -6,8 +6,9 @@ import { resolve } from "node:path";
 import {
   ADMIN_BRUTE_FORCE_POLICY, ADMIN_CAPTCHA_REQUIRED_REASON, ADMIN_GENERIC_CREDENTIAL_ERROR, adminAuthSubject, adminAuthSubjects,
   createAdminBruteForce, createAdminCaptcha, createMemoryAdminAuthThrottle, createPostgresAdminAuthThrottle, gateAdminAuth, lockSecondsForLevel,
-  readAdminAltchaHmacKey, recordAdminAuthFailure, withAdminBruteForce, type AdminAuthThrottleStore,
+  readAdminAltchaHmacKey, recordAdminAuthFailure, withAdminBruteForce, type AdminAuthThrottleStore, type AdminBruteForce,
 } from "../src/auth/admin-brute-force";
+import { verifyApprovalDecisionTotp } from "../src/auth/auth-security";
 import { ADMIN_CLIENT_IP_FORWARD_HEADER, parseAdminClientIpConfig, resolveAdminClientIp } from "../src/auth/admin-client-ip";
 import { adminSecurityHeaders } from "../src/auth/auth-runtime";
 
@@ -230,4 +231,56 @@ test("Root: two-factor buckets use only the SDK cookie of the configured securit
       assert.equal((await handler(request)).status,i===5?429:401);
     }
   }
+});
+
+// R4：高影响审批批准的动态码只验码、不验密码/人机验证，但失败计数与锁定必须落在共享存储里。
+function approvalTotpHarness() {
+  const store = createMemoryAdminAuthThrottle();
+  const bf = {
+    store,
+    captcha: { challenge: async () => ({ parameters: {} }), verify: async () => false },
+    clientIp: { trustedProxies: [], header: "x-forwarded-for" },
+    twoFactorCookieName: "zzsh_admin.two_factor",
+  } as unknown as AdminBruteForce;
+  const options = () => ({
+    adminBruteForce: bf,
+    // 每次调用都重建进程内状态：模拟重启或另一个实例，锁定只能来自共享 store。
+    rateLimitState: new Map<string, { failures: number; resetAt: number }>(),
+    securityVerificationBudget: { inFlight: 0 },
+    adminAuth: { api: { verifyTOTP: async ({ body }: { body: { code: string } }) => ({ status: body.code === "135790" }) } },
+  }) as never;
+  const attempt = async (code: string, ip: string, opts?: ReturnType<typeof options>) => {
+    const request = { headers: { "x-request-id": "req_approval_totp" }, socket: { remoteAddress: ip } } as never;
+    const context = { userId: "admin_boss", sessionId: "session_1", credentials: { headers: {} } } as never;
+    try {
+      await verifyApprovalDecisionTotp(request, context, { totpCode: code }, opts ?? options());
+      return 200;
+    } catch (error) {
+      return (error as { status?: number }).status ?? 500;
+    }
+  };
+  return { store, bf, options, attempt };
+}
+
+test("approval TOTP lockout is persistent across IP changes and process-local state resets", async () => {
+  const { store, attempt } = approvalTotpHarness();
+  for (let index = 0; index < ADMIN_BRUTE_FORCE_POLICY.lockThreshold - 1; index += 1) {
+    assert.equal(await attempt("000000", `10.0.0.${index + 1}`), 401);
+  }
+  assert.equal(await attempt("000000", "10.0.0.200"), 429, "达到阈值即持久锁定");
+  // 换 IP、换进程内限流桶（重启/多实例），连正确动态码也必须被锁挡住。
+  assert.equal(await attempt("135790", "203.0.113.9"), 429);
+  assert.ok(store.audits.some((entry) => entry.action === "admin.auth.lockout" && entry.details.scope === "approval-totp"));
+});
+
+test("approval TOTP needs only the code and clears the shared failure counter on success", async () => {
+  const { store, options, attempt } = approvalTotpHarness();
+  const opts = options();
+  assert.equal(await attempt("000000", "10.0.0.1", opts), 401);
+  assert.equal(await attempt("000000", "10.0.0.1", opts), 401);
+  const subjects = adminAuthSubjects("admin:admin_boss", "10.0.0.1");
+  assert.equal((await store.status("approval-totp", subjects)).failures, 2);
+  // 没有 password、没有 altcha；正确码直接通过。
+  assert.equal(await attempt("135790", "10.0.0.1", opts), 200);
+  assert.equal((await store.status("approval-totp", subjects)).failures, 0, "成功复核清空失败计数");
 });

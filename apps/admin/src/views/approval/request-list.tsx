@@ -1,100 +1,142 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
-import { InlineStatus } from "../../components/ui/badge";
+import { Badge, InlineStatus } from "../../components/ui/badge";
 import { Input } from "../../components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../components/ui/select";
 import {
-  actionFor, ACTION_LABELS, APPROVAL_ACTION_NAMES, businessProgress, businessTitleOf, candidateAvailabilityLabel,
-  personLabel, statusView, type RequestSummary,
+  OPERATION_TITLES, operationLevel, personLabel, requestStatusView, requestSummaryLine,
+  type RequestSummary, type RiskLevel,
 } from "./contract";
 import { EmptyNote, FieldLabel, formatApprovalDate as formatDate, ReadingNote } from "./atoms";
 
 const ALL = "all";
 
+export type ListScope = "pending" | "involved" | "all";
+export type ListFilter = {
+  operationCode: string;
+  status: string;
+  requester: string;
+  timeFrom: string;
+  timeTo: string;
+};
+
+export const EMPTY_FILTER: ListFilter = { operationCode: "", status: "", requester: "", timeFrom: "", timeTo: "" };
+
+const SCOPE_LABELS: Record<ListScope, string> = {
+  pending: "待我处理",
+  involved: "与我相关",
+  all: "全部申请",
+};
+
+const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: ALL, label: "全部状态" },
+  { value: "PENDING", label: "待审批" },
+  { value: "APPROVED", label: "已生效" },
+  { value: "REJECTED", label: "已驳回" },
+  { value: "CANCELLED", label: "已撤回" },
+];
+
+const LEVEL_VARIANT: Record<RiskLevel, "destructive" | "warning" | "outline"> = {
+  高: "destructive", 中: "warning", 低: "outline",
+};
+
+function titleOf(item: RequestSummary): string {
+  return OPERATION_TITLES[item.operationCode] ?? item.business?.businessTitle ?? "审批申请";
+}
+
 /**
- * 待我处理 / 我的申请共用的六列表格。
- *
- * 服务端只提供 mine/pending 的游标分页，没有业务类型、状态、时间或关键词筛选合同，
- * 所以这里的筛选是**本页过滤**并明确标注范围；服务端全集筛选作为缺口登记给 Master，
- * 不用前端过滤冒充全集，也不放无受权接口的统计卡。
+ * 统一列表：一张表，服务端按范围/类型/状态/申请人/时间筛选（统一接口）。
+ * 每行写清申请人与一行人话摘要，右侧显示级别，只保留阅读与办理所需的信息。
  */
 export function RequestList({
-  items, busy, emptyNote, onOpen,
+  items, busy, emptyNote, onOpen, scope, onScopeChange, canSeeAll, filters, onFiltersChange,
 }: {
   items: RequestSummary[];
   busy: boolean;
   emptyNote: string;
   onOpen: (requestId: string, title: string) => void;
+  scope: ListScope;
+  onScopeChange: (scope: ListScope) => void;
+  canSeeAll: boolean;
+  filters: ListFilter;
+  onFiltersChange: (filters: ListFilter) => void;
 }) {
-  const [business, setBusiness] = useState(ALL);
-  const [status, setStatus] = useState(ALL);
-  const [keyword, setKeyword] = useState("");
+  const [draft, setDraft] = useState<ListFilter>(filters);
+  useEffect(() => { setDraft(filters); }, [filters]);
 
-  const businessOptions = useMemo(() => {
-    const titles = [...new Set(items.map((item) => businessTitleOf(item)))].sort();
-    return [{ value: ALL, label: "全部业务" }, ...titles.map((title) => ({ value: title, label: title }))];
-  }, [items]);
+  const typeOptions = [
+    { value: ALL, label: "全部类型" },
+    ...Object.entries(OPERATION_TITLES).map(([value, label]) => ({ value, label })),
+  ];
+  const scopeOptions: Array<{ value: ListScope; label: string }> = [
+    { value: "pending", label: SCOPE_LABELS.pending },
+    { value: "involved", label: SCOPE_LABELS.involved },
+    ...(canSeeAll ? [{ value: "all" as ListScope, label: SCOPE_LABELS.all }] : []),
+  ];
 
-  const statusOptions = useMemo(() => {
-    const values = [...new Set(items.map((item) => item.status).filter(Boolean))].sort();
-    return [{ value: ALL, label: "全部状态" }, ...values.map((value) => ({ value, label: statusView(value).label }))];
-  }, [items]);
-
-  const filtered = useMemo(() => {
-    const needle = keyword.trim().toLowerCase();
-    return items.filter((item) => {
-      if (business !== ALL && businessTitleOf(item) !== business) return false;
-      if (status !== ALL && item.status !== status) return false;
-      if (!needle) return true;
-      return [item.summary, item.requestId, item.requester?.name, item.requester?.displayUsername, item.requester?.username]
-        .some((value) => typeof value === "string" && value.toLowerCase().includes(needle));
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    onFiltersChange({
+      operationCode: draft.operationCode === ALL ? "" : draft.operationCode,
+      status: draft.status,
+      requester: draft.requester.trim(),
+      timeFrom: draft.timeFrom,
+      timeTo: draft.timeTo,
     });
-  }, [items, business, status, keyword]);
-
-  const filterActive = business !== ALL || status !== ALL || keyword.trim() !== "";
+  };
+  const reset = () => {
+    setDraft(EMPTY_FILTER);
+    onFiltersChange(EMPTY_FILTER);
+  };
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <form onSubmit={submit} className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3" noValidate>
         <label className="block min-w-0">
-          <FieldLabel>业务类型</FieldLabel>
-          <Select value={business} onValueChange={(value) => setBusiness(value ?? ALL)} items={businessOptions}>
+          <FieldLabel>查看范围</FieldLabel>
+          <Select value={scope} items={scopeOptions} onValueChange={(value) => { if (value) onScopeChange(value as ListScope); }}>
             <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {businessOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+              {scopeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
             </SelectContent>
           </Select>
         </label>
         <label className="block min-w-0">
-          <FieldLabel>审批状态</FieldLabel>
-          <Select value={status} onValueChange={(value) => setStatus(value ?? ALL)} items={statusOptions}>
+          <FieldLabel>类型</FieldLabel>
+          <Select value={draft.operationCode || ALL} items={typeOptions} onValueChange={(value) => setDraft({ ...draft, operationCode: value ?? ALL })}>
             <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {statusOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+              {typeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
             </SelectContent>
           </Select>
         </label>
         <label className="block min-w-0">
-          <FieldLabel>关键词（摘要 / 编号 / 申请人）</FieldLabel>
-          <Input value={keyword} onChange={(event) => setKeyword(event.target.value)} className="h-9" placeholder="输入即在当前页内过滤" />
+          <FieldLabel>状态</FieldLabel>
+          <Select value={draft.status || ALL} items={STATUS_OPTIONS} onValueChange={(value) => setDraft({ ...draft, status: value === ALL ? "" : value ?? "" })}>
+            <SelectTrigger className="h-9 w-full focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {STATUS_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
         </label>
-        <div className="flex items-end">
-          <Button
-            type="button" size="sm" variant="secondary" disabled={!filterActive}
-            onClick={() => { setBusiness(ALL); setStatus(ALL); setKeyword(""); }}
-          >
-            重置过滤
-          </Button>
+        <label className="block min-w-0">
+          <FieldLabel>申请人</FieldLabel>
+          <Input value={draft.requester} onChange={(event) => setDraft({ ...draft, requester: event.target.value })} className="h-9" placeholder="姓名或账号" />
+        </label>
+        <label className="block min-w-0">
+          <FieldLabel>提交起始日期</FieldLabel>
+          <Input type="date" value={draft.timeFrom} onChange={(event) => setDraft({ ...draft, timeFrom: event.target.value })} className="h-9" />
+        </label>
+        <label className="block min-w-0">
+          <FieldLabel>提交截止日期</FieldLabel>
+          <Input type="date" value={draft.timeTo} onChange={(event) => setDraft({ ...draft, timeTo: event.target.value })} className="h-9" />
+        </label>
+        <div className="flex items-end gap-2 sm:col-span-2 xl:col-span-3">
+          <Button type="submit" size="sm" loading={busy}>查询</Button>
+          <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={reset}>重置条件</Button>
         </div>
-      </div>
-
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        {filterActive
-          ? `仅筛选当前页：命中 ${filtered.length} / 当前页 ${items.length} 行。`
-          : `当前页 ${items.length} 行。`}
-        筛选仅覆盖本页，无法统计全部申请。
-      </p>
+      </form>
 
       {busy ? <ReadingNote /> : null}
 
@@ -106,45 +148,30 @@ export function RequestList({
               <th scope="col">业务事项</th>
               <th scope="col">申请人</th>
               <th scope="col">当前状态</th>
-              <th scope="col">下一步</th>
               <th scope="col">申请时间</th>
-              <th scope="col" className="w-32">操作</th>
+              <th scope="col" className="text-right">级别</th>
+              <th scope="col" className="w-28">操作</th>
             </tr>
           </thead>
           <tbody>
-            {filtered.map((item) => {
-              const status = statusView(item.status);
-              const progress = businessProgress(item.business);
-              const permitted = APPROVAL_ACTION_NAMES.filter((name) => actionFor(item.actions, name)?.allowed === true);
-              const actionable = permitted.length > 0;
-              const next = !Array.isArray(item.actions) ? "办理资格待读取" : actionable ? `可办理：${permitted.map(name => ACTION_LABELS[name] ?? name).join("、")}` : "暂无已确认的可办动作";
-              const availability = candidateAvailabilityLabel(item.candidateAvailability);
+            {items.map((item) => {
+              const status = requestStatusView({ status: item.status, operationCode: item.operationCode, business: item.business });
+              const level = operationLevel(item.operationCode);
               return (
                 <tr key={item.requestId} className="transition-colors hover:bg-foreground/[0.03] focus-within:bg-foreground/[0.03]">
                   <td className="min-w-0">
-                    <span className="block text-sm font-medium break-words">{businessTitleOf(item)}</span>
-                    <span className="mt-0.5 block text-xs leading-relaxed break-words text-muted-foreground">{item.summary}</span>
-                    <span className="mt-0.5 block font-mono text-xs break-all text-muted-foreground">{item.requestId}</span>
+                    <span className="block text-sm font-medium break-words">{titleOf(item)}</span>
+                    <span className="mt-0.5 block text-xs leading-relaxed break-words text-muted-foreground">{requestSummaryLine(item)}</span>
                   </td>
                   <td className="whitespace-nowrap">{personLabel(item.requester)}</td>
                   <td>
                     <InlineStatus tone={status.tone}>{status.label}</InlineStatus>
                     {item.statusReason ? <span className="mt-0.5 block text-xs text-muted-foreground">{item.statusReason}</span> : null}
-                    <span className="mt-1 block text-xs text-muted-foreground">业务：{progress.label}</span>
-                    {progress.detail ? <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{progress.detail}</span> : null}
                   </td>
-                  <td className="max-w-52">
-                    <span className="block text-xs leading-relaxed">{next}</span>
-                    {availability ? <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">{availability}</span> : null}
-                  </td>
-                  <td className="whitespace-nowrap">
-                    {formatDate(item.createdAt)}
-                    <span className="mt-0.5 block text-xs text-muted-foreground">有效期至 {formatDate(item.expiresAt)}</span>
-                  </td>
+                  <td className="whitespace-nowrap">{formatDate(item.createdAt)}</td>
+                  <td className="text-right"><Badge variant={LEVEL_VARIANT[level]}>{level}</Badge></td>
                   <td>
-                    <Button type="button" size="sm" variant={actionable ? "primary" : "secondary"} className="whitespace-nowrap focus-visible:ring-2 focus-visible:ring-ring/60" aria-label={`${actionable ? "查看并处理" : "查看"}：${businessTitleOf(item)}`} onClick={() => onOpen(item.requestId, businessTitleOf(item))}>
-                      {actionable ? "查看并处理" : "查看"}
-                    </Button>
+                    <Button type="button" size="sm" variant="secondary" className="whitespace-nowrap focus-visible:ring-2 focus-visible:ring-ring/60" aria-label={`查看：${titleOf(item)}`} onClick={() => onOpen(item.requestId, titleOf(item))}>查看</Button>
                   </td>
                 </tr>
               );
@@ -154,13 +181,9 @@ export function RequestList({
       </div>
 
       {!busy && items.length === 0 ? <EmptyNote title={emptyNote} /> : null}
-      {!busy && items.length > 0 && filtered.length === 0 ? (
-        <EmptyNote
-          title="当前页没有符合过滤条件的申请"
-          description="过滤只作用于本页，换页或重置后重新查看。"
-          action={<Button type="button" size="sm" variant="ghost" onClick={() => { setBusiness(ALL); setStatus(ALL); setKeyword(""); }}>重置过滤</Button>}
-        />
-      ) : null}
+      <p className="text-xs leading-relaxed text-muted-foreground" aria-live="polite">
+        {SCOPE_LABELS[scope]}：当前页 {items.length} 条。可按类型、状态、申请人、时间缩小范围；翻页见下方。
+      </p>
     </div>
   );
 }

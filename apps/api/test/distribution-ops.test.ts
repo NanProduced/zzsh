@@ -200,24 +200,32 @@ test('self terms support uniform rates without assigning or requiring a syntheti
 });
 
 const access=(permissions:string[],boss=false)=>({status:'ACTIVE' as const,isBoss:boss,passwordChangeRequired:false,permissions:new Set(boss?authorization.ADMIN_PERMISSION_CODES:permissions)});
-test('request/execution need policy manage; every decision needs Boss, not only ordinary approval',()=>{
- assertDistributionApprovalAccess(access(['personal.distribution.policy.manage']),'REQUEST');
- assert.throws(()=>assertDistributionApprovalAccess(access(['approval.request.approve']),'DECIDE'));
+test('all three stages share the single policy-manage permission; an operator (not only Boss) may DECIDE',()=>{
+ // 新规则：assertDistributionApprovalAccess 三阶段统一用 personal.distribution.policy.manage，stage 形参保留但不再改变口径。
+ for(const stage of ['REQUEST','DECIDE','EXECUTE'] as const)assertDistributionApprovalAccess(access(['personal.distribution.policy.manage']),stage);
+ // DECIDE 下放后：持有 manage 的运营（非 Boss）也能决定，不再被「仅 Boss」拦下。
+ assertDistributionApprovalAccess(access(['personal.distribution.policy.manage']),'DECIDE');
  assertDistributionApprovalAccess(access([],true),'DECIDE');
+ for(const stage of ['REQUEST','DECIDE','EXECUTE'] as const)assert.throws(()=>assertDistributionApprovalAccess(access(['approval.request.approve']),stage));
  assert.throws(()=>assertDistributionApprovalAccess(access(['personal.distribution.policy.read']),'EXECUTE'));
 });
 
-test('executor verifies immutable approved hash/Boss/original requester and reuses same client',async()=>{
+test('executor verifies immutable approved hash/payload/client and allows operator DECIDE, self-approval and infinite validity',async()=>{
  const a=authorization as any,s=policyStore as any,oldAccess=a.loadEffectiveAdminAccess,oldApply=s.applyApprovedDistributionPolicyInTransaction;let applied=0;
  a.loadEffectiveAdminAccess=async(_c:any,userId:string)=>access(['personal.distribution.policy.manage'],userId==='boss_1');
  const client:any={query:async()=>({rows:[{at:'2026-10-26T08:00:00.000Z'}]})};
  s.applyApprovedDistributionPolicyInTransaction=async(c:any,_actor:any,payload:any,approval:any)=>{assert.equal(c,client);assert.deepEqual(payload,change());assert.equal(approval.approvalRequestId,'approval_1');applied++;return{policy:{versionId:'policy_2'}};};
  const payload=change(),input={requestId:'approval_1',operationCode:'distribution.policy.publish',payloadVersion:1,operationPayload:payload,operationPayloadHash:hash(payload),requestedBy:'ops_1',decidedBy:'boss_1',expiresAt:'2026-10-27T08:00:00.000Z'};
- try{const execute=createDistributionPolicyApprovalExecutor({kind:'LOCAL_CONTROLLED_DISTRIBUTION'});assert.equal((await execute(client,input as any,{userId:'ops_1',sessionId:'session_1'},'req_1')).resultCode,'DISTRIBUTION_POLICY_APPLIED');assert.equal(applied,1);
+ try{
+  const execute=createDistributionPolicyApprovalExecutor({kind:'LOCAL_CONTROLLED_DISTRIBUTION'});
+  assert.equal((await execute(client,input as any,{userId:'ops_1',sessionId:'session_1'},'req_1')).resultCode,'DISTRIBUTION_POLICY_APPLIED');assert.equal(applied,1);
+  // 新规则：DECIDE 下放运营、允许自批（decidedBy/requestedBy/actor 同为 ops_1），且不再对有效期做有限数判断。
+  assert.equal((await execute(client,{...input,decidedBy:'ops_1'} as any,{userId:'ops_1',sessionId:'session_1'},'req_3')).resultCode,'DISTRIBUTION_POLICY_APPLIED');assert.equal(applied,2);
+  assert.equal((await execute(client,{...input,expiresAt:'infinity'} as any,{userId:'ops_1',sessionId:'session_1'},'req_5')).resultCode,'DISTRIBUTION_POLICY_APPLIED');assert.equal(applied,3);
+  // 冻结的 approved payload hash 与已装配的写作用域仍是硬闸门。
   await assert.rejects(()=>execute(client,{...input,operationPayloadHash:'0'.repeat(64)} as any,{userId:'ops_1',sessionId:'session_1'},'req_2'));
-  await assert.rejects(()=>execute(client,{...input,decidedBy:'ops_1'} as any,{userId:'ops_1',sessionId:'session_1'},'req_3'));
   await assert.rejects(()=>createDistributionPolicyApprovalExecutor()(client,input as any,{userId:'ops_1',sessionId:'session_1'},'req_4'));
-  assert.equal(applied,1);
+  assert.equal(applied,3);
  }finally{a.loadEffectiveAdminAccess=oldAccess;s.applyApprovedDistributionPolicyInTransaction=oldApply;}
 });
 

@@ -190,7 +190,7 @@ export function StageCardAttentionNotice({ stageCards, terminal = false }: {
   </Alert>;
 }
 
-export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose, compact=false, onViewChange }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean; compact?:boolean; onViewChange?:(view:SettlementReadView|null)=>void }) {
+export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderStatus, frozenInventory, canManualClose, compact=false, onViewChange, onOpenPath }: { orderId: string; displayNo: string; viewerId: string; orderStatus?: string; frozenInventory?: InventoryLine[]; canManualClose?: boolean; compact?:boolean; onViewChange?:(view:SettlementReadView|null)=>void; onOpenPath?:(path:string,title?:string)=>void }) {
   const [view, setView] = useState<SettlementReadView | null>(null);
   const [readState, setReadState] = useState<FulfillmentReadState>("idle");
   const [readDetail, setReadDetail] = useState("");
@@ -1020,6 +1020,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         {adjustOpen ? <div className="im-support-fulfillment-actions">
           <Button type="button" onClick={previewAdjustment} disabled={primaryDisabled}>生成调整预览</Button>
           {preview?.adjustArmed && preview.versionHash ? <Button type="button" onClick={()=>armConfirmation("adjust")} disabled={primaryDisabled}>提交人工调整</Button> : null}
+          {onOpenPath ? <Button type="button" variant="ghost" className="im-support-quiet-action" onClick={() => onOpenPath("/approvals", "审批中心")}>查看申请</Button> : null}
         </div> : null}
       </div>:null}
 

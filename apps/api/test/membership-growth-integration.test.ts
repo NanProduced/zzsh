@@ -1358,7 +1358,10 @@ function policyChangeFixture() {
     trace.push({ sql, values }); assert.doesNotMatch(sql, /^\s*(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP)\b|\bFOR\s+(UPDATE|SHARE)\b/i, "policy change is strictly a read projection");
     if (sql.includes("membership-policy-change-context")) { if (state.throwContext) throw Error("PRIVATE_DATABASE_DETAIL"); assert.equal(values[0], "membership.benefit.policy.publish"); assert.equal(values[1], POLICY_CHANGE_ASOF); assert.match(sql, /relevant AS MATERIALIZED/); assert.match(sql, /count\(\*\) FILTER/); assert.doesNotMatch(sql, /LIMIT 20/); return { rows: [state.context] }; }
     if (sql.includes(" AS allowed")) return { rows: [{ allowed: state.scope }] };
-    if (sql.includes('FROM "zzsh_iam"."approval_request" WHERE "id"')) return { rows: values[0] === row.id ? [row] : [] };
+    // 详情可见范围改按当前角色与游戏范围判定；这里提供角色/范围读取的最小夹具。
+    if (sql.includes('FROM "zzsh_iam"."admin_user_role"')) return { rows: [{ code: "role_preset_ops", canApprove: true }], rowCount: 1 };
+    if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: "ALL_GAMES", gameIds: [] }], rowCount: 1 };
+    if (sql.includes('FROM "zzsh_iam"."approval_request" WHERE "id"')) return { rows: values[0] === row.id && state.scope ? [row] : [] };
     if (sql.includes('FROM "zzsh_iam"."approval_decision"')) return { rows: state.decision ? [state.decision] : [] };
     if (sql.includes("membership-policy-change-facts")) return { rows: [facts] };
     throw Error("UNEXPECTED_POLICY_CHANGE_QUERY");
@@ -1413,10 +1416,12 @@ test("policy change missing decisions, changed approvers, lost or duplicate publ
   for (const kind of ["decision", "approver", "execution", "published", "duplicate", "result", "payload"] as const) { const f = policyChangeFixture(); f.publish(); if (kind === "decision") f.state.decision = null; if (kind === "approver") f.state.decision.approverId = "other-decider"; if (kind === "execution") f.facts.executionStatus = null; if (kind === "published") f.facts.publishedCount = "0"; if (kind === "duplicate") f.facts.publishedCount = "2"; if (kind === "result") f.facts.resultDetail = "another-policy"; if (kind === "payload") f.facts.published.policyPayload = { invalid: true }; const read = await f.read(); assert.equal(read.knowledge, "UNKNOWN", kind); assert.equal(read.immutableDiff, null); }
 });
 
-test("policy change rejected, failed and expired requests preserve real axes at one asOf", async () => {
+test("policy change rejected, failed and non-expiring requests preserve real axes at one asOf", async () => {
   const rejected = policyChangeFixture(); rejected.decide("REJECTED"); rejected.state.context.blockingCount = "0"; assert.equal((await rejected.read()).request?.approvalStatus, "REJECTED");
   const failed = policyChangeFixture(); failed.decide(); failed.row.status = "EXECUTION_FAILED"; failed.facts.executionStatus = "FAILED"; failed.facts.executedBy = "executor-context"; failed.facts.executedAtUtc = POLICY_CHANGE_ASOF; const failure = await failed.read(); assert.equal(failure.request?.approvalStatus, "APPROVED"); assert.equal(failure.request?.executionStatus, "FAILED"); assert.equal(failure.effectiveState?.status, "UNKNOWN");
-  for (const status of ["PENDING", "APPROVED"] as const) { const f = policyChangeFixture(); if (status === "APPROVED") f.decide(); f.facts.expiresAtUtc = POLICY_CHANGE_ASOF; f.state.context.blockingCount = "0"; assert.equal((await f.read()).request?.approvalStatus, "EXPIRED"); }
+  // 申请有效期一律 infinity，virtualRequestStatus 只看库内真实状态；旧「把 expiresAtUtc 推到 asOf 后变成 EXPIRED 且不再阻碍在途单」的场景已不存在。
+  // 到期字段取任意时间点，PENDING / APPROVED 都仍在途，blockingCount 仍为 1，状态不因时间改写。
+  for (const status of ["PENDING", "APPROVED"] as const) { const f = policyChangeFixture(); if (status === "APPROVED") f.decide(); f.facts.expiresAtUtc = POLICY_CHANGE_ASOF; assert.equal((await f.read()).request?.approvalStatus, status); }
   const justBefore = policyChangeFixture(); justBefore.facts.expiresAtUtc = "2026-10-25T12:00:00.123457Z"; assert.equal((await justBefore.read()).request?.approvalStatus, "PENDING");
 });
 

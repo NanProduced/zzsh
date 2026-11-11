@@ -1,5 +1,5 @@
 import {
-  businessProgress, executionModeLabel, executionProgress, personLabel, reasonLabel, statusView,
+  businessProgress, executionModeLabel, executionProgress, personLabel, statusView,
   type RequestDetail,
 } from "../../views/approval/contract.ts";
 import type { ApprovalPolicy, StepStatus } from "./policy.ts";
@@ -11,7 +11,6 @@ export function requestPolicy(detail: RequestDetail): ApprovalPolicy {
   const pending = detail.status === "PENDING" && !detail.decision;
   const closed = detail.status === "EXPIRED" || detail.status === "CANCELLED";
   const reviewStatus: StepStatus = decided ? "complete" : pending ? "pending" : closed ? "inactive" : "unknown";
-  const availability = detail.candidateAvailability;
   const execution = executionProgress(detail);
   const business = businessProgress(detail.business);
   const executionStatus: StepStatus = detail.execution?.status === "SUCCEEDED" ? "complete"
@@ -31,21 +30,16 @@ export function requestPolicy(detail: RequestDetail): ApprovalPolicy {
         facts: [
           { label: "申请人", value: personLabel(detail.requester) },
           { label: "申请时间", value: detail.createdAt ?? "未提供" },
-          { label: "规则快照", value: `模板 v${detail.template.version}` },
-          { label: "发起条件", value: detail.operation.triggerCondition },
         ],
       },
       {
-        id: "review", kind: "approval", label: "候选审批组", status: reviewStatus,
+        id: "review", kind: "approval", label: "审批", status: reviewStatus,
         statusLabel: decided ? "已有有效决定" : pending ? "待审批" : closed ? statusView(detail.status).label : "决定记录未读到",
-        description: "组内任一合格人的首个有效批准或拒绝生效；申请人不能自批。",
-        approvers: detail.candidates.map(candidate => ({ name: personLabel(candidate), title: candidate.eligible === true ? "通用资格合格" : candidate.eligible === false ? "通用资格不满足" : "通用资格未提供" })),
+        description: "由具备审批权限的人作出首个有效批准或驳回决定。",
+        approvers: detail.candidates.map(candidate => ({ name: personLabel(candidate), title: candidate.eligible === true ? "可审批" : "暂不可审批" })),
         next: ["approved", "rejected"],
         facts: [
           { label: "申请状态", value: statusView(detail.status).label },
-          { label: "候选快照", value: `${availability?.total ?? detail.candidates.length} 人` },
-          { label: "本单可处理", value: availability ? `${availability.eligible} 人` : "未提供" },
-          ...(availability?.blockingReasonCode ? [{ label: "当前限制", value: reasonLabel(availability.blockingReasonCode) }] : []),
           ...(detail.decision ? [
             { label: "决定人", value: personLabel(detail.decision.approver) },
             { label: "决定时间", value: detail.decision.createdAt ?? "未提供" },

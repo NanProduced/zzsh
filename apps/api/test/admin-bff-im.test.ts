@@ -227,3 +227,18 @@ test("admin BFF forwards the exact support unpaid cancellation path", async t =>
  assert.equal((await route(path+"/extra","POST")).status,404);
  assert.deepEqual(calls,["/api/v1/admin/orders/order_1/support-unpaid-cancel"]);
 });
+
+test("admin BFF forwards the unified approval list GET used by the list page and the nav badge", async t => {
+ const calls:string[]=[];
+ t.mock.method(authSecurity,"handleAdminSecurity",async(request:any,response:any)=>{
+  calls.push(request.originalUrl);response.status(200).json({requests:[],pendingCount:0,scope:"pending"});
+ });
+ const path="/security/approvals/requests?scope=pending&limit=1";
+ const list=await route(path);
+ assert.equal(list.status,200,"GET /security/approvals/requests must not be a BFF 404");
+ assert.deepEqual(list.body,{requests:[],pendingCount:0,scope:"pending"});
+ assert.deepEqual(calls,["/api/v1/admin/security/approvals/requests?scope=pending&limit=1"]);
+ assert.equal((await route("/security/approvals/requests","PUT")).status,404,"only the whitelisted GET/POST methods remain open");
+ assert.equal((await route("/security/approvals/requests/unknown")).status,404);
+ assert.equal(calls.length,1);
+});

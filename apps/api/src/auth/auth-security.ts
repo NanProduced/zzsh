@@ -1877,7 +1877,49 @@ async function readSecurityOperation(request: NodeRequest, response: NodeRespons
   sendSuccess(response, await readAdminSecurityCommandReceipt(options.pool, context.userId, commandId), requestId);
 }
 
-const APPROVAL_STEP_UP_PATHS = new Set(["/approvals/requests/decision", "/approvals/requests/execute", "/approvals/requests/withdraw"]);
+/**
+ * 批准高影响审批时的动态码复核。审批写不再在外层统一要求「密码 + 动态码」：
+ * 分级判断挪进审批路由，在读出申请行、知道申请类型之后才调用本函数；
+ * 中低影响批准、驳回、撤回都不复核，任何审批操作都不再要求密码。
+ */
+export async function verifyApprovalDecisionTotp(
+  request: NodeRequest,
+  context: AdminContext,
+  body: Record<string, unknown>,
+  options: AuthSecurityOptions,
+): Promise<void> {
+  const code = typeof body.totpCode === "string" ? body.totpCode : "";
+  if (!/^\d{6}$/.test(code)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Two-factor code is invalid");
+  // R4：动态码失败计数与锁定必须落在共享存储里，并且以账号为主体（换 IP 不能重置）。
+  // 进程内限流桶只作为第二道即时保护，不能替代持久封锁。仍然不要密码、不要人机验证。
+  const bf = options.adminBruteForce;
+  const subjects = bf ? adminAuthSubjects(`admin:${context.userId}`, resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], bf.clientIp)) : [];
+  if (bf) await gateAdminAuth(bf, "approval-totp", subjects, { required: false, payload: undefined });
+  const key = rateLimitKey(request, "admin.approval.decision.totp", context.userId);
+  checkRateLimit(options, key);
+  const releaseVerificationBudget = acquireSecurityVerificationBudget(options);
+  let verified = false;
+  try {
+    if (!options.adminAuth.api.verifyTOTP) throw new Error("two-factor verification API unavailable");
+    const result = await options.adminAuth.api.verifyTOTP({ body: { code }, headers: context.credentials.headers });
+    if ((result as { status?: boolean } | undefined)?.status === false) throw new Error("two-factor verification rejected");
+    clearRateLimit(options, key);
+    verified = true;
+  } catch {
+    recordRateLimitFailure(options, key);
+  } finally {
+    releaseVerificationBudget();
+  }
+  if (verified) {
+    if (bf) await clearAdminAuthFailures(bf, "approval-totp", subjects);
+    return;
+  }
+  if (bf) {
+    const failure = await recordAdminAuthFailure(bf, "approval-totp", subjects, ensureApiV1RequestId(request));
+    if (!failure || failure.lockedUntil) throw new SecurityApiError(429, API_V1_ERROR_CODES.RATE_LIMITED, "尝试次数过多，请稍后再试");
+  }
+  throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Two-factor verification is required");
+}
 
 export async function handleAdminSecurity(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, options: AuthSecurityOptions): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
@@ -1889,13 +1931,7 @@ export async function handleAdminSecurity(request: AuthSecurityNodeRequest, resp
   try {
     const path = routePath(request, "/api/v1/admin/security");
     if (path.startsWith("/approvals")) {
-      if (request.method === "POST" && APPROVAL_STEP_UP_PATHS.has(path)) {
-        // 审批决定、执行与撤回均为高风险写：先实时复核密码 + TOTP（失败累计后要求 ALTCHA），再剥离复核字段交给审批路由的严格字段校验。
-        const context = await readAdminContext(request, options);
-        const body = bodyOf(request);
-        await verifyAdminReauthentication(request, context, body, options);
-        for (const key of ["password", "totpCode", "altcha"]) delete body[key];
-      }
+      // 动态码分级由审批路由在读出申请类型后决定；外层不再剥离复核字段、不再要求密码。
       return await handleAdminApprovalRoute(request, response, requestId, options, readAdminContext);
     }
     if (path.startsWith("/audit")) {
