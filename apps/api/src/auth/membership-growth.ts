@@ -2,6 +2,7 @@ import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../suppl
 import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
 import { normalizeTime } from "../supply/content-hash";
 import { DELTA_HAFF_FIXED_SCHEMA, validateDeltaHaffRule } from "../supply/delta-rental";
+import { fixedFeeAllowsPayableRatio, parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
 
 export const MEMBERSHIP_GROWTH_SCHEMA = "membership-growth-v1" as const;
 export const GROWTH_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
@@ -683,6 +684,8 @@ export type PolicyValidationContext = {
   catalog?: { safeBoxes?: readonly string[]; materials?: ReadonlyArray<{ itemId: string; unit?: "ROUND" | "PIECE" | "DAY" }> };
   /** Bound release quote mode. SPREAD releases price through a spread delta, so enabled contracts must carry one. */
   releaseMode?: "SPREAD" | "PERCENT";
+  /** When a sealed fixed-fee policy is evaluated, all enabled mode rates must be supplied. */
+  fixedFeeRates?: FixedFeeRates;
 };
 
 function validateCatalogCoverage(contract: GrowthPricingContract, path: string, context: PolicyValidationContext, result: PolicyValidation): void {
@@ -999,6 +1002,36 @@ export function validateBenefitPolicy(value: GrowthBenefitPolicy, context: Polic
       if (notPriced(lowerContract) || notPriced(higherContract)) continue;
       if (isLegacyPricingContract(lowerContract) && isLegacyPricingContract(higherContract)) comparePricing(lowerContract, higherContract, `pricing.${mode}.${higher.tier}`);
     }
+  }
+  if (context.fixedFeeRates !== undefined) {
+    try {
+      const rates = parseFixedFeeRates(context.fixedFeeRates);
+      if (!validEnabledModes(context.enabledModes)) throw new Error("enabled modes are required");
+      const check = (mode: RentalMode, ratio: string | undefined, path: string) => {
+        if (ratio === undefined || ratio === "") return; // The ordinary policy validator reports pending values.
+        if (!fixedFeeAllowsPayableRatio(rates[mode], ratio)) result.errors.push(`${path}.discount_exceeds_fee`);
+      };
+      for (const mode of context.enabledModes) {
+        for (const tier of NORMAL_GROWTH_TIERS) {
+          const contract = value?.tiers?.[tier]?.pricing?.[mode], path = `tiers.${tier}.pricing.${mode}`;
+          if (!contract || notPriced(contract)) continue;
+          if (!isTotalDiscountContract(contract)) result.errors.push(`${path}.total_discount_required`);
+          else check(mode, contract.payableRatio, path);
+        }
+        for (const kind of ["FRIEND", "PRESTIGE"] as const) {
+          if (independentRanges) {
+            const range = entitlementRangeForMode(value, kind, mode);
+            if (range && !notPriced(range)) check(mode, range.minPayableRatio, `entitlementRanges.${kind}.byMode.${mode}`);
+          } else {
+            const cap = value?.tiers?.[kind === "FRIEND" ? "GOLD" : "DIAMOND"]?.entitlementCap;
+            const entry = cap && entitlementCapForMode(cap, mode);
+            if (!entry || notPriced(entry) || (!isEntitlementCapByMode(cap!) && entry.mode !== mode)) continue;
+            if (!isTotalDiscountContract(entry)) result.errors.push(`entitlementCaps.${kind}.${mode}.total_discount_required`);
+            else check(mode, entry.payableRatio, `entitlementCaps.${kind}.${mode}`);
+          }
+        }
+      }
+    } catch { result.errors.push("fixedFeeRates.invalid"); }
   }
   result.publishable = result.publishable && result.errors.length === 0 && value?.status === "APPROVED" && result.warnings.length === 0;
   result.valid = result.errors.length === 0;

@@ -45,6 +45,23 @@ test('a previously approved policy remains spendable after its effective time, w
  assert.equal(validateBenefitPolicy({...approved,effectiveAt:null},{enabledModes:modes}).publishable,true,'legacy approved null payload date keeps its existing metadata-bound compatibility');
  assert.equal(validateBenefitPolicy({...approved,effectiveAt:'2026-02-30T00:00:00Z'},{enabledModes:modes}).valid,false);
 });
+test('fixed-fee policy forbids member and entitlement discounts deeper than each enabled mode fee',()=>{
+ const configured=structuredClone(input);
+ configured.tiers.GOLD.payableRatio='0.95';configured.tiers.PLATINUM.payableRatio='0.95';configured.tiers.DIAMOND.payableRatio='0.95';
+ configured.entitlementRanges.FRIEND={minPayableRatio:'0.95',maxPayableRatio:'1'};
+ configured.entitlementRanges.PRESTIGE={minPayableRatio:'0.95',maxPayableRatio:'1'};
+ const policy={...normalize(original(),configured),status:'APPROVED' as const};
+ const rates={ordinary:'0.10',custom:'0.08',fast:'0.02'};
+ const good=validateBenefitPolicy(policy,{enabledModes:modes,fixedFeeRates:rates});assert.equal(good.publishable,true,JSON.stringify(good));
+ const tooLow=validateBenefitPolicy(policy,{enabledModes:modes,fixedFeeRates:{...rates,custom:'0.04'}});
+ assert.equal(tooLow.publishable,false);assert(tooLow.errors.includes('tiers.GOLD.pricing.custom.discount_exceeds_fee'));assert(tooLow.errors.includes('entitlementRanges.FRIEND.byMode.custom.discount_exceeds_fee'));
+ const equal=validateBenefitPolicy(policy,{enabledModes:modes,fixedFeeRates:{...rates,custom:'0.05'}});assert.equal(equal.publishable,true,JSON.stringify(equal));
+ const badInput=structuredClone(configured);badInput.tiers.GOLD.payableRatio='0.90';badInput.tiers.PLATINUM.payableRatio='0.90';badInput.tiers.DIAMOND.payableRatio='0.90';
+ const tooDeep=validateBenefitPolicy({...normalize(original(),badInput),status:'APPROVED'},{enabledModes:modes,fixedFeeRates:rates});assert.equal(tooDeep.publishable,false);assert(tooDeep.errors.includes('tiers.GOLD.pricing.custom.discount_exceeds_fee'));
+ assert.equal(validateBenefitPolicy(policy,{enabledModes:modes,fixedFeeRates:{...rates,custom:'1'}}).publishable,false);
+ assert.equal(validateBenefitPolicy(policy,{enabledModes:[],fixedFeeRates:rates}).publishable,false);
+ assert.equal(validateBenefitPolicy(policy,{enabledModes:modes}).publishable,true,'legacy pricing remains unchanged');
+});
 test('ALL entitlement needs real enabled modes, validates every frozen range and preserves legacy candidate rules',()=>{
  const p=normalize(),before=JSON.stringify(p);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p).valid,false);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p,{enabledModes:[]}).valid,false);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p,{enabledModes:modes}).valid,true);assert.equal(JSON.stringify(p),before);
  const {scope:_scope,...common}=candidate.pricing,old={...candidate,pricing:{...common,mode:'ordinary' as const}};assert.equal(validateEntitlementCandidate(old,'UNKNOWN',p).valid,true);

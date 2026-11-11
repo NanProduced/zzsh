@@ -1,14 +1,29 @@
-import { DecimalError, divideToScale, parseNonNegativeDecimal } from "./decimal";
+import { DecimalError, divideToScale, formatDecimalExact, parseNonNegativeDecimal } from "./decimal";
+import type { RentalMode } from "./delta-rental";
 
 export const FIXED_FEE_ALGORITHM = "FIXED_TOTAL_V1" as const;
 
 export type FixedFeeLine = Readonly<{ itemId: string; grossCents: bigint }>;
+export type FixedFeeRates = Readonly<Record<RentalMode, string>>;
 
 function fixedFeeRate(rateText: string) {
   if (typeof rateText !== "string" || rateText.length > 10) throw new DecimalError("fixed fee rate is invalid");
   const rate = parseNonNegativeDecimal(rateText, 8, "fixed fee rate");
   if (rate.value >= 10n ** BigInt(rate.scale)) throw new DecimalError("fixed fee rate must be less than one");
   return rate;
+}
+
+export function parseFixedFeeRates(value: unknown): FixedFeeRates {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== "custom,fast,ordinary") throw new DecimalError("fixed fee rates are incomplete");
+  const rates = value as Record<string, unknown>;
+  const parse = (mode: RentalMode) => formatDecimalExact(fixedFeeRate(rates[mode] as string));
+  return { ordinary: parse("ordinary"), custom: parse("custom"), fast: parse("fast") };
+}
+
+export function fixedFeeRateForMode(rates: FixedFeeRates, mode: RentalMode): string {
+  if (!["ordinary", "custom", "fast"].includes(mode)) throw new DecimalError("rental mode is invalid");
+  return parseFixedFeeRates(rates)[mode];
 }
 
 /** Membership's payable share must leave at least the owner's pre-coverage share. */

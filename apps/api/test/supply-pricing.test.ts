@@ -9,7 +9,7 @@ import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { readResourceIncomePreview } from "../src/supply/publishing";
-import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio } from "../src/supply/fixed-fee";
+import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio, fixedFeeRateForMode, parseFixedFeeRates } from "../src/supply/fixed-fee";
 import { applyTotalDiscountToQuote } from "../src/auth/membership-total-discount";
 import { normalizeQuote } from "../src/supply/content-hash";
 import { projectTenantPriceQuote } from "../src/supply/tenant-price-projection";
@@ -92,6 +92,18 @@ test("fixed fee rejects a discount deeper than the applicable fee rate", () => {
   assert.equal(fixedFeeAllowsPayableRatio("0", "1"), true);
   for (const ratio of ["", "0", "1.01", "0.123456789"]) assert.throws(() => fixedFeeAllowsPayableRatio("0.08", ratio));
   assert.throws(() => fixedFeeAllowsPayableRatio("1", "0.95"));
+});
+
+test("fixed-fee policy requires three explicit rates and selects by rental mode", () => {
+  const rates = parseFixedFeeRates({ ordinary: "0.1000", custom: "0.08", fast: "0.12" });
+  assert.deepEqual(rates, { ordinary: "0.1", custom: "0.08", fast: "0.12" });
+  assert.equal(fixedFeeRateForMode(rates, "ordinary"), "0.1");
+  assert.equal(fixedFeeRateForMode(rates, "custom"), "0.08");
+  assert.equal(fixedFeeRateForMode(rates, "fast"), "0.12");
+  for (const value of [null, {}, { ordinary: "0.1", custom: "0.08" }, { ...rates, fast: null }, { ...rates, fast: "1" }, { ...rates, extra: "0" }]) {
+    assert.throws(() => parseFixedFeeRates(value));
+  }
+  assert.throws(() => fixedFeeRateForMode(rates, "unknown" as never));
 });
 
 test("fixed fee rounds once for the combined resource amount and allocates cents deterministically", () => {
