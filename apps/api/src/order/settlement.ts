@@ -249,6 +249,16 @@ export function earlyMakeupCents(fullSpreadCents: bigint, consumed: bigint, decl
   return rRoundCents(makeupExact(rat(fullSpreadCents, 100n), consumed, declared));
 }
 
+/** The same frozen fee basis applies to normal settlement, manual adjustment and cancellation. */
+export function allocateFixedOwnerIncome(grossCents: bigint, rate: string, fullPayoutSelected: boolean) {
+  if (typeof grossCents !== "bigint" || grossCents < 0n || typeof fullPayoutSelected !== "boolean") throw new DecimalError("Invalid owner income basis");
+  const serviceFeeCents = calculateFixedFee([{ itemId: "owner", grossCents }], rate).feeCents;
+  const fullPayoutFeeCents = fullPayoutSelected ? fullPayoutServiceFeeCents(grossCents) : 0n;
+  const ownerNetCents = grossCents - serviceFeeCents - fullPayoutFeeCents;
+  if (ownerNetCents < 0n) throw new DecimalError("Owner income cannot cover fees");
+  return { grossCents, serviceFeeCents, fullPayoutFeeCents, ownerNetCents };
+}
+
 function parseExactRatio(ratio: SettlementExactRatio | null | undefined, prefix: string, reasons: string[]): { buyer: Rat; owner: Rat } | null {
   if (!ratio || typeof ratio !== "object") {
     reasons.push(`${prefix}_EXACT_RATIO_MISSING`);
@@ -519,6 +529,14 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   const renterHaffTotal = Hb + makeupCents;
   const ownerConsumed = Ho + Go;
 
+  let fixedOwner: ReturnType<typeof allocateFixedOwnerIncome> | null = null;
+  if (fixedPricing && fixedGross !== null && typeof input.fixedFeeRate === "string") {
+    try {
+      fixedOwner = allocateFixedOwnerIncome(fixedGross, input.fixedFeeRate, started && input.fullPayout === "SELECTED");
+      if (fixedOwner.serviceFeeCents !== fixedServiceFee || fixedGross - fixedOwner.serviceFeeCents !== ownerConsumed) reasons.push("FIXED_FEE_ALLOCATION_MISMATCH");
+    } catch { reasons.push("OWNER_INCOME_INSUFFICIENT"); }
+  }
+
   let fee = 0n;
   let feeBase = 0n;
   let feePayer: "OWNER" | "NONE" = "NONE";
@@ -527,11 +545,11 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   } else if (input.fullPayout === "SELECTED" && started && !reasons.includes("FULL_PAYOUT_POLICY_REF_MISSING")) {
     feeBase = fixedPricing && fixedGross !== null ? fixedGross : ownerConsumed;
     feePayer = "OWNER";
-    fee = fullPayoutServiceFeeCents(feeBase);
+    fee = fixedOwner ? fixedOwner.fullPayoutFeeCents : fullPayoutServiceFeeCents(feeBase);
   }
 
   const ownerGross = fixedPricing && fixedGross !== null ? fixedGross : ownerConsumed;
-  const ownerNet = feePayer === "OWNER" ? ownerConsumed - fee : ownerConsumed;
+  const ownerNet = fixedOwner ? fixedOwner.ownerNetCents : feePayer === "OWNER" ? ownerConsumed - fee : ownerConsumed;
   if (ownerNet < 0n) reasons.push("OWNER_INCOME_INSUFFICIENT");
   const renterCharge = renterHaffTotal + Gb;
   const renterRefund = captured - renterCharge;

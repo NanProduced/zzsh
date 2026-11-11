@@ -5,6 +5,7 @@ import { computeQuote } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import {
   computeSettlement,
+  allocateFixedOwnerIncome,
   settlementFeeReconfirmationRequired,
   earlyMakeupCents,
   settlementConfirmationReady,
@@ -136,6 +137,15 @@ test("fixed-fee settlement charges platform and full-payout fees from the same g
   assert.equal(money(result, "renterRefund"), "0.00");
   assert.equal(money(result, "platformContribution"), "13.00");
   assert.deepEqual(input, before);
+});
+
+test("fixed-fee manual gross allocation uses frozen rates and rejects insufficient owner income", () => {
+  assert.deepEqual(allocateFixedOwnerIncome(4000n, "0.10", true), { grossCents: 4000n, serviceFeeCents: 400n, fullPayoutFeeCents: 320n, ownerNetCents: 3280n });
+  assert.deepEqual(allocateFixedOwnerIncome(10000n, "0.10", true), { grossCents: 10000n, serviceFeeCents: 1000n, fullPayoutFeeCents: 800n, ownerNetCents: 8200n });
+  assert.deepEqual(allocateFixedOwnerIncome(4000n, "0.10", false), { grossCents: 4000n, serviceFeeCents: 400n, fullPayoutFeeCents: 0n, ownerNetCents: 3600n });
+  assert.throws(() => allocateFixedOwnerIncome(10000n, "0.95", true));
+  assert.throws(() => allocateFixedOwnerIncome(-1n, "0.10", false));
+  assert.throws(() => allocateFixedOwnerIncome(100n, "", false));
 });
 
 test("fixed-fee early makeup uses the undiscounted whole haff fee, not the discounted price difference", () => {
