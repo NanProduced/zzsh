@@ -9,6 +9,8 @@ import { membershipGrowthEnabled } from "./membership-growth-integration";
 import { SecurityApiError } from "./security-core";
 import { canonicalize } from "../supply/content-hash";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
+import { DELTA_HAFF_FIXED_SCHEMA } from "../supply/delta-rental";
+import { fixedFeeAllowsPayableRatio, parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
 
 const OPERATION_CODES = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -50,13 +52,14 @@ export type SealedReleaseFacts = {
   enabledModes: RentalMode[];
   releaseMode: "SPREAD" | "PERCENT";
   haffSchema: string | null;
+  fixedFeeRates?: FixedFeeRates;
   /** Bound release catalog used to require complete policy contracts at publish time. */
   catalog: { safeBoxes: string[]; materials: Array<{ itemId: string; unit?: "ROUND" | "PIECE" | "DAY"; name?: string; unitQuantity?: string }>; resources?: Array<{ itemId: string; name: string; unit: string; pricingKind: string }> };
 };
 
 export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId: string, priceVersionId: string): Promise<SealedReleaseFacts> {
-  const row = (await client.query<{ releaseId: string; gameId?: string; termVersionId?: string; priceVersionId: string; status: string; mode: string; haffRule: unknown }>(
-    `SELECT r.id AS "releaseId", r.game_id AS "gameId", r.term_version_id AS "termVersionId", r.price_version_id AS "priceVersionId", p.status, p.mode, p.haff_rule AS "haffRule"
+  const row = (await client.query<{ releaseId: string; gameId?: string; termVersionId?: string; priceVersionId: string; status: string; mode: string; haffRule: unknown; fixedFeeRates?: unknown }>(
+    `SELECT r.id AS "releaseId", r.game_id AS "gameId", r.term_version_id AS "termVersionId", r.price_version_id AS "priceVersionId", p.status, p.mode, p.haff_rule AS "haffRule", p.fixed_fee_rates AS "fixedFeeRates"
        FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
       WHERE r.id=$1`, [ruleReleaseId],
   )).rows[0];
@@ -65,6 +68,11 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
   const enabledModes = sealedEnabledRentalModes(row.haffRule);
   if (enabledModes === null || (row.mode !== "SPREAD" && row.mode !== "PERCENT")) conflict("Sealed release pricing modes cannot be verified");
   const haffRule = row.haffRule as Record<string, unknown>;
+  let fixedFeeRates: FixedFeeRates | undefined;
+  if (haffRule.schema === DELTA_HAFF_FIXED_SCHEMA) {
+    if (row.mode !== "PERCENT") conflict("Fixed fee pricing mode is invalid");
+    try { fixedFeeRates = parseFixedFeeRates(row.fixedFeeRates); } catch { conflict("Fixed fee rates are unavailable"); }
+  } else if (row.fixedFeeRates !== null && row.fixedFeeRates !== undefined) conflict("Fixed fee pricing rules are unavailable");
   const baseBySafeBox = haffRule.baseBySafeBox;
   const safeBoxes = baseBySafeBox && typeof baseBySafeBox === "object" && !Array.isArray(baseBySafeBox) ? Object.keys(baseBySafeBox).sort() : [];
   const resources = (await client.query<{ itemId: string; unit: string; name: string; pricingKind: string; unitQuantity: string | null }>(
@@ -79,10 +87,10 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
     ...(typeof material.name === "string" && material.name.length > 0 ? { name: material.name } : {}),
     ...(typeof material.unitQuantity === "string" && material.unitQuantity.length > 0 ? { unitQuantity: material.unitQuantity } : {}),
   }));
-  return { gameId: row.gameId, termVersionId: row.termVersionId, enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, catalog: { safeBoxes, materials, resources: resources.map(({ itemId, name, unit, pricingKind }) => ({ itemId, name, unit, pricingKind })) } };
+  return { gameId: row.gameId, termVersionId: row.termVersionId, enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, ...(fixedFeeRates ? { fixedFeeRates } : {}), catalog: { safeBoxes, materials, resources: resources.map(({ itemId, name, unit, pricingKind }) => ({ itemId, name, unit, pricingKind })) } };
 }
 
-type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string; enabledModes: RentalMode[] };
+type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string; enabledModes: RentalMode[]; fixedFeeRates?: FixedFeeRates };
 
 async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: string): Promise<ApprovedPolicyPayload> {
   // Approved policy versions are append-only for runtime; entitlement FK keeps the referenced version.
@@ -93,9 +101,9 @@ async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: 
   )).rows[0];
   if (!row) conflict("Approved membership policy is unavailable");
   const sealed = await assertSealedRuleRelease(client, row.ruleReleaseId, row.priceVersionId);
-  const validation = validateBenefitPolicy(row.policyPayload, { enabledModes: sealed.enabledModes });
+  const validation = validateBenefitPolicy(row.policyPayload, { enabledModes: sealed.enabledModes, fixedFeeRates: sealed.fixedFeeRates });
   if (!validation.valid || !validation.publishable) conflict("Approved membership policy is not publishable");
-  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef, enabledModes: sealed.enabledModes };
+  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef, enabledModes: sealed.enabledModes, fixedFeeRates: sealed.fixedFeeRates };
 }
 
 type DraftPolicyForApproval = { id: string; version: number; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; policyPayload: GrowthBenefitPolicy; payloadHash: string; approvedPayloadHash?: string };
@@ -140,7 +148,7 @@ export async function validateUnifiedMembershipPolicySubmission(client: PoolClie
   const draft = await loadDraftPolicyForApproval(client, payload);
   const sealed = await assertSealedRuleRelease(client, draft.ruleReleaseId, draft.priceVersionId);
   if (draft.policyPayload.pricingScope !== "ALL_ENABLED_RENTAL_MODES" || projectUnifiedMembershipPricing(draft.policyPayload, sealed.enabledModes).knowledge !== "KNOWN") conflict("请先保存统一总价折扣政策，再提交审批");
-  const validation = validateBenefitPolicy(draft.policyPayload, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
+  const validation = validateBenefitPolicy(draft.policyPayload, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode, fixedFeeRates: sealed.fixedFeeRates });
   if (!validation.publishable) conflict("统一会员政策仍有待配置或不符合规则的权益");
 }
 
@@ -152,6 +160,12 @@ export async function validateMembershipEntitlementPayload(client: PoolClient, p
   try {
     const validation = validateEntitlementCandidate(candidate, "UNKNOWN", policy.policy, { enabledModes: policy.enabledModes });
     if (!validation.valid) conflict(`Membership entitlement is invalid: ${validation.errors.join(",")}`);
+    if (policy.fixedFeeRates) {
+      const terms = candidate.pricing;
+      if (!isTotalDiscountContract(terms)) conflict("固定手续费模式只支持总价折扣");
+      const modes = terms.scope === "ALL_ENABLED_RENTAL_MODES" ? policy.enabledModes : [terms.mode];
+      if (modes.some(mode => !fixedFeeAllowsPayableRatio(policy.fixedFeeRates![mode], terms.payableRatio))) conflict("礼遇优惠幅度不能超过适用手续费率");
+    }
   } catch (error) {
     if (error instanceof GrowthRuleError) conflict("Membership entitlement contains invalid values");
     throw error;
@@ -222,7 +236,7 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     const effectiveAtUtc = draft?.effectiveAt ?? text(payload, "effectiveAtUtc");
     const sourceRef = draft?.sourceRef ?? text(payload, "sourceRef");
     const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
-    const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
+    const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode, fixedFeeRates: sealed.fixedFeeRates });
     if (!result.valid || !result.publishable) conflict(`Membership policy is not publishable: ${[...result.errors, ...result.warnings].slice(0, 5).join(",")}`);
     if (policy.pricingScope !== undefined && projectUnifiedMembershipPricing(policy, sealed.enabledModes).knowledge !== "KNOWN") conflict("Membership policy requires one total discount and one entitlement range across enabled rental paths");
     for (const tier of Object.values((policy as GrowthBenefitPolicy).tiers)) {

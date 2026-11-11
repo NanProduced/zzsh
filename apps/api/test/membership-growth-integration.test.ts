@@ -515,6 +515,31 @@ test("new policy publication refuses a per-path discount conflict without insert
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
 
+test("fixed-fee membership publication checks every applicable mode before writing", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const { compatibility, ...fixedBase } = compatRule();
+    const fixedRule = { ...fixedBase, schema: "haff-ratio-v3", fixedModes: compatibility!.modes };
+    const release = { mode: "PERCENT", haffRule: fixedRule, fixedFeeRates: { ordinary: "0.1", custom: "0.08", fast: "0.12" } };
+    const build = (ratio: string) => {
+      const input = unifiedTestPricing();
+      for (const tier of Object.values(input.tiers)) tier.payableRatio = ratio;
+      input.entitlementRanges.FRIEND = { minPayableRatio: "0.95", maxPayableRatio: "1" };
+      input.entitlementRanges.PRESTIGE = { minPayableRatio: "0.95", maxPayableRatio: "1" };
+      return normalizeUnifiedMembershipPolicy({ ...readerPolicy(), status: "DRAFT" }, input, { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
+    };
+    const allowed = draftApprovalFixture(build("0.95"), release);
+    assert.equal((await executeMembershipGrowthOperation(allowed.client as never, allowed.input as never, { userId: "boss" } as never, "allowed")).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+    assert.equal(allowed.inserted.length, 1);
+    const deep = draftApprovalFixture(build("0.90"), release);
+    await assert.rejects(() => executeMembershipGrowthOperation(deep.client as never, deep.input as never, { userId: "boss" } as never, "deep"), /discount_exceeds_fee/);
+    assert.equal(deep.inserted.length, 0);
+    const missing = draftApprovalFixture(build("0.95"), { ...release, fixedFeeRates: null });
+    await assert.rejects(() => executeMembershipGrowthOperation(missing.client as never, missing.input as never, { userId: "boss" } as never, "missing"), /Fixed fee rates are unavailable/);
+    assert.equal(missing.inserted.length, 0);
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
+
 function readerPolicy(): GrowthBenefitPolicy {
   const haff = { status: "CONFIGURED" as const, kind: "HAFF_RATIO" as const, schema: "haff-ratio-v1" as const, priceVersionId: "price-v1", costBasisRef: "cost-v1", baseBySafeBox: { "box-a": "47" }, spreadDelta: "8" };
   const material = { status: "CONFIGURED" as const, kind: "FIXED_UNIT" as const, itemId: "item", unit: "PIECE" as const, unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1", priceVersionId: "price-v1", costBasisRef: "cost-v1" };
