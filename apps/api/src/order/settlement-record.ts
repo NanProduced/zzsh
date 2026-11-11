@@ -28,6 +28,7 @@ import { assertBusinessRuntimeIdentity } from "../database/business";
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import {
+  allocateFixedOwnerIncome,
   computeSettlement,
   settlementFeeReconfirmationRequired,
   settlementConfirmationReady,
@@ -552,6 +553,8 @@ function payloadFor(input: {
   proposedOwnerNet: string | null;
   proposedOwnerGross?: string;
   proposedFullPayoutFee?: string;
+  proposedPlatformServiceFee?: string;
+  proposedMembershipDiscount?: string;
   proposedRenterRefund: string | null;
   reason: string | null;
   base: AcceptanceBase;
@@ -591,6 +594,7 @@ function payloadFor(input: {
     early: input.early,
     proposedOwnerNet: input.proposedOwnerNet,
     ...(input.proposedOwnerGross !== undefined ? {proposedOwnerGross:input.proposedOwnerGross,proposedFullPayoutFee:input.proposedFullPayoutFee} : {}),
+    ...(input.proposedPlatformServiceFee !== undefined ? {proposedPlatformServiceFee:input.proposedPlatformServiceFee,proposedMembershipDiscount:input.proposedMembershipDiscount} : {}),
     proposedRenterRefund: input.proposedRenterRefund,
     reason: input.reason,
     amounts: amounts ? {
@@ -783,6 +787,7 @@ async function settlementPostingView(client: PoolClient, orderId: string): Promi
       reason: posting.manualReason,
       proposedOwnerGross: snapshot.proposedOwnerGross ?? null,
       proposedFullPayoutFee: snapshot.proposedFullPayoutFee ?? null,
+      ...(snapshot.proposedPlatformServiceFee === undefined ? {} : {proposedPlatformServiceFee:snapshot.proposedPlatformServiceFee,proposedMembershipDiscount:snapshot.proposedMembershipDiscount}),
       systemOwnerNetCents: posting.systemOwnerNetCents,
       postedOwnerNetCents: posting.ownerNetCents,
       systemRenterRefundCents: posting.systemRenterRefundCents,
@@ -968,7 +973,7 @@ function projectComputation(value: unknown): Record<string, unknown> {
 function projectInputSnapshot(value: unknown): Record<string, unknown> {
   const snapshot = pickFields(value, [
     "schema", "openingId", "openingVersion", "capturedAmount", "depositAmount", "lines", "kind", "endReason", "early",
-    "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
+    "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedPlatformServiceFee", "proposedMembershipDiscount", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
   ]);
   if (Array.isArray(snapshot.lines)) snapshot.lines = snapshot.lines.map((line) => pickFields(line, ["itemId", "openingQuantity", "remainingQuantity", "consumedQuantity"]));
   if (snapshot.amounts !== undefined) snapshot.amounts = projectAmounts(snapshot.amounts);
@@ -1000,7 +1005,7 @@ function projectPosting(value: unknown): Record<string, unknown> {
   if (posting.amounts !== undefined) posting.amounts = projectAmounts(posting.amounts);
   if (posting.manualAdjustment && typeof posting.manualAdjustment === "object") {
     posting.manualAdjustment = pickFields(posting.manualAdjustment, [
-      "reason", "proposedOwnerGross", "proposedFullPayoutFee", "systemOwnerNetCents", "postedOwnerNetCents", "systemRenterRefundCents", "postedRenterRefundCents",
+      "reason", "proposedOwnerGross", "proposedFullPayoutFee", "proposedPlatformServiceFee", "proposedMembershipDiscount", "systemOwnerNetCents", "postedOwnerNetCents", "systemRenterRefundCents", "postedRenterRefundCents",
     ]);
   }
   return posting;
@@ -1015,10 +1020,10 @@ function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unkno
   const item = value as Record<string, unknown>;
   const withheld = new Set(viewer === "OWNER" ? [
     "capturedAmount", "capturedCents", "depositAmount", "haffConsumedBuyer", "itemConsumedBuyer", "unusedItemRefund", "unusedHaffRefund",
-    "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund", "membershipDiscount",
+    "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund", "membershipDiscount", "proposedMembershipDiscount",
   ] : [
     "haffConsumedOwner", "itemConsumedOwner", "ownerGross", "ownerNet", "systemOwnerNet", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee",
-    "systemOwnerNetCents", "postedOwnerNetCents", "owner", "platformServiceFee",
+    "systemOwnerNetCents", "postedOwnerNetCents", "owner", "platformServiceFee", "proposedPlatformServiceFee", "proposedMembershipDiscount",
   ]);
   if (item.feePayer !== viewer) for (const field of ["feeBase", "feeRate", "feeAmount"]) withheld.add(field);
   if ((item.amounts as Record<string, unknown> | null)?.feePayer !== viewer) withheld.add("compensationFeeCents");
@@ -1031,7 +1036,7 @@ function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknow
   const body = pickFields(value, [
     "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "openingGeneration", "openingGenerationRecoveryRequired", "intakes", "versions", "currentRequest", "settlement", "posting",
     "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
-    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedRenterRefund", "reason",
+    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedPlatformServiceFee", "proposedMembershipDiscount", "proposedRenterRefund", "reason",
   ]);
   if(Array.isArray(body.extraResources))body.extraResources=body.extraResources.map(item=>pickFields(item,["itemId","name","unit","pricingKind"]));
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
@@ -1413,7 +1418,7 @@ async function loadBill(client: PoolClient, order: LockedOrder, remaining: LineQ
 async function insertVersion(client: PoolClient, input: {
   order: LockedOrder; actor: Actor; openingId: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; endReason: SettlementEndReason;
   lines: SettlementInventoryLine[]; basis: Basis; proposedOwnerNet: string | null; proposedRenterRefund: string | null; reason: string | null;
-  proposedOwnerGross?: string; proposedFullPayoutFee?: string;
+  proposedOwnerGross?: string; proposedFullPayoutFee?: string; proposedPlatformServiceFee?: string; proposedMembershipDiscount?: string;
   approvalRequestId: string | null; requestId: string; confirmInitiator: boolean; base: AcceptanceBase;
 }): Promise<Command> {
   const versionId = `settle_${randomUUID().replaceAll("-", "")}`;
@@ -1425,6 +1430,7 @@ async function insertVersion(client: PoolClient, input: {
     order: input.order, openingId: input.openingId, openingVersion: (await confirmedOpening(client, input.order.id))!.versionNo,
     basis: input.basis, lines: input.lines, kind: input.kind, endReason: input.endReason, early: probed.early, result: probed,
     proposedOwnerNet: input.proposedOwnerNet, proposedOwnerGross: input.proposedOwnerGross, proposedFullPayoutFee: input.proposedFullPayoutFee,
+    proposedPlatformServiceFee:input.proposedPlatformServiceFee,proposedMembershipDiscount:input.proposedMembershipDiscount,
     proposedRenterRefund: input.proposedRenterRefund, reason: input.reason, base: input.base,
   });
   const hashed = hashApprovalPayload(payload);
@@ -1596,16 +1602,16 @@ export async function previewStaffSettlement(client: PoolClient, orderId: string
     const endReason: SettlementEndReason = early ? input.endReason! : "NORMAL";
     const result = early ? probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview") : normal;
     if (!result.ok || !result.amounts || result.early !== early) return blocked(result.reasons.length ? result.reasons : ["SETTLEMENT_NOT_COMPUTABLE"]);
-    const allocation = manualSettlementAllocation(input.proposedOwnerGross ?? "",input.proposedRenterRefund ?? "",bill.basis.captured,bill.basis.fullPayoutSelected);
+    const allocation = manualSettlementAllocation(input.proposedOwnerGross ?? "",input.proposedRenterRefund ?? "",bill.basis.captured,bill.basis.fullPayoutSelected,bill.basis.settlementPricing);
     if (!allocation) return blocked(["FUNDING_SOURCE_REQUIRED"]);
     const payload = payloadFor({
       order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
       kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet:allocation.net, proposedOwnerGross:allocation.gross,
-      proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund, reason: input.reason ?? null, base,
+      proposedFullPayoutFee:allocation.fee,proposedPlatformServiceFee:allocation.serviceFee,proposedMembershipDiscount:allocation.membershipDiscount,proposedRenterRefund:allocation.refund, reason: input.reason ?? null, base,
     });
     return done({ accepted: false, early, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId,
       systemOwnerNet: result.amounts.ownerNet.amount, systemRenterRefund: result.amounts.renterRefund.amount, proposedOwnerGross:allocation.gross,
-      proposedOwnerNet:allocation.net,proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund }, order.status);
+      proposedOwnerNet:allocation.net,proposedFullPayoutFee:allocation.fee,...(allocation.serviceFee===undefined?{}:{proposedPlatformServiceFee:allocation.serviceFee,proposedMembershipDiscount:allocation.membershipDiscount}),proposedRenterRefund:allocation.refund }, order.status);
   }
   if (early && !input.endReason) return blocked(["EARLY_REASON_REQUIRED"]);
   if (!early && input.endReason) return blocked(normal.ok ? ["END_REASON_INCONSISTENT"] : normal.reasons);
@@ -1648,11 +1654,20 @@ function yuanField(value: string): string {
   return `${match[1]}.${(match[2]??"").padEnd(2,"0")}`;
 }
 
-function manualSettlementAllocation(grossValue:string,refundValue:string,capturedValue:string,fullPayout:boolean) {
+function manualSettlementAllocation(grossValue:string,refundValue:string,capturedValue:string,fullPayout:boolean,pricing?:Basis["settlementPricing"]) {
   const gross=yuanField(grossValue),refund=yuanField(refundValue);
   const cents=(value:string)=>yuanToCents({currency:"CNY",unit:"yuan",amount:value,scale:2},"manual allocation");
   const grossCents=cents(gross),refundCents=cents(refund),captured=cents(capturedValue);
   if(grossCents+refundCents>captured)return null;
+  if(pricing?.schema==="settlement-pricing-v3") {
+    try {
+      if(typeof pricing.fixedFeeRate!=="string"||!fixedFeeAllowsPayableRatio(pricing.fixedFeeRate,pricing.payableRatio))return null;
+      const allocation=allocateFixedOwnerIncome(grossCents,pricing.fixedFeeRate,fullPayout);
+      const ratio=parseNonNegativeDecimal(pricing.payableRatio,8,"payable ratio"),unit=10n**BigInt(ratio.scale);
+      const discount=divideToScale({value:grossCents*(unit-ratio.value),scale:ratio.scale},{value:1n,scale:0},0).value;
+      return {gross,refund,fee:moneyString(allocation.fullPayoutFeeCents),net:moneyString(allocation.ownerNetCents),serviceFee:moneyString(allocation.serviceFeeCents),membershipDiscount:moneyString(discount)};
+    } catch { return null; }
+  }
   const fee=fullPayout?fullPayoutServiceFeeCents(grossCents):0n;
   return {gross,refund,fee:moneyString(fee),net:moneyString(grossCents-fee)};
 }
@@ -1674,12 +1689,12 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
   const endReason: SettlementEndReason = early ? input.endReason! : "NORMAL";
   const result = early ? probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview") : normal;
   if (!result.ok || !result.amounts || result.early !== early) return blocked(result.reasons.length ? result.reasons : ["SETTLEMENT_NOT_COMPUTABLE"]);
-  const allocation=manualSettlementAllocation(input.proposedOwnerGross,input.proposedRenterRefund,bill.basis.captured,bill.basis.fullPayoutSelected);
+  const allocation=manualSettlementAllocation(input.proposedOwnerGross,input.proposedRenterRefund,bill.basis.captured,bill.basis.fullPayoutSelected,bill.basis.settlementPricing);
   if(!allocation)return blocked(["FUNDING_SOURCE_REQUIRED"]);
   const payload = payloadFor({
     order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
     kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet:allocation.net,proposedOwnerGross:allocation.gross,
-    proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund, reason: input.reason, base,
+    proposedFullPayoutFee:allocation.fee,proposedPlatformServiceFee:allocation.serviceFee,proposedMembershipDiscount:allocation.membershipDiscount,proposedRenterRefund:allocation.refund, reason: input.reason, base,
   });
   const hashed = hashApprovalPayload(payload);
   if (hashed.hash !== input.acceptedHash) return blocked(["SETTLEMENT_HASH_MISMATCH"]);
@@ -1704,7 +1719,7 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
   });
   return insertVersion(client, {
     order, actor, openingId: bill.opening.id, kind: "MANUAL_ADJUSTMENT", endReason, lines: bill.lines, basis: bill.basis,
-    proposedOwnerNet:allocation.net,proposedOwnerGross:allocation.gross,proposedFullPayoutFee:allocation.fee,
+    proposedOwnerNet:allocation.net,proposedOwnerGross:allocation.gross,proposedFullPayoutFee:allocation.fee,proposedPlatformServiceFee:allocation.serviceFee,proposedMembershipDiscount:allocation.membershipDiscount,
     proposedRenterRefund:allocation.refund, reason: input.reason, approvalRequestId: approvalId,
     requestId: input.requestId, confirmInitiator: false, base,
   });
@@ -1915,7 +1930,12 @@ async function postReadySettlement(
   if(version.kind==="MANUAL_ADJUSTMENT" && snapshot.proposedOwnerGross!==undefined) {
     manualGross=exactCents(snapshot.proposedOwnerGross,"OWNER_GROSS");
     fee=exactCents(snapshot.proposedFullPayoutFee,"COMPENSATION_FEE");
-    if(manualGross<0n || fee!==(bill.basis.fullPayoutSelected?fullPayoutServiceFeeCents(manualGross):0n)
+    const fixed=bill.basis.settlementPricing?.schema==="settlement-pricing-v3"?bill.basis.settlementPricing:undefined;
+    if(fixed) {
+      const allocation=manualSettlementAllocation(String(snapshot.proposedOwnerGross),String(snapshot.proposedRenterRefund),bill.basis.captured,bill.basis.fullPayoutSelected,fixed);
+      if(!allocation || allocation.serviceFee!==snapshot.proposedPlatformServiceFee || allocation.membershipDiscount!==snapshot.proposedMembershipDiscount
+        || exactCents(allocation.fee,"COMPENSATION_FEE")!==fee || exactCents(allocation.net,"OWNER_NET")!==ownerNet)throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+    } else if(manualGross<0n || fee!==(bill.basis.fullPayoutSelected?fullPayoutServiceFeeCents(manualGross):0n)
       || ownerNet!==manualGross-fee || manualGross+renterRefund>captured)throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
   const feeDelta=fee-systemFee;

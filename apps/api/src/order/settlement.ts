@@ -609,14 +609,18 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
 /** Pending versions with an outdated fee basis or payer must be replaced, not silently recalculated. */
 export function settlementFeeReconfirmationRequired(snapshot: unknown): boolean {
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
-  const value = snapshot as { kind?:unknown;fullPayoutSelected?:unknown;proposedOwnerGross?:unknown;proposedFullPayoutFee?:unknown;proposedOwnerNet?:unknown;endReason?: unknown; amounts?: { feePayer?: unknown; feeBase?: unknown; ownerGross?: unknown } | null };
+  const value = snapshot as { schema?:unknown;kind?:unknown;fullPayoutSelected?:unknown;proposedOwnerGross?:unknown;proposedFullPayoutFee?:unknown;proposedPlatformServiceFee?:unknown;proposedMembershipDiscount?:unknown;proposedOwnerNet?:unknown;endReason?: unknown; amounts?: { feePayer?: unknown; feeBase?: unknown; ownerGross?: unknown } | null };
   const amounts = value.amounts;
   if (amounts?.feePayer === "RENTER" || (value.endReason === "TENANT_VOLUNTARY_EARLY" && amounts?.feePayer === "OWNER"
     && (typeof amounts.feeBase !== "string" || typeof amounts.ownerGross !== "string" || amounts.feeBase !== amounts.ownerGross))) return true;
-  if (value.kind !== "MANUAL_ADJUSTMENT" || value.proposedOwnerGross === undefined && value.fullPayoutSelected !== true) return false;
+  if (value.kind !== "MANUAL_ADJUSTMENT" || (value.schema !== "settlement-version-v4" && value.proposedOwnerGross === undefined && value.fullPayoutSelected !== true)) return false;
   const cents=(value:unknown)=>typeof value==="string"&&/^(0|[1-9]\d{0,18})\.\d{2}$/.test(value)?BigInt(value.replace(".","")):null;
   const gross=cents(value.proposedOwnerGross),fee=cents(value.proposedFullPayoutFee),net=cents(value.proposedOwnerNet);
   if(gross===null||fee===null||net===null||typeof value.fullPayoutSelected!=="boolean")return true;
+  if(value.schema==="settlement-version-v4") {
+    const service=cents(value.proposedPlatformServiceFee),discount=cents(value.proposedMembershipDiscount);
+    return service===null||discount===null||discount>service||fee!==(value.fullPayoutSelected?fullPayoutServiceFeeCents(gross):0n)||gross<fee+service||net!==gross-fee-service;
+  }
   return fee!==(value.fullPayoutSelected?fullPayoutServiceFeeCents(gross):0n) || net!==gross-fee;
 }
 

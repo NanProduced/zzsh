@@ -158,6 +158,18 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
  assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedUnit,confirmationDigest:signed(changedUnit)}}));
 });
 
+test('manual fixed-fee proposals use the frozen fee and discount rates without changing the agreed refund',()=>{
+ const calculate=load(readFileSync(resolve(tree,path),'utf8'),'manualSettlementAllocation');
+ const policy={schema:'settlement-pricing-v3',fixedFeeRate:'0.10',payableRatio:'0.90'};
+ assert.equal(canonicalize(calculate('40','60','100.00',true,policy)),canonicalize({gross:'40.00',refund:'60.00',fee:'3.20',net:'32.80',serviceFee:'4.00',membershipDiscount:'4.00'}));
+ assert.equal(canonicalize(calculate('40','60','100.00',false,policy)),canonicalize({gross:'40.00',refund:'60.00',fee:'0.00',net:'36.00',serviceFee:'4.00',membershipDiscount:'4.00'}));
+ const rounding=calculate('0.05','0.00','0.05',false,policy);
+ assert.equal(rounding.serviceFee,'0.01');assert.equal(rounding.membershipDiscount,'0.01');
+ assert.equal(calculate('40.01','60','100.00',true,policy),null);
+ assert.equal(calculate('40','60','100.00',true,{...policy,payableRatio:'0.89'}),null);
+ assert.equal(canonicalize(calculate('40','60','100.00',true)),canonicalize({gross:'40.00',refund:'60.00',fee:'3.20',net:'36.80'}));
+});
+
 test('fixed-fee refunds reconcile after discounts, excess consumption and early makeup',()=>{
  const makeInput=(haffQuantity:string,ratio:string,itemPrice:string,itemQuantity:string,payableRatio:string)=>{
   const {compatibility,...baseRule}=compatRule(ratio);

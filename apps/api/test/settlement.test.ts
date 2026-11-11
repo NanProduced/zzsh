@@ -34,6 +34,11 @@ test("outdated fee payer or early fee basis requires a new decision", () => {
   assert.equal(settlementFeeReconfirmationRequired(manual),false);
   assert.equal(settlementFeeReconfirmationRequired({...manual,proposedFullPayoutFee:"2.00"}),true);
   assert.equal(settlementFeeReconfirmationRequired({...manual,proposedOwnerNet:"20.00"}),true);
+  const fixed={schema:"settlement-version-v4",kind:"MANUAL_ADJUSTMENT",fullPayoutSelected:true,amounts:{feePayer:"OWNER"},proposedOwnerGross:"40.00",proposedFullPayoutFee:"3.20",proposedPlatformServiceFee:"4.00",proposedMembershipDiscount:"4.00",proposedOwnerNet:"32.80"};
+  assert.equal(settlementFeeReconfirmationRequired(fixed),false);
+  assert.equal(settlementFeeReconfirmationRequired({...fixed,proposedPlatformServiceFee:undefined}),true);
+  assert.equal(settlementFeeReconfirmationRequired({...fixed,proposedMembershipDiscount:"4.01"}),true);
+  assert.equal(settlementFeeReconfirmationRequired({...fixed,proposedOwnerNet:"36.80"}),true);
   assert.equal(settlementFeeReconfirmationRequired(null), false);
 });
 
