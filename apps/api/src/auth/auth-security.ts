@@ -863,15 +863,18 @@ async function activateEnrollment(request: NodeRequest, response: NodeResponse, 
   await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     // Bootstrap lock order: admin_security, then the activation audit mutation.
-    const locked = await client.query<{ status: string; isBoss: boolean; passwordChangeRequired: boolean; bootstrapExpiresAt: Date | null; bootstrapUsedAt: Date | null; firstActivatedAt: Date | null }>(
-      `SELECT "status", "is_boss" AS "isBoss", "password_change_required" AS "passwordChangeRequired", "bootstrap_expires_at" AS "bootstrapExpiresAt", "bootstrap_used_at" AS "bootstrapUsedAt", "first_activated_at" AS "firstActivatedAt"
+    const locked = await client.query<{ status: string; isBoss: boolean; passwordChangeRequired: boolean; bootstrapExpiresAt: Date | null; unlimitedInitialEnrollment: boolean; bootstrapUsedAt: Date | null; firstActivatedAt: Date | null }>(
+      `SELECT "status", "is_boss" AS "isBoss", "password_change_required" AS "passwordChangeRequired",
+              CASE WHEN "bootstrap_expires_at" = 'infinity'::timestamptz THEN NULL ELSE "bootstrap_expires_at" END AS "bootstrapExpiresAt",
+              COALESCE("bootstrap_expires_at" = 'infinity'::timestamptz, false) AS "unlimitedInitialEnrollment",
+              "bootstrap_used_at" AS "bootstrapUsedAt", "first_activated_at" AS "firstActivatedAt"
          FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 FOR UPDATE`,
       [context.userId],
     );
     if (locked.rows[0]?.status !== "PENDING_ENROLLMENT") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator enrollment is not pending");
     if (locked.rows[0]?.passwordChangeRequired) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Password change required");
-    const firstBossEnrollment = locked.rows[0].isBoss && !locked.rows[0].firstActivatedAt;
-    if (locked.rows[0].bootstrapUsedAt || (!firstBossEnrollment && (!locked.rows[0].bootstrapExpiresAt || locked.rows[0].bootstrapExpiresAt.getTime() <= Date.now()))) {
+    const unlimitedFirstEnrollment = !locked.rows[0].firstActivatedAt && (locked.rows[0].isBoss || locked.rows[0].unlimitedInitialEnrollment);
+    if (locked.rows[0].bootstrapUsedAt || (!unlimitedFirstEnrollment && (!locked.rows[0].bootstrapExpiresAt || locked.rows[0].bootstrapExpiresAt.getTime() <= Date.now()))) {
       throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator bootstrap has expired");
     }
     await client.query(`UPDATE "zzsh_iam"."admin_security"

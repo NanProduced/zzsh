@@ -8,13 +8,14 @@ type Security = {
   isBoss: boolean;
   passwordChangeRequired: boolean;
   bootstrapExpiresAt: Date | null;
+  unlimitedInitialEnrollment: boolean;
   bootstrapUsedAt: Date | null;
   firstActivatedAt: Date | null;
 };
 
 async function activate(overrides: Partial<Security>, twoFactor = true) {
   const row: Security = { status: "PENDING_ENROLLMENT", isBoss: true, passwordChangeRequired: false,
-    bootstrapExpiresAt: null, bootstrapUsedAt: null, firstActivatedAt: null, ...overrides };
+    bootstrapExpiresAt: null, unlimitedInitialEnrollment: false, bootstrapUsedAt: null, firstActivatedAt: null, ...overrides };
   let writes = 0, audits = 0;
   const query = async (sql: string) => {
     if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(sql) || sql.includes("set_config")) return { rows: [] };
@@ -45,6 +46,11 @@ test("first Boss still requires a changed password, TOTP and an unused activatio
   assert.deepEqual(await activate({ passwordChangeRequired: true }), { status: 403, writes: 0, audits: 0 });
   assert.deepEqual(await activate({}, false), { status: 403, writes: 0, audits: 0 });
   assert.deepEqual(await activate({ bootstrapUsedAt: new Date() }), { status: 409, writes: 0, audits: 0 });
+});
+
+test("initial operations account can activate without a deadline, but its later recovery cannot", async () => {
+  assert.deepEqual(await activate({ isBoss: false, unlimitedInitialEnrollment: true }), { status: 200, writes: 1, audits: 1 });
+  assert.deepEqual(await activate({ isBoss: false, unlimitedInitialEnrollment: true, firstActivatedAt: new Date("2019-01-01T00:00:00Z") }), { status: 409, writes: 0, audits: 0 });
 });
 
 test("ordinary and previously activated Boss recovery retain their activation deadlines", async () => {
