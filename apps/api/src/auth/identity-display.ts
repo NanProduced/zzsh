@@ -7,7 +7,7 @@ import { readLegacyIdentityMasks } from "./legacy-identity-profile";
 export { maskIdCard, maskRealName } from "./identity-mask";
 
 /** B5: read-only masked identity display. Full values never leave this module and are never logged. */
-export const IDENTITY_MASKING_VERSION = "identity-mask-v1" as const;
+export const IDENTITY_MASKING_VERSION = "identity-mask-v2" as const;
 export interface IdentityDisplay { realNameMasked: string; idCardMasked: string; maskingVersion: typeof IDENTITY_MASKING_VERSION }
 export type IdentityDisplayResult = { identityDisplay: IdentityDisplay; identityDisplayReason: null; identityDisplaySource?: "NATIVE_PROVIDER" | "RECORDED_SOURCE" }
   | { identityDisplay: null; identityDisplayReason: "NOT_RECORDED" | "NOT_VERIFIED" | "STORE_UNAVAILABLE" };
@@ -15,6 +15,18 @@ export type IdentityDisplayResult = { identityDisplay: IdentityDisplay; identity
 /** Minimal restricted store interface: one self-scoped SELECT, no write path. */
 type IdentityDisplayRecord={ realName: string; idCardNo: string;source?:"RECORDED_SOURCE" }|{maskedDisplay:IdentityDisplay;source:"NATIVE_PROVIDER"|"RECORDED_SOURCE"};
 export interface IdentityDisplayStore { read(userId: string): Promise<IdentityDisplayRecord | null> }
+
+// Re-mask at the read boundary: legacy encrypted profiles authenticate their original masks as AAD.
+function identityDisplayMask(name: string, document: string): IdentityDisplay {
+  const first = Array.from(name.trim())[0];
+  const realNameMasked = first && first !== "*" && !/[\p{Cc}\p{Cs}]/u.test(first) ? `${first}**` : "***";
+  const chars = Array.from(document.trim());
+  const visible = (value: string) => /^[A-Za-z0-9]$/.test(value) ? value : "*";
+  const idCardMasked = chars.length === 18
+    ? `${chars.slice(0, 3).map(visible).join("")}${"*".repeat(11)}${chars.slice(-4).map(visible).join("")}`
+    : chars.length > 4 ? `${"*".repeat(chars.length - 4)}${chars.slice(-4).map(visible).join("")}` : "*".repeat(chars.length);
+  return { realNameMasked, idCardMasked, maskingVersion: IDENTITY_MASKING_VERSION };
+}
 export function pgIdentityDisplayStore(db: Pool | PoolClient): IdentityDisplayStore {
   return {
     async read(userId) {
@@ -66,8 +78,8 @@ export async function readIdentityDisplay(store: IdentityDisplayStore, userId: s
     throw new Error("identity display read failed"); // drop driver message/detail to avoid echoing values
   }
   if (!row) return { identityDisplay: null, identityDisplayReason: "NOT_RECORDED" };
-  if("maskedDisplay"in row)return{identityDisplay:row.maskedDisplay,identityDisplayReason:null,identityDisplaySource:row.source};
-  return { identityDisplay: { realNameMasked: maskRealName(row.realName), idCardMasked: maskIdCard(row.idCardNo), maskingVersion: IDENTITY_MASKING_VERSION }, identityDisplayReason: null,
+  if("maskedDisplay"in row)return{identityDisplay:identityDisplayMask(row.maskedDisplay.realNameMasked,row.maskedDisplay.idCardMasked),identityDisplayReason:null,identityDisplaySource:row.source};
+  return { identityDisplay: identityDisplayMask(row.realName,row.idCardNo), identityDisplayReason: null,
     ...(row.source?{identityDisplaySource:row.source}:{}) };
 }
 

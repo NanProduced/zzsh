@@ -1059,13 +1059,13 @@ test("account status keeps simultaneous restrictions and does not label withdraw
 
 test("identity page shows only server-masked name and document, and explains missing source", async () => {
   const make = (identity) => probe({ authRead: async (route, session) => route === "/get-session" ? profileReply(session.userId) : identity });
-  const shown = await make({ ...identityReply("VERIFIED"), identityDisplay: { realNameMasked: "张*", idCardMasked: "110101********1234", maskingVersion: "identity-mask-v1" }, identityDisplayReason: null });
+  const shown = await make({ ...identityReply("VERIFIED"), identityDisplay: { realNameMasked: "张**", idCardMasked: "110***********1234", maskingVersion: "identity-mask-v2" }, identityDisplayReason: null });
   try {
     await shown.render("identity");
-    await shown.waitFor(() => shown.host.textContent.includes("张*"));
-    assert.match(shown.host.textContent, /张\*/);
-    assert.match(shown.host.textContent, /110101\*{8}1234/);
-    assert.doesNotMatch(shown.host.textContent, /110101\d{10}/);
+    await shown.waitFor(() => shown.host.textContent.includes("张**"));
+    assert.match(shown.host.textContent, /张\*\*/);
+    assert.match(shown.host.textContent, /110\*{11}1234/);
+    assert.doesNotMatch(shown.host.textContent, /110101/);
   } finally { await shown.close(); }
   const missing = await make({ ...identityReply("VERIFIED"), identityDisplay: null, identityDisplayReason: "NOT_RECORDED" });
   try {

@@ -116,18 +116,18 @@ test('missing identity details and registration facts stay unavailable rather th
 });
 
 test('legacy identity defaults to masks and reveals original values only after the authorized action', async t => {
-  const display = { realNameMasked: '合**名', idCardMasked: '990000********123X', maskingVersion: 'identity-mask-v1' };
+  const display = { realNameMasked: '合**', idCardMasked: '990***********123X', maskingVersion: 'identity-mask-v2' };
   const h = await mount(t, { user: { identity: { ...rawUser.identity, display } }, sensitiveProfile: true,
     permissions: [...defaultPermissions, 'user.identity.sensitive.read'], sensitiveData: { userId: subject, phoneNumber: null,
       realName: 'SYNTHETIC_NAME', identityNumber: 'SYNTHETIC_DOCUMENT', availability: { phoneNumber: 'NOT_RECORDED', realName: 'AVAILABLE', identityNumber: 'AVAILABLE' } } });
   await click(namedButton('展开实名与联系方式')); await waitFor(() => h.host.querySelector('.udv-identity'));
   const identity = h.host.querySelector('.udv-identity');
-  assert.match(identity.textContent, /合\*\*名/); assert.match(identity.textContent, /990000\*{8}123X/);
+  assert.match(identity.textContent, /合\*\*/); assert.match(identity.textContent, /990\*{11}123X/);
   assert.equal(identity.textContent.includes('SYNTHETIC_NAME'), false);
   await click(namedButton('查看明文')); await waitFor(() => identity.textContent.includes('SYNTHETIC_NAME'));
   assert.match(identity.textContent, /SYNTHETIC_DOCUMENT/);
   await click(namedButton('隐藏明文')); assert.equal(identity.textContent.includes('SYNTHETIC_NAME'), false);
-  assert.match(identity.textContent, /合\*\*名/);
+  assert.match(identity.textContent, /合\*\*/);
 });
 
 for (const [phoneRevealed, expected] of [[true, /联系方式已授权展示/], [false, /联系方式已脱敏/], [undefined, /实名资料按需查看/]]) {

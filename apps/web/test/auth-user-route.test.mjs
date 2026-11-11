@@ -56,6 +56,27 @@ async function readError(response) {
   return response.json();
 }
 
+test("identity status forwards the masked display for the current session without caching", async () => {
+  const originalFetch = globalThis.fetch;
+  const display = { realNameMasked: "李**", idCardMasked: "360***********0015", maskingVersion: "identity-mask-v2" };
+  let forwarded;
+  globalThis.fetch = async (url, init) => {
+    forwarded = { url: String(url), cookie: init.headers.get("cookie") };
+    return Response.json({ identityStatus: "VERIFIED", identityDisplay: display, identityDisplayReason: null, sessionToken: "fixture-private" });
+  };
+  try {
+    const path = ["identity", "status"];
+    const response = await GET(request(path, { headers: { cookie: "zzsh_user.session_token=fixture; unrelated=ignored" } }), routeContext(path));
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.identityDisplay, display);
+    assert.equal(body.sessionToken, undefined);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(forwarded.url, "http://127.0.0.1:3102/api/auth/user/identity/status");
+    assert.equal(forwarded.cookie, "zzsh_user.session_token=fixture");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("identity security paths reject method mismatches before BFF forwarding", async () => {
   const originalFetch = globalThis.fetch;
   let upstreamCalls = 0;

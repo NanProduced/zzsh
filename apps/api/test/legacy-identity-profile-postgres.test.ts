@@ -75,7 +75,8 @@ test("legacy identity actual PostgreSQL: encryption, exact replay, locks, ACL an
     await first.query("ROLLBACK");
     await second.query("BEGIN; SET LOCAL ROLE zzsh_synth_identity_r");
     const display=await readIdentityDisplay(pgIdentityDisplayStore(second),binding.userId,"VERIFIED");
-    assert.equal(display.identityDisplay?.realNameMasked,"合**名");
+    assert.equal(display.identityDisplay?.realNameMasked,"合**");
+    assert.equal(display.identityDisplay?.idCardMasked,"990***********123X");
     const access:EffectiveAdminAccess={status:"ACTIVE",isBoss:false,passwordChangeRequired:false,permissions:new Set(["user.directory.read","user.identity.sensitive.read"])};
     const revealed=await readUserSensitiveProfile(second,{adminId:"synthetic_admin",sessionId:"synthetic_session",requestId:"synthetic_request"},access,binding.userId,{profileKey,subjectKey});
     assert.equal(revealed.realName,details.realName); assert.equal(revealed.identityNumber,details.idCardNo);

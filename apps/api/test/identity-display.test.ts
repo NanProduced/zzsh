@@ -37,7 +37,8 @@ test("native display uses only current provider/subject binding and never select
   return{rows:[]};
  }} as unknown as PoolClient;
  const display=await readIdentityDisplay(pgIdentityDisplayStore(client),"user","VERIFIED");
- assert.equal(display.identityDisplay?.realNameMasked,"合**名");
+ assert.equal(display.identityDisplay?.realNameMasked,"合**");
+ assert.equal(display.identityDisplay?.idCardMasked,"110***********1232");
  assert.equal("identityDisplaySource"in display&&display.identityDisplaySource,"NATIVE_PROVIDER");
  const read=statements.find(sql=>sql.includes("native-identity-display-read"))!;
  assert.match(read,/s\.provider=p\.provider/);assert.match(read,/b\.subject_digest=p\.subject_digest/);
@@ -69,7 +70,8 @@ test("migrated identity self display reads only masks tied to the current legacy
   throw new Error("unexpected query");
  }} as unknown as PoolClient;
  const display=await readIdentityDisplay(pgIdentityDisplayStore(client),"user","VERIFIED");
- assert.equal(display.identityDisplay?.realNameMasked,"合**名");
+ assert.equal(display.identityDisplay?.realNameMasked,"合**");
+ assert.equal(display.identityDisplay?.idCardMasked,"990***********123X");
  assert.equal("identityDisplaySource" in display && display.identityDisplaySource,"RECORDED_SOURCE");
  const query=statements.find(sql=>sql.includes("FROM zzsh_iam.user_legacy_identity_profile p"))!;
  assert.doesNotMatch(query,/ciphertext|authentication_tag|nonce/);
@@ -79,7 +81,7 @@ test("migrated identity self display reads only masks tied to the current legacy
 test("display read: verified/recorded, not recorded, not verified, store unavailable, no value leak on error", async () => {
   const store = (row: { realName: string; idCardNo: string } | null, err?: object): IdentityDisplayStore => ({ read: async () => { if (err) throw err; return row; } });
   const ok = await readIdentityDisplay(store({ realName: "测试人", idCardNo: "000000200001010000" }), "u", "VERIFIED");
-  assert.deepEqual(ok, { identityDisplay: { realNameMasked: "测*人", idCardMasked: "000000********0000", maskingVersion: "identity-mask-v1" }, identityDisplayReason: null });
+  assert.deepEqual(ok, { identityDisplay: { realNameMasked: "测**", idCardMasked: "000***********0000", maskingVersion: "identity-mask-v2" }, identityDisplayReason: null });
   assert.ok(!JSON.stringify(ok).includes("20000101"));
   assert.equal((await readIdentityDisplay(store(null), "u", "VERIFIED")).identityDisplayReason, "NOT_RECORDED");
   let called = false;
@@ -87,4 +89,16 @@ test("display read: verified/recorded, not recorded, not verified, store unavail
   assert.equal(called, false);
   assert.equal((await readIdentityDisplay(store(null, { code: "42P01" }), "u", "VERIFIED")).identityDisplayReason, "STORE_UNAVAILABLE");
   await assert.rejects(readIdentityDisplay(store(null, { code: "XX", message: "测试人 000000200001010000" }), "u", "VERIFIED"), (e: Error) => !e.message.includes("000000200001010000"));
+});
+
+test("display masking never reconstructs details hidden by an existing mask", async () => {
+  const store = (name: string, document: string): IdentityDisplayStore => ({ read: async () => ({
+    maskedDisplay: { realNameMasked: name, idCardMasked: document, maskingVersion: "identity-mask-v2" }, source: "RECORDED_SOURCE" as const,
+  }) });
+  const short = await readIdentityDisplay(store("*", "****EFGH"), "u", "VERIFIED");
+  assert.equal(short.identityDisplay?.realNameMasked, "***");
+  assert.equal(short.identityDisplay?.idCardMasked, "****EFGH");
+  const unknown = await readIdentityDisplay(store("*", "******************"), "u", "VERIFIED");
+  assert.equal(unknown.identityDisplay?.realNameMasked, "***");
+  assert.equal(unknown.identityDisplay?.idCardMasked, "******************");
 });
