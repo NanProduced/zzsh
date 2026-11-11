@@ -3,7 +3,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
 import { normalizeTime } from "./content-hash";
-import { parseFixedFeeRates } from "./fixed-fee";
+import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { effectivePublicationStateSql } from "./listing-query";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
@@ -13,6 +13,30 @@ type BenefitRow = { effectiveAt: string; version: string; policy: GrowthBenefitP
 type EntitlementRow = { id?: string; startsAt: string; endsAt: string; pricing: unknown };
 const modeNames: readonly RentalMode[] = ["ordinary", "custom", "fast"];
 const instantSql = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+/** asOf comes from the server transaction; absence or an invalid price version is never a zero-fee fallback. */
+export async function readEffectiveFixedFeePrice(client: PoolClient, gameId: string, rentalMode: RentalMode, asOf: string) {
+  if (typeof gameId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId) || !modeNames.includes(rentalMode)) throw invalid("Pricing policy reference is invalid");
+  let at: string;
+  try { at = normalizeTime(asOf) ?? ""; } catch { throw invalid("Pricing policy time is invalid"); }
+  if (!at) throw invalid("Pricing policy time is invalid");
+  const row = (await client.query<{ id: string; generation: string; effectiveAt: string; priceVersionId: string;
+    mode: string | null; status: string | null; roundingPolicy: string | null; haffRule: unknown; rates: unknown }>(
+    `SELECT s.id,s.generation::text AS generation,${instantSql("s.effective_at")} AS "effectiveAt",s.price_version_id AS "priceVersionId",
+      p.mode,p.status,p.rounding_policy AS "roundingPolicy",p.haff_rule AS "haffRule",p.fixed_fee_rates AS rates
+      FROM zzsh_supply.pricing_policy_schedule s LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=s.game_id
+      WHERE s.game_id=$1 AND s.pricing_model='FIXED_FEE' AND s.effective_at<=$2::timestamptz
+      ORDER BY s.effective_at DESC,s.generation DESC LIMIT 1`, [gameId, at],
+  )).rows[0];
+  if (!row) return null;
+  const modes = sealedEnabledRentalModes(row.haffRule);
+  if (row.mode !== "PERCENT" || row.status !== "SEALED" || row.roundingPolicy !== "HALF_UP_CENT_V1"
+    || !modes || (row.haffRule as { schema?: unknown })?.schema !== "haff-ratio-v3") throw conflict("生效中的固定手续费政策无法核实");
+  let rates: ReturnType<typeof parseFixedFeeRates>;
+  try { rates = parseFixedFeeRates(row.rates); } catch { throw conflict("生效中的固定手续费率无法核实"); }
+  return { scheduleId: row.id, generation: row.generation, effectiveAt: row.effectiveAt, priceVersionId: row.priceVersionId,
+    commissionRate: fixedFeeRateForMode(rates, rentalMode), haffRule: row.haffRule, roundingPolicy: row.roundingPolicy };
+}
 
 /** The caller holds the shared policy lock throughout this read and its eventual write. */
 export async function readFixedFeeTimeline(client: PoolClient, gameId: string, options: {
