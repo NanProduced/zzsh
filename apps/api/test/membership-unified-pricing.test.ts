@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {NORMAL_GROWTH_TIERS,entitlementPricingSummary,isTotalDiscountContract,isUnifiedTotalDiscountContract,validateBenefitPolicy,validateEntitlementCandidate,type GrowthBenefitPolicy,type RentalMode} from '../src/auth/membership-growth';
 import {normalizeUnifiedMembershipPolicy,projectUnifiedMembershipPricing,type UnifiedMembershipPricingInput} from '../src/auth/membership-unified-pricing';
+import {validateFixedFeeTimeline,type FixedFeeTimelineInput} from '../src/auth/fixed-fee-policy-timeline';
 
 const modes:RentalMode[]=['ordinary','custom'],scope='ALL_ENABLED_RENTAL_MODES' as const;
 const input:UnifiedMembershipPricingInput={schema:'membership-unified-pricing.v1',scope,tiers:{STANDARD:{payableRatio:'1'},SILVER:{payableRatio:'0.98'},GOLD:{payableRatio:'0.95'},PLATINUM:{payableRatio:'0.9'},DIAMOND:{payableRatio:'0.85'}},entitlementRanges:{FRIEND:{minPayableRatio:'0.8',maxPayableRatio:'1'},PRESTIGE:{minPayableRatio:'0.7',maxPayableRatio:'0.9'}}};
@@ -61,6 +62,31 @@ test('fixed-fee policy forbids member and entitlement discounts deeper than each
  assert.equal(validateBenefitPolicy(policy,{enabledModes:modes,fixedFeeRates:{...rates,custom:'1'}}).publishable,false);
  assert.equal(validateBenefitPolicy(policy,{enabledModes:[],fixedFeeRates:rates}).publishable,false);
  assert.equal(validateBenefitPolicy(policy,{enabledModes:modes}).publishable,true,'legacy pricing remains unchanged');
+});
+test('fee changes check current and future member policies and still-active entitlements',()=>{
+ const config=structuredClone(input);
+ for(const tier of NORMAL_GROWTH_TIERS)config.tiers[tier].payableRatio='1';
+ config.entitlementRanges.FRIEND={minPayableRatio:'1',maxPayableRatio:'1'};
+ config.entitlementRanges.PRESTIGE={minPayableRatio:'1',maxPayableRatio:'1'};
+ const policy={...normalize(original(),config),status:'APPROVED' as const};
+ const start='2026-10-01T00:00:00.000000Z',later='2026-10-02T00:00:00.000000Z';
+ const rate={ordinary:'0.10',custom:'0.08',fast:'0.12'};
+ const entitlement={startsAt:start,endsAt:later,pricing:{...candidate.pricing,payableRatio:'0.95'}};
+ const timeline:FixedFeeTimelineInput={from:start,fees:[{effectiveAt:start,generation:'1',rates:rate,protectedModes:modes}],benefits:[{effectiveAt:start,version:'1',policy}],entitlements:[entitlement]};
+ assert.deepEqual(validateFixedFeeTimeline(timeline),{valid:true});
+ const lowered={effectiveAt:later,generation:'2',rates:{...rate,custom:'0.04'},protectedModes:modes};
+ assert.deepEqual(validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,lowered]}),{valid:true},'an entitlement ending at the effective instant no longer overlaps');
+ const stillActive={...entitlement,endsAt:'2026-10-02T00:00:00.000001Z'};
+ assert.deepEqual(validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,lowered],entitlements:[stillActive]}),{valid:false,reason:'ENTITLEMENT_DISCOUNT_EXCEEDS_FEE',at:later,mode:'custom'});
+ const invalidEntitlement={...entitlement,pricing:{status:'CONFIGURED',kind:'TOTAL_DISCOUNT',payableRatio:'0.95'}};
+ assert.equal((validateFixedFeeTimeline({...timeline,entitlements:[invalidEntitlement]}) as any).reason,'ENTITLEMENT_PRICING_UNAVAILABLE');
+ const deep=structuredClone(config);for(const tier of NORMAL_GROWTH_TIERS)deep.tiers[tier].payableRatio='0.90';
+ const deepPolicy={...normalize(original(),deep),status:'APPROVED' as const};
+ assert.equal((validateFixedFeeTimeline({...timeline,benefits:[...timeline.benefits,{effectiveAt:later,version:'2',policy:deepPolicy}]}) as any).reason,'BENEFIT_POLICY_INCOMPATIBLE');
+ assert.deepEqual(validateFixedFeeTimeline({...timeline,benefits:[{effectiveAt:start,version:'4',policy},{effectiveAt:later,version:'3',policy:deepPolicy}]}),{valid:true},'older policy versions do not override a newer effective version');
+ assert.equal((validateFixedFeeTimeline({...timeline,fees:[]}) as any).reason,'FEE_POLICY_UNAVAILABLE');
+ assert.equal((validateFixedFeeTimeline({...timeline,benefits:[]}) as any).reason,'BENEFIT_POLICY_UNAVAILABLE');
+ assert.equal((validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,{...lowered,generation:'1'}]}) as any).reason,'TIMELINE_UNAVAILABLE');
 });
 test('ALL entitlement needs real enabled modes, validates every frozen range and preserves legacy candidate rules',()=>{
  const p=normalize(),before=JSON.stringify(p);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p).valid,false);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p,{enabledModes:[]}).valid,false);assert.equal(validateEntitlementCandidate(candidate,'UNKNOWN',p,{enabledModes:modes}).valid,true);assert.equal(JSON.stringify(p),before);
