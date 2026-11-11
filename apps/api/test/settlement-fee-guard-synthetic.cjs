@@ -13,6 +13,27 @@ const pool = new Pool({host:'127.0.0.1',port:55439,database:'zzsh_synth_prod_ref
 const originalAdmission = payment.assertControlledSettlementResource;
 payment.assertControlledSettlementResource = async () => {};
 
+async function approveSyntheticAdjustment(client,requestId,key) {
+  const leased={query:async(sql,values)=>{
+    if(sql==='BEGIN')return client.query('SAVEPOINT synthetic_approval_route');
+    if(sql==='COMMIT')return client.query('RELEASE SAVEPOINT synthetic_approval_route');
+    if(sql==='ROLLBACK'){await client.query('ROLLBACK TO SAVEPOINT synthetic_approval_route');return client.query('RELEASE SAVEPOINT synthetic_approval_route');}
+    return client.query(sql,values);
+  },release(){}};
+  const pool={query:(...args)=>client.query(...args),connect:async()=>leased};
+  const request={method:'POST',url:'/api/v1/admin/security/approvals/requests/decision',
+    headers:{'idempotency-key':key},body:{requestId,decision:'APPROVE',reason:'双方已核实'}};
+  let status=0,body=null;const response={headersSent:false,status(value){status=value;return this;},setHeader(){return this;},json(value){body=value;return this;}};
+  const context={userId:'fee-admin',sessionId:'fee-admin-session',credentials:{},security:{status:'ACTIVE',isBoss:true,passwordChangeRequired:false},sessionLocked:false};
+  await require('../dist/src/auth/approval-audit').handleAdminApprovalRoute(request,response,'fee-approval-request',{pool},async()=>context);
+  assert.equal(status,200,JSON.stringify(body));
+  const proof=(await client.query(`SELECT r.status,r.decided_by,(SELECT count(*)::int FROM zzsh_iam.approval_decision d
+    WHERE d.request_id=r.id AND d.decision='APPROVED' AND d.approver_admin_id='fee-admin') AS decisions,
+    (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.object_id=r.id AND a.action='approval.request.approved' AND a.outcome='SUCCESS') AS audits
+    FROM zzsh_iam.approval_request r WHERE r.id=$1`,[requestId])).rows[0];
+  assert.deepEqual(proof,{status:'APPROVED',decided_by:'fee-admin',decisions:1,audits:1});
+}
+
 (async () => {
   const client = await pool.connect();
   try {
@@ -190,10 +211,7 @@ payment.assertControlledSettlementResource = async () => {};
     assert.equal((await settlement.readSettlementStages(client,['fee-order-2'],'fee-owner')).get('fee-order-2').code,'DECISION_PENDING');
     const approval=(await client.query("SELECT approval_request_id FROM zzsh_order.settlement_version WHERE id=$1",[manualVersion.id])).rows[0];
     assert(approval?.approval_request_id);
-    // The approval is a synthetic fixture; actual approval workflows are not exercised here.
-    await client.query("SET LOCAL session_replication_role='replica'");
-    await client.query("UPDATE zzsh_iam.approval_request SET status='APPROVED',decided_by='fee-admin',decided_at=clock_timestamp() WHERE id=$1",[approval.approval_request_id]);
-    await client.query("SET LOCAL session_replication_role='origin'");
+    await approveSyntheticAdjustment(client,approval.approval_request_id,'fee-approval-key');
     for(const userId of ['fee-renter','fee-owner']){
       const user={realm:'user',userId,sessionId:userId+'-session',controlledPaymentFact:{}};
       await setAuditContext(client,'user',user.userId,user.sessionId,'fee-manual-confirm');
@@ -220,9 +238,7 @@ payment.assertControlledSettlementResource = async () => {};
     const lowerSubmitted=await settlement.adjustSettlement(client,'fee-order-2',boss,{...lower,acceptedHash:lowerPreview.body.versionHash,requestId:'fee-manual-lower'});
     const lowerVersion=lowerSubmitted.body.settlement;
     const lowerApproval=(await client.query("SELECT approval_request_id FROM zzsh_order.settlement_version WHERE id=$1",[lowerVersion.id])).rows[0].approval_request_id;
-    await client.query("SET LOCAL session_replication_role='replica'");
-    await client.query("UPDATE zzsh_iam.approval_request SET status='APPROVED',decided_by='fee-admin',decided_at=clock_timestamp() WHERE id=$1",[lowerApproval]);
-    await client.query("SET LOCAL session_replication_role='origin'");
+    await approveSyntheticAdjustment(client,lowerApproval,'fee-lower-approval-key');
     for(const userId of ['fee-renter','fee-owner']){
       const user={realm:'user',userId,sessionId:userId+'-session',controlledPaymentFact:{}};
       await setAuditContext(client,'user',user.userId,user.sessionId,'fee-manual-lower-confirm');
