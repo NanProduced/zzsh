@@ -125,6 +125,20 @@ test('compact mode requires a next-round target, an explicit transaction and rea
  assert.equal(f.state.coverage.size,0);assert.equal(f.state.receipts.size,0);
 });
 
+test('restored compact evidence cannot authorize recovery as a different database epoch',async()=>{
+ const rows=inputs(),original=fixture(nextResource),scope=await bindReviewedEmptyFinanceObservationBatch(original.client,actor,rows,reviews(rows,nextResource));
+ const created=await importReviewedCompactEmptyFinanceObservationBatch(original.client,actor,rows,scope),originalKey=created.body.batchId;
+ const restoredResource={...nextResource,oid:43,nonce:'c'.repeat(24)},restored=fixture(restoredResource);
+ for(const field of ['coverage','audit','batchAudit','receipts'] as const)restored.state[field]=structuredClone(original.state[field]);
+ restored.state.readOnly=true;const restoredScope=await bindReviewedEmptyFinanceObservationBatch(restored.client,actor,rows,reviews(rows,restoredResource),'recover');
+ const changedProof=compactEmptyFinanceBatchProof(rows,reviews(rows,restoredResource)[0]!,actor.requestId);
+ assert.notEqual(changedProof.batchId,originalKey);assert(restored.state.receipts.has(originalKey));assert(!restored.state.receipts.has(changedProof.batchId));
+ const before=restored.state.queries.length;
+ await assert.rejects(recoverReviewedCompactEmptyFinanceObservationBatch(restored.client,actor,rows,restoredScope),/partial original evidence/);
+ assert.equal(restored.state.receipts.size,1);assert(restored.state.receipts.has(originalKey));
+ assert(!restored.state.queries.slice(before).some(row=>/\b(?:INSERT|UPDATE|DELETE)\b/.test(row.sql)));
+});
+
 test('compact batch proof binds the exact source, cutoff and target and rejects nonempty inputs',()=>{
  const rows=inputs(),review=reviews(rows,nextResource)[0]!,proof=compactEmptyFinanceBatchProof(rows,review,actor.requestId);
  assert.match(proof.batchId,/^history-empty-batch-[a-f0-9]{40}$/);
