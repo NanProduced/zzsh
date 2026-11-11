@@ -1145,6 +1145,17 @@ test('ADM-SUMMARY: the search keeps the old-ID hit explainable without a permane
   assert.ok(matched.includes('按旧平台 ID 命中'), 'an old-ID hit explains itself once');
 });
 
+test('keyword search avoids the default aggregate sort and does not fetch a keyword overview', async t => {
+  const {calls}=await mount(t);await waitFor(()=>browser.document.querySelector('tbody tr'));
+  await input(browser.document.querySelector('[aria-label="查找用户"]'),'测试昵称');
+  await click(namedButton('查询'));
+  await waitFor(()=>calls.some(call=>call.url.includes('q=%E6%B5%8B%E8%AF%95%E6%98%B5%E7%A7%B0')));
+  const request=calls.findLast(call=>call.url.includes('q=%E6%B5%8B%E8%AF%95%E6%98%B5%E7%A7%B0'));
+  assert.equal(new URL(request.url,browser.location.href).searchParams.get('sort'),'registered_desc');
+  assert.ok(browser.document.body.textContent.includes('已按注册时间排序'));
+  assert.equal(calls.some(call=>call.url.includes('overview-stats')&&call.url.includes('q=')),false);
+});
+
 // ADM-USER-UI-RESTORE-01 / F0-B: R1 真实注册时间与 R2 上架摘要及同集合下钻。
 test('R1: the list, the phone lookup and the detail all ask for the original registration time',async t=>{
   const {calls}=await mount(t);

@@ -6,7 +6,7 @@ import { readAdminDomainSummary, type AdminDomainSummaryRequest } from "../src/a
 import { listUserDirectory, projectUserAccountStatus, userDirectoryStatusCountQuery, type AdminDirectoryViewer, type UserDirectoryFilter } from "../src/auth/user-directory";
 import { adminOrderReadPredicatePlan, queryAdminReadOrders } from "../src/order/admin-order-read";
 import { parseAdminOrderPageQuery } from "../src/order/order-routes";
-import { handleUserDirectoryAdmin } from "../src/auth/user-directory-routes";
+import { handleUserDirectoryAdmin, parseUserDirectoryFilter } from "../src/auth/user-directory-routes";
 import { DirectorySqlFixture, directorySecurityFixture } from "./user-directory-fixtures";
 
 const AS_OF = "2026-11-03T02:03:04.123456Z";
@@ -110,6 +110,25 @@ test("field permissions and unavailable membership do not trigger a full members
   const supported = await run(f, userRequest());
   assert.equal(supported.state, "KNOWN"); assert.equal(supported.membership?.state, "UNKNOWN");
   assert.equal(f.queries.some(q => /membership_candidates|membership_growth/.test(q.sql)), false);
+});
+
+test("keyword summaries stay unknown without running an aggregate", async () => {
+  for (const filter of [{ search: "测试用户" }, { identifier: "测试名称" }]) {
+    const f = new SummaryFixture(); f.gameScopeMode = "ALL_GAMES";
+    const result = await run(f, userRequest(filter));
+    assert.equal(result.state, "UNKNOWN");
+    assert.equal(result.reason, "KEYWORD_SEARCH_AGGREGATE_NOT_SUPPORTED");
+    assert.equal(result.total, null); assert.equal(result.statuses, null);
+    assert.equal(aggregates(f).length, 0);
+  }
+});
+
+test("only a complete phone-shaped query is routed to the protected phone lookup", () => {
+  for (const value of ["13800138000", "+86 138-0013-8000"]) {
+    assert.throws(() => parseUserDirectoryFilter(new URLSearchParams({ q: value }), false), (error: any) => error.status === 400);
+  }
+  const keyword = "用户13800138000名称";
+  assert.equal(parseUserDirectoryFilter(new URLSearchParams({ q: keyword }), false).search, keyword);
 });
 
 test("phone predicate can be authorized without being echoed in response/drilldowns", async () => {

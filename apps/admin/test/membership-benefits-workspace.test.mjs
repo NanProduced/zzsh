@@ -355,7 +355,10 @@ test("user choice reuses exact-phone POST lookup and keeps the phone out of ever
     const input = browser.document.querySelector('input[aria-label="查找用户"]');
     assert.ok(input);
     await act(async () => { Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set.call(input, "13800138000"); input.dispatchEvent(new browser.Event("input", { bubbles: true })); });
-    await click(button("查询")); await until(() => calls.some(call => call.path === "/users/lookup"));
+    const searchButton = button("查询");
+    assert.ok(searchButton, "鼠标和触屏用户可以看到查询入口");
+    assert.equal(searchButton.className.includes("sr-only"), false);
+    await click(searchButton); await until(() => calls.some(call => call.path === "/users/lookup"));
     assert.equal(calls.find(call => call.path === "/users/lookup").body.phone, "13800138000");
     assert.equal(calls.some(call => call.url.includes("13800138000")), false);
     await until(() => [...browser.document.querySelectorAll("button")].some(item => item.textContent.includes("匹配用户")));

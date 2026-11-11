@@ -307,7 +307,7 @@ function UserPicker({
 
     try {
       const result = await directoryAdapter(snapshot).adapter.list(
-        // 显式使用注册时间排序：EMPTY_FILTERS.sort 是需要 order.read 的聚合排序，无权限会 403；有关键词时服务端本就归一为注册时间。
+        // 默认聚合排序需要 order.read；选择用户时使用注册时间排序。
         { ...EMPTY_FILTERS, q, sort: REGISTRATION_SORT.desc, registrationTime: REGISTRATION_TIME_ORIGINAL },
         { page: 1, pageSize: 10 },
         read.signal
@@ -325,7 +325,7 @@ function UserPicker({
   const handleInputChange = (text: string) => {
     setQuery(text);
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    // 显式触发：不再边打字边自动发请求（避免 403 与并发名额）；按回车或 sr-only「选择用户」按钮才检索。
+    // 显式触发：避免输入过程中占用目录查询的并发名额。
     // 输入变化先撤掉上一次结果与在途请求，避免展示与当前关键词不符的旧列表。
     if (controller.current) {
       controller.current.abort();
@@ -347,7 +347,8 @@ function UserPicker({
 
   return (
     <div ref={containerRef} className="relative w-full min-w-[200px] max-w-sm">
-      <div className="relative flex items-center">
+      <div className="flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
         <Search className="absolute left-2.5 size-3.5 text-muted-foreground pointer-events-none" aria-hidden />
         <Input
           aria-label="查找用户"
@@ -368,8 +369,7 @@ function UserPicker({
           }}
           className="h-9 pl-8 pr-8 text-xs bg-background border-border/80 font-normal focus-visible:ring-1"
         />
-        {/* 方案 1：纯自动即时联想，框内不放置汉字查询按钮。检索中展示微型 Spinner，有输入时展示清除 X */}
-        <div className="absolute right-2 flex items-center gap-1">
+        <div className="absolute inset-y-0 right-2 flex items-center gap-1">
           {busy ? (
             <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
           ) : query ? (
@@ -392,16 +392,17 @@ function UserPicker({
             </button>
           ) : null}
         </div>
-        {/* 隐藏的查询与选择触发器，保证无缝兼容现有自动化测试套件 */}
-        <button
+        </div>
+        <Button
           type="button"
           aria-label="选择用户"
-          className="sr-only"
-          disabled={disabled || !query.trim()}
+          variant="outline"
+          size="sm"
+          disabled={disabled || busy || !query.trim()}
           onClick={() => void search()}
         >
           查询
-        </button>
+        </Button>
       </div>
       {!canPhoneLookup ? <p className="mt-1 text-[11px] text-muted-foreground">手机号查找需要相应权限</p> : null}
 

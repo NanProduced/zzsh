@@ -82,7 +82,7 @@ const SORT_LABEL: Record<string, string> = {
   published_desc: '上架数多→少', published_asc: '上架数少→多',
 };
 
-/** 需要服务端聚合统计的排序：普通关键词检索时服务端会把它们归一为注册时间排序。 */
+/** 关键词检索时，默认避开需要全量聚合的排序。 */
 const AGGREGATE_SORT_PREFIXES = ['active_orders', 'renter_current', 'owner_current', 'published', 'balance', 'credit'];
 const isAggregateSort = (sort: string) => AGGREGATE_SORT_PREFIXES.some(prefix => sort.startsWith(`${prefix}_`));
 
@@ -519,8 +519,7 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
     const nextDraft = overrideDraft ? { ...draftFilters, ...overrideDraft } : draftFilters;
     const newQ = draftInput.trim();
     const isPhone = PHONE_LIKE.test(newQ);
-    // 普通关键词检索时服务端把聚合排序归一为 registered_desc；这里同步已生效/草稿 sort，避免 UI 与实际排序不符。
-    // 手机号走 /users/lookup 精确查找，不触发该归一（也不触发全表聚合排序超时），保持原排序。
+    // 普通关键词检索时默认避开全量聚合排序；手机号走精确查找，保留用户原排序。
     const appliedSort = newQ && !isPhone && isAggregateSort(nextDraft.sort) ? 'registered_desc' : nextDraft.sort;
 
     // 保留输入框内容；手机号不写入地址栏由 safeFilters 在 PHONE_LIKE 时剥离 q 保证（user-directory-data.ts:58），无需清空。
@@ -529,7 +528,7 @@ export function UserList({ adapter, tab, onQueryChange, onOpenPath, refreshNonce
     setPage(1);
     setCursor(undefined);
     contextKeyRef.current = undefined;
-    setNotice('');
+    setNotice(appliedSort !== nextDraft.sort ? '为加快搜索，已按注册时间排序；可在结果中调整排序。' : '');
     recoveringContext.current = false;
     retry();
   };

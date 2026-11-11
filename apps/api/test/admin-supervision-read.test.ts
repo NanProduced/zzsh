@@ -252,6 +252,25 @@ test("only the v3 single-account GET accepts rental reading and keeps active ide
     access = { ...access, permissions: new Set(["order.read"]) }; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403);
     access = { ...access, status: "FROZEN" as never, permissions: new Set(["supply.rental_account.read"]) }; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403);
 });
+
+test("supervision SQL timeout rolls back and returns a retryable 504", async t => {
+    const f = rentalDetailFixture();
+    const access = rentalViewer(["supply.review.read"]).access;
+    t.mock.method(authSecurity, "readAdminContext", async () => ({ userId: "fixture-admin", sessionId: "fixture-session" }));
+    t.mock.method(authSecurity, "assertAdminContextInTransaction", async () => {});
+    t.mock.method(authorization, "loadEffectiveAdminAccess", async () => access);
+    t.mock.method(require("../src/supply/admin-supervision-read"), "listSupervision", async () => {
+        throw Object.assign(new Error("synthetic SQL cancellation"), { code: "57014" });
+    });
+    const options = { pool: { connect: async () => f.client }, supplyGateReader: async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null }), listingCursorKey: queryKey, adminOrigin: "http://synthetic-admin", apiOrigin: "http://synthetic-api" };
+    const response = { status() { return this; }, setHeader() { return this; }, json() {} };
+    await assert.rejects(handlePublishingRoute({ method: "GET", headers: { origin: options.adminOrigin } } as never,
+        response as never, options as never, "req-timeout", "/listing-reviews", new URLSearchParams("queryVersion=3"), true),
+    (error: any) => error.status === 504 && error.code === "EVIDENCE_UNAVAILABLE");
+    assert.ok(f.queries.some(q => q.sql.includes("statement_timeout','5s")));
+    assert.equal(f.queries.at(-1)?.sql, "ROLLBACK");
+    assert.equal(f.queries.some(q => q.sql === "COMMIT"), false);
+});
 async function captureListQuery(params: URLSearchParams) {
     let captured: { sql: string; values: unknown[] } | undefined;
     await listSupervision({ query: async (sql: string, values: unknown[]) => {
