@@ -14,6 +14,11 @@ export type BasisInput = { expectedRevision: string | null; inputEvidenceId: str
   fullPayout: boolean; partiesVerified: true; reason: string };
 type StoredBasis = { basis: LegacySettlementBasis; ordinal: string; sourceDigest: string; evidenceId: string; headRevision: string | null };
 
+export function projectLegacySettlementBasis(basis: LegacySettlementBasis) {
+  return { id: basis.id, openingHaffM: basis.openingHaffM, openingItems: structuredClone(basis.openingItems),
+    fullPayout: basis.fullPayout, source: "STAFF_VERIFIED" as const };
+}
+
 export function parseLegacyOwnerPrices(value: unknown): LegacyPrices {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== [...NAMES].sort().join(",")) throw invalid("OWNER_PRICES_INVALID");
   const row = value as Record<string, unknown>;

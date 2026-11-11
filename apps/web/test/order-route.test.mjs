@@ -7,6 +7,17 @@ const {POST:CREATE_V2}=await import('../src/app/api/v2/orders/route.ts');
 const ctx=path=>({params:Promise.resolve({path})});
 const input=(path,init={},query='')=>new Request('http://127.0.0.1:3100/api/orders/'+path.join('/')+query,{...init,headers:{origin:'http://127.0.0.1:3100',...init.headers}});
 
+test('legacy continuation BFF forwards the verified opening basis for the bound user',async()=>{
+ const old=globalThis.fetch, orderId='legacy_order_'+'a'.repeat(40),path=['legacy',orderId,'continuation'];
+ const settlementBasis={id:'basis_1',openingHaffM:'100',openingItems:{expendHaff:'100',barrett:'0',bullet:'0',awm:'1',armor:null,helmet:'0',coffee:'0',card:'0'},fullPayout:false,source:'STAFF_VERIFIED'};
+ globalThis.fetch=async(url)=>String(url).endsWith('/get-session')?Response.json({user:{id:'user_a'}}):Response.json({continuation:{settlementBasis}});
+ try{
+  const response=await GET(input(path,{headers:{'x-zzsh-expected-user-id':'user_a',cookie:'zzsh_user.session_token=fixture'}}),ctx(path));
+  assert.equal(response.status,200);assert.deepEqual((await response.json()).continuation.settlementBasis,settlementBasis);
+  assert.equal(response.headers.get('cache-control'),'no-store');
+ }finally{globalThis.fetch=old;}
+});
+
 test('demo checkout BFF binds identity and original key, and never invents provider success',async()=>{
  const old=globalThis.fetch,calls=[];let subject='user_a',resultOrder='order_demo',scope='ECS_TEST_SIMULATED';
  globalThis.fetch=async(url,options)=>{calls.push({url:String(url),options});return String(url).endsWith('/get-session')

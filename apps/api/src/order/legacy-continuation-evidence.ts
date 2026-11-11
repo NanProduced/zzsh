@@ -4,7 +4,7 @@ import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-autho
 import { recordAudit } from "../auth/security-core";
 import { assertUserContextInTransaction } from "../auth/user-identity";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
-import { legacyEarlyPartyConfirmed, readLatestLegacySettlementBasisId, readLegacySettlementBasis } from "./legacy-settlement-basis";
+import { legacyEarlyPartyConfirmed, projectLegacySettlementBasis, readLatestLegacySettlementBasisId, readLegacyProposalBasis, readLegacySettlementBasis } from "./legacy-settlement-basis";
 import { assertGameScope, conflict, forbidden, fingerprintRequest, invalid, newSupplyId, notFound, sha256Hex, withIdempotency } from "../supply/supply-util";
 import { canonicalize } from "../supply/content-hash";
 import type { LegacyContinuationSource } from "./legacy-continuation-calc";
@@ -120,10 +120,17 @@ export async function readLegacyContinuation(client: PoolClient, actor: LegacyCo
   const continuation=projectLegacyContinuation(binding, actor, evidence, head, duties, access.canOperate, disposition, access.canReadCommission,access.canSettle===true);
   if (evidence && continuation.stage === "3") {
     const basis=await readLegacySettlementBasis(client,binding,evidence,head);
-    continuation.settlementBasis=basis?{id:basis.id,openingHaffM:basis.openingHaffM}:null;
+    continuation.settlementBasis=basis?projectLegacySettlementBasis(basis):null;
     if(actor.realm==="admin" && access.canSettle===true)continuation.lastBasisId=basis?.id??await readLatestLegacySettlementBasisId(client,binding);
     if(!basis){continuation.capabilities=continuation.capabilities.filter(kind=>kind!=="preview"&&kind!=="propose");
       if(!continuation.reasons.includes("OPENING_BASIS_UNVERIFIED"))continuation.reasons.push("OPENING_BASIS_UNVERIFIED");}
+  }
+  if (evidence && ["8","9","4"].includes(continuation.stage ?? "")) {
+    const source=readSealedLegacyFacts(evidence).evidence.source.settlementV2;
+    if(source) {
+      const basis=await readLegacyProposalBasis(client,binding,source.basisId,source.inputEvidenceId);
+      continuation.settlementBasis=basis?projectLegacySettlementBasis(basis):null;
+    }
   }
   if(evidence && head && ["8","9"].includes(continuation.stage??"") && readSealedLegacyFacts(evidence).evidence.source.isAdvanceSet==="1") {
     const pending=await legacyEarlyPartyConfirmed(client,binding,head,evidence);continuation.earlyReviewPending=pending;

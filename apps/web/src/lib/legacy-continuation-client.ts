@@ -10,6 +10,7 @@ export type LegacyContinuation = {
   amounts: Record<string, { cents: string; yuan: string } | null>; quantities: LegacyQuantitiesInput | null;
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[];
   settlementKind: "EARLY" | "NORMAL" | null; earlyFee: string | null; refundDueAt: string | null;
+  settlementBasis: { id: string; openingHaffM: string; openingItems: LegacyQuantitiesInput | null; fullPayout: boolean | null; source: "STAFF_VERIFIED" | null } | null;
   duties: Array<{ id: string; kind: string; amountCents: string; currency: "CNY"; status: string; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean;
     refundProgress:'UNKNOWN'|'NO_REFUND_DUE'|'NO_NEW_REFUND'|'CHANNEL_SUCCEEDED'|'FAILED'|'PROCESSING'|'REVIEW_REQUIRED'|'SIMULATED';refundSimulationScope?:'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED' }>;
   channelState: "UNKNOWN";
@@ -52,9 +53,20 @@ export function parseLegacyContinuation(value: unknown): LegacyContinuation {
       refundProgress:(d.refundProgress??'UNKNOWN') as LegacyContinuation['duties'][number]['refundProgress'],...(d.refundProgress==='SIMULATED'?{refundSimulationScope:d.refundSimulationScope as 'LOCAL_DEMO_SIMULATED'|'ECS_TEST_SIMULATED'}:{}) };
   });
   const quantities = value.quantities === null ? null : parseLegacyQuantitiesInput(value.quantities);
+  let settlementBasis: LegacyContinuation["settlementBasis"] = null;
+  if (value.settlementBasis !== undefined && value.settlementBasis !== null) {
+    const basis = value.settlementBasis;
+    if (!record(basis) || typeof basis.id !== "string" || !id.test(basis.id)
+      || typeof basis.openingHaffM !== "string" || !/^(0|[1-9]\d{0,9})(?:\.\d{1,2})?$/.test(basis.openingHaffM)
+      || basis.fullPayout !== undefined && typeof basis.fullPayout !== "boolean"
+      || basis.source !== undefined && basis.source !== "STAFF_VERIFIED") throw new Error("结算核实资料暂不可用");
+    settlementBasis = { id: basis.id, openingHaffM: basis.openingHaffM,
+      openingItems: basis.openingItems === undefined || basis.openingItems === null ? null : parseLegacyQuantitiesInput(basis.openingItems),
+      fullPayout: typeof basis.fullPayout === "boolean" ? basis.fullPayout : null, source: basis.source === "STAFF_VERIFIED" ? basis.source : null };
+  }
   return { schema: "legacy-continuation.v1", availability: value.availability as LegacyContinuation["availability"], revision: value.revision as string | null, evidenceId: value.evidenceId as string | null, stage: value.stage as string | null, isSettle: value.isSettle as string | null,
     amounts, quantities, capabilities: [...value.capabilities] as string[], commandFingerprints: { ...value.commandFingerprints } as Record<string, string>, reasons: [...value.reasons] as string[], duties, channelState: "UNKNOWN",
-    settlementKind: value.settlementKind === "EARLY" || value.settlementKind === "NORMAL" ? value.settlementKind : null, earlyFee: typeof value.earlyFee === "string" ? value.earlyFee : null, refundDueAt: typeof value.refundDueAt === "string" ? value.refundDueAt : null };
+    settlementKind: value.settlementKind === "EARLY" || value.settlementKind === "NORMAL" ? value.settlementKind : null, earlyFee: typeof value.earlyFee === "string" ? value.earlyFee : null, refundDueAt: typeof value.refundDueAt === "string" ? value.refundDueAt : null, settlementBasis };
 }
 export function parseLegacyQuantitiesInput(value: unknown): LegacyQuantitiesInput {
   if (!record(value)) throw new Error("消耗数量不完整");

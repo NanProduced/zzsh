@@ -55,6 +55,18 @@ test("wire parsing strips private source, refuses inconsistent money and does no
   assert.throws(()=>parseLegacyQuantitiesInput({expendHaff:"1"}));
   assert.equal(parseLegacyContinuation(view({availability:"NOT_IMPORTED",quantities:null,capabilities:[],amounts:{}})).quantities,null);
 });
+test("verified legacy opening facts survive the user projection without exposing internal prices",()=>{
+ const {parseLegacyContinuation}=load("apps/web/src/lib/legacy-continuation-client.ts",{"./order-client.ts":{}});
+ const basis={id:"basis_1",openingHaffM:"1",openingItems:{...quantities,coffee:null},fullPayout:false,source:"STAFF_VERIFIED",ownerPrices:{coffee:"PRIVATE"}};
+ const parsed=parseLegacyContinuation(view({stage:"3",settlementBasis:basis}));
+ assert.deepEqual(parsed.settlementBasis,{id:"basis_1",openingHaffM:"1",openingItems:{...quantities,coffee:null},fullPayout:false,source:"STAFF_VERIFIED"});
+ assert(!JSON.stringify(parsed).includes("PRIVATE"));
+ assert.equal(parseLegacyContinuation(view({settlementBasis:undefined})).settlementBasis,null);
+ assert.deepEqual(parseLegacyContinuation(view({settlementBasis:{id:"basis_1",openingHaffM:"1"}})).settlementBasis,
+  {id:"basis_1",openingHaffM:"1",openingItems:null,fullPayout:null,source:null});
+ assert.throws(()=>parseLegacyContinuation(view({settlementBasis:{...basis,openingHaffM:"NaN"}})));
+ assert.throws(()=>parseLegacyContinuation(view({settlementBasis:{...basis,fullPayout:"false"}})));
+});
 test('legacy simulated refund requires an explicit demo scope and remains distinct from channel success',()=>{
  const {parseLegacyContinuation}=load('apps/web/src/lib/legacy-continuation-client.ts',{'./order-client.ts':{}});
  const duty={id:'refund',kind:'RENTER_REFUND',amountCents:'8200',currency:'CNY',status:'SETTLED',maturityAt:null,sourceStatus:null,revision:'1',settledBy:'FINANCE',financeVerified:true,refundProgress:'SIMULATED',refundSimulationScope:'LOCAL_DEMO_SIMULATED'};

@@ -2,8 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 import { initialLegacyFacts } from "../src/order/legacy-continuation-model";
-import { readLegacySettlementBasis, recordLegacySettlementBasis, type BasisInput } from "../src/order/legacy-settlement-basis";
+import { projectLegacySettlementBasis, readLegacySettlementBasis, recordLegacySettlementBasis, type BasisInput } from "../src/order/legacy-settlement-basis";
 import { legacyBinding, legacyEvidence, legacyPrices, legacyQuantities, legacySource } from "./legacy-continuation-fixture";
+
+test("verified basis projection exposes quantities, never owner prices or a frozen-order claim", () => {
+  const source={id:"basis_1",openingHaffM:"100",baseBot:"110",ownerPrices:legacyPrices("1.00"),openingItems:legacyQuantities("100"),fullPayout:false};
+  const view=projectLegacySettlementBasis(source);
+  assert.deepEqual(view,{id:"basis_1",openingHaffM:"100",openingItems:legacyQuantities("100"),fullPayout:false,source:"STAFF_VERIFIED"});
+  assert.equal("ownerPrices" in view,false);assert.equal("baseBot" in view,false);
+  view.openingItems.coffee="9";assert.notEqual(source.openingItems.coffee,"9");
+});
 
 test("staff-verified legacy basis is bound to source, evidence and original revision", async () => {
   const events: Array<Record<string, unknown>> = [];

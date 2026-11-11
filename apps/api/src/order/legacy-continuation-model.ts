@@ -52,7 +52,7 @@ export type LegacyContinuationView = {
   confirmationAmounts?: { ownerNet: { cents: string; yuan: string }; refundNet: { cents: string; yuan: string } } | null;
   refundDueAt?: string | null;
   settlementKind?: "EARLY" | "NORMAL" | null; earlyFee?: string | null;
-  settlementBasis?: { id:string; openingHaffM:string } | null; lastBasisId?: string | null;
+  settlementBasis?: { id:string; openingHaffM:string; openingItems:LegacyQuantities; fullPayout:boolean; source:"STAFF_VERIFIED" } | null; lastBasisId?: string | null;
   earlyReviewPending?: boolean;
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean }>;
   channelState: "UNKNOWN";

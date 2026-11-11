@@ -85,6 +85,10 @@ const user=(legacyId,userId,requestId)=>({realm:'user',userId,sessionId:'synthet
   const renter=user(b.legacyRenterId,b.renterUserId,'synthetic-renter-propose');await setAuditContext(client,'user',renter.userId,renter.sessionId,renter.requestId);
   const saved=await basisStore.readLegacySettlementBasis(client,b,sourceRow,locked.head),plan=calc.planVerifiedLegacySettlement(sourceRow.facts.evidence,
    {kind:'propose',caller:{role:'renter',legacyUserId:b.legacyRenterId},quantities:v.quantities,endReason:early?'TENANT_VOLUNTARY_EARLY':'NORMAL',settlementBasis:saved},saved);
+  const expectedBasis=basisStore.projectLegacySettlementBasis(saved);
+  const initialView=await evidence.readLegacyContinuation(client,renter,b.id);
+  assert.deepEqual(initialView.continuation.settlementBasis,expectedBasis);
+  assert.equal('ownerPrices' in initialView.continuation.settlementBasis,false);
   assert.equal(plan.ok,true);
   await client.query('SET CONSTRAINTS ALL DEFERRED');
   const proposed=await command.applyLegacyContinuationCommand(client,renter,b.id,command.parseLegacyMutation('propose',{
@@ -92,6 +96,8 @@ const user=(legacyId,userId,requestId)=>({realm:'user',userId,sessionId:'synthet
   assert.equal(proposed.body.stage,'8');
   const head=await evidence.readLegacyContinuationHead(client,b.id),row=await evidence.readLegacyContinuationEvidence(client,b.id,head);
   const owner=user(b.legacyOwnerId,b.ownerUserId,'synthetic-owner-confirm');await setAuditContext(client,'user',owner.userId,owner.sessionId,owner.requestId);
+  const proposalView=await evidence.readLegacyContinuation(client,owner,b.id);
+  assert.deepEqual(proposalView.continuation.settlementBasis,expectedBasis);
   const confirmPlan=calc.planLegacyContinuation(model.readSealedLegacyFacts(row).evidence,{kind:'confirm',caller:{role:'owner',legacyUserId:b.legacyOwnerId}});
   assert.equal(confirmPlan.ok,true);
   await client.query('SET CONSTRAINTS ALL DEFERRED');
@@ -111,6 +117,9 @@ const user=(legacyId,userId,requestId)=>({realm:'user',userId,sessionId:'synthet
     expectedRevision:head.revision,inputEvidenceId:row.id,planFingerprint:staffPlan.fingerprint,reason:'已与双方核实提前结算'}),readLegacyDutyFinalization,staffAuthority,finance.postLegacyOwnerCreditOnConfirmation);
   }
   assert.equal(confirmed.body.stage,'4');
+  await setAuditContext(client,'user',owner.userId,owner.sessionId,owner.requestId);
+  const completedView=await evidence.readLegacyContinuation(client,owner,b.id);
+  assert.deepEqual(completedView.continuation.settlementBasis,expectedBasis);
   const duties=await evidence.readLegacyContinuationDuties(client,b.id);
   assert.equal(duties.find(d=>d.kind==='RENTER_REFUND').amountCents,payout?'3047':early?'3775':'8200');
   assert.equal(duties.find(d=>d.kind==='OWNER_CREDIT').amountCents,early?'5500':'1300');
