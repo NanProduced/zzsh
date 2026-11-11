@@ -90,6 +90,18 @@ test('next-round compact batch keeps each coverage but records and recovers only
  f.state.extraObservation=true;await assert.rejects(recoverReviewedCompactEmptyFinanceObservationBatch(f.client,actor,rows,scope));
 });
 
+test('one compact batch preserves all five historical sources for the same subject',async()=>{
+ const f=fixture(nextResource),sample=inputs()[0]!;
+ const kinds=['HISTORICAL_EARNINGS_LOG','HISTORICAL_PAYMENT','HISTORICAL_REFUND','HISTORICAL_WITHDRAWAL','HISTORICAL_DISTRIBUTION'] as const;
+ const rows=kinds.map(sourceKind=>({...sample,coverage:{...sample.coverage,sourceKind}}));
+ const scope=await bindReviewedEmptyFinanceObservationBatch(f.client,actor,rows,reviews(rows,nextResource));
+ const result=await importReviewedCompactEmptyFinanceObservationBatch(f.client,actor,rows,scope);
+ assert.equal(result.body.created,5);assert.equal(f.state.coverage.size,5);
+ assert.equal(f.state.batchAudit.size,1);assert.equal(f.state.receipts.size,1);
+ f.state.readOnly=true;
+ assert.equal((await recoverReviewedCompactEmptyFinanceObservationBatch(f.client,actor,rows,scope)).knowledge,'KNOWN');
+});
+
 test('compact recovery refuses partial or mixed evidence and never treats a missing batch receipt as success',async()=>{
  const f=fixture(nextResource),rows=inputs(),scope=await bindReviewedEmptyFinanceObservationBatch(f.client,actor,rows,reviews(rows,nextResource));
  f.state.readOnly=true;assert.equal((await recoverReviewedCompactEmptyFinanceObservationBatch(f.client,actor,rows,scope)).knowledge,'UNKNOWN');
