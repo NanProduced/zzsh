@@ -191,6 +191,10 @@ test("historical five-admin package is superseded before credentials", t => {
 
 test("formal initialization plan preserves the current five-digit number contract", () => {
     assert.deepEqual(plan.formalAdminInitialization.serverAssignedFirstLogins, ["zz00001", "zz00002"]);
+    assert.equal(plan.formalAdminInitialization.scope, "LEGACY_TARGET_ONLY");
+    assert.deepEqual(plan.nextDeployment, { status: "NOT_READY", administrators: { bosses: 2, operations: 2,
+        operationsScope: "ALL_GAMES", firstEnrollmentDeadline: "NONE", totp: "SELF_ENROLL" }, policyInitialization: "MUST_NOT_REQUIRE_ACTIVE_BOSS" });
+    assert.equal(plan.connections, 0); assert.equal(plan.credentialReads, 0);
     const result = run(["--execute", "--initialize-admins"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /FORMAL_INITIALIZATION_INPUT_REQUIRED/);
