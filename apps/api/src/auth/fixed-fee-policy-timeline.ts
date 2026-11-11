@@ -31,12 +31,13 @@ export function validateFixedFeeTimeline(input: FixedFeeTimelineInput): FixedFee
     from = instant(input.from);
     const fees = input.fees.map(row => ({ ...row, effectiveAt: instant(row.effectiveAt), generationNo: sequence(row.generation), rates: parseFixedFeeRates(row.rates) }));
     const benefits = input.benefits.map(row => ({ ...row, effectiveAt: instant(row.effectiveAt), versionNo: sequence(row.version) }));
-    const entitlements = input.entitlements.map(row => ({ ...row, startsAt: instant(row.startsAt), endsAt: instant(row.endsAt) }));
+    const entitlements = input.entitlements.map(row => ({ ...row, startsAt: instant(row.startsAt), endsAt: instant(row.endsAt) }))
+      .sort((left, right) => left.startsAt < right.startsAt ? -1 : left.startsAt > right.startsAt ? 1 : 0);
     if (new Set(fees.map(row => row.generation)).size !== fees.length || new Set(benefits.map(row => row.version)).size !== benefits.length) throw new Error("duplicate version");
     if (entitlements.some(row => row.startsAt >= row.endsAt)) throw new Error("invalid entitlement interval");
-    const events = [...new Set([from, ...fees.map(row => row.effectiveAt), ...benefits.map(row => row.effectiveAt), ...entitlements.map(row => row.startsAt)]
+    const events = [...new Set([from, ...fees.map(row => row.effectiveAt), ...benefits.map(row => row.effectiveAt)]
       .filter(at => at >= from))].sort();
-    for (const at of events) {
+    for (const [index, at] of events.entries()) {
       const fee = fees.filter(row => row.effectiveAt <= at).sort((left, right) => right.effectiveAt.localeCompare(left.effectiveAt)
         || (left.generationNo > right.generationNo ? -1 : left.generationNo < right.generationNo ? 1 : 0))[0];
       if (!fee) return { valid: false, reason: "FEE_POLICY_UNAVAILABLE", at };
@@ -44,14 +45,17 @@ export function validateFixedFeeTimeline(input: FixedFeeTimelineInput): FixedFee
       if (!benefit) return { valid: false, reason: "BENEFIT_POLICY_UNAVAILABLE", at };
       const checked = validateBenefitPolicy(benefit.policy, { enabledModes: fee.protectedModes, fixedFeeRates: fee.rates });
       if (!checked.publishable) return { valid: false, reason: "BENEFIT_POLICY_INCOMPATIBLE", at };
+      const next = events[index + 1];
       for (const entitlement of entitlements) {
-        if (entitlement.startsAt > at || entitlement.endsAt <= at) continue;
+        if (next && entitlement.startsAt >= next) break;
+        if (entitlement.endsAt <= at) continue;
+        const observedAt = entitlement.startsAt > at ? entitlement.startsAt : at;
         const pricing = entitlementPricingSummary(entitlement.pricing);
-        if (pricing.knowledge !== "KNOWN") return { valid: false, reason: "ENTITLEMENT_PRICING_UNAVAILABLE", at };
+        if (pricing.knowledge !== "KNOWN") return { valid: false, reason: "ENTITLEMENT_PRICING_UNAVAILABLE", at: observedAt };
         const applicable = "scope" in pricing ? fee.protectedModes : [pricing.mode];
         for (const mode of applicable) {
           if (!fee.protectedModes.includes(mode)) continue;
-          if (!fixedFeeAllowsPayableRatio(fee.rates[mode], pricing.payableRatio)) return { valid: false, reason: "ENTITLEMENT_DISCOUNT_EXCEEDS_FEE", at, mode };
+          if (!fixedFeeAllowsPayableRatio(fee.rates[mode], pricing.payableRatio)) return { valid: false, reason: "ENTITLEMENT_DISCOUNT_EXCEEDS_FEE", at: observedAt, mode };
         }
       }
     }
