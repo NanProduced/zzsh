@@ -359,6 +359,15 @@ export function assertRoundOpeningPartition(dataset, opening) {
     candidate: s.candidate, reviewRequired: s.reviewRequired, reviewAvailableCents: s.reviewAvailableCents };
 }
 
+/** NEXT must prove the batch receipts as well as every original coverage row. */
+export function compactEmptyCoverageReadbackMatches(phase,readback){
+ const proof=readback?.emptyFinancialCoverage,batch=proof?.batchProof;
+ return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&phase.receiptMode==='BATCH_V2'&&Array.isArray(phase.chunks)
+  &&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&proof?.sourceRebuilt===true&&proof.expected===phase.rows
+  &&proof.readable===phase.rows&&proof.actual===phase.rows&&proof.chunks===phase.chunks.length
+  &&batch?.mode==='BATCH_V2'&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
+}
+
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true }) {
   const issues = [], target = input.target;
@@ -555,6 +564,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
       ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
       ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&!compactEmptyCoverageReadbackMatches(empty,readback))issues.push('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED');
     const guarantee=checkpoint?.fundsSupplement?.coverage?.guarantees;
     if(guarantee?.policyExcluded===true && (readback.ownerGuaranteeHistory?.policyExcluded!==true
       ||readback.ownerGuaranteeHistory.expected!==0||readback.ownerGuaranteeHistory.actual!==0)) issues.push("ROUND_GUARANTEE_EXCLUSION_READBACK_UNCONFIRMED");

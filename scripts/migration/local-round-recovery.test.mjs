@@ -14,7 +14,7 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
   const hash='a'.repeat(64),receiptSha='b'.repeat(64),dumpSha='c'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='d'.repeat(64),cutoff='2026-11-03T07:01:00Z';
@@ -53,6 +53,16 @@ test('new-round growth recovery cannot change the source binding or target profi
   assert.throws(()=>assertResumeLineage({input:{...input,sourceBinding:ref,sourceWorkflow:{...ref,sha256:other}},previousInput,previousInputSha256:hash,previousReceipt}),/ROUND_RESUME_LINEAGE_MISMATCH:sourceWorkflow/);
   const changed={...input,sourceBinding:ref,target:{...target,migrationProfile:'OTHER'}};
   assert.throws(()=>assertResumeLineage({input:changed,previousInput,previousInputSha256:hash,previousReceipt}),/ROUND_RESUME_LINEAGE_MISMATCH:target/);
+});
+
+test('next-round readback must prove every compact empty coverage batch receipt',()=>{
+ const phase={schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:800,chunks:[{},{}]};
+ const readback={emptyFinancialCoverage:{sourceRebuilt:true,expected:800,readable:800,actual:800,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}}};
+ assert.equal(compactEmptyCoverageReadbackMatches(phase,readback),true);
+ for(const changed of [{...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:undefined}},
+  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{mode:'BATCH_V2',expected:2,matched:1}}},
+  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,readable:799}}])assert.equal(compactEmptyCoverageReadbackMatches(phase,changed),false);
+ assert.equal(compactEmptyCoverageReadbackMatches({...phase,receiptMode:undefined},readback),false);
 });
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -146,6 +156,8 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     "database/business-migrations": { assertBusinessMigrationPrefix() {} },
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
+    "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
+      importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){} },
     "supply/legacy-user-migration": { migrateLegacyOwner(_client, row) {
       if (row.id === 2 && ["rejected", "lost-rollback"].includes(failure)) throw Object.assign(Error("original rejection"), { status: 409 });
       if (unicodeFirst && row.id === 1) { assert.equal(row.note, "合成\u2028昵称\u2029保留"); commands.push("UNICODE_SOURCE_PRESERVED"); }
@@ -194,6 +206,12 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
 test("next-profile dataset execution stops before connecting until all domain adapters are ready",async()=>{
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:'LOCAL_MIGRATION_NEXT_V1'});
  assert.match(result.error?.message??'',/NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+ assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
+});
+
+test('NEXT refuses an old finance build before acquiring the target lock or writing',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'compact-build-old'});
+ assert.match(result.error?.message??'',/NEXT_COMPACT_COVERAGE_BUILD_REQUIRED/);
  assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
 });
 
@@ -1075,10 +1093,14 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   for (const name of ['prepare','manifest','apply','readback']) Object.assign(data.growth[name], { instance, migrationProfile });
   data.checkpoint.targetFenceReleased = true; data.checkpoint.protectionRecorded = true;
   data.readback.targetFence = 'HELD_UNTIL_ROLLBACK';
+  data.checkpoint.generatedPhases={financeEmptyCoverage:{schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:2,chunks:[{},{}]}};
+  data.readback.emptyFinancialCoverage={sourceRebuilt:true,expected:2,readable:2,actual:2,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}};
   Object.assign(data.receipt.stages.find(stage=>stage.name==='paths').metrics,{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased:true});
   for (const name of ['prepare','readback']) Object.assign(data.growth[name], { readOnlyFence:'HELD_UNTIL_ROLLBACK', readOnlyMaintenanceUnlock:true, readOnlyMaintenanceClosed:true });
   Object.assign(data.growth.apply, { targetFence:'HELD_ACROSS_BATCHES', targetFenceReleased:true });
   const result = assessRoundEvidence(data); assert.equal(result.status, 'COMPLETE', result.issues.join(','));
+  const missingBatchProof=structuredClone(data);delete missingBatchProof.readback.emptyFinancialCoverage.batchProof;
+  assert(assessRoundEvidence(missingBatchProof).issues.includes('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED'));
   for (const domain of ['liabilityDuties','completedCommissions']) {
     const isolated=structuredClone(data);isolated.checkpoint.quarantine.push({domain,sourceId:'source-1',code:'REVIEW_REQUIRED'});
     assert(assessRoundEvidence(isolated).issues.includes('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW'));

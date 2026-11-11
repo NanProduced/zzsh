@@ -131,6 +131,10 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
     const file = manifest.files.continuations, rows = [];
     if (file) for await (const row of readRows(join(dataset, file.file))) rows.push(row);
     verifyNextContinuationRows(manifest, rows, mod("order/legacy-continuation-calc").admitLegacyEvidence);
+    const finance=mod("finance/personal-finance-observation-maintenance");
+    if(finance.COMPACT_EMPTY_COVERAGE_VERSION!=="BATCH_V2"||typeof finance.importReviewedCompactEmptyFinanceObservationBatch!=="function"
+      ||typeof finance.recoverReviewedCompactEmptyFinanceObservationBatch!=="function"||typeof finance.compactEmptyFinanceBatchProof!=="function")
+        throw new Error("NEXT_COMPACT_COVERAGE_BUILD_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
 

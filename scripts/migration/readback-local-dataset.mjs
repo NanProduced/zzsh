@@ -1,4 +1,4 @@
-import {assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
+import {assertEmptyCoverageReceiptMode,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,readCompactCoverageEvidence,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
 import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertReadbackTarget, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
 import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readSourceRows as rows } from "./local-source-adapter.mjs";
@@ -409,6 +409,9 @@ try {
   }
   if(state.phases.financeEmptyCoverage?.complete){
     const phase=state.generatedPhases.financeEmptyCoverage, chunks=phase?.chunks;
+    const compact=registration.migrationProfile===NEXT_MIGRATION_PROFILE;
+    if(compact&&phase?.schema!=="zzsh.empty-coverage-chunks.v1")throw new Error("EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN");
+    assertEmptyCoverageReceiptMode(phase,compact);
     if(phase?.schema!=="zzsh.empty-coverage-chunks.v1"){
       const bytes=readFileSync(join(dirname(checkpoint),"phases","financeEmptyCoverage.json"));if(hash(bytes)!==phase?.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
       const expected=JSON.parse(bytes).flatMap(chunk=>chunk.rows.map(row=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage));let readable=0;
@@ -436,19 +439,32 @@ try {
       emitEmptyChunk:chunk=>{const descriptor=chunks[checkedChunks++];assertRebuiltEmptyCoverageChunk(descriptor,chunk,readFileSync(chunkFile(descriptor)));}});
     if(rebuilt.inputSha256!==state.fundsSupplement?.inputSha256)throw new Error("EMPTY_COVERAGE_SOURCE_BINDING_CHANGED");
     assertRebuiltEmptyCoverageManifest(phase,rebuilt.emptyCoverage,checkedChunks);
-    let readable=0,expected=0,batch=[];
+    let readable=0,expected=0,batch=[];const compactProofs=[];
     async function checkEmptyBatch(){
       const actual=new Map((await query(`SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[batch.map(r=>r.id)])).rows.map(r=>[r.id,r]));
       for(const row of batch){const found=actual.get(row.id);if(!found||found.user_id!==row.userId||found.source_kind!==row.sourceKind||found.source_count!==0||found.imported_count!==0||found.isolated_count!==0||found.actual_count!=='0'||found.body_digest!==row.bodyDigest||found.source_canonical!==row.canonical)difference("financeEmptyCoverage",row.id,"PROVED_EMPTY_COVERAGE_DRIFT");else readable++;}batch=[];
     }
-    for(const chunk of chunks)for(const row of JSON.parse(readFileSync(chunkFile(chunk)))){
-      batch.push(mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage);expected++;
-      if(batch.length===500)await checkEmptyBatch();
+    for(const chunk of chunks){const chunkRows=JSON.parse(readFileSync(chunkFile(chunk)));
+      if(compact){
+        if(typeof state.binding.actorId!=='string'||typeof state.binding.sessionId!=='string'||!registration.instance?.systemIdentifier)throw new Error('COMPACT_COVERAGE_ACTOR_OR_TARGET_MISSING');
+        compactProofs.push(mod("finance/personal-finance-observation-maintenance").compactEmptyFinanceBatchProof(chunkRows.map(row=>row.input),{
+          ref:'CORE_FULL_LEGACY_'+state.binding.oid,attempt:'dataset-'+state.binding.datasetSha256.slice(0,16),actor:{userId:state.binding.actorId,sessionId:state.binding.sessionId},
+          resource:{migrationProfile:registration.migrationProfile,systemIdentifier:registration.instance.systemIdentifier,oid:Number(registration.oid),nonce:registration.nonce},
+          inputSha256:state.fundsSupplement.inputSha256,cutoff:new Date(manifest.sourceCutoff).toISOString()},'core-legacy-dataset-'+state.binding.oid));
+      }
+      for(const row of chunkRows){batch.push(mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage);expected++;
+        if(batch.length===500)await checkEmptyBatch();}
     }
     if(batch.length)await checkEmptyBatch();
+    let batchProof;
+    if(compact){
+      const actor={userId:state.binding.actorId,sessionId:state.binding.sessionId},checked=await readCompactCoverageEvidence(query,compactProofs,actor);
+      for(const item of checked.differences)difference('financeEmptyCoverage',item.batchId,item.reason);
+      batchProof={mode:'BATCH_V2',expected:checked.expected,matched:checked.matched};
+    }
     const total=(await query(`SELECT count(*)::int n FROM zzsh_order.personal_finance_observation_coverage WHERE source_system='legacy_mysql_restore' AND source_count=0 AND source_kind=ANY($1::text[])`,[Object.values(phase.kinds)])).rows[0].n;
     if(expected!==phase.rows||total!==expected)difference("financeEmptyCoverage","COHORT","EMPTY_COVERAGE_TARGET_COUNT_DRIFT");
-    report.emptyFinancialCoverage={expected,readable,actual:total,sourceRebuilt:true,chunks:checkedChunks,scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
+    report.emptyFinancialCoverage={expected,readable,actual:total,sourceRebuilt:true,chunks:checkedChunks,...(batchProof?{batchProof}:{}),scope:"EXACT_SOURCE_ZERO_PER_SUBJECT_AND_KIND_NOT_A_ZERO_WALLET"};
     }
   }
   // The old listing deposit is retired: nothing to reconcile, and any row would be a leak.

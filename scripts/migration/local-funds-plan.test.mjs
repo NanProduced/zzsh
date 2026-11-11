@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertEmptyCoverageReceiptMode,assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,compareCompactCoverageEvidence,readCompactCoverageEvidence,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
 import {isExactLegacyRefundRelationship,LEGACY_REFUND_RELATIONSHIP_POLICY} from './local-source-adapter.mjs';
 
 test('a refund relationship needs the original order, user and nonblank matching number',()=>{
@@ -44,6 +44,53 @@ test('streamed empty coverage is checked against regenerated source, exact bytes
  assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,chunks:[...saved.chunks].reverse()},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
  assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,rows:400},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
  assert.throws(()=>assertRebuiltEmptyCoverageManifest(saved,rebuilt,1),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
+});
+
+test('compact coverage readback requires the exact physical batch receipt and audit',()=>{
+ const actor={userId:'fixture_admin',sessionId:'fixture_session'},batchId='history-empty-batch-'+'b'.repeat(40);
+ const expected=[{batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,coverageCount:2,actor,requestId:'fixture_request',financialEffect:'NONE'}}];
+ const receipt=()=>({scope_key:JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),key:batchId,request_fingerprint:'a'.repeat(64),response_status:200,publish_required:false,response_body:{...expected[0].body}});
+ const audit=()=>({object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:{...expected[0].body}});
+ assert.deepEqual(compareCompactCoverageEvidence(expected,[receipt()],[audit()],actor),{expected:1,matched:1,differences:[]});
+ for(const [receipts,audits] of [[[],[audit()]],[[receipt()],[]],[[{...receipt(),request_fingerprint:'f'.repeat(64)}],[audit()]],
+  [[{...receipt(),publish_required:true}],[audit()]],[[receipt()],[{...audit(),session_id:'other'}]],[[receipt()],[audit(),audit()]]])
+  assert.notDeepEqual(compareCompactCoverageEvidence(expected,receipts,audits,actor).differences,[]);
+ assert.throws(()=>compareCompactCoverageEvidence([...expected,...expected],[receipt()],[audit()],actor),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
+ assert.throws(()=>compareCompactCoverageEvidence(expected,[receipt()],[audit()],{}),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
+});
+
+test('old and next migration checkpoints cannot silently exchange empty coverage receipt formats',()=>{
+ assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({},false));
+ assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},true));
+ assert.throws(()=>assertEmptyCoverageReceiptMode({},true),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
+ assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
+ assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:null},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
+ assert.throws(()=>assertEmptyCoverageReceiptMode({},undefined),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
+});
+
+test('compact readback queries only the bound batch and reports missing evidence',async()=>{
+ const actor={userId:'fixture_admin',sessionId:'fixture_session'},batchId='history-empty-batch-'+'c'.repeat(40);
+ const proof={batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,actor,requestId:'fixture_request'}};
+ const scope=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),calls=[];
+ const query=async(sql,args)=>{calls.push(args);if(sql.includes('count(*)'))return{rows:[{n:'1'}]};if(sql.includes('idempotency_record'))return{rows:[{scope_key:scope,key:batchId,request_fingerprint:proof.fingerprint,response_status:200,publish_required:false,response_body:proof.body}]};
+  return{rows:[{object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:proof.body}]};};
+ assert.deepEqual(await readCompactCoverageEvidence(query,[proof],actor),{expected:1,matched:1,differences:[]});
+ assert.deepEqual(calls,[[scope,[batchId]],[[batchId]],[',"finance.history.empty_batch.import.v1",null]'],[]]);
+ assert.equal((await readCompactCoverageEvidence(async sql=>({rows:sql.includes('count(*)')?[{n:'0'}]:[]}),[proof],actor)).matched,0);
+ assert((await readCompactCoverageEvidence(async sql=>({rows:sql.includes('count(*)')?[{n:'2'}]:[]}),[proof],actor)).differences.some(row=>row.reason==='BATCH_TOTAL_DIFFERS'));
+ let callsOnBadInput=0;await assert.rejects(readCompactCoverageEvidence(async()=>{callsOnBadInput++;return{rows:[]};},[{...proof,batchId:'wrong'}],actor));
+ assert.equal(callsOnBadInput,0);
+});
+
+test('compact readback keeps queries bounded and detects duplicate batch identities across pages',async()=>{
+ const actor={userId:'fixture_admin',sessionId:'fixture_session'},scope=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]);
+ const proofs=Array.from({length:501},(_,i)=>{const batchId='history-empty-batch-'+i.toString(16).padStart(40,'0');return{batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,actor,requestId:'fixture_request'}};});
+ const byId=new Map(proofs.map(proof=>[proof.batchId,proof])),sizes=[];
+ const query=async(sql,args)=>{if(sql.includes('count(*)'))return{rows:[{n:'501'}]};const ids=sql.includes('idempotency_record')?args[1]:args[0];sizes.push(ids.length);
+  return{rows:ids.map(id=>{const p=byId.get(id);return sql.includes('idempotency_record')?{scope_key:scope,key:id,request_fingerprint:p.fingerprint,response_status:200,publish_required:false,response_body:p.body}:
+   {object_id:id,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:p.body};})};};
+ assert.equal((await readCompactCoverageEvidence(query,proofs,actor)).matched,501);assert.deepEqual(sizes,[500,500,1,1]);
+ await assert.rejects(readCompactCoverageEvidence(query,[...proofs,proofs[0]],actor),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
 });
 
 test('legacy withdrawal destinations become non-reusable masks and immutable restricted refs, never full identities, payout credentials or URLs',()=>{
