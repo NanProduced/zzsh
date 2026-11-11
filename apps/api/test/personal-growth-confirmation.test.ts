@@ -4,11 +4,12 @@ import type {PoolClient} from "pg";
 import {computeDeltaQuote,projectDeltaQuote,type InternalQuote,type QuoteInput} from "../src/supply/pricing";
 import {quoteToGrowthOfferPlan,type OfferBinding} from "../src/auth/membership-growth";
 import {selectPersonalGrowthOffer,frozenPersonalGrowthV4Valid,type GrowthConfirmationKnown} from "../src/order/personal-growth-confirmation";
-import {freezeSettlementPricing,readPersonalPriceProjection,rebuildPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
+import {freezeSettlementPricing,issuePersonalConfirmation,readPersonalPriceProjection,rebuildPersonalConfirmation,verifyPersonalConfirmation,type PersonalConfirmationOptions} from "../src/order/personal-confirmation";
 import {computeContentHash,normalizeContentPayload} from "../src/supply/content-hash";
 import {compatRule} from "./pricing-compat-fixture";
 import {legacyPayload} from "./legacy-listed-fixture";
 import {applyTotalDiscountToQuote} from "../src/auth/membership-total-discount";
+import {FIXED_FEE_ALGORITHM} from "../src/supply/fixed-fee";
 const asOf="2026-10-16T04:00:00.123456Z",binding:OfferBinding={userId:"user-1",ownerUserId:"owner-1",accountId:"account-1",listingVersionId:"version-1",ruleReleaseId:"release-1",quantityDigest:"a".repeat(64)};
 function input(base="47",deposit="30000"):QuoteInput{return {priceVersionId:"price-v1",mode:"SPREAD",roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD",haffRule:compatRule(base),lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",unit:"HAFF_BASE",customerTier:"STANDARD"}],conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"ordinary"}},termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"},deposits:{tenantDepositCents:deposit,publisherBailRequirementCents:"0"}};}
 function quote(base="47",deposit="30000"):InternalQuote{const result=computeDeltaQuote(input(base,deposit));assert(result.quotable,result.quotable?"":result.reasonCodes.join(","));return result.quote;}
@@ -133,4 +134,43 @@ test("legacy confirmation uses its frozen base with new growth and rejects missi
  const accepted=await rebuildPersonalConfirmation(client,user,{...request,fullPayoutTermsAcceptance:{termsVersionId:terms.termsVersionId,termsDigest:terms.termsDigest,disclosureVersion:terms.disclosureVersion}},options);
  assert.equal(accepted.snapshot.schema,"personal-quote-v4");assert.equal(accepted.projection.compensationDisclosure?.selected,true);
  assert.equal(statements.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)),false);
+});
+
+test("fixed-fee confirmation binds effective pricing separately from accepted funding and rejects a changed policy",async t=>{
+ const order:typeof import("../src/order/order")=require("../src/order/order"),publishing:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority");
+ t.mock.method(order,"assertFreshCreateAuthorization",async()=>({ownerUserId:"owner-1",gameId:"game-1"}));t.mock.method(publishing,"evaluatePublication",async()=>[]);t.mock.method(funding,"isProductionConfirmationFundingReader",()=>true);
+ let fundingPrice="";t.mock.method(funding,"assertFinalConfirmationFunding",async(_client:PoolClient,facts:Parameters<typeof funding.assertFinalConfirmationFunding>[1])=>{fundingPrice=facts.priceVersionId;});
+ const fixedRule=(base:string)=>{const {compatibility,...rest}=compatRule(base);return {...rest,schema:"haff-ratio-v3",fixedModes:compatibility!.modes};};
+ const originalInput:QuoteInput={priceVersionId:"price-v1",mode:"PERCENT",fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:"0.10",roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD",haffRule:fixedRule("47"),
+  lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",unit:"HAFF_BASE",customerTier:"STANDARD"}],conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"custom",ownerRatioB:"45"}},
+  termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY"},deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}};
+ const original=computeDeltaQuote(originalInput);assert(original.quotable);original.quote.ruleReleaseId="release-1";
+ const payload=normalizeContentPayload({schemaVersion:4,accountId:"account-1",gameId:"game-1",declaration:{title:"FIXTURE",description:null,attributes:{safe_box_code:"box-a",vit_level:6,bear_level:6,rentalPricing:{rentalMode:"custom",ownerRatioB:"45"},full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}},inventory:[{itemId:"haff",quantity:"60000000"}],skins:[],entitlements:[],mediaBindings:[],termOptionCode:"daily-10m",pricingOptionCode:""},
+  ruleRefs:{releaseId:"release-1",priceVersionId:"funding-v1",termVersionId:"term-v1",agreementVersionId:"agreement-1",agreementDigest:"d".repeat(64)},
+  pricingPolicy:{schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:"schedule-1",generation:"1",effectiveAt:"2026-10-15T00:00:00Z",priceVersionId:"price-v1"},quoteValues:original.quote as unknown as Record<string,unknown>});
+ const version={id:"version-1",account_id:"account-1",rule_release_id:"release-1",review_state:"PUBLISHED",payload,content_hash:computeContentHash(payload)},account={id:"account-1",owner_user_id:"owner-1",game_id:"game-1",current_version_id:"version-1"};
+ let policyNo=2;
+ const client={query:async(sql:string,values:unknown[]=[])=>{
+  if(sql.includes("FROM zzsh_supply.game"))return {rows:[{current_release_id:"release-1",enabled:true}]};if(sql.includes("SELECT * FROM zzsh_supply.rental_account"))return {rows:[account]};if(sql.includes("SELECT * FROM zzsh_supply.listing_version"))return {rows:[version]};
+  if(sql.includes("FROM zzsh_supply.listing_publication"))return {rows:[{source:"OWNER_DIRECT"}]};if(sql.includes("SELECT p.id,p.status"))return {rows:[{id:"funding-v1",status:"SEALED",mode:"SPREAD",haff_rule:compatRule(),commission_rate:null,rounding_policy:"HALF_UP_CENT_V1",term_version_id:"term-v1"}]};
+  if(sql.includes("FROM zzsh_supply.pricing_policy_schedule s"))return {rows:[{id:`schedule-${policyNo}`,generation:String(policyNo),effectiveAt:"2026-10-16T00:00:00.000000Z",priceVersionId:`price-v${policyNo}`,mode:"PERCENT",status:"SEALED",roundingPolicy:"HALF_UP_CENT_V1",haffRule:fixedRule(policyNo===2?"50":"51"),rates:{ordinary:"0.1",custom:policyNo===2?"0.12":"0.13",fast:"0.12"}}]};
+  if(sql.includes("FROM zzsh_supply.price_line")){assert.equal(values[0],`price-v${policyNo}`);return {rows:[{item_id:"haff",pricing_kind:"HAFF_RATIO",unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null,item_unit:"HAFF_BASE",item_enabled:true}]};}
+  if(sql.includes("FROM zzsh_supply.term_option"))return {rows:[originalInput.termOption]};if(sql.includes("AS at"))return {rows:[{at:asOf}]};if(sql.includes(" AS now"))return {rows:[{now:"1792123200"}]};throw new Error("unexpected SQL: "+sql);
+ }} as unknown as PoolClient;
+ const growthReader:NonNullable<PersonalConfirmationOptions["membershipGrowthReader"]>=async(_c,i)=>{
+  assert.equal(i.priceVersionId,`price-v${policyNo}`);assert.equal(i.baseQuote.pricingInputs.compatibility?.ownerRatioB,"45");
+  const discounted=applyTotalDiscountToQuote(i.baseQuote,"0.95");assert(discounted);
+  const planBinding={userId:i.userId,ownerUserId:i.ownerUserId,accountId:i.accountId,listingVersionId:i.listingVersionId,ruleReleaseId:i.ruleReleaseId,quantityDigest:i.quantityDigest};
+  return {knowledge:"KNOWN",effectiveTier:"GOLD",policyTier:"GOLD",asOfUtc:i.asOfUtc,policyVersion:"1",entitlementIds:[],candidates:[{quote:discounted.quote,payableRatio:"0.95",plan:quoteToGrowthOfferPlan(discounted.quote,{source:"GROWTH",benefitVersion:"1",binding:planBinding})}]};
+ };
+ const options:PersonalConfirmationOptions={key:{keyId:"fixture",secret:"isolated-fixture-only-not-production-key"},gate:async()=>({occupancy:"FREE",publisherBail:"NOT_REQUIRED",reference:"FIXTURE"}),
+  fundingReader:async()=>({schema:"personal-quote-v2",version:"1",sourceRef:"FIXTURE",baseDepositCents:"30000",publisherBailRequirementCents:"0",vipWaiver:false,svipWaiver:false,fullPayoutPolicyRef:"fixture-policy",fullPayoutPolicyVersion:"1",disclosureVersion:"v1"}),membershipGrowthReader:growthReader};
+ const user={userId:"user-1",sessionId:"session-1"},request={accountId:"account-1",versionId:"version-1",releaseId:"release-1"};
+ const rebuilt=await rebuildPersonalConfirmation(client,user,request,options);
+ assert.equal(rebuilt.snapshot.schema,"personal-quote-v5");assert.equal(rebuilt.snapshot.ruleRefs.priceVersionId,"funding-v1");assert.equal(rebuilt.snapshot.quote.priceVersionId,"price-v2");
+ assert.equal("pricingPolicy" in rebuilt.snapshot&&rebuilt.snapshot.pricingPolicy?.scheduleId,"schedule-2");assert.equal(rebuilt.projection.quote.baseRenterHaffRatioWanPerYuan,"45");
+ assert("settlementPricing" in rebuilt.snapshot);assert.equal(rebuilt.snapshot.settlementPricing?.schema,"settlement-pricing-v3");assert.equal(rebuilt.snapshot.settlementPricing?.fixedFeeRate,"0.12");
+ const issued=await issuePersonalConfirmation(client,user,request,options);assert.equal(fundingPrice,"funding-v1");
+ await verifyPersonalConfirmation(client,user,request,issued.confirmationToken,options);
+ policyNo=3;await assert.rejects(()=>verifyPersonalConfirmation(client,user,request,issued.confirmationToken,options),(error:unknown)=>(error as {code:string}).code==="CONFIRMATION_CHANGED");
 });

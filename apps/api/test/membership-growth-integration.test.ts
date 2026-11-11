@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, growthContributionSourceDigest, mapAcceptedSettlementToGrowthFacts, membershipGrowthPostCommitCallback, normalizeGrowthInstant, policyTierForGrowthProjection, readGrowthSourceCompleteness, readMembershipGrowth, readMembershipGrowthQuoteCandidates, readMembershipGrowthQuoteCandidatesAt, resolveGrowthEffectiveTime, settlementBackfillActorAllowed } from "../src/auth/membership-growth-integration";
-import { computeDeltaQuote, type QuoteInput } from "../src/supply/pricing";
+import { computeDeltaQuote, computePublishedFixedFeeQuote, type QuoteInput } from "../src/supply/pricing";
 import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
 import { chooseCompleteOffer, isLegacyPricingContract, isNotPriced, validateBenefitPolicy } from "../src/auth/membership-growth";
 import { lockReplacementEntitlement } from "../src/auth/membership-growth-approval";
 import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-approval";
-import { canonicalize } from "../src/supply/content-hash";
+import { canonicalize, computeContentHash, type ContentPayloadInput } from "../src/supply/content-hash";
 import { createHash } from "node:crypto";
 import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
@@ -506,6 +506,26 @@ test("fixed-fee growth reads enabled modes and rejects a discount below the froz
       const incompatible = { ...entitlement, pricingPayload: { ...entitlement.pricingPayload, payableRatio: "0.89" } };
       const denied = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, input.haffRule, [incompatible]), request);
       assert.equal(denied.knowledge, "UNKNOWN"); if (denied.knowledge === "UNKNOWN") assert.equal(denied.reason, "ENTITLEMENT_QUOTE_UNAVAILABLE");
+      if (rentalMode === "custom") {
+        const published = structuredClone(base.quote); published.ruleReleaseId = "release-1";
+        const listing: ContentPayloadInput = { schemaVersion: 4, accountId: "account-1", gameId: "game-1",
+          declaration: { title: "synthetic", description: null, attributes: { safe_box_code: "box-a", vitLevel: 6, bearLevel: 6, rentalPricing: input.conditions.rentalPricing },
+            inventory: input.lines.map(line => ({ itemId: line.itemId, quantity: line.quantity })), skins: [], entitlements: [], termOptionCode: "daily-10m", pricingOptionCode: "", mediaBindings: [] },
+          ruleRefs: { releaseId: "release-1", priceVersionId: "price-v1", termVersionId: "term-1", agreementVersionId: "agreement-1", agreementDigest: "d".repeat(64) },
+          pricingPolicy: { schema: "pricing-policy-v1", pricingModel: "FIXED_FEE", scheduleId: "schedule-1", generation: "1", effectiveAt: "2026-10-01T00:00:00Z", priceVersionId: "price-v1" },
+          quoteValues: published as unknown as Record<string, unknown> };
+        const { compatibility: newModes, ...newBase } = compatRule("50");
+        const changed: QuoteInput = { ...input, priceVersionId: "price-v2", haffRule: { ...newBase, schema: "haff-ratio-v3", fixedModes: newModes!.modes } };
+        assert.equal(computeDeltaQuote(changed).quotable, false);
+        const baseAfterChange = computePublishedFixedFeeQuote(changed, { accountId: "account-1", gameId: "game-1", contentHash: computeContentHash(listing), payload: listing });
+        assert(baseAfterChange.quotable);
+        const changedRequest = { ...request, priceVersionId: "price-v2", baseQuote: baseAfterChange.quote, quoteInput: changed };
+        const carried = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, changed.haffRule, [entitlement]), changedRequest);
+        assert.equal(carried.knowledge, "KNOWN", JSON.stringify(carried));
+        const forged = { ...changed, conditions: { ...changed.conditions, rentalPricing: { rentalMode: "custom" as const, ownerRatioB: "46" } } };
+        const mismatch = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, changed.haffRule, [entitlement]), { ...changedRequest, quoteInput: forged });
+        assert.equal(mismatch.knowledge, "UNKNOWN"); if (mismatch.knowledge === "UNKNOWN") assert.equal(mismatch.reason, "FIXED_FEE_BASE_INVALID");
+      }
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
