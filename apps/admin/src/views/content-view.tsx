@@ -375,6 +375,7 @@ export function ContentView({
               <Button type="button" size="sm" variant="ghost" loading={listLoading} onClick={() => void reload()}><RefreshCw size={14} aria-hidden="true" />刷新</Button>
               <div className="content-state-filter" role="group" aria-label="按状态筛选本页">{itemChips.map(chip => <Button key={chip.value} type="button" size="sm" variant={itemFilter === chip.value ? "secondary" : "ghost"} aria-pressed={itemFilter === chip.value} onClick={() => setItemFilter(chip.value)}>{chip.label}<span className="content-state-count">{chip.count}</span></Button>)}</div>
             </div>
+            <p className="mt-2 text-xs text-muted-foreground">仅筛选当前页，翻页或调整筛选查看更多。</p>
             <StatusMessage error={listError} className="mt-3" />
             {page && filteredItems.length > 0 ? (
               <div className="table-wrap mt-3">

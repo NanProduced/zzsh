@@ -83,6 +83,9 @@ export function humanizeAction(action: string): string {
 export const DOMAIN_LABELS: Record<string, string> = {
   admin: "管理员与安全", user: "用户", approval: "审批", order: "订单", membership: "会员",
   distribution: "分销", content: "内容", game: "游戏", system: "系统",
+  // 仅补真实业务域；本地沙盒 / ECS 演示等测试环境前缀不进入运营筛选下拉。
+  supply: "供给", im: "客服会话", profile: "资料", finance: "资金", credit: "信用",
+  joinpay: "汇聚支付", legal: "法务合同", withdrawal: "提现", controlled: "受控提现",
 };
 
 export function domainOf(action: string): string {
@@ -103,6 +106,14 @@ const OBJECT_TYPE_LABELS: Record<string, string> = {
   user: "用户",
   approval_request: "审批申请",
   approval_template: "审批模板",
+  auth_account: "认证账号",
+  rental_order: "租赁订单",
+  rental_account: "资源账号",
+  payment_request: "支付请求",
+  content_resource: "内容资源",
+  credit_event: "信用记录",
+  distribution_participant: "分销商",
+  im_consultation: "客服会话",
 };
 
 export function objectTypeLabel(objectType: string): string {

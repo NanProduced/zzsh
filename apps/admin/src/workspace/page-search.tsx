@@ -370,7 +370,7 @@ function PageSearch({
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
             onKeyDown={handleInputKeyDown}
-            placeholder="在当前权限内的已实现页面中查找"
+            placeholder="搜索页面与标签"
             aria-label="搜索页面与标签"
             autoComplete="off"
           />

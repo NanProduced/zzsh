@@ -16,7 +16,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { ListPagination } from "../components/admin-list/list-pagination";
 import { receiptEnvelopeIssue, statusView, type RecoveryResult, type RequestDetail } from "./approval/contract";
 import { dropPendingWrite, inspectPending, pendingWriteSubject, savePendingWrite, updatePendingWriteKind, type PendingInspection } from "./approval/pending-writes";
-import { directoryAdapter, EMPTY_FILTERS, type User } from "./user-directory/user-directory-data";
+import { directoryAdapter, EMPTY_FILTERS, REGISTRATION_SORT, REGISTRATION_TIME_ORIGINAL, type User } from "./user-directory/user-directory-data";
 import { InfoHint, MembershipEntitlementForm, formatDiscountLabel, formatDepositBenefitText, type AdminEntitlementDraft, type MembershipEntitlementContext } from "./membership-entitlement-form";
 
 const LEGACY_MODE_LABELS: Record<string, string> = { ordinary: "普通", custom: "自定义", fast: "极速" };
@@ -289,6 +289,7 @@ function UserPicker({
   }, [open]);
 
   const canSearch = snapshot.security.isBoss || hasPermission(snapshot, "user.directory.read");
+  const canPhoneLookup = hasPermission(snapshot, "user.phone.lookup");
 
   async function search(searchText?: string) {
     const q = (searchText !== undefined ? searchText : query).trim();
@@ -306,7 +307,8 @@ function UserPicker({
 
     try {
       const result = await directoryAdapter(snapshot).adapter.list(
-        { ...EMPTY_FILTERS, q },
+        // 显式使用注册时间排序：EMPTY_FILTERS.sort 是需要 order.read 的聚合排序，无权限会 403；有关键词时服务端本就归一为注册时间。
+        { ...EMPTY_FILTERS, q, sort: REGISTRATION_SORT.desc, registrationTime: REGISTRATION_TIME_ORIGINAL },
         { page: 1, pageSize: 10 },
         read.signal
       );
@@ -322,19 +324,17 @@ function UserPicker({
 
   const handleInputChange = (text: string) => {
     setQuery(text);
-    if (!text.trim()) {
-      if (controller.current) controller.current.abort();
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      setRows([]);
-      setOpen(false);
-      lastSearchedRef.current = "";
-      return;
-    }
-    // 当用户输入时，先不要盲目以旧的空结果展示“未找到”，进入防抖检索
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
-    debounceTimer.current = setTimeout(() => {
-      void search(text);
-    }, 300);
+    // 显式触发：不再边打字边自动发请求（避免 403 与并发名额）；按回车或 sr-only「选择用户」按钮才检索。
+    // 输入变化先撤掉上一次结果与在途请求，避免展示与当前关键词不符的旧列表。
+    if (controller.current) {
+      controller.current.abort();
+      controller.current = null;
+    }
+    setBusy(false);
+    setRows([]);
+    setOpen(false);
+    lastSearchedRef.current = "";
   };
 
   if (!canSearch) {
@@ -351,7 +351,7 @@ function UserPicker({
         <Search className="absolute left-2.5 size-3.5 text-muted-foreground pointer-events-none" aria-hidden />
         <Input
           aria-label="查找用户"
-          placeholder="输入手机号、昵称或ID搜索..."
+          placeholder={canPhoneLookup ? "输入手机号、昵称或ID搜索..." : "输入昵称或ID搜索..."}
           disabled={disabled}
           value={query}
           onFocus={() => {
@@ -403,6 +403,7 @@ function UserPicker({
           查询
         </button>
       </div>
+      {!canPhoneLookup ? <p className="mt-1 text-[11px] text-muted-foreground">手机号查找需要相应权限</p> : null}
 
       {/* Floating Dropdown Results Menu: 纯实色高对比度、绝不透光 */}
       {open ? (

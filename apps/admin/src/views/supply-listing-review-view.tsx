@@ -20,7 +20,7 @@ import { condText } from "./supply-accounts/reason-summary";
 import { SupplyActionDialog, type ActionFeedback } from "./supply-review/action-bar";
 import { AccountCompleteView, ImportedAccountView, PublicBasisView } from "./supply-review/detail-pane";
 import { AccountCards, AccountFees, AccountIdentity, AccountResources, AccountTerms, IdLine, KindHint, KindSelect, MoreFilters, QuickView, ReasonCell, RowActions, RowMenu, SavedViewsMenu, StatusBadge, TimeText, useSavedViews } from "./supply-accounts/account-list-parts";
-import { KIND_LABELS, LOGIN_METHOD_OPTIONS, fullShanghaiTime, groupConditions, versionText, rowHaffText, rowQuoteText, rowDepositText, rowFullPayout, rowListingStatus, lookupNeedsDirectory, rowBaseFeeRows, rowCoreAssetsText, rowTermsLines } from "./supply-accounts/account-list-model";
+import { KIND_LABELS, LOGIN_METHOD_OPTIONS, fullShanghaiTime, groupConditions, versionText, rowHaffText, rowQuoteText, rowDepositText, rowFullPayout, rowListingStatus, lookupNeedsDirectory, suggestKind, rowBaseFeeRows, rowCoreAssetsText, rowTermsLines } from "./supply-accounts/account-list-model";
 import { ListPagination, ListToolbar, ListToolbarSearch, ListToolbarEnumSelect } from "@/components/admin-list";
 import { ConditionCheck, ReasonSummary, type CheckTarget } from "./supply-accounts/reason-summary";
 import { ACCOUNT_BUSINESS_STATES, attributeFacts, linkedOrderStatus, formatAmount, historicalReadSummary, blockerLabel, inventoryRows, knownSupplyLink, mediaContentUrl, mediaReviewLabel, orderHandoff, orderPaymentText, publicBasisVersion, quantityText, reasonIsDirty, restrictionConditions, reviewStateLabel, supplyFactText, supplyObjectLabel, type Detail, type MediaBinding, type QueueItem, type SupplyLinkedOrder, type SupplyWorkDetail, type SupplyWorkItem, type SupplyWorkPage, type SupplyWorkView, type SupplyQueryKind, type Version, type ZoomTarget } from "./supply-review/model";
@@ -222,7 +222,8 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
         return value;
     }, [filter]);
     useEffect(() => { if (initialAccountId)
-        return; const controller = new AbortController(); setListBusy(true); setListError(undefined); setPage(undefined); void loadList(controller.signal).then(value => { if (!value || controller.signal.aborted)
+        return; const controller = new AbortController(); const timeout = AbortSignal.timeout(8000); const signal = AbortSignal.any([controller.signal, timeout]); setListBusy(true); setListError(undefined); setPage(undefined); void loadList(signal).then(value => { if (controller.signal.aborted)
+        return; if (timeout.aborted) { setListError("读取超时，请缩小条件后重试"); return; } if (!value)
         return;
         if (filter.cursor && typeof value.total === "number" && Number.isSafeInteger(value.total) && value.total >= 0 && !value.items.length && stack.length * Number(filter.limit) >= value.total) {
         positions.delete(identity);
@@ -238,7 +239,11 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
         return;
     } requestAnimationFrame(() => { const scroller = viewport.current?.closest(".workspace-page"); if (scroller && prior)
         scroller.scrollTop = prior.scroll; window.scrollTo(0, prior?.windowScroll ?? 0); (document.getElementById(prior?.focus ?? "") ?? document.getElementById("supply-work-title"))?.focus({ preventScroll: true }); }); }).catch(error => { if (controller.signal.aborted)
-        return; if (error instanceof AdminApiError && error.code === "EVIDENCE_UNAVAILABLE") {
+        return; if (timeout.aborted || (error instanceof AdminApiError && error.status === 504)) {
+        setListError("读取超时，请缩小条件后重试");
+        return;
+    }
+    if (error instanceof AdminApiError && error.code === "EVIDENCE_UNAVAILABLE") {
         setListError("筛选范围过大，暂不能完整核对；已保留筛选条件，请缩小条件后重试。");
         return;
     }
@@ -420,6 +425,9 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
     } if (draftKind === "link" && (!page || !knownSupplyLink(draftQ.trim(), page.stationOrigins))) {
         setQueryError("不是已知本站账号或订单路径，未读取外部地址。");
         return;
+    } if (draftKind === "owner" && suggestKind(draftQ) === "nickname") {
+        setQueryError("当前按「号主」查找只接受号主用户 ID 或旧平台 ID；输入看起来像昵称，请切换为「昵称」查找。");
+        return;
     } let kind = draftKind, q = draftQ.trim(); if (kind === "link") {
         const parsed = knownSupplyLink(q, page!.stationOrigins)!;
         kind = parsed.kind === "order" ? "order" : "account";
@@ -437,16 +445,17 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
         setListNotice(undefined);
         setFilter({ ...emptyFilter, limit: filter.limit });
     };
+    const reloadList = () => setFilter(current => ({ ...current }));
     if (!initialAccountId) {
         const quickRow = page?.items.find(r => r.id === quick);
         const viewRow = (row: SupplyWorkItem, trigger?: HTMLElement) => { quickOrigin.current = trigger ?? document.getElementById("supply-open-" + row.id); remember("supply-open-" + row.id); setQuick(row.id); };
         const openFull = (row: SupplyWorkItem, context: string) => { setQuick(null); open(row.id, supplyObjectLabel(row), context); };
-        return <div className="sa-page text-sm" ref={viewport}><header className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h1 id="supply-work-title" tabIndex={-1} className="text-2xl leading-9 font-semibold outline-none">账号供给</h1><p className="mt-0.5 text-muted-foreground">管理账号资料与接单条件</p></div><div className="text-right"><Button variant="outline" size="lg" onClick={() => setFilter({ ...filter })}><RefreshCw size={15}/>刷新列表</Button><p className="mt-2 text-xs text-muted-foreground">仅展示当前授权范围</p></div></header>
+        return <div className="sa-page text-sm" ref={viewport}><header className="mb-4 flex flex-wrap items-start justify-between gap-3"><div><h1 id="supply-work-title" tabIndex={-1} className="text-2xl leading-9 font-semibold outline-none">账号供给</h1><p className="mt-0.5 text-muted-foreground">管理账号资料与接单条件</p></div><div className="text-right"><Button variant="outline" size="lg" onClick={reloadList}><RefreshCw size={15}/>刷新列表</Button><p className="mt-2 text-xs text-muted-foreground">仅展示当前授权范围</p></div></header>
  <Tabs value={filter.view} onValueChange={value => { const v = value as SupplyWorkView; positions.delete(identity); setStack([]); setQuick(null); setFilter({ ...filter, view: v, cursor: "" }); onQueryChange({ view: v }); }} className="mb-4"><TabsList aria-label="供给工作视图" className="overflow-x-auto gap-5 [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>button]:px-1">{views.map(([value, label]) => <TabsTrigger key={value} value={value}>{label}</TabsTrigger>)}</TabsList></Tabs>
  <ListToolbar noValidate className="sa-search" onSubmit={submitSearch} onReset={resetFilters}>
    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 md:min-w-[380px]">
      <KindSelect kind={draftKind} onKind={setDraftKind}/>
-     <ListToolbarSearch value={draftQ} onChange={setDraftQ} ariaLabel="业务线索" placeholder={"输入" + KIND_LABELS[draftKind] + "查找"} />
+     <ListToolbarSearch value={draftQ} onChange={setDraftQ} ariaLabel="业务线索" placeholder={draftKind === "owner" ? "输入号主用户 ID 或旧平台 ID 查找" : "输入" + KIND_LABELS[draftKind] + "查找"} />
      <Button type="submit" size="lg" className="px-4" disabled={listBusy}>查找</Button>
      <SavedViewsMenu saved={savedViews} current={{ view: filter.view, kind: draftKind, q: draftQ.trim(), gameId: filter.gameId, status: filter.status, eligibility: filter.eligibility }} onLoad={v => { positions.delete(identity); setStack([]); setDraftKind(v.kind); setDraftQ(v.q); setFilter({ ...filter, view: v.view, kind: v.kind, q: v.q, gameId: v.gameId, status: v.status ?? "", eligibility: v.eligibility ?? "", cursor: "" }); }}/>
      {draftQ && <Button variant="ghost" type="button" size="lg" className="text-xs text-muted-foreground" onClick={() => { positions.delete(identity); setDraftQ(""); setStack([]); setFilter({ ...filter, q: "", cursor: "" }); setQueryError(undefined); }}>清除线索</Button>}
@@ -470,7 +479,7 @@ function SupplyWork({ snapshot, refreshNonce, onDirtyChange, initialAccountId, i
        <TriangleAlert aria-hidden />
        <AlertTitle>本次列表未读到</AlertTitle>
        <AlertDescription>{listError}</AlertDescription>
-       <AlertAction><Button onClick={() => { positions.delete(identity); setStack([]); setFilter({ ...filter, cursor: "" }); }}>回首页重读</Button></AlertAction>
+       <AlertAction><Button onClick={reloadList}>重试</Button><Button onClick={() => { positions.delete(identity); setStack([]); setFilter({ ...filter, cursor: "" }); }}>回首页重读</Button></AlertAction>
      </Alert>
    ) : listBusy ? (
      <div className="space-y-2 py-2" aria-busy="true">

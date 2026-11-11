@@ -268,7 +268,7 @@ function OrderList({snapshot,onOpenPath,refreshNonce,initialQuery,onQueryChange}
  <ListToolbar noValidate className="oc-search" onSubmit={e=>{e.preventDefault();submitSearch();}} onReset={resetSearch}>
    <div className="oc-search-main">
      <div className="oc-search-group" role="group" aria-label="关键字查询"><Select value={filters.kind} onValueChange={kind=>setFilters(f=>({...f,kind:kind||"order"}))} items={[["order","订单号"],["account","账号编号"],["party","交易双方"],["renter","租客"],["owner","号主"]].map(([value,label])=>({value,label}))}><SelectTrigger aria-label="查找方式" className="oc-search-kind h-9 min-w-[104px] text-xs"><SelectValue/></SelectTrigger><SelectContent className="min-w-[120px]">{[["order","订单号"],["account","账号编号"],["party","交易双方"],["renter","租客"],["owner","号主"]].map(([value,label])=><SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select>
-     <ListToolbarSearch value={filters.q} onChange={q=>setFilters(f=>({...f,q}))} ariaLabel="查找线索" placeholder={filters.kind==="order"||filters.kind==="account"?"业务编号精确匹配":"用户编号精确；昵称、用户名包含匹配"} /></div>
+     <ListToolbarSearch value={filters.q} onChange={q=>setFilters(f=>({...f,q}))} ariaLabel="查找线索" placeholder={filters.kind==="order"||filters.kind==="account"?"业务编号精确匹配":"用户 ID 或旧平台编号精确；昵称、用户名包含匹配"} /></div>
      <Button size="sm" type="submit">查询</Button>
    </div>
    <div className="admin-list-toolbar-row">

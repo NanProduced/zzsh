@@ -232,7 +232,7 @@ function EarningsRows({ rows, snapshot, onOpenPath, showSource = true }: { rows:
 
 export function DistributionEarningsPage({ snapshot, onOpenPath, query = emptyQuery, onQueryChange, refreshNonce = 0 }: PageProps) {
   const { filters, update } = useDashboardFilters(query, onQueryChange), [nonce, setNonce] = useState(0);
-  const allowed = can(snapshot, 'distribution.dashboard.read'), identity = dashboardContextIdentity(snapshot);
+  const allowed = can(snapshot, 'distribution.dashboard.read'), canDirectory = can(snapshot, 'user.directory.read'), identity = dashboardContextIdentity(snapshot);
   const liveQuery = useRef(query); liveQuery.current = query;
   const [draftQ, setDraftQ] = useState(filters.q);
   useEffect(() => { setDraftQ(filters.q); }, [filters.q]);
@@ -269,6 +269,7 @@ export function DistributionEarningsPage({ snapshot, onOpenPath, query = emptyQu
   const total = read ? Number(read.total) : 0;
   return <section className="space-y-5" data-distribution-earnings>
     <PageHeader title="佣金明细" description="按当前已知责任核对佣金记录；未确认原始发生日的记录仍保留，记录金额不是钱包余额。" actions={<Button variant="outline" disabled={busy} onClick={() => { update({ page: 1 }); setNonce(value => value + 1); }}><RefreshCw aria-hidden="true" />刷新</Button>} />
+    {!canDirectory ? <p className="text-xs text-amber-600 dark:text-amber-400" role="status">无用户目录读取权限，昵称不参与匹配；请使用用户 ID 或订单号。</p> : null}
     <Card className="p-3"><form data-distribution-earnings-filters className="flex flex-col gap-3" onSubmit={event => { event.preventDefault(); update({ q: draftQ.trim() }); }}>
       <div className="flex flex-wrap items-end gap-x-4 gap-y-3">
         <label className="min-w-[14rem] max-w-md flex-1 space-y-2 text-sm"><span className="block text-muted-foreground">搜索</span><div className="relative"><Search size={16} aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索订单号或受益人" value={draftQ} onChange={event => setDraftQ(event.target.value)} onBlur={() => { if (draftQ.trim() !== filters.q) update({ q: draftQ.trim() }); }} placeholder="订单号 / 受益人昵称或 ID，回车搜索" className="pl-8" /></div></label>
@@ -320,6 +321,7 @@ function DistributionParticipantsDashboard({ snapshot, onOpenPath, query = empty
   const count = (item: { recordCount?: string | null; mappedRecordCount?: string }) => item.recordCount ?? item.mappedRecordCount ?? null;
   return <TooltipProvider><section className="space-y-5" data-distribution-participants>
     <PageHeader title="分销商" description="按已接入佣金记录与已核责任汇总；来源覆盖尚未核全，记录金额不等于钱包余额。旧资格来源可在详情查看。" actions={<Button variant="outline" disabled={busy} onClick={() => { update({ page: 1 }); setNonce(value => value + 1); }}><RefreshCw aria-hidden="true" />刷新</Button>} />
+    {!canDirectory ? <p className="text-xs text-amber-600 dark:text-amber-400" role="status">无用户目录读取权限，昵称不参与匹配；请使用用户 ID 或订单号。</p> : null}
     <Card className="p-3"><form data-distribution-participants-filters className="flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); update({ q: draftQ.trim(), page: 1 }); }}><label className="min-w-[14rem] max-w-md flex-1 space-y-2 text-sm"><span className="block text-muted-foreground">搜索</span><div className="relative"><Search size={16} aria-hidden="true" className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input aria-label="搜索分销商" value={draftQ} onChange={event => setDraftQ(event.target.value)} onBlur={() => { if (draftQ.trim() !== filters.q) update({ q: draftQ.trim(), page: 1 }); }} placeholder="昵称或用户 ID，回车搜索" className="pl-8" /></div></label><Button type="submit" variant="outline" disabled={busy}>查询</Button></form></Card>
     {error ? <Alert variant="warning"><CircleAlert aria-hidden="true" /><AlertTitle>分销商列表暂不可用</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
     {!read && busy ? <p role="status" className="text-sm text-muted-foreground">正在读取分销商…</p> : null}

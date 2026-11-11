@@ -182,7 +182,11 @@ const ACCOUNT_OBJECT_ITEMS = [ALL, ...ACCOUNT_OBJECT_TYPES.map((value) => ({ val
 const ACCOUNT_ACTION_ITEMS = [ALL, ...ACCOUNT_AUDIT_ACTIONS.map((value) => ({ value, label: labelForAction(value) }))];
 const OUTCOME_ITEMS = [ALL, { value: "SUCCESS", label: "成功" }, { value: "FAILURE", label: "失败" }];
 const DOMAIN_ITEMS = [ALL, ...Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label }))];
-const OPERATION_OBJECT_ITEMS = [ALL, ...["admin_user", "admin_security", "admin_role", "admin_session", "user_account", "approval_request", "approval_template"].map((value) => ({ value, label: objectTypeLabel(value) }))];
+const OPERATION_OBJECT_ITEMS = [ALL, ...[
+  "admin_user", "admin_security", "admin_role", "admin_session", "admin_auth_subject", "admin_recovery_request",
+  "user_account", "user", "auth_account", "approval_request", "approval_template",
+  "rental_order", "rental_account", "payment_request", "content_resource", "credit_event", "distribution_participant", "im_consultation",
+].map((value) => ({ value, label: objectTypeLabel(value) }))];
 const inputClass = "h-9 w-full text-xs";
 
 export function AdminAuditView({

@@ -173,7 +173,7 @@ test("page search component interaction: no match shows empty state, Enter guard
     await settle();
 
     // Find input inside popover
-    const input = browser.document.body.querySelector('input[placeholder*="在当前权限内的已实现页面中查找"]');
+    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
     assert.ok(input, "search input is rendered in popover");
 
     // Initially with empty query and non-empty pages, results list is displayed
@@ -254,7 +254,7 @@ test("F3: long unbroken query string wraps without overflowing empty state conta
     });
     await settle();
 
-    const input = browser.document.body.querySelector('input[placeholder*="在当前权限内的已实现页面中查找"]');
+    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
     const longString = "NO_MATCH_" + "X".repeat(180);
     await setInput(input, longString);
     await settle();
@@ -335,7 +335,7 @@ test("open tabs search preserves detail ID leading zeros and activates without d
     });
     await settle();
 
-    const input = browser.document.body.querySelector('input[placeholder*="在当前权限内的已实现页面中查找"]');
+    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
 
     // Search by exact leading-zero ID
     await setInput(input, "00123");
@@ -389,7 +389,7 @@ test("dirty leave cancellation does not record recent access or switch tabs", as
     });
     await settle();
 
-    const input = browser.document.body.querySelector('input[placeholder*="在当前权限内的已实现页面中查找"]');
+    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
     await setInput(input, "规则");
     await settle();
 
@@ -495,7 +495,7 @@ test("IME composition prevents premature navigation on Enter key", async () => {
     });
     await settle();
 
-    const input = browser.document.body.querySelector('input[placeholder*="在当前权限内的已实现页面中查找"]');
+    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
 
     // Start IME composition
     await act(async () => {

@@ -52,7 +52,8 @@ const nextCalendarDay = (value: string) => {
   parsed.setUTCDate(parsed.getUTCDate() + 1);
   return parsed.toISOString().slice(0, 10);
 };
-export const PHONE_LIKE = /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/;
+/** 整串才是手机号：普通关键词里含 11 位数字不应被当成手机查找（与后端 user-directory-routes.ts 同步）。 */
+export const PHONE_LIKE = /^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/;
 export const STATUS_LABEL: Record<string,string> = { ACTIVE: '正常', RESTRICTED: '受限', FROZEN: '已冻结', CANCELLED: '已注销', UNKNOWN: '未知' };
 export const FILTER_VALUE_LABEL:Record<string,string>={VERIFIED:'已实名',UNVERIFIED:'未实名',REJECTED:'未通过',MIGRATED:'旧平台用户',LOCAL:'未关联旧平台来源'};
 export const safeFilters = (filters: Filters) => Object.fromEntries(Object.entries(filters).filter(([key,value])=>value && !(key==='q' && PHONE_LIKE.test(value)) && !(key==='sort' && filters.registrationTime==='LOCAL')));
