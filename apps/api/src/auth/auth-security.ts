@@ -1890,6 +1890,11 @@ export async function verifyApprovalDecisionTotp(
 ): Promise<void> {
   const code = typeof body.totpCode === "string" ? body.totpCode : "";
   if (!/^\d{6}$/.test(code)) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Two-factor code is invalid");
+  // R4：动态码失败计数与锁定必须落在共享存储里，并且以账号为主体（换 IP 不能重置）。
+  // 进程内限流桶只作为第二道即时保护，不能替代持久封锁。仍然不要密码、不要人机验证。
+  const bf = options.adminBruteForce;
+  const subjects = bf ? adminAuthSubjects(`admin:${context.userId}`, resolveAdminClientIp(request as unknown as Parameters<typeof resolveAdminClientIp>[0], bf.clientIp)) : [];
+  if (bf) await gateAdminAuth(bf, "approval-totp", subjects, { required: false, payload: undefined });
   const key = rateLimitKey(request, "admin.approval.decision.totp", context.userId);
   checkRateLimit(options, key);
   const releaseVerificationBudget = acquireSecurityVerificationBudget(options);
@@ -1905,7 +1910,14 @@ export async function verifyApprovalDecisionTotp(
   } finally {
     releaseVerificationBudget();
   }
-  if (verified) return;
+  if (verified) {
+    if (bf) await clearAdminAuthFailures(bf, "approval-totp", subjects);
+    return;
+  }
+  if (bf) {
+    const failure = await recordAdminAuthFailure(bf, "approval-totp", subjects, ensureApiV1RequestId(request));
+    if (!failure || failure.lockedUntil) throw new SecurityApiError(429, API_V1_ERROR_CODES.RATE_LIMITED, "尝试次数过多，请稍后再试");
+  }
   throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Two-factor verification is required");
 }
 

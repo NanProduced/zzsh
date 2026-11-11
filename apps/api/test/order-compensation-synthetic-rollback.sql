@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 WITH p AS (SELECT operation_payload||jsonb_build_object('caseRef','synth-incident-abort') AS v FROM zzsh_iam.approval_request WHERE id='synthetic_request')
 INSERT INTO zzsh_iam.approval_request(id,template_id,template_version,operation_code,trigger_condition,payload_version,operation_payload,operation_payload_hash,summary,requested_by,status,expires_at)
- SELECT 'synthetic_abort','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic rollback','synthetic_ops','PENDING',now()+interval '1 hour' FROM p;
+ SELECT 'synthetic_abort','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic rollback','synthetic_ops','PENDING','infinity'::timestamptz FROM p;
 INSERT INTO zzsh_iam.approval_request_candidate(request_id,admin_user_id,source,template_version) VALUES('synthetic_abort','synthetic_ops','TEMPLATE',1);
 BEGIN;
 SET LOCAL ROLE synth_comp_runtime;

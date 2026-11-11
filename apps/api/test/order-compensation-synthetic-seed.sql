@@ -3,10 +3,17 @@ BEGIN;
 SET LOCAL session_replication_role='replica';
 INSERT INTO zzsh_auth_user."user"(id,name,email,"createdAt","updatedAt") VALUES
  ('synthetic_owner','owner','synthetic-owner@example.invalid',now(),now()),('synthetic_renter','renter','synthetic-renter@example.invalid',now(),now());
-INSERT INTO zzsh_auth_admin."user"(id,name,email,"twoFactorEnabled","createdAt","updatedAt") VALUES('synthetic_ops','ops','synthetic-ops@example.invalid',true,now(),now());
-INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at) VALUES('synthetic_ops','ACTIVE',false,now());
-INSERT INTO zzsh_auth_admin.session(id,"userId",token,"expiresAt","createdAt","updatedAt") VALUES('synthetic_session','synthetic_ops','synthetic-session-token',now()+interval '2 hours',now(),now());
-INSERT INTO zzsh_iam.admin_user_role(admin_user_id,role_id) VALUES('synthetic_ops','role_preset_ops');
+-- 包赔批准仅 Boss：主审批账号必须是 Boss；另建一个非 Boss 运营用于验证硬拦。
+INSERT INTO zzsh_auth_admin."user"(id,name,email,"twoFactorEnabled","createdAt","updatedAt") VALUES
+ ('synthetic_ops','ops','synthetic-ops@example.invalid',true,now(),now()),
+ ('synthetic_ops_denied','ops-denied','synthetic-ops-denied@example.invalid',true,now(),now());
+INSERT INTO zzsh_iam.admin_security(admin_user_id,status,is_boss,first_activated_at) VALUES
+ ('synthetic_ops','ACTIVE',true,now()),
+ ('synthetic_ops_denied','ACTIVE',false,now());
+INSERT INTO zzsh_auth_admin.session(id,"userId",token,"expiresAt","createdAt","updatedAt") VALUES
+ ('synthetic_session','synthetic_ops','synthetic-session-token',now()+interval '2 hours',now(),now()),
+ ('synthetic_session_ops','synthetic_ops_denied','synthetic-ops-session-token',now()+interval '2 hours',now(),now());
+INSERT INTO zzsh_iam.admin_user_role(admin_user_id,role_id) VALUES('synthetic_ops','role_preset_ops'),('synthetic_ops_denied','role_preset_ops');
 INSERT INTO zzsh_supply.game(id,code,name) VALUES('synthetic_game','synthetic','synthetic');
 INSERT INTO zzsh_supply.rental_account(id,owner_user_id,game_id) VALUES('synthetic_account','synthetic_owner','synthetic_game');
 WITH s AS (SELECT '{"id":"1","pay_is":"1","sale_user_id":"11","user_id":"22","order_status":"3"}'::jsonb AS v)
@@ -19,7 +26,7 @@ INSERT INTO zzsh_order.wallet_revision(user_id,ledger_revision,read_revision) VA
 WITH basis AS (SELECT encode(sha256(convert_to(zzsh_order.canonical_finance_json(jsonb_build_object('origin','LEGACY','orderId',id,'gameId',game_id,'ownerUserId',owner_user_id,'sourceDigest',source_digest)),'UTF8')),'hex') AS d FROM zzsh_order.legacy_order_read_snapshot WHERE id='legacy_order_synthetic'),
  payload AS (SELECT jsonb_build_object('schema','order-compensation.v1','origin','LEGACY','orderId','legacy_order_synthetic','gameId','synthetic_game','ownerUserId','synthetic_owner','sourceDigest',d,'amountCents','1200','caseRef','synth-incident-1','reason','synthetic reason','evidenceRef','synthetic evidence') AS v FROM basis)
  INSERT INTO zzsh_iam.approval_request(id,template_id,template_version,operation_code,trigger_condition,payload_version,operation_payload,operation_payload_hash,summary,requested_by,status,expires_at)
- SELECT 'synthetic_request','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic compensation','synthetic_ops','PENDING',now()+interval '1 hour' FROM payload;
+ SELECT 'synthetic_request','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic compensation','synthetic_ops','PENDING','infinity'::timestamptz FROM payload;
 INSERT INTO zzsh_iam.approval_request_candidate(request_id,admin_user_id,source,template_version) VALUES('synthetic_request','synthetic_ops','TEMPLATE',1);
 COMMIT;
 CREATE ROLE synth_comp_runtime NOLOGIN;

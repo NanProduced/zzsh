@@ -53,6 +53,15 @@ test("boss dashboard keeps receipts, quoted spread, settled contribution and pai
       id: "order_1", displayNo: "ZZ1", status: "PAID", paidAt: "2026-10-31T00:00:00.000000Z",
       confirmedCents: "100", contributionCents: "10", contributionState: "QUOTED",
     }] };
+    // 待办队列按当前角色读取全部 PENDING 申请，再由服务端单一判定过滤。
+    if (sql.includes('r."status" = \'PENDING\'')) return { rows: [{
+      id: "approval_pending_1", operationCode: "approval.test.execute", operationPayload: { outcome: "SUCCESS" },
+      objectGameId: null, status: "PENDING", requestedBy: "admin_requester", summary: "待办",
+      createdAt: "2026-11-01T00:00:00.000Z", expiresAt: "infinity", requesterUsername: "staff",
+      requesterDisplayUsername: "STAFF", requesterName: "员工",
+    }] };
+    if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: "ALL_GAMES", gameIds: [] }] };
+    if (sql.includes('FROM "zzsh_auth_admin"."user" u')) return { rows: [{ id: "boss", username: "boss", displayUsername: "BOSS", name: "Boss", status: "ACTIVE", isBoss: true, twoFactorEnabled: true }] };
     if (sql.includes("approval_request")) return { rows: [{ count: "1", age: "60" }] };
     if (sql.includes("min(paid_at)")) return { rows: [{ age: "3600" }] };
     throw new Error(`Unexpected dashboard query: ${sql.slice(0, 80)}`);

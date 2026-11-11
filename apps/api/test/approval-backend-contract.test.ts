@@ -44,6 +44,8 @@ type FixtureRequest = {
   decisionReason: string | null;
   supersedesRequestId: string | null;
   supersededByRequestId: string | null;
+  /** OBJECT_GAME_SQL 反查出的所属游戏；结算调整与冲回靠它做范围判定。 */
+  objectGameId?: string | null;
 };
 
 type Fixture = {
@@ -459,8 +461,8 @@ test("only a currently eligible approver receives the limited entitlement amendm
   assert.equal(own.body.entitlementAmendment, null);
   const wrongScope = harness({ ...fixture, actors: [BOSS, REQUESTER, { ...CANDIDATE, gameScope: { mode: "SELECTED_GAMES", gameIds: ["other_game"] } }] });
   const scoped = await call(wrongScope, CANDIDATE.id, "GET", `/approvals/requests/detail?requestId=${row.id}`);
-  assert.equal(scoped.body.entitlementAmendment, null);
-  assert.equal(scoped.body.business.summaryAvailable, false);
+  // 游戏范围外的运营现在打不开这张申请详情（N2 与 R2 一致）。
+  assert.equal(scoped.status, 404, JSON.stringify(scoped.body));
 });
 
 test("amended approval rejects stale hashes, frozen target changes, unsupported operations and oversized bodies before decision write", async () => {
@@ -1379,23 +1381,37 @@ test("virtualRequestStatus returns the stored status; expiry is never computed",
   finally { Date.now = originalNow; }
 });
 
-test("requestScope resolves the current role before a single read-only scope query on the same client", async () => {
-  const sqls: string[] = [], values: unknown[][] = [];
-  const client = { query: async (sql: string, v: unknown[]) => {
-    sqls.push(sql); values.push(v);
-    if (sql.includes("AS allowed")) {
-      assert.match(sql, /requested_by/);
-      assert.doesNotMatch(sql, /FOR UPDATE|FOR SHARE|INSERT|UPDATE|DELETE/);
-    }
-    return { rows: sql.includes("AS allowed") ? [{ allowed: true }] : [{ code: "role_preset_ops", canApprove: true }] };
-  } } as unknown as PoolClient;
-  assert.equal(await requestScope(client, "policy_viewer", "policy_request", false), true);
-  assert.equal(sqls.length, 2, "one role-rank query plus one scope query");
-  assert.match(sqls[0]!, /admin_user_role/);
-  assert.match(sqls[1]!, /requested_by/);
-  assert.deepEqual(values[1], ["policy_viewer", true, "policy_request"], "the OPS role widens the scope to pending requests");
-  sqls.length = 0; values.length = 0;
-  assert.equal(await requestScope(client, "boss_viewer", "policy_request", true), true);
+test("requestScope keeps the Boss shortcut and narrows operator detail reads by type and game scope", async () => {
+  const sqls: string[] = [];
+  const requestRow = (overrides: Record<string, unknown> = {}) => ({
+    id: "approval_req_target", operationCode: "distribution.policy.publish", operationPayload: {},
+    requestedBy: "admin_requester", status: "PENDING", objectGameId: null, ...overrides,
+  });
+  const makeClient = (row: Record<string, unknown>, gameIds: string[] = []) => ({ query: async (sql: string) => {
+    sqls.push(sql);
+    if (sql.includes('FROM "zzsh_iam"."approval_request"')) return { rows: [row] };
+    if (sql.includes('"game_scope_mode"')) return { rows: [{ mode: gameIds.length ? "SELECTED_GAMES" : "ALL_GAMES", gameIds }], rowCount: 1 };
+    if (sql.includes('FROM "zzsh_iam"."admin_user_role"')) return { rows: [{ code: "role_preset_ops", canApprove: true }], rowCount: 1 };
+    throw new Error("unexpected SQL: " + sql.slice(0, 120));
+  } }) as unknown as PoolClient;
+
+  const ops = makeClient(requestRow());
+  assert.equal(await requestScope(ops, "policy_viewer", "approval_req_target", false), true);
+  assert.match(sqls[0]!, /objectGameId|"game_id"/, "the request row carries the resolved object game id");
+  assert.ok(sqls.some((sql) => sql.includes("admin_user_role")), "detail reads resolve the current role");
+  assert.ok(sqls.some((sql) => sql.includes("game_scope_mode")), "detail reads resolve the current game scope");
+
+  // 游戏范围外的运营不能打开结算调整详情（R2 的可见性收口）。
+  const outOfScope = makeClient(requestRow({ operationCode: "order.settlement.adjust", operationPayload: { orderId: "order_1" }, objectGameId: "game_a" }), ["game_b"]);
+  assert.equal(await requestScope(outOfScope, "ops_b", "approval_req_target", false), false);
+  // 仅 Boss 的类型不对运营开放详情；本人提交的单始终可见。
+  const bossOnly = makeClient(requestRow({ operationCode: "membership.benefit.policy.publish" }));
+  assert.equal(await requestScope(bossOnly, "ops_b", "approval_req_target", false), false);
+  const own = makeClient(requestRow({ operationCode: "membership.benefit.policy.publish", requestedBy: "ops_b" }));
+  assert.equal(await requestScope(own, "ops_b", "approval_req_target", false), true);
+
+  sqls.length = 0;
+  assert.equal(await requestScope(makeClient(requestRow()), "boss_viewer", "approval_req_target", true), true);
   assert.equal(sqls.length, 0, "an existing Boss scope short-circuits before any role or scope query");
 });
 
@@ -1514,6 +1530,25 @@ test("D4 a decider outside the target game returns GAME_SCOPE_DENIED", () => {
   assert.throws(() => assertApprovalAction(evaluateApprovalActions(outOfScope), "approve"), (error: any) => error.status === 403);
 });
 
+test("D4 settlement adjustments are scoped by the order's game id, not by an absent payload gameId", () => {
+  const row = requestFixture({
+    operationCode: "order.settlement.adjust",
+    operationPayload: { orderId: "order_1", reason: "人工调整" },
+    objectGameId: "game_a",
+    status: "PENDING",
+  });
+  const inScope = decisionContext(row, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_a"] } });
+  assert.equal(evaluateApprovalActions(inScope).find((entry) => entry.action === "approve")?.allowed, true);
+  const outOfScope = decisionContext(row, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_b"] } });
+  const item = evaluateApprovalActions(outOfScope).find((entry) => entry.action === "approve")!;
+  assert.equal(item.allowed, false, "只管 B 游戏的运营不能批 A 游戏订单的资金调整");
+  assert.equal(item.reasonCode, "GAME_SCOPE_DENIED");
+  assert.throws(() => assertApprovalAction(evaluateApprovalActions(outOfScope), "approve"), (error: any) => error.status === 403);
+  // 反查不到订单游戏时，带范围限制的账号按失败关闭处理。
+  const unresolved = decisionContext({ ...row, objectGameId: null }, { gameScope: { mode: "SELECTED_GAMES", gameIds: ["game_a"] } });
+  assert.equal(evaluateApprovalActions(unresolved).find((entry) => entry.action === "approve")?.reasonCode, "GAME_SCOPE_DENIED");
+});
+
 test("D5 self approval is allowed for all registered types including settlement adjust", () => {
   const boss = decisionContext(requestFixture({ status: "PENDING" }), { userId: BOSS.id, decisionRole: "BOSS", access: { status: "ACTIVE", isBoss: true, passwordChangeRequired: false, permissions: new Set(["approval.request.approve"]) } });
   for (const operationCode of APPROVAL_REGISTERED_OPERATION_CODES) {
@@ -1555,4 +1590,35 @@ test("D8 the operation registry no longer registers distribution.earning.reverse
   assert.equal(approvalRegistration("distribution.earning.reverse"), null);
   assert.equal(APPROVAL_REGISTERED_OPERATION_CODES.includes("distribution.policy.publish"), true, "distribution policy publish remains registered and delegated to ops");
   assert.equal(membershipDecisionRequiresBoss("distribution.policy.publish"), false);
+});
+
+test("N1 pendingCount counts only actionable rows and pure support never receives a badge count", async () => {
+  const support: FixtureActor = { ...CANDIDATE, id: "support_only", username: "support_only", decisionRole: "SUPPORT_ONLY", permissions: ["approval.request.read", "approval.request.create"] };
+  const ops: FixtureActor = { ...CANDIDATE, id: "ops_actor", username: "ops_actor", decisionRole: "OPS" };
+  const rows = [
+    requestFixture({ id: "req_pending_1", status: "PENDING", requestedBy: "support_only" }),
+    requestFixture({ id: "req_pending_2", status: "PENDING", requestedBy: "support_only" }),
+    requestFixture({ id: "req_closed", status: "EXECUTED", requestedBy: "support_only" }),
+  ];
+  const view = harness(baseFixture({ actors: [BOSS, REQUESTER, support, ops], requests: rows }));
+  const supportResult = await call(view, "support_only", "GET", "/approvals/requests?scope=pending&limit=1");
+  assert.equal(supportResult.status, 200, JSON.stringify(supportResult.body));
+  assert.equal(supportResult.body.scope, "involved", "纯客服的 pending 改写成 involved");
+  assert.equal(supportResult.body.pendingCount, undefined, "角标不能把客服自己提交的申请数算进去");
+
+  const opsResult = await call(view, "ops_actor", "GET", "/approvals/requests?scope=pending&limit=1");
+  assert.equal(opsResult.status, 200, JSON.stringify(opsResult.body));
+  assert.equal(opsResult.body.pendingCount, 2, "只算当前真能批的待审单，不把已结束的单算进角标");
+  assert.equal(opsResult.body.requests.length, 1, "先过滤后分页：limit=1 也能拿到一整页");
+  assert.ok(opsResult.body.nextCursor, "过滤后仍有下一页，不是空页配上 hasMore");
+});
+
+test("N4 malformed list filters return 400 instead of casting errors into 500", async () => {
+  const view = harness(baseFixture());
+  for (const query of ["timeFrom=not-a-date", "timeTo=2026-99-99", "status=NOT_A_STATUS", "operationCode=BAD%20CODE"]) {
+    const result = await call(view, CANDIDATE.id, "GET", "/approvals/requests?scope=pending&limit=5&" + query);
+    assert.equal(result.status, 400, query);
+  }
+  const valid = await call(view, CANDIDATE.id, "GET", "/approvals/requests?scope=pending&limit=5&timeFrom=2026-01-01T00:00:00Z&status=PENDING");
+  assert.equal(valid.status, 200, JSON.stringify(valid.body));
 });

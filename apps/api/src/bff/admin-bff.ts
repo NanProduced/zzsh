@@ -137,6 +137,8 @@ const GET_SECURITY_PATHS = new Set([
   "/security/roles",
   "/security/recovery/pending",
   "/security/approvals/templates",
+  // 统一审批列表：列表页与导航角标都走这个 GET；缺少此项时真实浏览器会得到 404。
+  "/security/approvals/requests",
   "/security/approvals/requests/mine",
   "/security/approvals/requests/pending",
   "/security/approvals/operations",

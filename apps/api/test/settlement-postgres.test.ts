@@ -343,9 +343,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   const reader = await o.createStaff("结算只读客服", ["im.support.read", "order.read"]);
   const outsider = await o.createStaff("无群结算客服", ["im.support.read", "order.settlement.write"]);
   const ops = await o.createStaff("结算运营", ["approval.request.approve", "approval.request.read", "approval.request.execute"]);
-  assert.equal((await post("/api/v1/admin/security/approvals/templates/update", {
-    operationCode: "order.settlement.adjust", triggerCondition: "manual-net", candidateUsernames: [ops.username, staff.username],
-  }, o.boss.jar, ADMIN_ORIGIN, key())).response.status, 200);
+  // 审批资格只看批准那一刻的当前角色，模板不再配候选人；默认模板行由初始数据提供。
   const gate = async () => ({ publisherBail: "SATISFIED" as const, occupancy: "FREE" as const, reference: "fixture:order-bail" });
   const confirmationKey = { keyId: "trb2test", secret: randomBytes(32).toString("hex") };
   const buyer = (await pool.query<{ id: string; sessionId: string }>(
@@ -1342,32 +1340,8 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   const adjustedId = adjusted.body!.settlement.id as string;
   await post(`/api/v1/orders/${normalId}/settlements/${adjustedId}/decision`, { action: "CONFIRM", versionHash: adjustedHash }, o.buyer, USER_ORIGIN, key());
   const manualConfirmKey = key();
-  // Controlled expiry fixture: IAM status may remain APPROVED until its next action.
-  const approvalDeadline = (await pool.query(`SELECT expires_at::text AS deadline FROM zzsh_iam.approval_request WHERE id = $1`, [approvalId])).rows[0].deadline;
-  const beforeExpiryPreview = await post(`/api/v1/admin/orders/${normalId}/settlement-preview`, {
-    ...remain, proposedOwnerNet: "2.00", proposedRenterRefund: "1.00", reason: "审批有效期回归",
-  }, staff.jar, ADMIN_ORIGIN);
-  assert.equal(beforeExpiryPreview.response.status, 200);
-  const beforeExpiryState = await settlementState(normalId);
-  await migrationPool.query(`UPDATE zzsh_iam.approval_request SET expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, [approvalId]);
-  try {
-    const expiredView = await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer);
-    assert.equal(expiredView.body!.ready, false);
-    assert.ok(expiredView.body!.reasons.includes("OPS_APPROVAL_EXPIRED"));
-    const expiredConfirmKey = key();
-    const expiredConfirm = await post(`/api/v1/orders/${normalId}/settlements/${adjustedId}/decision`, { action: "CONFIRM", versionHash: adjustedHash }, o.owner, USER_ORIGIN, expiredConfirmKey);
-    assert.equal(expiredConfirm.response.status, 409);
-    assert.equal(expiredConfirm.body!.reasons?.[0], "OPS_APPROVAL_EXPIRED");
-    const staleExpiryPreview = await post(`/api/v1/admin/orders/${normalId}/settlements/adjustments`, {
-      ...remain, proposedOwnerNet: "2.00", proposedRenterRefund: "1.00", reason: "审批有效期回归", acceptedHash: beforeExpiryPreview.body!.versionHash,
-    }, staff.jar, ADMIN_ORIGIN, key());
-    assert.equal(staleExpiryPreview.response.status, 409);
-    assert.equal(staleExpiryPreview.body!.reasons?.[0], "SETTLEMENT_HASH_MISMATCH");
-    assert.deepEqual(await settlementState(normalId), beforeExpiryState);
-    assert.equal((await pool.query(`SELECT status FROM zzsh_iam.approval_request WHERE id = $1`, [approvalId])).rows[0].status, "APPROVED");
-  } finally {
-    await migrationPool.query(`UPDATE zzsh_iam.approval_request SET expires_at = $2::timestamptz WHERE id = $1`, [approvalId, approvalDeadline]);
-  }
+  // 新申请的有效期是 infinity，服务端与库侧都不再按 expires_at 拦截；这里继续验证
+  // 「批准 → 双方确认 → 过账 → 佣金计提」的完整链路，不再人为把申请改成已过期。
   assert.equal((await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer)).body!.ready, false);
   const beforePostingState = await settlementState(normalId);
   await migrationPool.query(`REVOKE INSERT ON zzsh_order.settlement_ledger_entry FROM "${o.runtimeUser}"`);
@@ -1503,13 +1477,8 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   }, o.owner, USER_ORIGIN, manualConfirmKey);
   assert.equal(bodyConflict.response.status, 409);
   assert.equal(bodyConflict.body!.error.code, "IDEMPOTENCY_KEY_REUSED");
-  await migrationPool.query(`UPDATE zzsh_iam.approval_request SET expires_at = clock_timestamp() - interval '1 second' WHERE id = $1`, [approvalId]);
-  try {
-    assert.equal((await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer)).body!.ready, true);
-    assert.equal((await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer)).body!.postingAuthorized, true);
-  } finally {
-    await migrationPool.query(`UPDATE zzsh_iam.approval_request SET expires_at = $2::timestamptz WHERE id = $1`, [approvalId, approvalDeadline]);
-  }
+  assert.equal((await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer)).body!.ready, true);
+  assert.equal((await post(`/api/v1/orders/${normalId}/settlement`, undefined, o.buyer)).body!.postingAuthorized, true);
 
   await pool.query(`UPDATE zzsh_iam.admin_security SET status = 'FROZEN' WHERE admin_user_id = $1`, [staff.id]);
   assert.equal((await post(`/api/v1/admin/orders/${earlyId}/settlement`, undefined, staff.jar, ADMIN_ORIGIN)).response.status, 401);

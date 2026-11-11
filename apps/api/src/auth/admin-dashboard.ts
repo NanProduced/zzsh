@@ -2,6 +2,7 @@ import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 
 import { ADMIN_PERMISSION, type EffectiveAdminAccess } from "./admin-authorization";
+import { readActionablePendingRequests, type ActionablePendingRequests } from "./approval-audit";
 import { deriveDashboardPreset, type DashboardPreset } from "./admin-dashboard-preset";
 import { gameScopeSql, readAdminGameScope, scopeIsEmpty, type AdminGameScope } from "./admin-scope";
 import { canonicalize } from "../supply/content-hash";
@@ -306,8 +307,16 @@ async function readQueues(
   current: { metrics: OverviewMetric[] },
   preset: DashboardPreset,
   legacyHeadReady: boolean,
+  pendingQueue: ActionablePendingRequests,
 ): Promise<DashboardQueue[]> {
   const { access, scope, adminId, imAppId } = viewer;
+  // 「待我审批」与审批列表、导航角标共用同一份可办申请；不再 JOIN 候选表、不再排除本人提交或看到期时间。
+  const pendingIds = pendingQueue.rows.map((row) => row.id);
+  const pendingAgeSql = pendingIds.length
+    ? `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(r.created_at)))::bigint::text AS age
+         FROM zzsh_iam.approval_request r WHERE r.id = ANY($1::text[])`
+    : null;
+  const pendingAgeValues: unknown[] = pendingIds.length ? [pendingIds] : [];
   const permission = (code: string) => access.permissions.has(code);
   const emptyScope = scopeIsEmpty(scope, access.isBoss);
   const globalScope = access.isBoss || scope.mode === "ALL_GAMES";
@@ -330,10 +339,7 @@ async function readQueues(
       [adminId, access.isBoss], "WARN", "/orders?status=PAID");
     if (permission(ADMIN_PERMISSION.approvalRequestApprove)) {
       await addAsync("pending-approvals", "待我审批", "pendingApprovals",
-        `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(r.created_at)))::bigint::text AS age
-           FROM zzsh_iam.approval_request r JOIN zzsh_iam.approval_request_candidate c ON c.request_id=r.id
-          WHERE c.admin_user_id=$1 AND r.status='PENDING' AND r.expires_at>clock_timestamp() AND r.requested_by<>$1`,
-        [adminId], "INFO", "/approvals");
+        pendingAgeSql, pendingAgeValues, "INFO", "/approvals");
     }
     return result;
   }
@@ -357,10 +363,7 @@ async function readQueues(
     }
     if (permission(ADMIN_PERMISSION.approvalRequestApprove)) {
       await addAsync("pending-approvals", "待我审批", "pendingApprovals",
-        `SELECT EXTRACT(EPOCH FROM (clock_timestamp()-min(r.created_at)))::bigint::text AS age
-           FROM zzsh_iam.approval_request r JOIN zzsh_iam.approval_request_candidate c ON c.request_id=r.id
-          WHERE c.admin_user_id=$1 AND r.status='PENDING' AND r.expires_at>clock_timestamp() AND r.requested_by<>$1`,
-        [adminId], "INFO", "/approvals");
+        pendingAgeSql, pendingAgeValues, "INFO", "/approvals");
     }
     return result;
   }
@@ -377,18 +380,11 @@ async function readQueues(
   return result;
 }
 
-async function readPendingApprovalMetric(client: PoolClient, access: EffectiveAdminAccess, adminId: string): Promise<OverviewMetric> {
+function readPendingApprovalMetric(access: EffectiveAdminAccess, pendingQueue: ActionablePendingRequests): OverviewMetric {
   if (!access.permissions.has(ADMIN_PERMISSION.approvalRequestApprove)) {
     return { id: "pendingApprovals", value: null, unit: "COUNT", state: "FORBIDDEN", drilldown: null };
   }
-  const row = (await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM zzsh_iam.approval_request r
-       JOIN zzsh_iam.approval_request_candidate c ON c.request_id=r.id
-      WHERE c.admin_user_id=$1 AND r.status='PENDING' AND r.expires_at>clock_timestamp() AND r.requested_by<>$1`,
-    [adminId],
-  )).rows[0]!;
-  return { id: "pendingApprovals", value: row.count, unit: "COUNT", state: "KNOWN", drilldown: "/approvals" };
+  return { id: "pendingApprovals", value: String(pendingQueue.count), unit: "COUNT", state: "KNOWN", drilldown: "/approvals" };
 }
 
 export async function readAdminDashboard(
@@ -408,7 +404,12 @@ export async function readAdminDashboard(
     exclusive_end: clock.starts_at,
   };
   const previous = await readAdminOverview(client, viewer, range, { clock: previousClock, ordersOnly: true, legacyHeadReady });
-  const pendingApprovals = await readPendingApprovalMetric(client, viewer.access, viewer.adminId);
+  const pendingQueue = await readActionablePendingRequests({
+    client, userId: viewer.adminId, access: viewer.access,
+    // 「能否批准」由 decisionGate 判定，与是否装配测试执行器无关；工作台不跑测试操作。
+    testOperationsEnabled: false, executorAssembled: true,
+  });
+  const pendingApprovals = readPendingApprovalMetric(viewer.access, pendingQueue);
   const metricsWithApprovals = { metrics: [...current.metrics, pendingApprovals] };
   const previousWithApprovals = { metrics: [...previous.metrics, { ...pendingApprovals, value: null, state: "FORBIDDEN" as const, drilldown: null }] };
   const confirmed = fromOverview(current, previous, "confirmedCents", "实付金额（含押金）", DEFINITIONS.confirmed, MONEY,
@@ -457,7 +458,7 @@ export async function readAdminDashboard(
   } else metrics = [];
 
   const recentOrders = await readRecentOrders(client, viewer, clock.starts_at, clock.observed_at, legacyHeadReady);
-  const queues = await readQueues(client, viewer, metricsWithApprovals, preset, legacyHeadReady);
+  const queues = await readQueues(client, viewer, metricsWithApprovals, preset, legacyHeadReady, pendingQueue);
   return {
     version: "admin.dashboard.v1",
     preset,

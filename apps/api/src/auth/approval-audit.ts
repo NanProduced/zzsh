@@ -808,7 +808,10 @@ async function configureTemplate(request: AuthSecurityNodeRequest, response: Aut
 
 const OBJECT_GAME_SQL = (alias: string) => `CASE WHEN ${alias}"operation_code" = 'distribution.earning.reverse' THEN
   (SELECT o."game_id" FROM "zzsh_order"."rental_referral_earning" e JOIN "zzsh_order"."rental_order" o ON o."id" = e."order_id"
-    WHERE e."id" = ${alias}"operation_payload" ->> 'earningId' AND e."order_id" = ${alias}"operation_payload" ->> 'orderId') END`;
+    WHERE e."id" = ${alias}"operation_payload" ->> 'earningId' AND e."order_id" = ${alias}"operation_payload" ->> 'orderId')
+  WHEN ${alias}"operation_code" = 'order.settlement.adjust' THEN
+  (SELECT o."game_id" FROM "zzsh_order"."rental_order" o
+    WHERE o."id" = ${alias}"operation_payload" ->> 'orderId') END`;
 const REQUEST_SELECT_COLUMNS = `"id", "template_id" AS "templateId", "template_version" AS "templateVersion", "operation_code" AS "operationCode", "trigger_condition" AS "triggerCondition", "payload_version" AS "payloadVersion", "operation_payload" AS "operationPayload", "operation_payload_hash" AS "operationPayloadHash", "summary", "requested_by" AS "requestedBy", "status", "status_reason" AS "statusReason", "expires_at" AS "expiresAt", "created_at" AS "createdAt", "decided_at" AS "decidedAt", "decided_by" AS "decidedBy", "decision_reason" AS "decisionReason", "supersedes_request_id" AS "supersedesRequestId", "superseded_by_request_id" AS "supersededByRequestId", ${OBJECT_GAME_SQL('')} AS "objectGameId"`;
 
 export async function readRequestById(executor: Pool | PoolClient, requestId: string): Promise<RequestRow | undefined> {
@@ -1312,6 +1315,104 @@ async function executeRequest(request: AuthSecurityNodeRequest, response: AuthSe
 type ListScope = "pending" | "involved" | "all";
 
 /** 统一列表：范围按当前角色算，不再依赖候选快照，也不再看有效期。 */
+const APPROVAL_STATUS_VALUES = new Set(["PENDING", "APPROVED", "REJECTED", "CANCELLED", "EXPIRED", "EXECUTED", "EXECUTION_FAILED"]);
+
+/** 列表参数在拼接 SQL 之前校验：非法时间不再落到 ::timestamptz 变成 500，状态必须是固定枚举。 */
+function readListFilters(request: AuthSecurityNodeRequest): {
+  operationCode: string | undefined;
+  status: string | undefined;
+  requester: string | undefined;
+  timeFrom: Date | null;
+  timeTo: Date | null;
+} {
+  const operationCode = queryValue(request, "operationCode");
+  if (operationCode !== undefined && !OPERATION_PATTERN.test(operationCode)) invalid("Operation code is invalid");
+  const status = queryValue(request, "status");
+  if (status !== undefined && !APPROVAL_STATUS_VALUES.has(status)) invalid("Status is invalid");
+  const instant = (name: string): Date | null => {
+    const raw = queryValue(request, name);
+    if (raw === undefined) return null;
+    const parsed = new Date(raw);
+    if (!Number.isFinite(parsed.getTime())) invalid(`${name} is invalid`);
+    return parsed;
+  };
+  return { operationCode, status, requester: queryValue(request, "requester"), timeFrom: instant("timeFrom"), timeTo: instant("timeTo") };
+}
+
+type ListRequestRow = RequestRow & {
+  requesterUsername: string | null;
+  requesterDisplayUsername: string | null;
+  requesterName: string;
+};
+
+const LIST_REQUEST_COLUMNS = `r."id", r."template_id" AS "templateId", r."template_version" AS "templateVersion", r."operation_code" AS "operationCode", r."trigger_condition" AS "triggerCondition", r."payload_version" AS "payloadVersion", r."operation_payload" AS "operationPayload", r."operation_payload_hash" AS "operationPayloadHash", r."summary", r."requested_by" AS "requestedBy", r."status", r."status_reason" AS "statusReason", r."expires_at" AS "expiresAt", r."created_at" AS "createdAt", r."decided_at" AS "decidedAt", r."decided_by" AS "decidedBy", r."decision_reason" AS "decisionReason", r."supersedes_request_id" AS "supersedesRequestId", r."superseded_by_request_id" AS "supersededByRequestId", ${OBJECT_GAME_SQL('r.')} AS "objectGameId", u."username" AS "requesterUsername", u."displayUsername" AS "requesterDisplayUsername", u."name" AS "requesterName"`;
+
+/** 全部待审申请（不分页）：待办列表、角标与工作台共用这一份原始数据。 */
+async function readAllPendingRequests(client: Pool | PoolClient, isBoss: boolean): Promise<ListRequestRow[]> {
+  const bossOnly = APPROVAL_REGISTERED_OPERATION_CODES.filter(membershipDecisionRequiresBoss);
+  const result = await client.query<ListRequestRow>(
+    `SELECT ${LIST_REQUEST_COLUMNS}
+       FROM "zzsh_iam"."approval_request" r
+       LEFT JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by"
+      WHERE r."status" = 'PENDING'${isBoss ? "" : ` AND r."operation_code" <> ALL($1::text[])`}
+      ORDER BY r."created_at" DESC, r."id" DESC`,
+    isBoss ? [] : [bossOnly],
+  );
+  return result.rows.filter((row) => typeof row?.id === "string" && typeof row.operationCode === "string");
+}
+
+export type ActionablePendingRequests = { rows: ListRequestRow[]; count: number };
+
+/**
+ * 待办口径的唯一实现：与写事务的 evaluateApprovalActions 同源，只保留当前账号真能批准的申请。
+ * 列表、导航角标 pendingCount 和工作台「待我审批」都调用它，避免三处各自按候选表或权限码估算。
+ * 这里只装配 decisionGate 需要的当前角色/有效权限/双因素/游戏范围，不做业务投影等读取展示用的查询。
+ */
+export async function readActionablePendingRequests(input: {
+  client: Pool | PoolClient;
+  userId: string;
+  access: EffectiveAdminAccess;
+  testOperationsEnabled: boolean;
+  executorAssembled: boolean;
+}): Promise<ActionablePendingRequests> {
+  const { client, userId, access } = input;
+  // 与 decisionGate 第 3 步同一判定：没有当前有效批准权的账号（含纯客服）直接返回空队列，不查申请行。
+  if (!hasPermission(access, ADMIN_PERMISSION.approvalRequestApprove)) return { rows: [], count: 0 };
+  const rows = await readAllPendingRequests(client, access.isBoss);
+  if (rows.length === 0) return { rows: [], count: 0 };
+  const [gameScope, self, decisionRole] = await Promise.all([
+    readAdminGameScope(client, userId),
+    adminByUserId(client, userId),
+    loadDecisionRoleRank(client, userId, access.isBoss),
+  ]);
+  const actionable = rows.filter((row) => evaluateApprovalActions({
+    row,
+    userId,
+    access,
+    twoFactorEnabled: self.twoFactorEnabled,
+    gameScope,
+    isCandidate: false,
+    decisionRole,
+    testOperationsEnabled: input.testOperationsEnabled,
+    executorAssembled: input.executorAssembled,
+  }).some((item) => item.action === "approve" && item.allowed));
+  return { rows: actionable, count: actionable.length };
+}
+
+function requestSummary(row: ListRequestRow, views: ApprovalReadViews): Record<string, unknown> {
+  return {
+    requestId: row.id,
+    operationCode: row.operationCode,
+    summary: row.summary,
+    status: row.status,
+    statusReason: row.statusReason,
+    requester: { username: row.requesterUsername ?? "unknown", displayUsername: row.requesterDisplayUsername ?? row.requesterUsername?.toUpperCase() ?? "UNKNOWN", name: row.requesterName ?? "已停用" },
+    createdAt: iso(row.createdAt),
+    business: views.business.get(row.id) ?? null,
+    actions: views.actions.get(row.id) ?? [],
+  };
+}
+
 async function listRequests(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader, scopeHint?: ListScope): Promise<void> {
   const context = await readContext(request, options);
   const access = await requireCurrentAccess(options.pool, context, ADMIN_PERMISSION.approvalRequestRead);
@@ -1337,27 +1438,52 @@ async function listRequests(request: AuthSecurityNodeRequest, response: AuthSecu
   const decisionRole = await loadDecisionRoleRank(options.pool, context.userId, access.isBoss);
   // 纯客服账号默认「与我相关」；有审批权的账号默认「待我处理」，含自己提交又能批的单。
   const scope: ListScope = requestedScope === "pending" && decisionRole === "SUPPORT_ONLY" ? "involved" : requestedScope;
+  const filters = readListFilters(request);
+
+  if (scope === "pending") {
+    // 先过滤再分页：服务端单一判定下的可办申请整体读出，不会先 LIMIT 再丢掉整页。
+    const queue = await readActionablePendingRequests({
+      client: options.pool, userId: context.userId, access,
+      testOperationsEnabled: options.testOperationsEnabled, executorAssembled: Boolean(options.approvalOperationExecutor),
+    });
+    let rows = queue.rows;
+    if (filters.operationCode) rows = rows.filter((row) => row.operationCode === filters.operationCode);
+    if (filters.status) rows = rows.filter((row) => row.status === filters.status);
+    if (filters.requester) {
+      const needle = filters.requester.toLowerCase();
+      rows = rows.filter((row) => row.requesterUsername?.toLowerCase() === needle || row.requesterName === filters.requester);
+    }
+    if (filters.timeFrom) rows = rows.filter((row) => new Date(row.createdAt).getTime() >= filters.timeFrom!.getTime());
+    if (filters.timeTo) rows = rows.filter((row) => new Date(row.createdAt).getTime() <= filters.timeTo!.getTime());
+    const pendingCount = rows.length;
+    if (cursorValues) {
+      const [at, id] = cursorValues;
+      rows = rows.filter((row) => {
+        const created = new Date(row.createdAt).getTime();
+        return created < at.getTime() || (created === at.getTime() && row.id < id);
+      });
+    }
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const views = await approvalReadViews(options.pool, context, access, page, options.testOperationsEnabled, Boolean(options.approvalOperationExecutor));
+    const next = hasMore ? Buffer.from(JSON.stringify({ createdAt: iso(page.at(-1)?.createdAt), id: page.at(-1)?.id })).toString("base64url") : null;
+    sendSuccess(response, {
+      requests: page.map((row) => requestSummary(row, views)),
+      nextCursor: next,
+      scope,
+      pendingCount,
+    }, requestId);
+    return;
+  }
 
   const values: unknown[] = [limit + 1];
   const conditions: string[] = [];
-  if (scope === "pending") {
-    conditions.push(`r."status" = 'PENDING'`);
-    if (!access.isBoss) {
-      conditions.push(`r."operation_code" <> ALL($${values.push(APPROVAL_REGISTERED_OPERATION_CODES.filter(membershipDecisionRequiresBoss))}::text[])`);
-    }
-  } else if (scope === "involved") {
-    conditions.push(`r."requested_by" = $${values.push(context.userId)}`);
-  }
-  const operationCode = queryValue(request, "operationCode");
-  if (operationCode) conditions.push(`r."operation_code" = $${values.push(operationCode)}`);
-  const status = queryValue(request, "status");
-  if (status) conditions.push(`r."status" = $${values.push(status)}`);
-  const requester = queryValue(request, "requester");
-  if (requester) conditions.push(`(lower(u."username") = lower($${values.push(requester)}) OR u."name" = $${values.push(requester)})`);
-  const timeFrom = queryValue(request, "timeFrom");
-  if (timeFrom) conditions.push(`r."created_at" >= $${values.push(timeFrom)}::timestamptz`);
-  const timeTo = queryValue(request, "timeTo");
-  if (timeTo) conditions.push(`r."created_at" <= $${values.push(timeTo)}::timestamptz`);
+  if (scope === "involved") conditions.push(`r."requested_by" = $${values.push(context.userId)}`);
+  if (filters.operationCode) conditions.push(`r."operation_code" = $${values.push(filters.operationCode)}`);
+  if (filters.status) conditions.push(`r."status" = $${values.push(filters.status)}`);
+  if (filters.requester) conditions.push(`(lower(u."username") = lower($${values.push(filters.requester)}) OR u."name" = $${values.push(filters.requester)})`);
+  if (filters.timeFrom) conditions.push(`r."created_at" >= $${values.push(filters.timeFrom)}`);
+  if (filters.timeTo) conditions.push(`r."created_at" <= $${values.push(filters.timeTo)}`);
   const countWhere = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const countValues = [...values];
   if (cursorValues) {
@@ -1367,39 +1493,27 @@ async function listRequests(request: AuthSecurityNodeRequest, response: AuthSecu
     conditions.push(`(r."created_at" < $${timeParam} OR (r."created_at" = $${timeParam} AND r."id" < $${idParam}))`);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-  const result = await options.pool.query<RequestRow & { requesterUsername: string | null; requesterDisplayUsername: string | null; requesterName: string }>(
-    `SELECT r."id", r."template_id" AS "templateId", r."template_version" AS "templateVersion", r."operation_code" AS "operationCode", r."trigger_condition" AS "triggerCondition", r."payload_version" AS "payloadVersion", r."operation_payload" AS "operationPayload", r."operation_payload_hash" AS "operationPayloadHash", r."summary", r."requested_by" AS "requestedBy", r."status", r."status_reason" AS "statusReason", r."expires_at" AS "expiresAt", r."created_at" AS "createdAt", r."decided_at" AS "decidedAt", r."decided_by" AS "decidedBy", r."decision_reason" AS "decisionReason", r."supersedes_request_id" AS "supersedesRequestId", r."superseded_by_request_id" AS "supersededByRequestId", ${OBJECT_GAME_SQL('r.')} AS "objectGameId", u."username" AS "requesterUsername", u."displayUsername" AS "requesterDisplayUsername", u."name" AS "requesterName"
+  const result = await options.pool.query<ListRequestRow>(
+    `SELECT ${LIST_REQUEST_COLUMNS}
        FROM "zzsh_iam"."approval_request" r
-       JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by"
+       LEFT JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by"
       ${where}
       ORDER BY r."created_at" DESC, r."id" DESC
       LIMIT $1`, values);
   const countResult = await options.pool.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM "zzsh_iam"."approval_request" r JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by" ${countWhere}`,
+    `SELECT count(*)::text AS count FROM "zzsh_iam"."approval_request" r LEFT JOIN "zzsh_auth_admin"."user" u ON u."id" = r."requested_by" ${countWhere}`,
     countValues);
   const hasMore = result.rows.length > limit;
   const rows = result.rows.slice(0, limit);
   const views = await approvalReadViews(options.pool, context, access, rows, options.testOperationsEnabled, Boolean(options.approvalOperationExecutor));
   const next = hasMore ? Buffer.from(JSON.stringify({ createdAt: iso(rows.at(-1)?.createdAt), id: rows.at(-1)?.id })).toString("base64url") : null;
-  // 待办列表再按服务端单一判定收口：只有当前真能批准的单才出现，前端隐藏按钮不算授权。
-  const visible = scope === "pending"
-    ? rows.filter((row) => views.actions.get(row.id)?.some((item) => item.action === "approve" && item.allowed))
-    : rows;
+  // 纯客服的 pending 会被改写成 involved；不返回 pendingCount，避免角标把自己提交的申请都算进去。
+  const pendingCount = decisionRole === "SUPPORT_ONLY" ? undefined : Number(countResult.rows[0]?.count ?? "0");
   sendSuccess(response, {
-    requests: visible.map((row) => ({
-      requestId: row.id,
-      operationCode: row.operationCode,
-      summary: row.summary,
-      status: row.status,
-      statusReason: row.statusReason,
-      requester: { username: row.requesterUsername ?? "unknown", displayUsername: row.requesterDisplayUsername ?? row.requesterUsername?.toUpperCase() ?? "UNKNOWN", name: row.requesterName },
-      createdAt: iso(row.createdAt),
-      business: views.business.get(row.id) ?? null,
-      actions: views.actions.get(row.id) ?? [],
-    })),
+    requests: rows.map((row) => requestSummary(row, views)),
     nextCursor: next,
     scope,
-    pendingCount: Number(countResult.rows[0]?.count ?? "0"),
+    ...(pendingCount === undefined ? {} : { pendingCount }),
   }, requestId);
 }
 
@@ -1508,9 +1622,15 @@ function candidateCanDecideRequest(state: CandidateAccessState, row: RequestRow)
 function businessScopeDenied(state: { isBoss: boolean; gameScope: AdminGameScope }, operationCode: string, payload: Record<string, unknown>, objectGameId?: string | null): boolean {
   if (!membershipOperationRequiresGameScope(operationCode)) return false;
   const gameId = payloadGameId(payload) ?? (typeof objectGameId === "string" && objectGameId ? objectGameId : null);
+  const global = state.isBoss || isAllGamesScope(state.gameScope);
   // A reversal whose original order cannot be resolved fails closed; it must never read as unscoped money.
-  if (!gameId) return operationCode === DISTRIBUTION_REVERSAL_OPERATION || operationCode === ORDER_COMPENSATION_OPERATION;
-  if (state.isBoss || isAllGamesScope(state.gameScope)) return false;
+  // 结算调整的 gameId 由 OBJECT_GAME_SQL 按 payload.orderId 反查；反查不到时，带游戏范围限制的
+  // 账号一律拒绝（R2 的失败关闭），否则「只有 B 游戏范围的运营」又能批任意游戏订单的资金调整。
+  if (!gameId) {
+    if (operationCode === DISTRIBUTION_REVERSAL_OPERATION || operationCode === ORDER_COMPENSATION_OPERATION) return true;
+    return operationCode === SETTLEMENT_ADJUST_OPERATION && !global;
+  }
+  if (global) return false;
   return !scopeAllowsGame(state.gameScope, false, gameId);
 }
 
@@ -1537,7 +1657,7 @@ type ApprovalReadViews = {
  */
 async function approvalReadViews(
   client: Pool | PoolClient,
-  context: AdminContext,
+  viewer: { userId: string },
   access: EffectiveAdminAccess,
   rows: readonly RequestRow[],
   testOperationsEnabled: boolean,
@@ -1559,18 +1679,18 @@ async function approvalReadViews(
     finalPayloadHash: decisions.get(row.id)?.finalPayloadHash ?? null,
   }));
   const [gameScope, self, candidateRows, viewerCandidateRows, decisionRole] = await Promise.all([
-    readAdminGameScope(client, context.userId),
-    adminByUserId(client, context.userId),
+    readAdminGameScope(client, viewer.userId),
+    adminByUserId(client, viewer.userId),
     candidateRowsFor(client, rows.map((row) => row.id)),
     rows.length > 0
       ? client.query<{ requestId: string }>(
           `SELECT "request_id" AS "requestId" FROM "zzsh_iam"."approval_request_candidate" WHERE "request_id" = ANY($1::text[]) AND "admin_user_id" = $2`,
-          [rows.map((row) => row.id), context.userId],
+          [rows.map((row) => row.id), viewer.userId],
         )
       : Promise.resolve({ rows: [] as { requestId: string }[] }),
-    loadDecisionRoleRank(client, context.userId, access.isBoss),
+    loadDecisionRoleRank(client, viewer.userId, access.isBoss),
   ]);
-  const projection = await projectApprovalBusinesses(client, facts, { userId: context.userId, access, gameScope });
+  const projection = await projectApprovalBusinesses(client, facts, { userId: viewer.userId, access, gameScope });
   const states = await candidateAccessStates(client, [...new Set(candidateRows.map((row) => row.adminUserId))]);
   const byId = new Map(rows.map((row) => [row.id, row]));
   const isViewerCandidate = new Set(viewerCandidateRows.rows.map((row) => row.requestId));
@@ -1593,7 +1713,7 @@ async function approvalReadViews(
     const state = projection.objectStates.get(row.id);
     actions.set(row.id, evaluateApprovalActions({
       row,
-      userId: context.userId,
+      userId: viewer.userId,
       access,
       twoFactorEnabled: self.twoFactorEnabled,
       gameScope,
@@ -1650,16 +1770,25 @@ function auditView(row: AuditRow): Record<string, unknown> {
   };
 }
 
+/**
+ * 详情可见范围的单一实现：Boss 全见；本人提交的单始终可见；其余按当前角色、申请类型与游戏范围收口。
+ * 与 R2 共用 OBJECT_GAME_SQL 反查结果，避免运营打开别的游戏或仅 Boss 能批的申请详情。
+ */
+async function readVisibleRequest(pool: Pool | PoolClient, userId: string, requestId: string, isBoss: boolean): Promise<RequestRow | null> {
+  const row = await readRequestById(pool, requestId);
+  if (!row) return null;
+  if (isBoss || row.requestedBy === userId) return row;
+  const role = await loadDecisionRoleRank(pool, userId, false);
+  if (role !== "OPS") return null;
+  if (membershipDecisionRequiresBoss(row.operationCode) || approvalRegistration(row.operationCode) === null) return null;
+  const gameScope = await readAdminGameScope(pool, userId);
+  if (businessScopeDenied({ isBoss: false, gameScope }, row.operationCode, row.operationPayload, row.objectGameId)) return null;
+  return row;
+}
+
 export async function requestScope(pool: Pool | PoolClient, userId: string, requestId: string, isBoss: boolean): Promise<boolean> {
   if (isBoss) return true;
-  // 详情可见范围按当前角色：运营及以上可查看待审单，客服只能看自己提交的。
-  const role = await loadDecisionRoleRank(pool, userId, false);
-  const result = await pool.query<{ allowed: boolean }>(
-    `SELECT (r."requested_by" = $1 OR $2::boolean) AS allowed
-       FROM "zzsh_iam"."approval_request" r WHERE r."id" = $3`,
-    [userId, role === "OPS", requestId],
-  );
-  return result.rows[0]?.allowed === true;
+  return (await readVisibleRequest(pool, userId, requestId, false)) !== null;
 }
 
 async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions, readContext: ContextReader): Promise<void> {
@@ -1667,13 +1796,7 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
   const access = await requireCurrentAccess(options.pool, context, ADMIN_PERMISSION.approvalRequestRead);
   const targetRequestId = queryValue(request, "requestId");
   if (!targetRequestId || targetRequestId.length > 128) invalid("Request id is required");
-  if (!(await requestScope(options.pool, context.userId, targetRequestId, access.isBoss))) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Approval request not found");
-  const result = await options.pool.query<RequestRow>(
-    `SELECT ${REQUEST_SELECT_COLUMNS}
-       FROM "zzsh_iam"."approval_request" WHERE "id" = $1`,
-    [targetRequestId],
-  );
-  const row = result.rows[0];
+  const row = await readVisibleRequest(options.pool, context.userId, targetRequestId, access.isBoss);
   if (!row) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Approval request not found");
   const requester = await personForDisplay(options.pool, row.requestedBy);
   const candidates = await requestCandidateRows(options.pool, row.id);

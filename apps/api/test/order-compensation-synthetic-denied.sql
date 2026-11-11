@@ -7,7 +7,7 @@ INSERT INTO zzsh_auth_admin.session(id,"userId",token,"expiresAt","createdAt","u
 INSERT INTO zzsh_iam.admin_user_permission(admin_user_id,permission_code,effect) VALUES('synthetic_denied','approval.request.approve','ALLOW');
 WITH p AS (SELECT operation_payload||jsonb_build_object('caseRef','synth-denied-incident') AS v FROM zzsh_iam.approval_request WHERE id='synthetic_request')
  INSERT INTO zzsh_iam.approval_request(id,template_id,template_version,operation_code,trigger_condition,payload_version,operation_payload,operation_payload_hash,summary,requested_by,status,expires_at)
- SELECT 'synthetic_denied_request','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic denied','synthetic_ops','PENDING',now()+interval '1 hour' FROM p;
+ SELECT 'synthetic_denied_request','approval_tpl_order_compensation',1,'order.compensation.grant','order.compensation.requested',1,v,encode(sha256(convert_to(zzsh_order.canonical_finance_json(v),'UTF8')),'hex'),'synthetic denied','synthetic_ops','PENDING','infinity'::timestamptz FROM p;
 INSERT INTO zzsh_iam.approval_request_candidate(request_id,admin_user_id,source,template_version) VALUES('synthetic_denied_request','synthetic_denied','TEMPLATE',1);
 COMMIT;
 BEGIN;
