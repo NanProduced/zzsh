@@ -2,7 +2,9 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {assertFirstAdminAuthorizationSeeds,assertFirstAdminSchemaBinding} from './initialize-first-administrators.mjs';
+import {existsSync,mkdtempSync,readFileSync,rmdirSync,unlinkSync,writeFileSync} from 'node:fs';
+import {join} from 'node:path';
+import {assertFirstAdminAuthorizationSeeds,assertFirstAdminSchemaBinding,assertFirstAdminUnclaimed} from './initialize-first-administrators.mjs';
 import {CANONICAL_AUTHORIZATION_TABLES,initialSeedRowsDigest} from './business-initial-seeds.mjs';
 
 function fixture(){
@@ -30,6 +32,17 @@ test('initial admin command without a mode only prints a no-connection plan',()=
  const run=spawnSync(process.execPath,[fileURLToPath(new URL('./initialize-first-administrators.mjs',import.meta.url))],{encoding:'utf8'});
  assert.equal(run.status,0);const result=JSON.parse(run.stdout);
  assert.equal(result.status,'PLAN_ONLY');assert.equal(result.connections,0);assert.equal(result.targetWrites,0);
+});
+
+test('first administrator execution preserves an existing claim or result',()=>{
+ const dir=mkdtempSync(join(process.cwd(),'tmp','first-admin-unclaimed-')),claim=join(dir,'claim.json'),result=join(dir,'result.json');
+ try{
+  assert.doesNotThrow(()=>assertFirstAdminUnclaimed(claim,result));
+  writeFileSync(claim,'original claim');assert.throws(()=>assertFirstAdminUnclaimed(claim,result),/FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS/);
+  assert.equal(readFileSync(claim,'utf8'),'original claim');unlinkSync(claim);
+  writeFileSync(result,'COMMIT_UNKNOWN');assert.throws(()=>assertFirstAdminUnclaimed(claim,result),/FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS/);
+  assert.equal(readFileSync(result,'utf8'),'COMMIT_UNKNOWN');
+ }finally{for(const path of [claim,result])if(existsSync(path))unlinkSync(path);rmdirSync(dir);}
 });
 
 test('first administrator authorization readback rejects changed role and permission seeds',async()=>{

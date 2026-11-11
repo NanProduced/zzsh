@@ -13,7 +13,7 @@ import {isolatedDistributionBuild,privateDistributionPath} from './local-distrib
 import {assertApprovedMigrationRelease,assertCommittedApiBuild,assertR07RegistrationReceipt,files,validateR07SchemaRequest} from './install-round07-schema.mjs';
 import {FirstAdminTransactionError,readFirstAdministratorsSnapshot,writeFirstAdministrators} from './local-first-admin-transaction.mjs';
 import {acquireMigrationTransactionFence,advisoryLockSql,assertLiveTarget,assertMigrationFenceHeld,captureMaintenanceLockEpoch,
-  hasVerifiedNextInitialSchema,loadRegisteredTarget,maintenanceConnection,NEXT_MIGRATION_PROFILE,targetConnection,targetIdentityQuery} from './local-target-registry.mjs';
+  hasVerifiedNextInitialSchema,loadRegisteredTarget,maintenanceConnection,NEXT_MIGRATION_PROFILE,targetConnection,targetIdentityQuery,assertMaintenanceLockHeld} from './local-target-registry.mjs';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url))),restricted=resolve('E:/zzsh-local-state/restricted');
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex'),hex=value=>/^[a-f0-9]{64}$/.test(value??'');
@@ -116,6 +116,21 @@ async function prepare(v){
   console.log(JSON.stringify({status:'FIRST_ADMIN_PREPARED_NOT_EXECUTED',attempt:out,preparedSha256:sha(readFileSync(file)),passwordFile:accountsFile,connections:0,targetWrites:0}));
 }
 
+function pathPresent(path){try{lstatSync(path);return true;}catch(error){if(error.code==='ENOENT')return false;throw error;}}
+/** Never reuse or overwrite evidence from an already claimed or otherwise incomplete attempt. */
+export function assertFirstAdminUnclaimed(claim,result){
+  assert(!pathPresent(claim)&&!pathPresent(result),'FIRST_ADMIN_ORIGINAL_ATTEMPT_EXISTS');
+}
+
+function firstAdminPreclaimReason(error){
+  if(/^FIRST_ADMIN_[A-Z_]+$/.test(error?.message??''))return error.message;
+  if(['ECONNREFUSED','ETIMEDOUT','ENOTFOUND','MODULE_NOT_FOUND'].includes(error?.code))return error.code;
+  return 'FIRST_ADMIN_PRECLAIM_STOPPED';
+}
+class FirstAdminPreclaimError extends Error{
+  constructor(reason,receipt){super(reason);this.receipt=receipt;}
+}
+
 async function execute(v,mode){
   const attempt=privatePath(v.attempt),preparedFile=privatePath(join(attempt,'prepared.json'));
   const prepared=pinned({path:preparedFile,sha256:v['prepared-sha']});
@@ -125,27 +140,22 @@ async function execute(v,mode){
   const input=readAccounts(),bound=verifyRequest(prepared.refs,{source:true}),{request,receipt,registered,credentials,api,migrations,authorizationSeeds,scriptHashes}=bound;
   assert.deepEqual(prepared.target,request.target,'FIRST_ADMIN_TARGET_CHANGED');
   const claim=join(attempt,'claim.json'),resultFile=join(attempt,mode==='initialize'?'result.json':`readback-${randomUUID()}.json`);
-  if(mode==='initialize'){
-    const fd=openSync(claim,'wx',0o600);try{writeFileSync(fd,JSON.stringify({schema:'zzsh.first-admin-claim.v1',preparedSha256:v['prepared-sha'],requestId:prepared.requestId})+'\n');fsyncSync(fd);}finally{closeSync(fd);}
-  }else{
+  const preclaimFile=mode==='initialize'?join(attempt,`preclaim-${randomUUID()}.json`):null;
+  if(mode==='initialize')assertFirstAdminUnclaimed(claim,resultFile);
+  else{
     const saved=JSON.parse(readFileSync(privatePath(claim),'utf8'));
     assert(saved.schema==='zzsh.first-admin-claim.v1'&&saved.preparedSha256===v['prepared-sha']&&saved.requestId===prepared.requestId,'FIRST_ADMIN_ORIGINAL_CLAIM_REQUIRED');
   }
-  let status='CLAIMED',commitAcknowledged=false,locked=false,writer,reader,fenceEpoch,transactionResult,readbackAccounts,lockClosed=false,writerClosed=true,readerClosed=true,unlockAck=false;
+  let status='CLAIMED',commitAcknowledged=false,locked=false,writer,reader,lock,fenceEpoch,transactionResult,readbackAccounts,
+    lockClosed=true,writerClosed=true,readerClosed=true,unlockAck=false,claimCreated=false,resultReserved=mode!=='initialize',connectionError,require,hashPassword,verifyPassword;
   const save=value=>{status=value.status;writeLoadCheckpoint(resultFile,{schema:'zzsh.first-admin-result.v1',preparedSha256:v['prepared-sha'],requestId:prepared.requestId,
     target:request.target,commitAcknowledged,...(readbackAccounts?{accounts:readbackAccounts}:{}),...value});};
-  save({status});
-  process.env.NODE_PATH=[join(root,'apps/api/node_modules'),join(root,'node_modules')].join(delimiter);Module._initPaths();
-  const require=createRequire(join(root,'apps/api/package.json')),{Client}=require('pg');
-  const moduleFile=join(api,'auth/initial-administrators.js');assert(hex(request.buildFiles?.['auth/initial-administrators.js']),'FIRST_ADMIN_BUILD_MODULE_MISSING');
-  const {initializeFirstAdministrators,readFirstAdministrators}=require(moduleFile);
-  const {hashPassword,verifyPassword}=await import(pathToFileURL(require.resolve('better-auth/crypto')).href);
-  const passwordBytes=readFileSync(secretPath(request.maintenanceSecret.path));let connectionError;
-  assert.equal(sha(passwordBytes),request.maintenanceSecret.sha256,'FIRST_ADMIN_MAINTENANCE_SECRET_CHANGED');
-  const common={connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
-  const lock=new Client(maintenanceConnection(registered,{...common,user:registered.owner,password:passwordBytes.toString('utf8').trim(),applicationName:'first-admin-lock'}));passwordBytes.fill(0);
-  lock.on('error',()=>{connectionError=true;});
-  const newClient=label=>{const c=new Client(targetConnection(registered,{...common,user:credentials.migration.name,password:credentials.migration.password,applicationName:label}));c.on('error',()=>{connectionError=true;});return c;};
+  const savePreclaim=value=>writeLoadCheckpoint(preclaimFile,{schema:'zzsh.first-admin-preclaim.v1',preparedSha256:v['prepared-sha'],requestId:prepared.requestId,
+    target:request.target,targetWritesBeforeClaim:0,...value});
+  if(mode==='initialize'){
+    const fd=openSync(preclaimFile,'wx',0o600);closeSync(fd);
+    savePreclaim({status:'PRECLAIM_STARTED'});
+  }else save({status});
   async function recheck(client){
     assert(!connectionError,'FIRST_ADMIN_CONNECTION_LOST');readAccounts();verifyRequest(prepared.refs);
     assert.deepEqual(files(api,['.js']),request.buildFiles,'FIRST_ADMIN_BUILD_CHANGED');
@@ -162,10 +172,29 @@ async function execute(v,mode){
   const fence=async client=>{assertLiveTarget(registered,(await client.query(targetIdentityQuery())).rows[0]);await acquireMigrationTransactionFence(client,registered,fenceEpoch);};
   let failure;
   try{
+    process.env.NODE_PATH=[join(root,'apps/api/node_modules'),join(root,'node_modules')].join(delimiter);Module._initPaths();
+    require=createRequire(join(root,'apps/api/package.json'));const {Client}=require('pg');
+    const moduleFile=join(api,'auth/initial-administrators.js');assert(hex(request.buildFiles?.['auth/initial-administrators.js']),'FIRST_ADMIN_BUILD_MODULE_MISSING');
+    const {initializeFirstAdministrators,readFirstAdministrators}=require(moduleFile);
+    ({hashPassword,verifyPassword}=await import(pathToFileURL(require.resolve('better-auth/crypto')).href));
+    const passwordBytes=readFileSync(secretPath(request.maintenanceSecret.path));
+    const common={connectionTimeoutMillis:3000,statement_timeout:120000,lock_timeout:1000};
+    try{
+      assert.equal(sha(passwordBytes),request.maintenanceSecret.sha256,'FIRST_ADMIN_MAINTENANCE_SECRET_CHANGED');
+      lock=new Client(maintenanceConnection(registered,{...common,user:registered.owner,password:passwordBytes.toString('utf8').trim(),applicationName:'first-admin-lock'}));lockClosed=false;
+    }finally{passwordBytes.fill(0);}
+    lock.on('error',()=>{connectionError=true;});
+    const newClient=label=>{const c=new Client(targetConnection(registered,{...common,user:credentials.migration.name,password:credentials.migration.password,applicationName:label}));c.on('error',()=>{connectionError=true;});return c;};
     await lock.connect();locked=(await lock.query(advisoryLockSql(registered,'try'))).rows[0]?.ok===true;assert(locked,'FIRST_ADMIN_TARGET_BUSY');
     fenceEpoch=await captureMaintenanceLockEpoch(lock,registered);
     if(mode==='initialize'){
       writer=newClient('first-admin-write');writerClosed=false;await writer.connect();
+      assert(!connectionError,'FIRST_ADMIN_CONNECTION_LOST');assertLiveTarget(registered,(await writer.query(targetIdentityQuery())).rows[0]);
+      await assertMaintenanceLockHeld(lock,registered);
+      const fd=openSync(claim,'wx',0o600);claimCreated=true;
+      try{writeFileSync(fd,JSON.stringify({schema:'zzsh.first-admin-claim.v1',preparedSha256:v['prepared-sha'],requestId:prepared.requestId})+'\n');fsyncSync(fd);}finally{closeSync(fd);}
+      const resultFd=openSync(resultFile,'wx',0o600);resultReserved=true;closeSync(resultFd);
+      save({status:'CLAIMED'});savePreclaim({status:'CLAIM_CREATED',claimCreatedByInvocation:true});
       transactionResult=await writeFirstAdministrators({client:writer,input,requestId:prepared.requestId,hashPassword,initialize:initializeFirstAdministrators,
         acquireFence:fence,checkBinding:recheck,record:async value=>{if(value.status==='COMMIT_ACK_READBACK_REQUIRED')commitAcknowledged=true;save(value);}});
       commitAcknowledged=true;
@@ -178,13 +207,26 @@ async function execute(v,mode){
     await reader.end();readerClosed=true;reader=null;
   }catch(error){failure=error;
     if(error instanceof FirstAdminTransactionError&&error.outcome==='COMMITTED_READBACK_REQUIRED')commitAcknowledged=true;
-    const outcome=commitAcknowledged?'COMMITTED_READBACK_REQUIRED':error instanceof FirstAdminTransactionError?error.outcome:'STOPPED_REVIEW_REQUIRED';
-    try{save({status:outcome});}catch{/* retain last durable state */}
+    if(mode!=='initialize'||resultReserved){
+      const outcome=commitAcknowledged?'COMMITTED_READBACK_REQUIRED':error instanceof FirstAdminTransactionError?error.outcome:'STOPPED_REVIEW_REQUIRED';
+      try{save({status:outcome});}catch{/* retain last durable state */}
+    }
   }finally{
     if(writer)try{await writer.end();writerClosed=true;}catch{}
     if(reader)try{await reader.end();readerClosed=true;}catch{}
     if(locked)try{unlockAck=(await lock.query(advisoryLockSql(registered,'unlock'))).rows[0]?.ok===true;}catch{}
-    try{await lock.end();lockClosed=true;}catch{}
+    if(lock)try{await lock.end();lockClosed=true;}catch{}
+  }
+  if(mode==='initialize'&&!claimCreated){
+    const reason=firstAdminPreclaimReason(failure),cleanupConfirmed=writerClosed&&readerClosed&&(!locked||unlockAck)&&lockClosed;
+    let claimPresent=null;try{claimPresent=pathPresent(claim);}catch{}
+    savePreclaim({status:'PRECLAIM_STOPPED_NO_TARGET_WRITE',reason,claimCreatedByInvocation:false,claimPresent,targetWrites:0,
+      lockAcquired:locked,unlockAck:locked?unlockAck:null,writerClosed,readerClosed,lockClosed,cleanupConfirmed});
+    throw new FirstAdminPreclaimError(reason,preclaimFile);
+  }
+  if(mode==='initialize'&&!resultReserved){
+    try{savePreclaim({status:'CLAIM_REVIEW_REQUIRED',claimCreatedByInvocation:true,targetWrites:0,writerClosed,readerClosed,unlockAck:locked?unlockAck:null,lockClosed});}catch{}
+    throw failure??Error('FIRST_ADMIN_CLAIM_REVIEW_REQUIRED');
   }
   if(failure||!writerClosed||!readerClosed||!unlockAck||!lockClosed){
     try{save({status:status==='READBACK_KNOWN_CLEANUP_PENDING'?'READBACK_KNOWN_CLEANUP_UNCONFIRMED':status,writerClosed,readerClosed,unlockAck,lockClosed});}catch{}
@@ -206,6 +248,8 @@ async function main(){
   return execute(v,v.execute?'initialize':'readback');
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{
-  const code=/^FIRST_ADMIN_[A-Z_]+$/.test(error.message??'')?error.message:undefined;
-  console.error(JSON.stringify({status:'FIRST_ADMIN_STOPPED',outcome:error instanceof FirstAdminTransactionError?error.outcome:'REVIEW_REQUIRED',...(code?{code}:{})}));process.exitCode=1;
+  const preclaim=error instanceof FirstAdminPreclaimError;
+  const code=preclaim?error.message:/^FIRST_ADMIN_[A-Z_]+$/.test(error.message??'')?error.message:undefined;
+  console.error(JSON.stringify({status:'FIRST_ADMIN_STOPPED',outcome:preclaim?'NO_TARGET_WRITE_BY_INVOCATION':error instanceof FirstAdminTransactionError?error.outcome:'REVIEW_REQUIRED',
+    ...(code?{code}:{}),...(preclaim?{preclaimReceipt:error.receipt}:{})}));process.exitCode=1;
 });
