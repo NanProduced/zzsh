@@ -7,7 +7,7 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
-import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
+import { fixedFeeSupportCancelContractSql,supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -488,7 +488,28 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+  await configureFixedFeeSupportCancellationPrivileges(pool, runtimeRole);
   await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+}
+
+/** Never expose the new cancellation executor unless its complete ledger contract is installed. */
+export async function configureFixedFeeSupportCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+ const role=quoteIdentifier(runtimeRole);
+ const row=(await pool.query(`SELECT
+  to_regprocedure('zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text)') IS NOT NULL AS executor,
+  to_regprocedure('zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text)') IS NOT NULL AS helper,
+  (SELECT count(*)::int FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.support_poststart_cancellation')
+    AND attname IN('fixed_fee_rate','platform_service_fee_cents') AND attnum>0 AND NOT attisdropped) AS columns,
+  EXISTS(SELECT 1 FROM pg_proc g WHERE g.oid=to_regprocedure('zzsh_order.guard_support_poststart_cancellation()')
+    AND position('fixed_fee_poststart_rate' IN g.prosrc)>0) AS marker,
+  (${fixedFeeSupportCancelContractSql}) AS safe,
+  (${supportPoststartTriggersSql}) AS triggers`)).rows[0];
+ if(!row||typeof row.executor!=='boolean'||typeof row.helper!=='boolean'||!Number.isInteger(row.columns)||typeof row.marker!=='boolean'||typeof row.safe!=='boolean'||!Number.isInteger(row.triggers))
+  throw new Error('Fixed fee cancellation contract inventory unavailable');
+ if(!row.executor&&!row.helper&&row.columns===0&&!row.marker)return;
+ if(!row.executor||!row.helper||row.columns!==2||!row.marker||!row.safe||row.triggers!==12)throw new Error('Fixed fee cancellation contract is partially deployed');
+ await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text),zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text) FROM PUBLIC, ${role};
+  GRANT EXECUTE ON FUNCTION zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text),zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text) TO ${role}`);
 }
 
 /** Do not grant the v5 verifier when its listing, order or funding guards are only partially installed. */

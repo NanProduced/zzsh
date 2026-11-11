@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureFixedFeePersonalPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureFixedFeePersonalPrivileges, configureFixedFeeSupportCancellationPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 
 test("fixed-fee order privileges reject partially installed guards before any grant",async()=>{
   const complete={verifier:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};
@@ -27,6 +27,20 @@ test("fixed-fee order privileges reject partially installed guards before any gr
   await configureFixedFeePersonalPrivileges(absent,"fixture_runtime");assert.equal(writes.length,1);
   const ready={query:async(sql:string)=>{writes.push(sql);return {rows:[complete]};}} as unknown as Pool;
   await configureFixedFeePersonalPrivileges(ready,"fixture_runtime");assert.match(writes.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.assert_fixed_fee_personal_order_v5/);
+});
+
+test("fixed-fee cancellation privileges stay closed for a partial contract",async()=>{
+  const ready={executor:true,helper:true,columns:2,marker:true,safe:true,triggers:12};
+  for(const partial of [{executor:false},{helper:false},{columns:1},{marker:false},{safe:false},{triggers:11}]){
+    const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[{...ready,...partial}]};}} as unknown as Pool;
+    await assert.rejects(configureFixedFeeSupportCancellationPrivileges(pool,'fixture_runtime'),/partially deployed/);assert.equal(calls.length,1);
+  }
+  const calls:string[]=[];const absent={query:async(sql:string)=>{calls.push(sql);return {rows:[{executor:false,helper:false,columns:0,marker:false,safe:false,triggers:12}]};}} as unknown as Pool;
+  await configureFixedFeeSupportCancellationPrivileges(absent,'fixture_runtime');assert.equal(calls.length,1);
+  const orphan={query:async()=>({rows:[{executor:false,helper:false,columns:0,marker:true,safe:false,triggers:12}]})} as unknown as Pool;
+  await assert.rejects(configureFixedFeeSupportCancellationPrivileges(orphan,'fixture_runtime'),/partially deployed/);
+  const complete={query:async(sql:string)=>{calls.push(sql);return {rows:[ready]};}} as unknown as Pool;
+  await configureFixedFeeSupportCancellationPrivileges(complete,'fixture_runtime');assert.match(calls.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.cancel_order_after_start_v3/);
 });
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
