@@ -387,7 +387,8 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
   let subjectCandidates:FinanceFacts["subjectCandidates"];
   if(scope.lookup&&!scope.lookup.exact&&scope.filters?.q&&!scope.filters.q.startsWith("ORDER_LINK:")){
     const search="%"+scope.filters.q.replace(/[\\%_]/g,value=>"\\"+value).toLocaleLowerCase("zh-CN")+"%",limit=scope.pageSize??20,offset=((scope.page??1)-1)*limit;
-    const predicate=`lower(id) LIKE $1 ESCAPE '\\' OR lower(COALESCE(name,'')) LIKE $1 ESCAPE '\\'`;
+    // 声明支持昵称/用户名查找：候选用户同时匹配 name、username、displayUsername，不含手机号等敏感字段。
+    const predicate=`lower(id) LIKE $1 ESCAPE '\\' OR lower(COALESCE(name,'')) LIKE $1 ESCAPE '\\' OR lower(COALESCE(username,'')) LIKE $1 ESCAPE '\\' OR lower(COALESCE("displayUsername",'')) LIKE $1 ESCAPE '\\'`;
     const count=(await client.query(`SELECT count(*)::text AS total FROM zzsh_auth_user."user" WHERE ${predicate}`,[search])).rows[0]?.total??"0";
     const candidates=(await client.query(`SELECT id,COALESCE(name,id) AS name FROM zzsh_auth_user."user" WHERE ${predicate} ORDER BY id COLLATE "C" LIMIT $2 OFFSET $3`,[search,limit,offset])).rows;
     subjectCandidates={items:candidates.map(row=>({id:String(row.id),name:displayName(row.name,String(row.id))})),total:Number(count)};

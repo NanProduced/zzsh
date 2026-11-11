@@ -105,6 +105,11 @@ export async function readAdminDomainSummaryInTransaction(client: PoolClient, co
       return { ...base, state: "FORBIDDEN", reason: "FILTER_FIELD_PERMISSION_REQUIRED" };
     }
     if (filter.membershipTier !== undefined) return { ...base, reason: "MEMBERSHIP_TIER_FILTER_AGGREGATE_NOT_SUPPORTED" };
+    // 关键词场景的状态分布要在同一张全表上再做一次 ILIKE + 多列 FILTER 聚合；列表已按相同条件返回命中数，
+    // 概览这里直接标记不支持，避免单个搜索触发第二次全表扫描（前端也已跳过该请求，此处是多端兜底）。
+    if (filter.search !== undefined || filter.identifier !== undefined) {
+      return { ...base, state: "UNKNOWN", reason: "KEYWORD_SEARCH_AGGREGATE_NOT_SUPPORTED" };
+    }
     let query: { text: string; values: unknown[] };
     try { query = await userDirectoryStatusCountQuery(client, viewer, filter, clock.asOf); }
     catch (error) {

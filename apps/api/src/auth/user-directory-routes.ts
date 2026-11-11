@@ -45,6 +45,8 @@ import { DIRECTORY_MEMBERSHIP_TIERS } from "./user-directory-membership";
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const USERNAME_SEARCH_MAX = 200;
 const LEGACY_ID_MAX = 128;
+/** 只有整串是手机号时才按手机号查找；关键词里夹带 11 位数字不应被误判为手机查找。 */
+const PHONE_LIKE_EXACT = /^(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}$/;
 const PAGINATION_KEYS = new Set(["page", "pageSize", "contextKey", "limit", "cursor"]);
 const REGISTRATION_KEYS = new Set(["registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort"]);
 const DIRECTORY_QUERY_KEYS = new Set(["phone", "userId", "legacyId", "identifier", "q", "accountStatus", "source", "identityStatus", "identityVerified", "ageStatus", "membershipTier", "entitlement", "creditState", "creditMin", "creditMax", "riskState", "registrationTime", "registeredFrom", "registeredTo", "registeredBefore", "sort", "page", "pageSize", "contextKey"]);
@@ -125,7 +127,7 @@ export function parseUserDirectoryFilter(query: URLSearchParams, phoneLookup: bo
   const legacyIdFilter = parseTrimmed(query.get("legacyId"), LEGACY_ID_MAX, "Legacy id");
   const identifierFilter = parseTrimmed(query.get("identifier"), USERNAME_SEARCH_MAX, "Identifier");
   const search = parseTrimmed(query.get("q"), USERNAME_SEARCH_MAX, "Search");
-  if ([identifierFilter, search].some(value => value && /(?:\+?86[\s-]*)?1[3-9](?:[\s-]*\d){9}/.test(value))) throw invalid("Phone lookup must use a request body");
+  if ([identifierFilter, search].some(value => value && PHONE_LIKE_EXACT.test(value))) throw invalid("Phone lookup must use a request body");
   const identityStatus = parseTrimmed(query.get("identityStatus"), 16, "Identity status");
   if (identityStatus && !["UNKNOWN", "UNVERIFIED", "VERIFIED", "REJECTED"].includes(identityStatus)) throw invalid("Identity status is invalid");
   const verified = query.get("identityVerified");

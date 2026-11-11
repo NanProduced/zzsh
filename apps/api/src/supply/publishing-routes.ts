@@ -473,13 +473,21 @@ export async function handlePublishingRoute(
     if (admin && query.has("queryVersion")) {
       if (query.get("queryVersion") !== "3") throw invalid("Unsupported supervision query version");
       const data = await withPublicListingSnapshot(options.pool, async client => {
-        const access = await authorize(client);
-        const viewer = await supervisionViewer(client, context, access!);
-        if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
-        for (const key of query.keys()) if (!["queryVersion", "versionId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported supervision detail query", key);
-        const a = await readPublishingAccount(client, accountMatch[1]!);
-        await authorize(client, a);
-        return readSupervision(client, a, viewer, gate, query.get("versionId"), options.legacyPublicAdmission, options.legacyPublicAdmissionDetail);
+        // 号主条件输入非 ID 时会跑重查询；给这条列表读取单独设 5 秒语句预算，超时返回可操作的 504，
+        // 而不是让前端一直停在「正在读取账号供给…」。其它读接口沿用各自既有预算。
+        await client.query("SELECT set_config('statement_timeout','5s',true),set_config('lock_timeout','500ms',true)");
+        try {
+          const access = await authorize(client);
+          const viewer = await supervisionViewer(client, context, access!);
+          if (!accountMatch) return { ...await listSupervision(client, viewer, parseSupervisionQuery(query), gate, options.listingCursorKey, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail), stationOrigins: { admin: options.adminOrigin, user: options.userOrigin } };
+          for (const key of query.keys()) if (!["queryVersion", "versionId"].includes(key) || query.getAll(key).length !== 1) throw invalid("Unsupported supervision detail query", key);
+          const a = await readPublishingAccount(client, accountMatch[1]!);
+          await authorize(client, a);
+          return readSupervision(client, a, viewer, gate, query.get("versionId"), options.legacyPublicAdmission, options.legacyPublicAdmissionDetail);
+        } catch (error) {
+          if ((error as { code?: string })?.code === "57014") throw new SecurityApiError(504, "EVIDENCE_UNAVAILABLE", "账号供给读取超时，请缩小筛选条件后重试");
+          throw error;
+        }
       });
       sendJson(response, 200, data, requestId);
       return true;
