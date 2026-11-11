@@ -14,6 +14,7 @@ import {
 import { deriveDashboardPreset, type DashboardPreset } from "./admin-dashboard-preset";
 import { readAdminGameScope, type AdminGameScope } from "./admin-scope";
 import {
+  ADMIN_BOOTSTRAP_LOCK,
   assignAdministratorAccess,
   assignAdministratorGameScope,
   createAdministrator,
@@ -194,7 +195,6 @@ export type AdminContext = {
   sessionLocked: boolean;
 };
 
-const SECURITY_ADVISORY_LOCK = 805101;
 const RECOVERY_TTL_MS = 10 * 60 * 1000;
 const SECURITY_RATE_LIMIT_MAX_FAILURES = 5;
 const SECURITY_RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -798,7 +798,7 @@ async function bootstrapAdmin(request: NodeRequest, response: NodeResponse, requ
   }
   const passwordHash = await options.hashPassword(password);
   const result = await withTransaction(options.pool, async (client) => {
-    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [SECURITY_ADVISORY_LOCK]);
+    await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [ADMIN_BOOTSTRAP_LOCK]);
     const now = new Date();
     const remainingBosses = await client.query<{ id: string; username: string | null }>(
       `SELECT s."admin_user_id" AS id, u."username" AS username FROM "zzsh_iam"."admin_security" s

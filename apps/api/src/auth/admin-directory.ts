@@ -42,6 +42,7 @@ import {
 
 const STAFF_ENROLLMENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ROLE_CODE_PATTERN = /^[a-z][a-z0-9_]{1,62}$/;
+export const ADMIN_BOOTSTRAP_LOCK = 805101;
 
 type AdminContext = {
   userId: string;
