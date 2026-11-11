@@ -473,7 +473,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       const originalPayable = typeof input.totalPayableRatio === "string" ? payableCentsFor(original.grossCents, input.totalPayableRatio) : null;
       const originalBuyerLines = originalPayable === null ? null : allocateCombinedDiscount(original.lines.map((line) => ({
         itemId: line.itemId, buyerCents: line.grossCents, ownerCents: line.ownerCents,
-      })), originalPayable);
+      })), originalPayable, "STABLE");
       if (fixedPrepaidLines.length !== items.length + 1 || originalPayable !== resourcePrepaid
           || originalBuyerLines === null
           || original.lines.some((line, index) => fixedPrepaidOwners.get(line.itemId) !== line.ownerCents
@@ -512,7 +512,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     if (payable === null) {
       reasons.push("TOTAL_DISCOUNT_UNKNOWN");
     } else {
-      const allocated=allocateCombinedDiscount(gross,payable);
+      const allocated=allocateCombinedDiscount(gross,payable,fixedPricing?"STABLE":"LEGACY");
       if(!allocated)reasons.push("DISCOUNT_OWNER_FUNDING_INSUFFICIENT");
       else{Hb=allocated[0]!;Gb=allocated.slice(1).reduce((sum,value)=>sum+value,0n);}
     }

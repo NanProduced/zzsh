@@ -32,7 +32,7 @@ export type DiscountLineFact = { itemId: string; buyerCents: bigint; ownerCents:
  * component ever drops below its owner amount. Proportional shares (floor) with the remainder handed
  * out by largest fractional part; ties resolve by larger base amount, then itemId.
  */
-export function allocateCombinedDiscount(lines: readonly DiscountLineFact[], payableCents: bigint): bigint[] | null {
+export function allocateCombinedDiscount(lines: readonly DiscountLineFact[], payableCents: bigint, ordering: "LEGACY" | "STABLE" = "LEGACY"): bigint[] | null {
   const baseTotal = lines.reduce((sum, line) => sum + line.buyerCents, 0n);
   if (payableCents < 0n || payableCents > baseTotal) return null;
   let remaining = baseTotal - payableCents;
@@ -64,7 +64,8 @@ export function allocateCombinedDiscount(lines: readonly DiscountLineFact[], pay
         const rightRemainder = weightTotal > 0n ? (remaining * lines[right]!.buyerCents) % weightTotal : 0n;
         if (leftRemainder !== rightRemainder) return leftRemainder > rightRemainder ? -1 : 1;
         if (lines[left]!.buyerCents !== lines[right]!.buyerCents) return lines[left]!.buyerCents > lines[right]!.buyerCents ? -1 : 1;
-        return lines[left]!.itemId.localeCompare(lines[right]!.itemId);
+        const a = lines[left]!.itemId, b = lines[right]!.itemId;
+        return ordering === "STABLE" ? (a < b ? -1 : a > b ? 1 : 0) : a.localeCompare(b);
       });
       for (const index of ranked) {
         if (remaining === 0n) break;
@@ -139,7 +140,7 @@ export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: st
   if (payableCents === null || payableCents > baseCents) return null;
   if (payableCents < ownerTotalCents) return null; // owner income can never be reduced by a member discount
   const facts: DiscountLineFact[] = quote.lines.map((line) => ({ itemId: line.itemId, buyerCents: centsOfAmount(line.buyerAmount.amount), ownerCents: centsOfAmount(line.ownerAmount.amount) }));
-  const payableLines = allocateCombinedDiscount(facts, payableCents);
+  const payableLines = allocateCombinedDiscount(facts, payableCents, quote.schemaVersion === 4 ? "STABLE" : "LEGACY");
   if (!payableLines) return null;
   const baseRatioByItem = new Map(quote.pricingInputs.exactRatios.map((ratio) => [ratio.itemId, ratio]));
   const nextLines: QuoteLine[] = [];

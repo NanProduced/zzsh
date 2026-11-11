@@ -42,7 +42,7 @@ export function calculateFixedFee(lines: readonly FixedFeeLine[], rateText: stri
   const rate = fixedFeeRate(rateText);
   const seen = new Set<string>();
   for (const line of lines) {
-    if (!line || typeof line.itemId !== "string" || !line.itemId.trim() || seen.has(line.itemId)) throw new DecimalError("fixed fee item is invalid");
+    if (!line || typeof line.itemId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(line.itemId) || seen.has(line.itemId)) throw new DecimalError("fixed fee item is invalid");
     if (typeof line.grossCents !== "bigint" || line.grossCents < 0n) throw new DecimalError("fixed fee base must not be negative");
     seen.add(line.itemId);
   }

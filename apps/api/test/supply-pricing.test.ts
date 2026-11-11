@@ -142,6 +142,7 @@ test("fixed fee preserves whole-order and line conservation, rejects missing or 
   assert.equal(calculateFixedFee([{ itemId: "empty", grossCents: 0n }], "0.10").feeCents, 0n);
   assert.equal(calculateFixedFee([{ itemId: "haff", grossCents: 10000n }], "0").feeCents, 0n);
   assert.equal(calculateFixedFee([{ itemId: "large", grossCents: 9007199254740993n }], "0.125").feeCents, 1125899906842624n);
+  for (const itemId of ["", " a", "物资", "item/1"]) assert.throws(() => calculateFixedFee([{ itemId, grossCents: 1n }], "0.1"));
   for (const rate of ["", "-0.1", "1", "1.1", "0.123456789", "NaN"]) assert.throws(() => calculateFixedFee([], rate));
   assert.throws(() => calculateFixedFee([], 0.1 as unknown as string));
   assert.throws(() => calculateFixedFee([{ itemId: "haff", grossCents: -1n }], "0.10"));

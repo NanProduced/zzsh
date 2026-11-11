@@ -7,6 +7,12 @@ import { computeSettlement, SETTLEMENT_ROUNDING_POLICY, type SettlementInventory
 import { compatRule } from "./pricing-compat-fixture";
 import { simulateMembershipProfit, canSimulateMembershipProfit } from "../src/auth/membership-profit-simulation";
 
+test("fixed-fee discount allocation uses a locale-independent item order", () => {
+  const lines = [{ itemId: "a", buyerCents: 10n, ownerCents: 9n }, { itemId: "B", buyerCents: 10n, ownerCents: 9n }];
+  assert.deepEqual(allocateCombinedDiscount(lines, 19n, "STABLE"), [10n, 9n]);
+  assert.deepEqual(allocateCombinedDiscount([...lines].reverse(), 19n, "STABLE"), [9n, 10n]);
+});
+
 test("profit simulation uses the same exact aggregate discount and never treats deposit or costs as profit", () => {
   const input = threePlusThree();
   input.deposits = { tenantDepositCents: "40000", publisherBailRequirementCents: "20000" };
