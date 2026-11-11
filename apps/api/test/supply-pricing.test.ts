@@ -6,7 +6,7 @@ import { CUSTOMER_TIERS, parseDeltaPriceLines, resolveDeltaHaffContext, resolveD
 import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
-import { updatePriceDraft } from "../src/supply/rules";
+import { activateRelease, updatePriceDraft } from "../src/supply/rules";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { readResourceIncomePreview } from "../src/supply/publishing";
 import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio, fixedFeeRateForMode, parseFixedFeeRates } from "../src/supply/fixed-fee";
@@ -104,6 +104,19 @@ test("fixed-fee policy requires three explicit rates and selects by rental mode"
     assert.throws(() => parseFixedFeeRates(value));
   }
   assert.throws(() => fixedFeeRateForMode(rates, "unknown" as never));
+});
+
+test("fixed-fee drafts cannot be activated through the legacy immediate release path", async () => {
+  const calls: string[] = [];
+  const client = { query: async (sql: string) => {
+    calls.push(sql);
+    if (sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: "game" }] };
+    if (sql.includes('UNION ALL')) return { rows: ["price", "term", "agreement"].map(id => ({ id, status: "SEALED", gameId: "game" })) };
+    if (sql.includes('AS "fixedFeeRates"')) return { rows: [{ mode: "PERCENT", policy: null, fixedFeeRates: { ordinary: "0.1", custom: "0.1", fast: "0.1" } }] };
+    throw new Error("unexpected query");
+  } };
+  await assert.rejects(() => activateRelease(client as never, "admin", true, "game", "price", "term", "agreement", "0"), /尚未开放发布/);
+  assert(!calls.some(sql => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)));
 });
 
 test("fixed fee rounds once for the combined resource amount and allocates cents deterministically", () => {

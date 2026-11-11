@@ -10,6 +10,7 @@ import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, 
 import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
 import { decimalToBigInt, parseNonNegativeDecimal } from "./decimal";
+import { FIXED_FEE_ALGORITHM, fixedFeeRateForMode, parseFixedFeeRates, type FixedFeeRates } from "./fixed-fee";
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
@@ -66,7 +67,7 @@ export async function listRules(
   );
   const priceVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."mode", v."status", v."commission_rate"::text AS "commissionRate",
-            v."haff_rule" AS "haffRule", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
+            v."haff_rule" AS "haffRule", v."fixed_fee_rates" AS "fixedFeeRates", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
             v."funding_policy" AS "fundingPolicy", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
        FROM "zzsh_supply"."price_version" v
       WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
@@ -146,10 +147,21 @@ export async function createPriceDraft(
   isBoss: boolean,
   gameId: string,
   mode: unknown,
+  fixedFeeRates?: unknown,
 ): Promise<{ id: string }> {
   await assertGameScope(client, adminUserId, isBoss, gameId);
   if (mode !== "SPREAD" && mode !== "PERCENT") throw invalid("Mode is invalid");
   const id = newSupplyId("price");
+  if (fixedFeeRates !== undefined) {
+    if (mode !== "PERCENT") throw invalid("Fixed fee rates require PERCENT mode");
+    let rates: FixedFeeRates;
+    try { rates = parseFixedFeeRates(fixedFeeRates); } catch { throw invalid("Fixed fee rates are invalid", "fixedFeeRates"); }
+    await client.query(
+      `INSERT INTO "zzsh_supply"."price_version" ("id", "game_id", "mode", "fixed_fee_rates", "created_by_admin_id") VALUES ($1, $2, $3, $4::jsonb, $5)`,
+      [id, gameId, mode, JSON.stringify(rates), adminUserId],
+    );
+    return { id };
+  }
   await client.query(
     `INSERT INTO "zzsh_supply"."price_version" ("id", "game_id", "mode", "created_by_admin_id")
      VALUES ($1, $2, $3, $4)`,
@@ -170,6 +182,13 @@ export async function updatePriceDraft(
   checkRevision(current, body.expectedRevision);
   const mode = body.mode === undefined ? (current.mode as "SPREAD" | "PERCENT") : body.mode;
   if (mode !== "SPREAD" && mode !== "PERCENT") throw invalid("Mode is invalid");
+  const isFixedFee = current.fixed_fee_rates !== null && current.fixed_fee_rates !== undefined;
+  if (isFixedFee && (mode !== "PERCENT" || body.commissionRate !== undefined)) throw invalid("Fixed fee drafts use per-mode rates");
+  if (!isFixedFee && body.fixedFeeRates !== undefined) throw invalid("Create a fixed fee draft to set per-mode rates");
+  let fixedFeeRates: FixedFeeRates | undefined;
+  if (body.fixedFeeRates !== undefined) {
+    try { fixedFeeRates = parseFixedFeeRates(body.fixedFeeRates); } catch { throw invalid("Fixed fee rates are invalid", "fixedFeeRates"); }
+  }
   let commissionRate: string | null | undefined;
   if (body.commissionRate !== undefined) {
     if (mode !== "PERCENT") throw invalid("Commission rate is only valid for PERCENT mode");
@@ -183,6 +202,7 @@ export async function updatePriceDraft(
   let haffRule: HaffRuleInput | null | undefined;
   if (body.haffRule !== undefined) {
     haffRule = body.haffRule === null ? null : validateDeltaHaffRule(body.haffRule, mode);
+    if (isFixedFee && haffRule !== null && haffRule.schema !== "haff-ratio-v3") throw invalid("Fixed fee drafts require a fixed fee haff rule");
   }
   const lines = body.lines === undefined ? undefined : parseDeltaPriceLines(body.lines, mode);
   if (lines) await assertChangedUnitPricesAtCentPrecision(client,versionId,String(current.game_id),mode,lines);
@@ -211,6 +231,7 @@ export async function updatePriceDraft(
             "haff_rule" = CASE WHEN $4::boolean THEN $5::jsonb ELSE "haff_rule" END,
             "rounding_policy" = COALESCE($6, "rounding_policy"),
             "funding_policy" = CASE WHEN $7::boolean THEN $8::jsonb ELSE "funding_policy" END,
+            "fixed_fee_rates" = CASE WHEN $10::boolean THEN $11::jsonb ELSE "fixed_fee_rates" END,
             "revision" = "revision" + 1,
             "updated_at" = clock_timestamp()
       WHERE "id" = $9`,
@@ -224,6 +245,8 @@ export async function updatePriceDraft(
       fundingPolicy !== undefined,
       fundingPolicy === null || fundingPolicy === undefined ? null : JSON.stringify(fundingPolicy),
       versionId,
+      fixedFeeRates !== undefined,
+      fixedFeeRates === undefined ? null : JSON.stringify(fixedFeeRates),
     ],
   );
   if (lines !== undefined) {
@@ -438,10 +461,12 @@ export async function activateRelease(
     if (row.gameId !== gameId) throw invalid("Rule versions must belong to this game");
     if (row.status !== "SEALED") throw conflict("Rule versions must be sealed before activation");
   }
-  const priceMeta = (await client.query<{ policy: unknown | null;mode:string }>(
-    `SELECT "funding_policy" AS policy,mode FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
+  const priceMeta = (await client.query<{ policy: unknown | null;mode:string;fixedFeeRates:unknown | null }>(
+    `SELECT "funding_policy" AS policy,mode,"fixed_fee_rates" AS "fixedFeeRates" FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
   )).rows[0];
   if(!priceMeta)throw invalid('价格规则不存在');
+  // shortcut: fixed-fee publication stays closed until scheduled policy and ledger guards are installed.
+  if (priceMeta.fixedFeeRates !== null && priceMeta.fixedFeeRates !== undefined) throw conflict("固定手续费政策尚未开放发布");
   const settlementItems=(await client.query<SettlementResourcePrice>(`SELECT i.name,i.unit,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",
     p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount"
     FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD'
@@ -492,12 +517,13 @@ export async function quotePreview(
     mode: "SPREAD" | "PERCENT";
     status: string;
     commissionRate: string | null;
+    fixedFeeRates: unknown | null;
     haffRule: unknown;
     roundingPolicy: string;
     revision: string;
   }>(
     `SELECT "id", "game_id" AS "gameId", "mode", "status", "commission_rate"::text AS "commissionRate",
-            "haff_rule" AS "haffRule", "rounding_policy" AS "roundingPolicy", "revision"::text AS "revision"
+            "haff_rule" AS "haffRule", "fixed_fee_rates" AS "fixedFeeRates", "rounding_policy" AS "roundingPolicy", "revision"::text AS "revision"
        FROM "zzsh_supply"."price_version" WHERE "id" = $1`,
     [priceVersionId],
   );
@@ -578,6 +604,11 @@ export async function quotePreview(
   const termAfter = await client.query<{ revision?: string }>(`SELECT "revision"::text AS "revision" FROM "zzsh_supply"."term_version" WHERE "id" = $1`, [termVersionId]);
   if (priceAfter.rows[0]?.revision !== priceRow.revision || termAfter.rows[0]?.revision !== termRow.revision) throw conflict("Version changed; refresh and retry");
   const rentalSelection = conditions.rentalPricing == null ? null : normalizeRentalPricing(conditions.rentalPricing);
+  let fixedRates: FixedFeeRates | null = null;
+  if (priceRow.fixedFeeRates !== null && priceRow.fixedFeeRates !== undefined) {
+    try { fixedRates = parseFixedFeeRates(priceRow.fixedFeeRates); } catch { throw invalid("Fixed fee rates are invalid"); }
+    if (!rentalSelection) throw invalid("Fixed fee pricing requires a rental mode", "conditions.rentalPricing");
+  }
   const binding: QuotePreviewBinding = {
     priceVersionId, priceVersionStatus: priceRow.status, priceVersionRevision: priceRow.revision, termVersionId,
     rentalMode: rentalSelection?.rentalMode ?? null, ownerRatioB: rentalSelection?.ownerRatioB ?? null,
@@ -624,7 +655,8 @@ export async function quotePreview(
     priceVersionId,
     mode: priceRow.mode,
     roundingPolicy: priceRow.roundingPolicy,
-    ...(priceRow.commissionRate !== null ? { commissionRate: priceRow.commissionRate } : {}),
+    ...(fixedRates && rentalSelection ? { fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, commissionRate: fixedFeeRateForMode(fixedRates, rentalSelection.rentalMode) }
+      : priceRow.commissionRate !== null ? { commissionRate: priceRow.commissionRate } : {}),
     ...(priceRow.haffRule ? { haffRule: priceRow.haffRule as HaffRatioRule } : {}),
     lines,
     conditions: {

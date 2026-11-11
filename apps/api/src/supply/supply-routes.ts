@@ -1336,10 +1336,10 @@ async function handleAdminWrite(
   }
   if (path === "/price-drafts" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["gameId", "mode"]);
+    ensureOnlyFields(body, ["gameId", "mode", "fixedFeeRates"]);
     const gameId = decodeId(requiredString(body, "gameId", 128));
     await write("supply.rules.price_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
-      const draft = await createPriceDraft(client, actor.id, access.isBoss, gameId, body.mode);
+      const draft = await createPriceDraft(client, actor.id, access.isBoss, gameId, body.mode, body.fixedFeeRates);
       return { status: 200, body: draft };
     }, "supply.rules.price_draft_created");
     return;

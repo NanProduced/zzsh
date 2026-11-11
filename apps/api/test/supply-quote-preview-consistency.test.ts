@@ -5,16 +5,18 @@ import { quotePreview } from "../src/supply/rules";
 import { compatRule } from "./pricing-compat-fixture";
 
 // 合成语句交错（非真实 PG 并发）：父版本修订在多表读取中途变化时必须拒绝，不得以旧修订回执新行。
-function harness(opts: { drift?: "price" | "term"; expectedRevision?: string | undefined }) {
-  const haff = compatRule("57") as any;
-  delete haff.compatibility.modes.fast.max;
+function harness(opts: { drift?: "price" | "term"; expectedRevision?: string | undefined; fixedRates?: Record<string, string>; rentalMode?: "ordinary" | "custom" | "fast" }) {
+  const legacyHaff = compatRule("57") as any;
+  delete legacyHaff.compatibility.modes.fast.max;
+  const { compatibility, ...baseHaff } = legacyHaff;
+  const haff = opts.fixedRates ? { ...baseHaff, schema: "haff-ratio-v3", fixedModes: compatibility.modes } : legacyHaff;
   let priceHead = "4";
   let termHead = "2";
   const queries: string[] = [];
   const client = {
     query: async (sql: string) => {
       queries.push(sql);
-      if (sql.includes('FROM "zzsh_supply"."price_version"')) return { rows: [{ id: "price_synthetic", gameId: "game_synthetic", mode: "SPREAD", status: "DRAFT", commissionRate: null, haffRule: haff, roundingPolicy: "HALF_UP_CENT_V1", revision: priceHead }] };
+      if (sql.includes('FROM "zzsh_supply"."price_version"')) return { rows: [{ id: "price_synthetic", gameId: "game_synthetic", mode: opts.fixedRates ? "PERCENT" : "SPREAD", status: "DRAFT", commissionRate: null, fixedFeeRates: opts.fixedRates ?? null, haffRule: haff, roundingPolicy: "HALF_UP_CENT_V1", revision: priceHead }] };
       if (sql.includes('FROM "zzsh_supply"."term_version"')) return { rows: [{ id: "term_synthetic", gameId: "game_synthetic", status: "SEALED", revision: termHead }] };
       if (sql.includes('FROM "zzsh_supply"."term_option"')) return { rows: [{ code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }] };
       if (sql.includes('FROM "zzsh_supply"."price_line"')) {
@@ -22,13 +24,15 @@ function harness(opts: { drift?: "price" | "term"; expectedRevision?: string | u
         if (opts.drift === "term") termHead = "3";
         return { rows: [
           { itemId: "haff", code: "df_billable_haff", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null },
-          { itemId: "coffee", code: "df_billable_coffee", unit: "PIECE", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: opts.drift ? "20" : "10", ownerUnitAmount: "5" },
+          { itemId: "coffee", code: "df_billable_coffee", unit: "PIECE", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: opts.drift ? "20" : "10", ownerUnitAmount: opts.fixedRates ? null : "5" },
         ] };
       }
       throw new Error("Unexpected synthetic query: " + sql);
     },
   } as unknown as PoolClient;
-  const body: Record<string, unknown> = { priceVersionId: "price_synthetic", termVersionId: "term_synthetic", conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "fast", ownerRatioB: "63" } }, inventory: [{ itemId: "haff", quantity: "100000000" }, { itemId: "coffee", quantity: "1" }] };
+  const rentalMode = opts.rentalMode ?? "fast";
+  const rentalPricing = { rentalMode, ...(rentalMode === "custom" ? { ownerRatioB: "55" } : rentalMode === "fast" ? { ownerRatioB: "63" } : {}) };
+  const body: Record<string, unknown> = { priceVersionId: "price_synthetic", termVersionId: "term_synthetic", conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing }, inventory: [{ itemId: "haff", quantity: "100000000" }, { itemId: "coffee", quantity: "1" }] };
   if (opts.expectedRevision !== undefined) body.expectedRevision = opts.expectedRevision;
   return { run: () => quotePreview(client, "synthetic_boss", true, body as any), queries };
 }
@@ -59,4 +63,17 @@ test("quotePreview 无 expectedRevision 调用方（会员利润模拟）兼容�
   const r: any = await harness({}).run();
   assert.equal(r.quotable, true);
   await assert.rejects(harness({ drift: "price" }).run());
+});
+
+test("quotePreview selects the explicit fee rate for each fixed-fee rental mode", async () => {
+  const rates = { ordinary: "0.05", custom: "0.1", fast: "0.2" };
+  for (const rentalMode of ["ordinary", "custom", "fast"] as const) {
+    const result: any = await harness({ fixedRates: rates, rentalMode, expectedRevision: "4" }).run();
+    assert.equal(result.quotable, true, rentalMode);
+    assert.equal(result.quote.schemaVersion, 4);
+    assert.equal(result.quote.pricingInputs.fixedFeeAlgorithm, "FIXED_TOTAL_V1");
+    assert.equal(result.quote.pricingInputs.commissionRate, rates[rentalMode]);
+    assert.equal(result.binding.rentalMode, rentalMode);
+  }
+  await assert.rejects(harness({ fixedRates: { ordinary: "0.05", custom: "0.10" } }).run());
 });
