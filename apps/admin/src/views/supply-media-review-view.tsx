@@ -875,7 +875,7 @@ export function SupplyMediaReviewView({
               </div>
               <p className="text-sm font-semibold">{filterSummary}：当前筛选下没有素材。</p>
               <p className="text-xs text-muted-foreground max-w-md mx-auto leading-relaxed">
-                0 条仅是本次查询结果；空队列不代表账号没有图片，也不代表媒体系统无数据。
+                当前队列暂无待审核内容（空队列不代表账号没有图片，也不代表媒体系统无数据）。可切换上方状态或点击刷新查看。
               </p>
               <div className="flex flex-wrap justify-center gap-2 pt-1">
                 {tab === "pending" ? (

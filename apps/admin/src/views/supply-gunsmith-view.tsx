@@ -545,8 +545,8 @@ export function SupplyGunsmithView({
           <SheetHeader className="border-b"><SheetTitle>{editor?.id ? "编辑" : "新增"}{editor?.entity === "alias" ? "枪械别名" : "改枪码"}</SheetTitle><SheetDescription>所属枪械：{firearms.find(f => f.id === editor?.firearmId)?.name ?? "未提供"}。保存维护内容，不会开启玩家端服务。</SheetDescription></SheetHeader>
           <div className="flex-1 space-y-5 overflow-y-auto p-5">
             {editor?.entity === "code" ? <>
-              <Field label="改枪码原文" required hint="保留完整原文或短码，不用目录code格式校验；不会自动添加枪名或模式。" error={fieldMessage("code")}><Textarea value={editValue("code")} disabled={busy} onChange={e => setEditValue("code", e.target.value)} className="min-h-32 font-mono"/></Field>
-              <Field label="模式" composite hint="依实际方案标注，不能仅凭代码内容自动判定。"><SupplySelect label="模式" value={editValue("modeCode")} options={MODE_ITEMS} disabled={busy} onValueChange={v => setEditValue("modeCode", v)}/></Field>
+              <Field label="改枪码原文" required hint="支持粘贴游戏导出的完整改枪码文本或短码。" error={fieldMessage("code")}><Textarea value={editValue("code")} disabled={busy} onChange={e => setEditValue("code", e.target.value)} className="min-h-32 font-mono"/></Field>
+              <Field label="模式" composite hint="请按方案适用的模式进行标注（如烽火地带、全面战场或通用）。"><SupplySelect label="模式" value={editValue("modeCode")} options={MODE_ITEMS} disabled={busy} onValueChange={v => setEditValue("modeCode", v)}/></Field>
               <Field label="方案说明" hint="例如：低成本腰射、满改红点。说明用于区分同一枪械的不同方案。"><Input value={editValue("note")} disabled={busy} onChange={e => setEditValue("note", e.target.value)}/></Field>
               <Field
                 label={

@@ -43,6 +43,13 @@ const PURPOSE_ITEMS = UPLOAD_PURPOSES.map((value) => ({
   label: { GAME_COVER: "游戏封面", SKIN_MEDIA: "皮肤图", ITEM_MEDIA: "物品图", FIREARM_MEDIA: "枪械图" }[value],
 }));
 
+const PURPOSE_HINT: Record<UploadPurpose, string> = {
+  GAME_COVER: "游戏封面：建议 16:9 或 4:3 横图（推荐 1920×1080 或 800×600）",
+  SKIN_MEDIA: "皮肤展示：建议横向比例或透明背景（推荐 800×450，16:9）",
+  ITEM_MEDIA: "物品图标：建议 1:1 正方形（推荐 512×512 或 256×256）",
+  FIREARM_MEDIA: "枪械展示：建议横向比例或透明背景（推荐 800×450，16:9）",
+};
+
 function StepRow({ label, state }: { label: string; state: UploadStepState }) {
   return (
     <li className="flex items-center gap-2 text-xs">
@@ -177,7 +184,7 @@ export function UploadMediaDialog({
               </SelectContent>
             </Select>
           </Field>
-          <Field label="用途">
+          <Field label="用途" hint={PURPOSE_HINT[purpose]}>
             <Select value={purpose} items={PURPOSE_ITEMS} onValueChange={(value) => setPurpose(value as UploadPurpose)} disabled={frozen}>
               <SelectTrigger className="h-8 w-full text-xs">
                 <SelectValue />

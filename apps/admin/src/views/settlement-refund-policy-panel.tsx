@@ -51,10 +51,11 @@ function PolicyDialog({ actorId }: { actorId: string }) {
   }
   useEffect(() => {
     alive.current = true;
+    void load();
     return () => { alive.current = false; generation.current++; readAbort.current?.abort(); };
   }, []);
   useEffect(() => {
-    if (!open) { generation.current++; readAbort.current?.abort(); return; }
+    if (!open) return;
     try { setPending(readCommand(actorId)); setStorageBlocked(false); }
     catch { setStorageBlocked(true); setError("原操作记录无法读取，请联系技术人员处理。"); }
     setNotice(""); void load();
@@ -95,8 +96,18 @@ function PolicyDialog({ actorId }: { actorId: string }) {
     void send(command);
   }
   const valid = /^\d+$/.test(normal) && /^\d+$/.test(early) && days(Number(normal)) && days(Number(early));
+  const isUnchanged = normal === String(policy?.normalDays) && early === String(policy?.earlyDays);
+  const saveDisabled = !policy?.available || !valid || busy || loading || !!pending || storageBlocked || isUnchanged;
+  const saveTitle = isUnchanged ? "数值未修改，无需保存" : !valid ? "请输入 0 至 365 的整数天数" : undefined;
   return <>
-    <Button type="button" variant="outline" onClick={() => setOpen(true)}>设置退款等待期</Button>
+    <div className="flex flex-wrap items-center gap-3">
+      {policy?.available ? (
+        <span className="text-xs text-muted-foreground bg-muted/50 px-2.5 py-1 rounded">
+          当前等待期：正常结算 {policy.normalDays} 天 · 提前结算 {policy.earlyDays} 天
+        </span>
+      ) : null}
+      <Button type="button" variant="outline" onClick={() => setOpen(true)}>设置退款等待期</Button>
+    </div>
     <Dialog open={open} onOpenChange={setOpen}><DialogContent>
       <div className="space-y-5">
         <div><DialogTitle>设置退款等待期</DialogTitle><DialogDescription>结算生效后，退款按对应等待期处理；提交和到账请查看具体退款进度。已结算订单保持原到期时间。</DialogDescription></div>
@@ -110,7 +121,7 @@ function PolicyDialog({ actorId }: { actorId: string }) {
           <label className="space-y-1 text-sm"><span>正常结算（天）</span><Input inputMode="numeric" value={normal} disabled={busy || !!pending || storageBlocked} onChange={e => setNormal(e.target.value)} /></label>
           <label className="space-y-1 text-sm"><span>提前结算（天）</span><Input inputMode="numeric" value={early} disabled={busy || !!pending || storageBlocked} onChange={e => setEarly(e.target.value)} /></label>
         </div> : null}
-        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">0 表示结算后即可处理退款；范围 0–365 天。</p><Button type="button" disabled={!policy?.available || !valid || busy || loading || !!pending || storageBlocked || normal === String(policy?.normalDays) && early === String(policy?.earlyDays)} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button></div>
+        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">0 表示结算后即可处理退款；范围 0–365 天。</p><Button type="button" disabled={saveDisabled} title={saveTitle} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button></div>
       </div>
     </DialogContent></Dialog>
   </>;

@@ -367,7 +367,7 @@ export function SupplyRulesView({
       <section className="section-panel">
         <div className="min-w-0 max-w-3xl">
           <h2 className="flex flex-wrap items-center gap-2 text-2xl leading-9 font-semibold">{RULES_SECTION_LABEL[section]}{rules ? <span className="rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">{rules.game.name}</span> : null}</h2>
-          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : deltaSection ? "修改将先保存为草稿，提交后由 Boss 确认正式生效。" : ""}</p>
+          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : deltaSection ? "线上运行与草稿修改相互隔离：保存改动进入草稿，提交后由 Boss 确认正式生效。" : ""}</p>
         </div>
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {command.locked ? (

@@ -229,15 +229,18 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
               <TableCell className="max-sm:col-span-2 font-medium">{keyLabel(k, key)}</TableCell>
               <TableCell data-label="当前生效" className={`text-right tabular-nums text-muted-foreground ${ML}`}>{before ?? "—"}</TableCell>
               <TableCell data-label="草稿" className={`w-36 ${ML}`}>
-                <Input
-                  aria-label={`${MAP_LABEL[k].title} ${key}`}
-                  inputMode="decimal"
-                  value={after}
-                  disabled={locked}
-                  aria-invalid={!DECIMAL.test(after.trim())}
-                  className={`text-right tabular-nums transition-colors ${changed ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                  onChange={e => setCell(k, key, e.target.value)}
-                />
+                <div className="flex flex-col items-end gap-1">
+                  <Input
+                    aria-label={`${MAP_LABEL[k].title} ${key}`}
+                    inputMode="decimal"
+                    value={after}
+                    disabled={locked}
+                    aria-invalid={!DECIMAL.test(after.trim())}
+                    className={`text-right tabular-nums transition-colors ${changed ? "border-primary bg-primary/[0.04] font-medium ring-1 ring-primary/30" : ""}`}
+                    onChange={e => setCell(k, key, e.target.value)}
+                  />
+                  {changed ? <span className="text-[10px] text-primary font-medium">已修改</span> : null}
+                </div>
               </TableCell>
             </TableRow>;
           })}
@@ -342,12 +345,11 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
       <Table className="min-w-[720px]">
         <TableHeader>
           <TableRow>
-            <TableHead className="w-44 font-semibold text-foreground">物品</TableHead>
-            <TableHead className="w-44">计价方式</TableHead>
-            <TableHead className="text-right">当前租客单价</TableHead>
-            <TableHead className="text-right">
-              <span className="inline-flex items-center gap-1 justify-end">计费数量 N <HelpTip label="计费数量 N 说明">作为单次计价的基本倍数单位</HelpTip></span>
+            <TableHead className="w-36 font-semibold text-foreground">物品</TableHead>
+            <TableHead className="w-44">
+              <span className="inline-flex items-center gap-1">计价基数 N <HelpTip label="计费基数说明">物资按每 N 个单位单次计价与结算</HelpTip></span>
             </TableHead>
+            <TableHead className="text-right">当前租客单价</TableHead>
             <TableHead className="text-right font-semibold text-foreground">{sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>
             {mode === "SPREAD" ? (
               <>
@@ -382,48 +384,50 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
                     </p>
                   ) : null}
                 </TableCell>
-                <TableCell data-label="计价方式" className={`whitespace-nowrap ${ML}`}>
+                <TableCell data-label="计价基数" className={`whitespace-nowrap ${ML}`}>
                   {haff ? (
                     <Badge variant="secondary" className="font-normal text-[11px] text-muted-foreground">
                       按哈夫币比例（见基础计价）
                     </Badge>
-                  ) : (
-                    <span>每 <b className="font-semibold tabular-nums text-foreground">{cur?.unitQuantity ?? r.unitQuantity}</b> {unitLabel(item?.unit ?? "", item?.code)}</span>
-                  )}
-                </TableCell>
-                <TableCell data-label="当前租客单价" className={`text-right tabular-nums text-muted-foreground ${ML}`}>
-                  {haff ? "—" : cur?.buyerUnitAmount ? referenceUnitYuan(cur.buyerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
-                </TableCell>
-                <TableCell data-label="计费数量 N" className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
-                  {haff ? "—" : lockedQty ? (
-                    <div className="flex items-center justify-end gap-1.5 max-sm:justify-start">
-                      <span className="text-sm font-semibold tabular-nums text-foreground">{r.unitQuantity}</span>
+                  ) : lockedQty ? (
+                    <div className="flex items-center gap-1">
+                      <span>每 <b className="font-semibold tabular-nums text-foreground">{r.unitQuantity}</b> {unitLabel(item?.unit ?? "", item?.code)}</span>
                       <HelpTip icon={CircleAlert} label="单位锁定说明" className="text-amber-600/80 hover:text-amber-600">
                         根据资源履约契约固定按 1 个基础单位计价，不可更改。
                       </HelpTip>
                     </div>
                   ) : (
-                    <Input
-                      aria-label={`${item?.name} 单位数量`}
-                      inputMode="numeric"
-                      className={`text-right tabular-nums transition-colors ${qtyChanged ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                      value={r.unitQuantity}
-                      disabled={locked}
-                      onChange={e => set(i, "unitQuantity", e.target.value)}
-                    />
+                    <div className="inline-flex items-center gap-1.5">
+                      <span className="text-xs text-muted-foreground">每</span>
+                      <Input
+                        aria-label={`${item?.name} 单位数量`}
+                        inputMode="numeric"
+                        className={`h-8 w-16 text-center tabular-nums transition-colors ${qtyChanged ? "border-primary bg-primary/[0.04] font-medium ring-1 ring-primary/30" : ""}`}
+                        value={r.unitQuantity}
+                        disabled={locked}
+                        onChange={e => set(i, "unitQuantity", e.target.value)}
+                      />
+                      <span className="text-xs text-muted-foreground">{unitLabel(item?.unit ?? "", item?.code)}</span>
+                    </div>
                   )}
                 </TableCell>
-                <TableCell data-label={sealedView ? "待生效租客价（元）" : "草稿租客价（元）"} className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
+                <TableCell data-label="当前租客单价" className={`text-right tabular-nums text-muted-foreground ${ML}`}>
+                  {haff ? "—" : cur?.buyerUnitAmount ? referenceUnitYuan(cur.buyerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
+                </TableCell>
+                <TableCell data-label={sealedView ? "待生效租客价（元）" : "草稿租客价（元）"} className={`min-w-28 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                   {haff ? "—" : (
-                    <Input
-                      aria-label={`${item?.name} 租客单价`}
-                      inputMode="decimal"
-                      maxLength={19}
-                      value={r.buyerUnitAmount}
-                      disabled={locked}
-                      className={`text-right tabular-nums transition-colors ${buyerChanged ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                      onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "buyerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.buyerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:buyerUnitAmount`)); } }}
-                    />
+                    <div className="flex flex-col items-end gap-1">
+                      <Input
+                        aria-label={`${item?.name} 租客单价`}
+                        inputMode="decimal"
+                        maxLength={19}
+                        value={r.buyerUnitAmount}
+                        disabled={locked}
+                        className={`text-right tabular-nums transition-colors ${buyerChanged ? "border-primary bg-primary/[0.04] font-medium ring-1 ring-primary/30" : ""}`}
+                        onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "buyerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.buyerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:buyerUnitAmount`)); } }}
+                      />
+                      {buyerChanged ? <span className="text-[10px] text-primary font-medium">已改动</span> : null}
+                    </div>
                   )}
                   {!haff && hasSubCent(basis.find(line=>line.itemId===r.itemId)?.buyerUnitAmount) && !changedPrices.has(`${r.itemId}:buyerUnitAmount`) && !locked ? <Button type="button" variant="ghost" size="sm" aria-label={`${item?.name} 租客单价改用两位价格`} onClick={() => setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:buyerUnitAmount`))}>改用两位价格</Button> : null}
                 </TableCell>
@@ -432,17 +436,20 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
                     <TableCell data-label="当前号主单价" className={`text-right tabular-nums text-muted-foreground ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                       {haff ? "—" : cur?.ownerUnitAmount ? referenceUnitYuan(cur.ownerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
                     </TableCell>
-                    <TableCell data-label={sealedView ? "待生效号主价（元）" : "草稿号主价（元）"} className={`min-w-24 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
+                    <TableCell data-label={sealedView ? "待生效号主价（元）" : "草稿号主价（元）"} className={`min-w-28 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                       {haff ? "—" : (
-                        <Input
-                          aria-label={`${item?.name} 号主单价`}
-                          inputMode="decimal"
-                          maxLength={19}
-                          value={r.ownerUnitAmount}
-                          disabled={locked}
-                          className={`text-right tabular-nums transition-colors ${ownerChanged ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
-                          onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "ownerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.ownerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:ownerUnitAmount`)); } }}
-                        />
+                        <div className="flex flex-col items-end gap-1">
+                          <Input
+                            aria-label={`${item?.name} 号主单价`}
+                            inputMode="decimal"
+                            maxLength={19}
+                            value={r.ownerUnitAmount}
+                            disabled={locked}
+                            className={`text-right tabular-nums transition-colors ${ownerChanged ? "border-primary bg-primary/[0.04] font-medium ring-1 ring-primary/30" : ""}`}
+                            onChange={e => { if (MONEY2.test(e.target.value)) { set(i, "ownerUnitAmount", e.target.value); if (hasSubCent(basis.find(line=>line.itemId===r.itemId)?.ownerUnitAmount)) setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:ownerUnitAmount`)); } }}
+                          />
+                          {ownerChanged ? <span className="text-[10px] text-primary font-medium">已改动</span> : null}
+                        </div>
                       )}
                       {!haff && hasSubCent(basis.find(line=>line.itemId===r.itemId)?.ownerUnitAmount) && !changedPrices.has(`${r.itemId}:ownerUnitAmount`) && !locked ? <Button type="button" variant="ghost" size="sm" aria-label={`${item?.name} 号主单价改用两位价格`} onClick={() => setChangedPrices(previous=>new Set(previous).add(`${r.itemId}:ownerUnitAmount`))}>改用两位价格</Button> : null}
                     </TableCell>

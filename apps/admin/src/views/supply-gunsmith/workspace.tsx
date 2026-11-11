@@ -357,9 +357,9 @@ export function GunsmithWorkspace({
                       {classifications.find(c => c.id === firearm.classificationId)?.name ?? "未分类"}
                     </Badge>
                     {firearm.code ? (
-                      <Badge variant="secondary" className="font-mono text-[11px] text-muted-foreground">
-                        {firearm.code}
-                      </Badge>
+                      <span className="font-mono text-[10px] text-muted-foreground/60 select-all" title={`内部目录标识：${firearm.code}`}>
+                        #{firearm.code}
+                      </span>
                     ) : null}
                   </div>
                   <p className="text-xs text-muted-foreground">

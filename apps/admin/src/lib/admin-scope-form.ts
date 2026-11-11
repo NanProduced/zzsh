@@ -23,9 +23,11 @@ export function buildRestoreScopePayload(username: string): { username: string; 
   return { username, mode: "SELECTED_GAMES" };
 }
 
-/** 选了指定游戏但一个都没勾时必须拦住保存，不静默提交旧集合或空集合；scope 未知时禁止修改。 */
-export function scopeChoiceError(choice: ScopeChoice | null, gameIds: string[]): string | null {
-  if (choice === null) return "服务端未提供该账号的业务范围，暂时不能修改或恢复。";
+/** 选了指定游戏但一个都没勾时必须拦住保存，不静默提交旧集合或空集合；新建时提示明确选择，编辑时 scope 未知禁止修改。 */
+export function scopeChoiceError(choice: ScopeChoice | null, gameIds: string[], isNew = false): string | null {
+  if (choice === null) {
+    return isNew ? "请明确选择业务范围（全部游戏、指定游戏或无业务范围）。" : "服务端未提供该账号的业务范围，暂时不能修改或恢复。";
+  }
   if (choice === "SELECTED_GAMES" && gameIds.length === 0) {
     return "请至少勾选一个游戏，或改选“无业务范围”。";
   }

@@ -1018,7 +1018,7 @@ export function AdminDirectoryView({
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (writeLocked("create", CREATE_TARGET)) return;
-    if (!createScopeSupported || scopeChoiceError(createScopeChoice, createScopeGameIds)) return;
+    if (!createScopeSupported || scopeChoiceError(createScopeChoice, createScopeGameIds, true)) return;
     const { username: omittedUsername, ...creationScope } = buildScopePayload("", createScopeChoice as ScopeChoice, createScopeGameIds);
     setError(undefined);
     if (!markPending("create", CREATE_TARGET, "/security/admins/create", "UNKNOWN")) {
@@ -1603,7 +1603,7 @@ export function AdminDirectoryView({
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-foreground">管理员账号{visibleUnknownCount > 0 ? <InfoHint label="为什么有的资料未提供">标「未提供」的资料暂时无法确认，不代表没有此项。</InfoHint> : null}</h1>
           <p className="mt-1 text-sm tabular-nums text-muted-foreground">
             {ready
-              ? `${admins.length} 个账号 · 生效 ${admins.filter((item) => item.status === "ACTIVE").length} · 冻结 ${admins.filter((item) => item.status === "FROZEN").length} · 待激活 ${admins.filter((item) => item.status === "PENDING_ENROLLMENT").length}`
+              ? `共 ${admins.length} 个账号${filteredAdmins.length !== admins.length ? ` · 匹配 ${filteredAdmins.length}` : ""} · 生效 ${admins.filter((item) => item.status === "ACTIVE").length} · 冻结 ${admins.filter((item) => item.status === "FROZEN").length} · 待激活 ${admins.filter((item) => item.status === "PENDING_ENROLLMENT").length}`
               : "正在读取…"}
           </p>
         </div>
@@ -1632,7 +1632,7 @@ export function AdminDirectoryView({
           >
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">账号或名称</span>
-              <Input value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索" className="h-9 w-56 focus-visible:outline-none!" />
+              <Input value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索账号(ZZ...)或显示名称" className="h-9 w-56 focus-visible:outline-none!" />
             </label>
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">状态</span>
@@ -1974,7 +1974,7 @@ export function AdminDirectoryView({
                     )}
                   </div>
                 ) : null}
-                <p className="text-xs text-muted-foreground">本人首次登录需改密并绑定 2FA。</p>
+                <p className="text-xs text-muted-foreground">首次登录需修改密码并绑定双因素身份验证 (TOTP / 动态口令)。</p>
                 <label className="block">
                   <FieldLabel>显示名称</FieldLabel>
                   <Input value={createName} onChange={(event) => setCreateName(event.target.value)} className="focus-visible:outline-none!" required />
@@ -1989,7 +1989,7 @@ export function AdminDirectoryView({
                     </label>
                   ))}
                   {createScopeChoice === "SELECTED_GAMES" ? <div className="flex flex-wrap gap-3">{games.map((game) => <label key={game.id} className="inline-flex items-center gap-2 text-sm cursor-pointer select-none"><Checkbox name={game.name} checked={createScopeGameIds.includes(game.id)} onCheckedChange={() => toggle(createScopeGameIds, game.id, setCreateScopeGameIds)} /><span>{game.name}</span></label>)}</div> : null}
-                  {scopeChoiceError(createScopeChoice, createScopeGameIds) ? <p className="text-xs text-muted-foreground">{scopeChoiceError(createScopeChoice, createScopeGameIds)}</p> : null}
+                  {scopeChoiceError(createScopeChoice, createScopeGameIds, true) ? <p className="text-xs text-muted-foreground">{scopeChoiceError(createScopeChoice, createScopeGameIds, true)}</p> : null}
                 </fieldset>
                 {activeRoleOptions.length > 0 ? (
                   <div>
@@ -2021,7 +2021,7 @@ export function AdminDirectoryView({
                 <Button type="button" variant="outline" disabled={loading} onClick={() => setCreateOpen(false)}>
                   取消
                 </Button>
-                <Button type="submit" size="sm" loading={loading} disabled={!createScopeSupported || Boolean(scopeChoiceError(createScopeChoice, createScopeGameIds)) || Boolean(createPending) || createUndelivered !== undefined || !createName.trim()}>
+                <Button type="submit" size="sm" loading={loading} disabled={!createScopeSupported || Boolean(scopeChoiceError(createScopeChoice, createScopeGameIds, true)) || Boolean(createPending) || createUndelivered !== undefined || !createName.trim()}>
                   创建管理员
                 </Button>
               </div>

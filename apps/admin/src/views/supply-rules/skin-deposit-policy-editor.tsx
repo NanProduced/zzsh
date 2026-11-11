@@ -47,6 +47,12 @@ export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId
       setBaseline(JSON.stringify(draft)); setNotice(issues.length ? "已保存草稿。还有金额没填，填完才能提交。" : "已保存草稿。去「待发布修改」提交。");
     } catch (failure) { setError((failure as Error).message); }
   };
+  const autoGenVersion = () => {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const ver = `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())}`;
+    setDraft(previous => previous ? { ...previous, policyVersion: ver } : previous);
+  };
   const amount = (label: string, value: string, onChange: (value: string) => void) => <Input aria-label={label} inputMode="decimal" value={value} placeholder="待配置" disabled={locked} className="min-w-24 text-right tabular-nums" onChange={event => { if (MONEY2.test(event.target.value)) onChange(event.target.value); }} />;
   const updateRow = (index: number, key: "first" | "subsequent", value: string) => setDraft(previous => previous ? { ...previous, rules: previous.rules.map((row, i) => i === index ? { ...row, [key]: value } : row) } : previous);
   return <section id={`skin-deposit-policy-${rules.game.id}`} tabIndex={-1} className="section-panel scroll-mt-20 space-y-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="皮肤推荐押金配置">
@@ -55,7 +61,17 @@ export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId
     {!base?.fundingPolicy ? <p role="status" className="text-sm text-muted-foreground">尚无可复用的资金政策。请先完成原资金约束配置；此处不代填保险箱、属性、保证金或押金上限。</p> : <>
       <div className="grid gap-3 sm:grid-cols-2">
         <DraftLine selected={selected} locked={command.locked} />
-        <label className="min-w-0 space-y-1 text-xs"><span className="text-muted-foreground">本次修改的版本名</span><Input aria-label="本次资金政策版本" placeholder="例如 2026-11" value={draft?.policyVersion ?? ""} disabled={locked} onChange={event => setDraft(previous => previous ? { ...previous, policyVersion: event.target.value } : previous)} /></label>
+        <label className="min-w-0 space-y-1 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">本次修改的版本名</span>
+            {!locked ? (
+              <button type="button" className="text-[11px] text-primary hover:underline cursor-pointer" onClick={autoGenVersion}>
+                自动生成版本号
+              </button>
+            ) : null}
+          </div>
+          <Input aria-label="本次资金政策版本" placeholder="例如 2026.11" value={draft?.policyVersion ?? ""} disabled={locked} onChange={event => setDraft(previous => previous ? { ...previous, policyVersion: event.target.value } : previous)} />
+        </label>
       </div>
       
       {!catalog ? <p role="status" className="text-xs text-muted-foreground">品质和词条列表还没加载，暂时只能改现有行。</p> : null}

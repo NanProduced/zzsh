@@ -236,8 +236,24 @@ function renderDrawerDiffValue(after: string) {
   return <>
     <div className="section-panel flex flex-wrap items-center gap-3 py-3" aria-label="发布状态">
       <StageBadge stage={stage} at={stage === "live" ? release?.activatedAt : null} />
-      <span className="text-sm text-muted-foreground">{stage === "unsaved" ? "有输入还没保存" : stage === "draft" ? "改动已存草稿，线上还没变" : stage === "sealed" ? (isBoss ? "已提交，等你确认生效" : "已提交，等待 Boss 生效") : "线上规则，直接修改即可，保存时自动存为草稿"}</span>
-      <Button type="button" variant={count ? "default" : "outline"} size="sm" className="ml-auto" onClick={() => setOpen(true)}>待发布修改（{count}）</Button>
+      <span className="text-sm text-muted-foreground">
+        {stage === "unsaved"
+          ? "当前有未保存的输入，请在下方点击保存为草稿"
+          : stage === "draft"
+            ? `已有 ${count} 项改动保存为草稿（线上保持运行未变）。点击右侧按钮提交审批`
+            : stage === "sealed"
+              ? (isBoss ? `已提交待生效（共 ${count} 项），请点击右侧确认生效` : `已提交（共 ${count} 项），等待 Boss 确认生效`)
+              : "当前展示线上生效规则。修改后保存为新草稿，提交后由 Boss 确认生效"}
+      </span>
+      <Button
+        type="button"
+        variant={count ? "default" : "outline"}
+        size="sm"
+        className="ml-auto"
+        onClick={() => setOpen(true)}
+      >
+        待发布修改（{count}）
+      </Button>
     </div>
     {toast ? <div role="status" className="fixed bottom-6 right-6 z-50 rounded-md bg-foreground px-4 py-2 text-sm text-background shadow-lg">{toast}</div> : null}
     <Sheet open={open} onOpenChange={setOpen}>

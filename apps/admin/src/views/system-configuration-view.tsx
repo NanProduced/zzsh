@@ -99,11 +99,18 @@ export function SystemConfigurationView({ snapshot, refreshNonce = 0 }: {
       <section aria-labelledby="system-media-title">
         <div className="flex flex-wrap items-center gap-2"><HardDrive className="size-4 text-muted-foreground" aria-hidden="true" /><h2 id="system-media-title" className="text-base font-semibold">媒体存储</h2><Badge variant="secondary">{BACKEND_LABEL[data.backend]}</Badge><Badge variant={data.configured ? "info" : "warning"}>{data.configured ? "已装配" : "未装配"}</Badge></div>
         <p className="mt-2 max-w-prose text-sm leading-6 text-muted-foreground">用于账号图片、游戏目录和运营素材。配置由部署端维护，切换目标前需完成历史图片迁移。</p>
-        <dl className="mt-5 grid min-w-0 grid-cols-1 gap-x-10 gap-y-4 border-y border-border py-5 sm:grid-cols-2">
-          {data.target ? Object.entries({ "Bucket": data.target.bucket, "地域": data.target.region, "Endpoint": data.target.endpoint, "对象前缀": data.target.objectPrefix }).map(([label, value]) => <div className="min-w-0" key={label}><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 break-all text-sm leading-6">{value}</dd></div>) : <div><dt className="text-xs text-muted-foreground">存储位置</dt><dd className="mt-1 text-sm">{data.backend === "local" ? "应用服务器本地目录" : "尚未装配存储适配器"}</dd></div>}
-          <div><dt className="text-xs text-muted-foreground">凭据方式</dt><dd className="mt-1 text-sm">{credentialLabel}</dd></div>
-          <div><dt className="text-xs text-muted-foreground">图片上传范围</dt><dd className="mt-1 text-sm">{data.limits.allowedMimes.map(mime => mime.replace("image/", "").toUpperCase()).join(" / ")} · 单张不超过 {Number((data.limits.maxBytes / 1024 / 1024).toFixed(2))} MiB</dd></div>
-        </dl>
+        <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+          <span>存储节点：<strong className="text-foreground font-medium">{data.target?.region ?? "本地存储"}</strong></span>
+          <span>目标空间：<strong className="text-foreground font-medium">{data.target?.bucket ?? "local"}</strong></span>
+          <span>支持格式：<strong className="text-foreground font-medium">{data.limits.allowedMimes.map(mime => mime.replace("image/", "").toUpperCase()).join("/")}</strong> (≤{Number((data.limits.maxBytes / 1024 / 1024).toFixed(0))}MB)</span>
+        </div>
+        <details className="mt-4 rounded-lg border border-border/70 p-3 text-xs">
+          <summary className="cursor-pointer font-medium text-muted-foreground hover:text-foreground select-none">展开底层连接与技术参数</summary>
+          <dl className="mt-3 grid min-w-0 grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
+            {data.target ? Object.entries({ "Bucket": data.target.bucket, "地域": data.target.region, "Endpoint": data.target.endpoint, "对象前缀": data.target.objectPrefix }).map(([label, value]) => <div className="min-w-0" key={label}><dt className="text-muted-foreground">{label}</dt><dd className="mt-0.5 break-all font-mono text-[11px]">{value}</dd></div>) : <div><dt className="text-muted-foreground">存储位置</dt><dd className="mt-0.5 text-xs">{data.backend === "local" ? "应用服务器本地目录" : "尚未装配存储适配器"}</dd></div>}
+            <div><dt className="text-muted-foreground">凭据方式</dt><dd className="mt-0.5 text-xs">{credentialLabel}</dd></div>
+          </dl>
+        </details>
         {data.credentialMode === "STS" && data.automaticCredentialRefresh === false ? <div className="mt-4"><StatusMessage tone="warning" error="当前临时凭据不会自动续期，请在部署端安排凭据更新，避免到期后图片无法读写。" /></div> : null}
       </section>
       <section aria-labelledby="system-storage-check-title">

@@ -28,13 +28,20 @@ export function CopyCode({ code }: { code: string }) {
     window.setTimeout(() => setCopied("idle"), 1600);
   };
   return (
-    <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
-      <span className="font-mono truncate max-w-36">{code}</span>
-      <Button type="button" variant="ghost" size="icon-sm" aria-label={`复制稳定 code ${code}`} onClick={() => void copy()}>
-        {copied === "done" ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/80 hover:text-foreground transition-colors group">
+      <span className="font-mono text-[10px] truncate max-w-40" title={code}>{code}</span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="size-5 p-0 text-muted-foreground/60 hover:text-foreground opacity-60 group-hover:opacity-100 transition-opacity"
+        aria-label={`复制稳定 code ${code}`}
+        onClick={() => void copy()}
+      >
+        {copied === "done" ? <CheckIcon className="size-3 text-emerald-600 dark:text-emerald-400" /> : <CopyIcon className="size-3" />}
       </Button>
-      {copied === "done" ? <span>已复制</span> : null}
-      {copied === "failed" ? <span>复制失败，请手动选择</span> : null}
+      {copied === "done" ? <span className="text-[10px] text-emerald-600 dark:text-emerald-400">已复制</span> : null}
+      {copied === "failed" ? <span className="text-[10px] text-destructive">复制失败</span> : null}
     </span>
   );
 }
@@ -308,12 +315,12 @@ export function CatalogObjectTable({
     );
   };
 
-  const editCellClass = (row: CatalogRow | null) => (editing && (row === null || row.id === editingId) ? "bg-muted/40 whitespace-normal" : undefined);
+  const editCellClass = (row: CatalogRow | null) => (editing && (row === null || row.id === editingId) ? (row === null ? "bg-primary/[0.04] whitespace-normal" : "bg-muted/40 whitespace-normal") : undefined);
 
   const phantomRow =
     editingIsNew && editValues ? (
       <Fragment>
-        <TableRow data-editing="new" data-catalog-row-id="">
+        <TableRow data-editing="new" data-catalog-row-id="" className="bg-primary/[0.06] border-l-4 border-l-primary ring-1 ring-primary/30 shadow-xs">
           <TableCell className={editCellClass(null)}>{nameCell(null)}</TableCell>
           {columns.map((column) => (
             <TableCell key={column.key} className={editCellClass(null)}>

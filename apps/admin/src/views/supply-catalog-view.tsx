@@ -524,6 +524,15 @@ export function SupplyCatalogView({
     if (kind === "skins" && catalog?.game.code === "delta" && !catalog.skinCategoryModel?.categorylessWriteReady) { setError("无分类词条创建尚未就绪，请先由维护者更新目录结构。"); return; }
     const created = editorValuesFor(kind);
     changeEditor({ kind, values: created, revision: catalog?.game.catalogRevision, baseline: JSON.stringify(created) });
+    if (typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        const input = document.querySelector('[data-editing="new"] input') as HTMLInputElement | null;
+        if (input) {
+          input.focus();
+          input.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+    }
   };
 
   const openEdit = (kind: CatalogKind, record: CatalogRow, confirm = false) => {
@@ -896,8 +905,8 @@ export function SupplyCatalogView({
                 ) : null}
                 <div className="flex flex-wrap items-end gap-2.5">
                   <div className="w-full sm:w-auto sm:min-w-60">
-                    <Field label="在已加载目录中查找">
-                      <Input value={query} disabled={Boolean(editor)} onChange={(event) => setQuery(event.target.value)} className="h-9 w-full text-xs" placeholder="名称、code 或别名" />
+                    <Field label="搜索物品或皮肤">
+                      <Input value={query} disabled={Boolean(editor)} onChange={(event) => setQuery(event.target.value)} className="h-9 w-full text-xs" placeholder="按名称、稳定编码或别名搜索" />
                     </Field>
                   </div>
                   {kind === "skins" ? (
@@ -929,7 +938,7 @@ export function SupplyCatalogView({
                     </Button>
                   </div>
                 </div>
-                {query.trim() ? <p className="text-[11px] text-muted-foreground">搜索仅覆盖当前已加载目录；空结果不代表全库不存在。</p> : null}
+                {query.trim() ? <p className="text-[11px] text-muted-foreground">当前仅在已加载列表中过滤；若全库未找到请确认是否已加载完毕。</p> : null}
                 <CatalogObjectTable
                   editingId={kind !== "skins" && editor && editor.id && editor.kind === kind ? editor.id : undefined}
                   editingIsNew={Boolean(editor && !editor.id && editor.kind === kind)}
