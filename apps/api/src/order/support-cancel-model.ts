@@ -55,7 +55,7 @@ export function supportPoststartCancellationAllocation(input: {
  if(paid===0n||refund+owner>paid)
   throw new SecurityApiError(409,"CONFLICT","退款和号主收益合计不能超过原付款剩余金额");
  return {paidCents:paid.toString(),previouslyAllocatedCents:allocated.toString(),refundCents:refund.toString(),
-  ownerCents:owner.toString(),platformContributionCents:(paid-allocated-refund-owner).toString(),commissionCents:"0"};
+  ownerCents:owner.toString(),platformBeforePayoutFeeCents:(paid-allocated-refund-owner).toString(),commissionCents:"0"};
 }
 
 export function assertSupportPoststartCancelInput(input:Record<string,unknown>) {
@@ -64,9 +64,11 @@ export function assertSupportPoststartCancelInput(input:Record<string,unknown>) 
   ||typeof reason!=="string"||[...reason.trim()].length<3||Buffer.byteLength(reason.trim(),"utf8")>600
   ||/[\u0000-\u001f\u007f]/.test(reason)
   ||typeof refund!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(refund)
-  ||typeof owner!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(owner))
+  ||typeof owner!=="string"||!/^(0|[1-9][0-9]{0,15})$/.test(owner)
+  ||input.ownerAmountBasis!==undefined && input.ownerAmountBasis!=="GROSS_BEFORE_FEE_V1")
   throw new SecurityApiError(400,"INVALID_ARGUMENT","请填写取消原因、退款金额和号主收益");
- return {expectedOrderRevision:revision,reason:reason.trim(),refundCents:refund,ownerCents:owner};
+ return {expectedOrderRevision:revision,reason:reason.trim(),refundCents:refund,ownerCents:owner,
+  ...(input.ownerAmountBasis==="GROSS_BEFORE_FEE_V1"?{ownerAmountBasis:"GROSS_BEFORE_FEE_V1" as const}:{})};
 }
 
 /** 已开租客服取消不要求结算草稿先关闭，但不能覆盖已记账或已分配退款。 */

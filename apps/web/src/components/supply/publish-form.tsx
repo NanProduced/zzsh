@@ -3609,7 +3609,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   <small className="publish-term-risk"><Info size={14} aria-hidden="true" />{payoutSelected === false ? "普通赔付的范围与条件见本次出租协议；选择方案不等于接受条款。" : "选择方案不等于接受条款，上架前仍需阅读并确认。"}</small>
                 <details id="publish-payout-rules" className="publish-policy-disclosure"><summary><span>查看赔付规则</span></summary>
                   <div className="publish-disclosure-panel">
-                    <div className="publish-payout-scenes"><div className="publish-payout-scene-card"><strong>正常结束 / 号主或账号原因提前结束</strong><p>按实际消耗的号主侧毛收入计算，由号主承担。</p></div><div className="publish-payout-scene-card"><strong>租客自愿提前结束，且非号主或账号原因</strong><p>按有效开租清单的全量号主侧毛收入计算，由租客承担；号主不重复承担同一费用。</p></div></div>
+                    <div className="publish-payout-scenes"><div className="publish-payout-scene-card"><strong>正常结束或提前结束</strong><p>按实际消耗对应的号主扣费前收入计算，由号主承担。上架时的全量收入仅为预估。</p></div></div>
                     <p className="publish-payout-subnote">未选择全额包赔或未正常交付开租，不自动收取。押金、保证金、价差、提前补足及赔款均不计入收费基数。</p>
                     <p className="publish-payout-subnote">服务费在结算生效时计算一次。保障针对本次租赁导致的约定损失，范围与实际赔付按有效条款处理；不承诺无条件赔付。</p>
                     <p className="publish-payout-subnote">以上是平台政策说明；本次出租条款在核价后单独阅读和接受。</p>

@@ -1990,6 +1990,26 @@ test("F5: a rejected version is not a confirmation and cannot be confirmed again
   });
 });
 
+test("a former renter-paid fee proposal cannot be confirmed by either party", async () => {
+  for (const party of ["renter", "owner"]) await withDom(async (window) => {
+    const version = { ...postedVersion, id: "v_old_fee", versionNo: "3", early: true, decisions: [] };
+    const pending = { ...postedSettlement, versions: [version], settlement: version,
+      currentRequest: { kind: "SETTLEMENT_VERSION", id: version.id, versionNo: "3" },
+      posting: null, ready: false, reasons: ["SETTLEMENT_FEE_RECONFIRM_REQUIRED"] };
+    const calls = [], stages = [];
+    const fetchImpl = router([{ match: "/settlement", method: "GET", respond: () => json(pending) }], calls);
+    const Component = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session("user_A")).OrderTradeActions;
+    const probe = createProbe(window, Component, { order: paidOrder, party, onChanged() {}, onStageFacts(facts) { if (facts) stages.push(facts); } }, fetchImpl);
+    try {
+      await probe.render();
+      assert.match(probe.host.textContent, /计算口径需要更正/);
+      assert(!probe.buttons().some(text => text.includes("确认提前结算")));
+      assert.equal(stages.at(-1)?.feeReconfirmationRequired, true);
+      assert(calls.every(call => call.method === "GET"));
+    } finally { await probe.dispose(); }
+  });
+});
+
 test("F5: a settlement-version request without a status still opens the decision step", async () => {
   await withDom(async (window) => {
     const currentVersion = { ...postedVersion, id: "v_current", versionNo: "3", decisions: [] };
@@ -2135,6 +2155,24 @@ test("M3-F1: a manual version discloses the amount confirmation would settle", a
     assert.ok(text.includes("这一版含人工调整"), "the adjustment is called out before deciding");
     await probe.dispose();
   });
+});
+
+test("人工调整后的号主毛收入与包赔费和系统原值分开显示",async()=>{
+ await withDom(async window=>{
+  const version={...manualVersion,proposedOwnerNet:"11040",inputSnapshot:{...manualVersion.inputSnapshot,proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60"}};
+  const data={...manualSettlement,versions:[version],settlement:version};
+  const pending=await tradeProbe(window,data,"owner");
+  assert.match(tableRow(pending.host,"调整后号主扣费前收入").textContent,/¥120\.00/);
+  assert.match(tableRow(pending.host,"调整后包赔费").textContent,/¥9\.60/);
+  assert.match(tableRow(pending.host,"本次将确认的净额").textContent,/¥110\.40/);
+  await pending.dispose();
+  const posting={...manualPosting,owner:{gross:"120.00",systemNetCents:"16836",availableCents:"11040"},compensationFeeCents:"960",
+   manualAdjustment:{...manualPosting.manualAdjustment,proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",postedOwnerNetCents:"11040"}};
+  const posted=await tradeProbe(window,{...data,posting},"owner");
+  assert.match(tableRow(posted.host,"调整后包赔费").textContent,/¥9\.60/);
+  assert.match(tableRow(posted.host,"本单净入账").textContent,/¥110\.40/);
+  await posted.dispose();
+ });
 });
 
 test("M3-F1: a manual version without a proposed value never presents the system value as what will be settled", async () => {

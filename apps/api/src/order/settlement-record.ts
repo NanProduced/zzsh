@@ -16,6 +16,7 @@ import { payableCentsFor } from "../auth/membership-total-discount";
 import type { freezeSettlementPricing } from "./personal-confirmation";
 import { assertGameScope, conflict, forbidden, invalid, notFound } from "../supply/supply-util";
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
+import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
@@ -27,6 +28,7 @@ import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, ty
 import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import {
   computeSettlement,
+  settlementFeeReconfirmationRequired,
   settlementConfirmationReady,
   SETTLEMENT_ROUNDING_POLICY,
   type ComputeSettlementInput,
@@ -36,7 +38,8 @@ import {
   type SettlementInventoryLine,
 } from "./settlement";
 
-export const SETTLEMENT_FEE_POLICY_VERSION = "trade-baseline-20260921";
+const PREVIOUS_SETTLEMENT_FEE_POLICY_VERSION = "trade-baseline-20260921";
+export const SETTLEMENT_FEE_POLICY_VERSION = "owner-actual-income-20261111";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
 export const SETTLEMENT_ADJUST_TRIGGER = "manual-net";
 const EARLY_REASONS = ["TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"] as const;
@@ -524,6 +527,8 @@ function payloadFor(input: {
   early: boolean;
   result: SettlementComputation;
   proposedOwnerNet: string | null;
+  proposedOwnerGross?: string;
+  proposedFullPayoutFee?: string;
   proposedRenterRefund: string | null;
   reason: string | null;
   base: AcceptanceBase;
@@ -561,6 +566,7 @@ function payloadFor(input: {
     endReason: input.endReason,
     early: input.early,
     proposedOwnerNet: input.proposedOwnerNet,
+    ...(input.proposedOwnerGross !== undefined ? {proposedOwnerGross:input.proposedOwnerGross,proposedFullPayoutFee:input.proposedFullPayoutFee} : {}),
     proposedRenterRefund: input.proposedRenterRefund,
     reason: input.reason,
     amounts: amounts ? {
@@ -734,7 +740,7 @@ async function settlementPostingView(client: PoolClient, orderId: string): Promi
     refundDueAt: posting.refundDueAt,
     capturedCents: posting.capturedCents,
     owner: {
-      gross: (snapshot.amounts as Record<string, unknown> | undefined)?.ownerGross ?? null,
+      gross: snapshot.proposedOwnerGross ?? (snapshot.amounts as Record<string, unknown> | undefined)?.ownerGross ?? null,
       systemNetCents: posting.systemOwnerNetCents,
       availableCents: posting.ownerNetCents,
     },
@@ -748,6 +754,8 @@ async function settlementPostingView(client: PoolClient, orderId: string): Promi
     amounts: snapshot.amounts ?? null,
     manualAdjustment: posting.manualReason === null ? null : {
       reason: posting.manualReason,
+      proposedOwnerGross: snapshot.proposedOwnerGross ?? null,
+      proposedFullPayoutFee: snapshot.proposedFullPayoutFee ?? null,
       systemOwnerNetCents: posting.systemOwnerNetCents,
       postedOwnerNetCents: posting.ownerNetCents,
       systemRenterRefundCents: posting.systemRenterRefundCents,
@@ -871,6 +879,8 @@ async function view(client: PoolClient, order: LockedOrder): Promise<Command> {
     ? { ready: true, reasons: [] as string[] }
     : pendingIntake
     ? { ready: false, reasons: ["SETTLEMENT_INTAKE_PENDING"] }
+    : current && settlementFeeReconfirmationRequired(current.inputSnapshot)
+    ? { ready: false, reasons: ["SETTLEMENT_FEE_RECONFIRM_REQUIRED"] }
     : current ? await readyFacts(client, current) : { ready: false, reasons: ["SETTLEMENT_VERSION_MISSING"] };
   return done({
     orderId: order.id,
@@ -931,7 +941,7 @@ function projectComputation(value: unknown): Record<string, unknown> {
 function projectInputSnapshot(value: unknown): Record<string, unknown> {
   const snapshot = pickFields(value, [
     "schema", "openingId", "openingVersion", "capturedAmount", "depositAmount", "lines", "kind", "endReason", "early",
-    "proposedOwnerNet", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
+    "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedRenterRefund", "reason", "feePolicyVersion", "amounts",
   ]);
   if (Array.isArray(snapshot.lines)) snapshot.lines = snapshot.lines.map((line) => pickFields(line, ["itemId", "openingQuantity", "remainingQuantity", "consumedQuantity"]));
   if (snapshot.amounts !== undefined) snapshot.amounts = projectAmounts(snapshot.amounts);
@@ -963,7 +973,7 @@ function projectPosting(value: unknown): Record<string, unknown> {
   if (posting.amounts !== undefined) posting.amounts = projectAmounts(posting.amounts);
   if (posting.manualAdjustment && typeof posting.manualAdjustment === "object") {
     posting.manualAdjustment = pickFields(posting.manualAdjustment, [
-      "reason", "systemOwnerNetCents", "postedOwnerNetCents", "systemRenterRefundCents", "postedRenterRefundCents",
+      "reason", "proposedOwnerGross", "proposedFullPayoutFee", "systemOwnerNetCents", "postedOwnerNetCents", "systemRenterRefundCents", "postedRenterRefundCents",
     ]);
   }
   return posting;
@@ -980,7 +990,7 @@ function isolateSettlementParty(value: unknown, viewer: SettlementViewer): unkno
     "capturedAmount", "capturedCents", "depositAmount", "haffConsumedBuyer", "itemConsumedBuyer", "unusedItemRefund", "unusedHaffRefund",
     "renterCharge", "renterRefund", "depositRefund", "systemRenterRefund", "proposedRenterRefund", "systemRenterRefundCents", "postedRenterRefundCents", "refund",
   ] : [
-    "haffConsumedOwner", "itemConsumedOwner", "ownerGross", "ownerNet", "systemOwnerNet", "proposedOwnerNet",
+    "haffConsumedOwner", "itemConsumedOwner", "ownerGross", "ownerNet", "systemOwnerNet", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee",
     "systemOwnerNetCents", "postedOwnerNetCents", "owner",
   ]);
   if (item.feePayer !== viewer) for (const field of ["feeBase", "feeRate", "feeAmount"]) withheld.add(field);
@@ -994,7 +1004,7 @@ function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknow
   const body = pickFields(value, [
     "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "openingGeneration", "openingGenerationRecoveryRequired", "intakes", "versions", "currentRequest", "settlement", "posting",
     "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
-    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedRenterRefund", "reason",
+    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedRenterRefund", "reason",
   ]);
   if(Array.isArray(body.extraResources))body.extraResources=body.extraResources.map(item=>pickFields(item,["itemId","name","unit","pricingKind"]));
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
@@ -1376,6 +1386,7 @@ async function loadBill(client: PoolClient, order: LockedOrder, remaining: LineQ
 async function insertVersion(client: PoolClient, input: {
   order: LockedOrder; actor: Actor; openingId: string; kind: "SYSTEM" | "MANUAL_ADJUSTMENT"; endReason: SettlementEndReason;
   lines: SettlementInventoryLine[]; basis: Basis; proposedOwnerNet: string | null; proposedRenterRefund: string | null; reason: string | null;
+  proposedOwnerGross?: string; proposedFullPayoutFee?: string;
   approvalRequestId: string | null; requestId: string; confirmInitiator: boolean; base: AcceptanceBase;
 }): Promise<Command> {
   const versionId = `settle_${randomUUID().replaceAll("-", "")}`;
@@ -1386,7 +1397,8 @@ async function insertVersion(client: PoolClient, input: {
   const payload = payloadFor({
     order: input.order, openingId: input.openingId, openingVersion: (await confirmedOpening(client, input.order.id))!.versionNo,
     basis: input.basis, lines: input.lines, kind: input.kind, endReason: input.endReason, early: probed.early, result: probed,
-    proposedOwnerNet: input.proposedOwnerNet, proposedRenterRefund: input.proposedRenterRefund, reason: input.reason, base: input.base,
+    proposedOwnerNet: input.proposedOwnerNet, proposedOwnerGross: input.proposedOwnerGross, proposedFullPayoutFee: input.proposedFullPayoutFee,
+    proposedRenterRefund: input.proposedRenterRefund, reason: input.reason, base: input.base,
   });
   const hashed = hashApprovalPayload(payload);
   if (input.approvalRequestId) {
@@ -1541,7 +1553,7 @@ export async function submitSettlement(client: PoolClient, orderId: string, acto
 }
 
 export async function previewStaffSettlement(client: PoolClient, orderId: string, actor: Actor, input: {
-  remaining: LineQty[]; endReason: EarlyReason | null; proposedOwnerNet?: string; proposedRenterRefund?: string; reason?: string;
+  remaining: LineQty[]; endReason: EarlyReason | null; proposedOwnerGross?: string; proposedOwnerNet?: string; proposedRenterRefund?: string; reason?: string;
 }): Promise<Command> {
   if (actor.realm !== "admin") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
@@ -1550,19 +1562,23 @@ export async function previewStaffSettlement(client: PoolClient, orderId: string
   const base = await acceptanceBase(client, order.id);
   const normal = probe(order, bill.opening.id, bill.basis, bill.lines, "NORMAL", "preview");
   const early = needsEarlyReason(normal);
-  if (input.proposedOwnerNet !== undefined || input.proposedRenterRefund !== undefined) {
+  if (input.proposedOwnerNet !== undefined) return blocked(["OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"]);
+  if (input.proposedOwnerGross !== undefined || input.proposedRenterRefund !== undefined) {
     if (early && !input.endReason) return blocked(["EARLY_REASON_REQUIRED"]);
     if (!early && input.endReason) return blocked(["END_REASON_INCONSISTENT"]);
     const endReason: SettlementEndReason = early ? input.endReason! : "NORMAL";
     const result = early ? probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview") : normal;
     if (!result.ok || !result.amounts || result.early !== early) return blocked(result.reasons.length ? result.reasons : ["SETTLEMENT_NOT_COMPUTABLE"]);
-    const proposedOwnerNet = yuanField(input.proposedOwnerNet ?? "");
-    const proposedRenterRefund = yuanField(input.proposedRenterRefund ?? "");
+    const allocation = manualSettlementAllocation(input.proposedOwnerGross ?? "",input.proposedRenterRefund ?? "",bill.basis.captured,bill.basis.fullPayoutSelected);
+    if (!allocation) return blocked(["FUNDING_SOURCE_REQUIRED"]);
     const payload = payloadFor({
       order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
-      kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet, proposedRenterRefund, reason: input.reason ?? null, base,
+      kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet:allocation.net, proposedOwnerGross:allocation.gross,
+      proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund, reason: input.reason ?? null, base,
     });
-    return done({ accepted: false, early, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId, systemOwnerNet: result.amounts.ownerNet.amount, systemRenterRefund: result.amounts.renterRefund.amount }, order.status);
+    return done({ accepted: false, early, amounts: payload.amounts, versionHash: hashApprovalPayload(payload).hash, baseVersionId: base.versionId,
+      systemOwnerNet: result.amounts.ownerNet.amount, systemRenterRefund: result.amounts.renterRefund.amount, proposedOwnerGross:allocation.gross,
+      proposedOwnerNet:allocation.net,proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund }, order.status);
   }
   if (early && !input.endReason) return blocked(["EARLY_REASON_REQUIRED"]);
   if (!early && input.endReason) return blocked(normal.ok ? ["END_REASON_INCONSISTENT"] : normal.reasons);
@@ -1600,12 +1616,22 @@ export async function classifySettlement(client: PoolClient, orderId: string, ac
 }
 
 function yuanField(value: string): string {
-  if (!/^(0|[1-9]\d{0,18})\.\d{2}$/.test(value)) throw invalid("Amount is invalid");
-  return value;
+  const match=/^(0|[1-9]\d{0,18})(?:\.(\d{1,2}))?$/.exec(value);
+  if (!match) throw invalid("Amount is invalid");
+  return `${match[1]}.${(match[2]??"").padEnd(2,"0")}`;
+}
+
+function manualSettlementAllocation(grossValue:string,refundValue:string,capturedValue:string,fullPayout:boolean) {
+  const gross=yuanField(grossValue),refund=yuanField(refundValue);
+  const cents=(value:string)=>yuanToCents({currency:"CNY",unit:"yuan",amount:value,scale:2},"manual allocation");
+  const grossCents=cents(gross),refundCents=cents(refund),captured=cents(capturedValue);
+  if(grossCents+refundCents>captured)return null;
+  const fee=fullPayout?fullPayoutServiceFeeCents(grossCents):0n;
+  return {gross,refund,fee:moneyString(fee),net:moneyString(grossCents-fee)};
 }
 
 export async function adjustSettlement(client: PoolClient, orderId: string, actor: Actor, input: {
-  remaining: LineQty[]; endReason: EarlyReason | null; proposedOwnerNet: string; proposedRenterRefund: string; reason: string; acceptedHash: string; requestId: string;
+  remaining: LineQty[]; endReason: EarlyReason | null; proposedOwnerGross: string; proposedRenterRefund: string; reason: string; acceptedHash: string; requestId: string;
 }): Promise<Command> {
   if (actor.realm !== "admin") throw forbidden();
   const order = await lockSettlement(client, orderId, actor, true);
@@ -1621,15 +1647,12 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
   const endReason: SettlementEndReason = early ? input.endReason! : "NORMAL";
   const result = early ? probe(order, bill.opening.id, bill.basis, bill.lines, endReason, "preview") : normal;
   if (!result.ok || !result.amounts || result.early !== early) return blocked(result.reasons.length ? result.reasons : ["SETTLEMENT_NOT_COMPUTABLE"]);
-  const proposedOwner = yuanField(input.proposedOwnerNet);
-  const proposedRefund = yuanField(input.proposedRenterRefund);
-  const captured = yuanToCents({ currency: "CNY", unit: "yuan", amount: bill.basis.captured, scale: 2 }, "captured");
-  const proposedSum = yuanToCents({ currency: "CNY", unit: "yuan", amount: proposedOwner, scale: 2 }, "proposed owner net")
-    + yuanToCents({ currency: "CNY", unit: "yuan", amount: proposedRefund, scale: 2 }, "proposed renter refund");
-  if (proposedSum > captured) return blocked(["FUNDING_SOURCE_REQUIRED"]);
+  const allocation=manualSettlementAllocation(input.proposedOwnerGross,input.proposedRenterRefund,bill.basis.captured,bill.basis.fullPayoutSelected);
+  if(!allocation)return blocked(["FUNDING_SOURCE_REQUIRED"]);
   const payload = payloadFor({
     order, openingId: bill.opening.id, openingVersion: bill.opening.versionNo, basis: bill.basis, lines: bill.lines,
-    kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet: proposedOwner, proposedRenterRefund: proposedRefund, reason: input.reason, base,
+    kind: "MANUAL_ADJUSTMENT", endReason, early, result, proposedOwnerNet:allocation.net,proposedOwnerGross:allocation.gross,
+    proposedFullPayoutFee:allocation.fee,proposedRenterRefund:allocation.refund, reason: input.reason, base,
   });
   const hashed = hashApprovalPayload(payload);
   if (hashed.hash !== input.acceptedHash) return blocked(["SETTLEMENT_HASH_MISMATCH"]);
@@ -1654,7 +1677,8 @@ export async function adjustSettlement(client: PoolClient, orderId: string, acto
   });
   return insertVersion(client, {
     order, actor, openingId: bill.opening.id, kind: "MANUAL_ADJUSTMENT", endReason, lines: bill.lines, basis: bill.basis,
-    proposedOwnerNet: proposedOwner, proposedRenterRefund: proposedRefund, reason: input.reason, approvalRequestId: approvalId,
+    proposedOwnerNet:allocation.net,proposedOwnerGross:allocation.gross,proposedFullPayoutFee:allocation.fee,
+    proposedRenterRefund:allocation.refund, reason: input.reason, approvalRequestId: approvalId,
     requestId: input.requestId, confirmInitiator: false, base,
   });
 }
@@ -1762,9 +1786,11 @@ async function postReadySettlement(
   if (!version || version.supersededAt || version.basisHash !== version.versionHash) throw conflict("STALE_VERSION");
   const snapshot = version.inputSnapshot;
   if (hashApprovalPayload(snapshot).hash !== version.versionHash) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  if (settlementFeeReconfirmationRequired(snapshot)) throw conflict("SETTLEMENT_FEE_RECONFIRM_REQUIRED");
+  const feePolicyVersion = snapshot.feePolicyVersion;
   if (snapshot.orderId !== order.id || snapshot.renterUserId !== order.renterUserId || snapshot.ownerUserId !== order.ownerUserId
       || snapshot.openingId !== version.openingId || snapshot.kind !== version.kind || snapshot.early !== version.early
-      || snapshot.feePolicyVersion !== SETTLEMENT_FEE_POLICY_VERSION) {
+      || (feePolicyVersion !== SETTLEMENT_FEE_POLICY_VERSION && feePolicyVersion !== PREVIOUS_SETTLEMENT_FEE_POLICY_VERSION)) {
     throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
 
@@ -1851,13 +1877,21 @@ async function postReadySettlement(
         || exactCents(snapshot.proposedRenterRefund, "RENTER_REFUND") !== renterRefund)) {
     throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
-  const adjustment = systemOwner + systemRefund - ownerNet - renterRefund;
-  const platformContribution = systemPlatform + adjustment;
+  const systemFee=exactCents(amounts.feeAmount, "COMPENSATION_FEE");
+  let fee=systemFee,manualGross:bigint|null=null;
+  if(version.kind==="MANUAL_ADJUSTMENT" && snapshot.proposedOwnerGross!==undefined) {
+    manualGross=exactCents(snapshot.proposedOwnerGross,"OWNER_GROSS");
+    fee=exactCents(snapshot.proposedFullPayoutFee,"COMPENSATION_FEE");
+    if(manualGross<0n || fee!==(bill.basis.fullPayoutSelected?fullPayoutServiceFeeCents(manualGross):0n)
+      || ownerNet!==manualGross-fee || manualGross+renterRefund>captured)throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  }
+  const feeDelta=fee-systemFee;
+  const adjustment = systemOwner + systemRefund - ownerNet - renterRefund - feeDelta;
+  const platformContribution = systemPlatform + feeDelta + adjustment;
   if (captured < 0n || ownerNet < 0n || renterRefund < 0n || platformContribution < 0n
       || ownerNet + renterRefund + platformContribution !== captured) {
     throw conflict("FUNDING_SOURCE_REQUIRED");
   }
-  const fee = exactCents(amounts.feeAmount, "COMPENSATION_FEE");
   if (fee < 0n || exactCents(amounts.feeBase, "COMPENSATION_FEE_BASE") < 0n
       || !["OWNER", "RENTER", "NONE"].includes(String(amounts.feePayer))) {
     throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
@@ -1907,7 +1941,7 @@ async function postReadySettlement(
   addPostingEntry(entries, "OWNER_AVAILABLE", ownerNet, {
     settlementVersionId: version.id, versionHash: version.versionHash,
     systemGross: computed.ownerGross, systemNet: moneyString(systemOwner), postedNet: moneyString(ownerNet),
-    feePayer: amounts.feePayer, compensationFee: computed.feeAmount,
+    feePayer: amounts.feePayer, compensationFee: manualGross===null?computed.feeAmount:centsToYuan(fee),
   }, { counterpartyUserId: order.ownerUserId });
   addPostingEntry(entries, "RENTER_REFUND_PAYABLE", renterRefund, {
     settlementVersionId: version.id, versionHash: version.versionHash, dueAt: header.refundDueAt,
@@ -1920,12 +1954,13 @@ async function postReadySettlement(
     amount: computed.earlyMakeup, endReason: snapshot.endReason,
   });
   addPostingEntry(entries, "PLATFORM_COMPENSATION_FEE", fee, {
-    base: computed.feeBase, rate: amounts.feeRate, payer: amounts.feePayer, policyVersion: SETTLEMENT_FEE_POLICY_VERSION,
+    base: manualGross===null?computed.feeBase:centsToYuan(manualGross), rate: amounts.feeRate, payer: amounts.feePayer, policyVersion: feePolicyVersion,
   });
   addPostingEntry(entries, "PLATFORM_MANUAL_NET_ADJUSTMENT", adjustment, {
     reason: manualReason, systemOwnerNet: moneyString(systemOwner), postedOwnerNet: moneyString(ownerNet),
     systemRenterRefund: moneyString(systemRefund), postedRenterRefund: moneyString(renterRefund),
     deltaOwnerNet: moneyString(ownerNet - systemOwner), deltaRenterRefund: moneyString(renterRefund - systemRefund),
+    ...(manualGross===null?{}:{deltaPayoutFee:moneyString(feeDelta)}),
     approvalRequestId: version.approvalRequestId,
   });
   for (const [index, entry] of entries.entries()) {
@@ -1961,6 +1996,7 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
   if (!version || version.supersededAt || version.versionHash !== versionHash) return blocked(["STALE_VERSION"]);
   const party = partyOf(order, actor.userId);
   if (action === "REJECT" && !reason) throw invalid("A rejection reason is required");
+  if (action === "CONFIRM" && settlementFeeReconfirmationRequired(version.inputSnapshot)) return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
   if (action === "CONFIRM" && version.early && requiresEarlySettlementAcceptance(order) && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
   if (action === "CONFIRM") {
     if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
@@ -1999,6 +2035,7 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
   const order = await lockSettlement(client, orderId, actor, true);
   const version = await currentVersion(client, orderId, versionId);
   if (!version || version.supersededAt || version.versionHash !== versionHash) return blocked(["STALE_VERSION"]);
+  if (settlementFeeReconfirmationRequired(version.inputSnapshot)) return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
   if (!version.early) return blocked(["SUPPORT_REVIEW_NOT_REQUIRED"]);
   if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
     return blocked(["SETTLEMENT_INTAKE_PENDING"]);
@@ -2033,6 +2070,7 @@ export async function finalizeSettlementBySupport(client:PoolClient,orderId:stri
   const order=await lockSettlement(client,orderId,actor,true);
   const version=await currentVersion(client,orderId,versionId);
   if(!version||version.supersededAt||version.versionHash!==versionHash)return blocked(["STALE_VERSION"]);
+  if(settlementFeeReconfirmationRequired(version.inputSnapshot))return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
   if(version.kind!=="SYSTEM")return blocked(["MANUAL_ADJUSTMENT_REQUIRES_REVIEW"]);
   if((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id=$1 AND status='OPEN' LIMIT 1`,[orderId])).rowCount)return blocked(["SETTLEMENT_INTAKE_PENDING"]);
   if((await client.query(`SELECT 1 FROM zzsh_order.settlement_decision WHERE settlement_version_id=$1 AND party='SUPPORT' AND action='FINALIZE'`,[version.id])).rowCount)return blocked(["FINALIZATION_REQUIRES_RECONCILIATION"]);
@@ -2050,7 +2088,7 @@ export interface SettlementStage { code: SettlementStageCode; label: string | nu
 export interface SettlementStageFacts {
   orderStatus: string; viewerParty: "RENTER" | "OWNER" | null; posted: boolean; intakeOpen: boolean;
   currentVersionNo: number | null; renterAction: string | null; ownerAction: string | null;
-  rentalStarted?: boolean; openingActionRequired?: boolean;
+  rentalStarted?: boolean; openingActionRequired?: boolean; feeReconfirmationRequired?: boolean;
 }
 const STAGE_LABELS: Record<SettlementStageCode, string | null> = {
   NONE: null, OPENING_PENDING: "待确认开租", RENTING: "租赁中", INTAKE_PENDING: "结算受理中", DECISION_PENDING: "待你确认结算",
@@ -2065,6 +2103,7 @@ export function settlementStageOf(f: SettlementStageFacts): SettlementStage {
   const v = f.currentVersionNo;
   if (f.posted) return stage("POSTED", v);
   if (f.intakeOpen) return stage("INTAKE_PENDING", v);
+  if (f.feeReconfirmationRequired) return stage("UNKNOWN", v);
   if (v !== null) {
     const mine = f.viewerParty === "RENTER" ? f.renterAction : f.viewerParty === "OWNER" ? f.ownerAction : "N/A";
     const rejected = f.renterAction === "REJECT" || f.ownerAction === "REJECT";
@@ -2085,10 +2124,26 @@ SELECT o.id, o.status AS "orderStatus",
        EXISTS (SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id = o.id) AS posted,
        COALESCE((SELECT i.status = 'OPEN' FROM zzsh_order.settlement_intake i WHERE i.order_id = o.id ORDER BY i.version_no DESC LIMIT 1), false) AS "intakeOpen",
        cv.version_no AS "currentVersionNo",
+       COALESCE(cv.input_snapshot #>> '{amounts,feePayer}' = 'RENTER' OR
+         (cv.input_snapshot->>'endReason' = 'TENANT_VOLUNTARY_EARLY' AND cv.input_snapshot #>> '{amounts,feePayer}' = 'OWNER'
+           AND (cv.input_snapshot #>> '{amounts,feeBase}' IS DISTINCT FROM cv.input_snapshot #>> '{amounts,ownerGross}'
+             OR jsonb_typeof(cv.input_snapshot #> '{amounts,feeBase}') IS DISTINCT FROM 'string'
+             OR jsonb_typeof(cv.input_snapshot #> '{amounts,ownerGross}') IS DISTINCT FROM 'string'))
+         OR (cv.input_snapshot->>'kind'='MANUAL_ADJUSTMENT'
+           AND (cv.input_snapshot->>'fullPayoutSelected'='true' OR cv.input_snapshot ? 'proposedOwnerGross')
+           AND (jsonb_typeof(cv.input_snapshot->'fullPayoutSelected') IS DISTINCT FROM 'boolean'
+             OR jsonb_typeof(cv.input_snapshot->'proposedOwnerGross') IS DISTINCT FROM 'string'
+             OR jsonb_typeof(cv.input_snapshot->'proposedFullPayoutFee') IS DISTINCT FROM 'string'
+             OR CASE WHEN coalesce(cv.input_snapshot->>'proposedOwnerGross','')~'^(0|[1-9][0-9]{0,18})\\.[0-9]{2}$'
+                    AND coalesce(cv.input_snapshot->>'proposedFullPayoutFee','')~'^(0|[1-9][0-9]{0,18})\\.[0-9]{2}$'
+                    AND coalesce(cv.input_snapshot->>'proposedOwnerNet','')~'^(0|[1-9][0-9]{0,18})\\.[0-9]{2}$'
+                THEN (cv.input_snapshot->>'proposedFullPayoutFee')::numeric<>(CASE WHEN cv.input_snapshot->>'fullPayoutSelected'='true' THEN round((cv.input_snapshot->>'proposedOwnerGross')::numeric*8/100,2) ELSE 0 END)
+                  OR (cv.input_snapshot->>'proposedOwnerNet')::numeric<>(cv.input_snapshot->>'proposedOwnerGross')::numeric-(cv.input_snapshot->>'proposedFullPayoutFee')::numeric
+                ELSE true END)), false) AS "feeReconfirmationRequired",
        (SELECT d.action FROM zzsh_order.settlement_decision d WHERE d.settlement_version_id = cv.id AND d.party = 'RENTER' LIMIT 1) AS "renterAction",
        (SELECT d.action FROM zzsh_order.settlement_decision d WHERE d.settlement_version_id = cv.id AND d.party = 'OWNER' LIMIT 1) AS "ownerAction"
   FROM zzsh_order.rental_order o
-  LEFT JOIN LATERAL (SELECT v.id, v.version_no FROM zzsh_order.settlement_version v
+  LEFT JOIN LATERAL (SELECT v.id, v.version_no, v.input_snapshot FROM zzsh_order.settlement_version v
                       WHERE v.order_id = o.id AND v.superseded_at IS NULL ORDER BY v.version_no DESC LIMIT 1) cv ON true
  WHERE o.id::text = ANY($1::text[]) AND (o.renter_user_id = $2 OR o.owner_user_id = $2)`;
 /** Single-order path: derive the same SettlementStageFacts from the /settlement view body (response itself unchanged). */
@@ -2103,6 +2158,7 @@ export function settlementStageFactsFromView(body: Record<string, unknown>, view
     intakeOpen: intakes.at(-1)?.status === "OPEN", currentVersionNo: current ? Number(current.versionNo) : null,
     renterAction: action("RENTER"), ownerAction: action("OWNER"),
     rentalStarted: body.rentalStarted === true,
+    ...(Array.isArray(body.reasons) && body.reasons.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED") ? { feeReconfirmationRequired: true } : {}),
     openingActionRequired: viewerParty !== null && openings.some(opening => opening.status === "DRAFT"
       && !opening.acks?.some(ack => ack.party === viewerParty)),
   };

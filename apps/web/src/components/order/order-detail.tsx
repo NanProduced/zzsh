@@ -25,6 +25,7 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
   if (order.fundsResolution?.code === "HISTORICAL_MANUAL_CLOSE") return {
     tone: "warning", title: "订单已关闭，资金处理未确认", note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录，勿将订单关闭理解为退款已到账。", actions: ["group"],
   };
+  if (facts?.feeReconfirmationRequired) return { tone: "warning", title: "结算方案待重新核对", note: "原方案的包赔费计算口径需要更正，请联系客服重新生成方案。", actions: ["group"] };
   if (facts?.phase === "DECISION_REJECTED") {
     return {
       tone: "warning",

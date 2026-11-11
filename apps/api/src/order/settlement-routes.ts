@@ -205,7 +205,8 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   const orderId = idOf((read ?? preview ?? openings ?? openingConfirm ?? classify ?? review ?? finalize ?? adjust)![1]!);
   if (method === "POST" && preview) {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedRenterRefund", "reason"]);
+    ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedOwnerGross", "proposedRenterRefund", "reason"]);
+    if (["proposedOwnerNet","proposedOwnerGross","proposedRenterRefund"].some(field=>body[field]!==undefined && typeof body[field]!=="string")) throw invalid("Adjustment amount is invalid");
     const endReason = body.endReason === undefined || body.endReason === null ? null : body.endReason;
     if (endReason !== null && endReason !== "TENANT_VOLUNTARY_EARLY" && endReason !== "OWNER_OR_ACCOUNT_EARLY") throw invalid("End reason is invalid", "endReason");
     const earlyReason = endReason as "TENANT_VOLUNTARY_EARLY" | "OWNER_OR_ACCOUNT_EARLY" | null;
@@ -213,6 +214,7 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
       remaining: linesOf(body, "remainingQuantity"),
       endReason: earlyReason,
       ...(typeof body.proposedOwnerNet === "string" ? { proposedOwnerNet: body.proposedOwnerNet } : {}),
+      ...(typeof body.proposedOwnerGross === "string" ? { proposedOwnerGross: body.proposedOwnerGross } : {}),
       ...(typeof body.proposedRenterRefund === "string" ? { proposedRenterRefund: body.proposedRenterRefund } : {}),
       ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
     })));
@@ -292,11 +294,12 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
   }
   if (method === "POST" && adjust) {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedRenterRefund", "reason", "acceptedHash"]);
+    ensureOnlyFields(body, ["lines", "endReason", "proposedOwnerNet", "proposedOwnerGross", "proposedRenterRefund", "reason", "acceptedHash"]);
     if (body.endReason !== undefined && body.endReason !== null && body.endReason !== "TENANT_VOLUNTARY_EARLY" && body.endReason !== "OWNER_OR_ACCOUNT_EARLY") {
       throw invalid("End reason is invalid", "endReason");
     }
-    if (typeof body.proposedOwnerNet !== "string" || typeof body.proposedRenterRefund !== "string" || typeof body.reason !== "string" || body.reason.trim().length < 3 || body.reason.length > 500) {
+    if (Object.hasOwn(body,"proposedOwnerNet") === Object.hasOwn(body,"proposedOwnerGross")
+      || typeof (body.proposedOwnerGross ?? body.proposedOwnerNet) !== "string" || typeof body.proposedRenterRefund !== "string" || typeof body.reason !== "string" || body.reason.trim().length < 3 || body.reason.length > 500) {
       throw invalid("Adjustment is invalid");
     }
     const remaining = linesOf(body, "remainingQuantity");
@@ -304,10 +307,11 @@ export async function handleSettlementAdminRoute(request: Request, response: Sup
     const endReason = body.endReason === undefined || body.endReason === null ? null : body.endReason;
     await runIdempotentWrite(options, request, response, requestId, { principalId: actor.userId, operation: "order.settlement.adjust", resourceId: orderId },
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId },
-      { lines: remaining, endReason, proposedOwnerNet: body.proposedOwnerNet, proposedRenterRefund: body.proposedRenterRefund, reason: body.reason.trim(), acceptedHash },
-      async (client) => { await recheckSettlement(client, orderId, actor); },
-      (client) => adjustSettlement(client, orderId, actor, {
-        remaining, endReason, proposedOwnerNet: body.proposedOwnerNet as string, proposedRenterRefund: body.proposedRenterRefund as string,
+      { lines: remaining, endReason, ...(typeof body.proposedOwnerGross === "string" ? {proposedOwnerGross:body.proposedOwnerGross} : {proposedOwnerNet:body.proposedOwnerNet}), proposedRenterRefund: body.proposedRenterRefund, reason: body.reason.trim(), acceptedHash },
+      async (client,replay) => { await recheckSettlement(client, orderId, actor, replay!==null); },
+      (client) => typeof body.proposedOwnerGross !== "string" ? Promise.resolve({status:409,body:{orderId,reasons:["OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"]}})
+        : adjustSettlement(client, orderId, actor, {
+        remaining, endReason, proposedOwnerGross: body.proposedOwnerGross as string, proposedRenterRefund: body.proposedRenterRefund as string,
         reason: (body.reason as string).trim(), acceptedHash, requestId,
       }),
       (client, result) => projectSettlementResponse(client, actor, result, orderId));

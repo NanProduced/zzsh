@@ -93,7 +93,14 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    await c.query(`UPDATE zzsh_supply.rental_account SET current_version_id='synthetic-observation',legacy_hold='UNRESOLVED' WHERE id=$1`,[b.accountId]);
   }
   await c.query("SET LOCAL session_replication_role='origin'");
-  if(cancellation){if(!(await evidence.legacySupportCancellationReady(c)))await c.query(fs.readFileSync('migrations/business/0191_legacy_support_cancel.sql','utf8'));}
+  if(cancellation){
+   const base=(await c.query("SELECT position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.check_legacy_continuation_result()')))>0 AS ready")).rows[0].ready;
+   if(!base)await c.query(fs.readFileSync('migrations/business/0191_legacy_support_cancel.sql','utf8'));
+   await c.query('SET LOCAL ROLE zzsh_synth_migrator');
+   await c.query(fs.readFileSync('migrations/business/0195_approval_center_link.sql','utf8'));
+   await c.query(fs.readFileSync('migrations/business/0196_owner_payout_fee.sql','utf8'));
+   await c.query('RESET ROLE');
+  }
   else if(!productionFull) {
    await c.query(fs.readFileSync('migrations/business/0168_legacy_payment_order_number_guard.sql','utf8'));
    await c.query(fs.readFileSync('migrations/business/0169_legacy_finance_duty_runtime.sql','utf8'));
@@ -129,7 +136,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    const origins={apiOrigin:'https://api.example.invalid',userOrigin:'https://user.example.invalid',adminOrigin:'https://admin.example.invalid',secureCookies:true};
    const demo=require('../dist/src/finance/ecs-test-demo-resource.js').createEcsTestDemoResource({config,env,origins,reference:'synth_demo',administratorId:'post_admin',sourceSnapshotSha256:'a'.repeat(64),restoreReceiptSha256:'b'.repeat(64),resource});
    await c.query('SAVEPOINT demo_complete');
-   const input=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const input=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
    const authority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
    assert.equal((await command.applyLegacyContinuationCommand(c,actor,b.id,input,readLegacyDutyFinalization,authority,finance.postLegacyOwnerCreditOnConfirmation,'SIMULATED')).body.stage,'5');
    const adapter=require('../dist/src/order/ecs-demo-legacy-refund.js');
@@ -167,7 +174,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    const other=await pool.connect(),observer=await pool.connect(),util=require('../dist/src/supply/supply-util.js');
    try {
     const op='order.legacy.continuation.support_cancel',key='synthetic_cancel_same_key';
-    const input=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+    const input=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
     const scope={realm:'admin',principalId:actor.userId,operation:op,resourceId:b.id},fingerprint=util.fingerprintRequest(op,b.id,input);
     const profiles=require('../dist/src/order/joinpay-refund-profile.js'),refundStore=require('../dist/src/order/channel-refund-store.js');
     const saved={assertFormalRefundProfile:profiles.assertFormalRefundProfile,describeRefundProfile:profiles.describeRefundProfile,
@@ -226,10 +233,48 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    const publishing=require('../dist/src/supply/publishing.js');
    const accountBefore=await publishing.lockPublishingAccount(c,b.accountId);
    assert.equal(await publishing.canPrepareLegacyCancelledDraft(c,accountBefore),false);
+   await c.query('SAVEPOINT cancellation_payout');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   const payoutEvidence=fixture.legacyEvidence(model.initialLegacyFacts(fixture.legacySource({isFullPayout:'1',commissions:[commission]}),
+    [{sourceRecordId:commission.id,canonical:commissionSource,digest:sha(commissionSource),evidenceRef:'synthetic-commission'}]));
+   await c.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,reasons=$4::jsonb,facts=$5::jsonb,facts_canonical=$6,facts_digest=$7 WHERE id=$1`,
+    [original.id,payoutEvidence.facts.evidence.parameterDigest,payoutEvidence.facts.evidence.admission,JSON.stringify(payoutEvidence.facts.evidence.reasons),JSON.stringify(payoutEvidence.facts),payoutEvidence.factsCanonical,payoutEvidence.factsDigest]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
+   const payoutInput=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'2000',
+    ownerAmountBasis:'GROSS_BEFORE_FEE_V1',reason:'双方协商取消',originalPaymentChecked:true});
+   const payoutAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   const payoutResult=await command.applyLegacyContinuationCommand(c,actor,b.id,payoutInput,readLegacyDutyFinalization,payoutAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR');
+   assert.equal(payoutResult.body.stage,'5');
+   const payoutHead=await evidence.readLegacyContinuationHead(c,b.id),payoutDuties=await evidence.readLegacyContinuationDuties(c,b.id);
+   assert.deepEqual([payoutHead.amounts.ownerGross,payoutHead.amounts.fullPayoutMoney,payoutHead.amounts.ownerNet,payoutHead.amounts.refundNet,payoutHead.amounts.platformContribution],
+    ['20.00','1.60','18.40','50.00','31.60']);
+   const payoutOwner=payoutDuties.find(d=>d.kind==='OWNER_CREDIT');assert.equal(payoutOwner.amountCents,'1840');assert.equal(payoutOwner.status,'SETTLED');
+   const payoutRefund=payoutDuties.find(d=>d.kind==='RENTER_REFUND');assert.equal(payoutRefund.amountCents,'5000');
+   assert.equal(payoutDuties.find(d=>d.kind==='COMMISSION').status,'VOID');
+   assert.equal((await require('../dist/src/order/legacy-duty-basis.js').readLegacyDutyBasis(c,b.id,payoutOwner)).amountCents,'1840');
+   assert.equal((await require('../dist/src/order/legacy-duty-basis.js').readLegacyDutyBasis(c,b.id,payoutRefund)).amountCents,'5000');
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT cancellation_payout');
+   console.log('PASS: legacy special cancellation deducts fee from owner gross and retains verifiable duties');
+   await c.query('SAVEPOINT cancellation_payout_unknown');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
+   const unknownEvidence=fixture.legacyEvidence(model.initialLegacyFacts(fixture.legacySource({isFullPayout:null,commissions:[commission]}),
+    [{sourceRecordId:commission.id,canonical:commissionSource,digest:sha(commissionSource),evidenceRef:'synthetic-commission'}]));
+   await c.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,reasons=$4::jsonb,facts=$5::jsonb,facts_canonical=$6,facts_digest=$7 WHERE id=$1`,
+    [original.id,unknownEvidence.facts.evidence.parameterDigest,unknownEvidence.facts.evidence.admission,JSON.stringify(unknownEvidence.facts.evidence.reasons),JSON.stringify(unknownEvidence.facts),unknownEvidence.factsCanonical,unknownEvidence.factsDigest]);
+   await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
+   await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
+   const unknownAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
+   await assert.rejects(command.applyLegacyContinuationCommand(c,actor,b.id,payoutInput,readLegacyDutyFinalization,unknownAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'),error=>error.message==='FULL_PAYOUT_UNKNOWN');
+   assert.equal((await c.query("SELECT count(*)::int AS n FROM zzsh_order.legacy_continuation_version WHERE order_id=$1",[b.id])).rows[0].n,0);
+   const fullRefund={...payoutInput,refundCents:'10000',ownerCents:'0'};
+   const fullRefundResult=await command.applyLegacyContinuationCommand(c,actor,b.id,fullRefund,readLegacyDutyFinalization,unknownAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR');
+   assert.equal(fullRefundResult.body.stage,'5');
+   assert.equal((await evidence.readLegacyContinuationDuties(c,b.id)).find(d=>d.kind==='RENTER_REFUND').amountCents,'10000');
+   await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT cancellation_payout_unknown');
+   console.log('PASS: unknown legacy payout blocks positive owner allocation but permits full renter refund');
    await c.query('SAVEPOINT missing_commission');await c.query('RESET ROLE');await c.query("SET LOCAL session_replication_role='replica'");
    await c.query('DELETE FROM zzsh_order.legacy_order_duty WHERE id=$1',[commissionId]);
    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);
-   const missing=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const missing=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
    const missingAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
    await assert.rejects(command.applyLegacyContinuationCommand(c,actor,b.id,missing,readLegacyDutyFinalization,missingAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'),error=>error.message==='COMMISSION_SOURCE_UNAVAILABLE');
    await c.query('ROLLBACK TO SAVEPOINT missing_commission');
@@ -304,7 +349,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    assert.deepEqual((await c.query(`SELECT reason FROM zzsh_iam.audit_event WHERE action='order.legacy.owner_credit.deferred' AND details->>'versionId'=$1`,[deferredCancel.body.versionId])).rows,[{reason:'AUTO_CREDIT_FAILED'}]);
    await c.query('SET CONSTRAINTS ALL IMMEDIATE');await c.query('ROLLBACK TO SAVEPOINT owner_credit_failure');
    await c.query('SAVEPOINT cancellation_flow');
-   const cancel=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const cancel=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
    const authority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
    const util=require('../dist/src/supply/supply-util.js'),operation='order.legacy.continuation.support_cancel',cancelKey='synthetic_legacy_cancel';
    const cancelFingerprint=util.fingerprintRequest(operation,b.id,cancel);
@@ -443,7 +488,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    await c.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,reasons=$4::jsonb,facts=$5::jsonb,facts_canonical=$6,facts_digest=$7 WHERE id=$1`,
     [original.id,isolated.facts.evidence.parameterDigest,isolated.facts.evidence.admission,JSON.stringify(isolated.facts.evidence.reasons),JSON.stringify(isolated.facts),isolated.factsCanonical,isolated.factsDigest]);
    await c.query("SET LOCAL session_replication_role='origin'");await c.query(`SET LOCAL ROLE ${runtimeRole}`);await setAuditContext(c,'admin',actor.userId,actor.sessionId,actor.requestId);
-   const isolatedInput=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',originalPaymentChecked:true});
+   const isolatedInput=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents:'5000',ownerCents:'3000',reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
    const isolatedAuthority=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT'),isolatedKey='synthetic_isolated_cancel',isolatedFingerprint=util.fingerprintRequest(operation,b.id,isolatedInput);
    await util.withIdempotency(c,{realm:'admin',principalId:actor.userId,operation,resourceId:b.id},isolatedKey,isolatedFingerprint,async()=>{},
     ()=>command.applyLegacyContinuationCommand(c,actor,b.id,isolatedInput,readLegacyDutyFinalization,isolatedAuthority,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR'));
@@ -457,7 +502,7 @@ const pool=new Pool({host:'127.0.0.1',port:cancellation||productionFull?55439:54
    console.log('PASS: an incomplete historical price does not prevent a manually allocated cancellation refund');
    for (const [refundCents,ownerCents] of [['0','10000'],['10000','0'],['0','0']]) {
     await c.query('SAVEPOINT cancellation_zero');
-    const zero=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents,ownerCents,reason:'双方协商取消',originalPaymentChecked:true});
+    const zero=command.parseLegacyMutation('support_cancel',{expectedRevision:null,inputEvidenceId:original.id,refundCents,ownerCents,reason:'双方协商取消',ownerAmountBasis:'GROSS_BEFORE_FEE_V1',originalPaymentChecked:true});
     const a=await finance.authorizeLegacyFinanceDuty(c,actor,b.id,'OWNER_CREDIT');
     await command.applyLegacyContinuationCommand(c,actor,b.id,zero,readLegacyDutyFinalization,a,finance.postLegacyOwnerCreditOnConfirmation,'OPERATOR');
     await c.query('SET CONSTRAINTS ALL IMMEDIATE');

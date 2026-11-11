@@ -10,7 +10,7 @@ import {
 function planner(state: {
   status?: string; opening?: { id: string; status: string } | null;
   generation?: string | null; acks?: string[]; posted?: boolean;
-  intake?: boolean; current?: boolean; decided?: string[]; rejected?: string[];
+  intake?: boolean; current?: boolean; decided?: string[]; rejected?: string[]; staleFee?: boolean;
 }) {
   return { query: async (sql: string) => {
     if (sql.includes("FROM zzsh_order.rental_order")) return { rows: [{ status: state.status ?? "PAID", displayNo: "ZZ-1", renterUserId: "u-r", ownerUserId: "u-o" }] };
@@ -19,7 +19,7 @@ function planner(state: {
     if (sql.includes("FROM zzsh_order.rental_opening_generation")) return { rows: state.generation ? [{ state: state.generation }] : [] };
     if (sql.includes("FROM zzsh_order.rental_opening_ack")) return { rows: (state.acks ?? []).map((party) => ({ party })) };
     if (sql.includes("FROM zzsh_order.settlement_intake")) return { rows: state.intake ? [{ id: "intake-1" }] : [] };
-    if (sql.includes("FROM zzsh_order.settlement_version")) return { rows: state.current ? [{ id: "version-1" }] : [] };
+    if (sql.includes("FROM zzsh_order.settlement_version")) return { rows: state.current ? [{ id: "version-1", inputSnapshot: state.staleFee ? { endReason:"TENANT_VOLUNTARY_EARLY", amounts:{feePayer:"RENTER"} } : null }] : [] };
     if (sql.includes("FROM zzsh_order.settlement_decision")) return { rows: [
       ...(state.decided ?? []).map((party) => ({ party, action: "CONFIRM" })),
       ...(state.rejected ?? []).map((party) => ({ party, action: "REJECT" })),
@@ -49,6 +49,8 @@ test("reminders never replace a missing or reviewed opening, and stay silent aft
     { kind: "NO_ACTION", reason: "SETTLEMENT_POSTED" });
   assert.deepEqual(await planOrderProgressReminder(planner({ status: "COMPLETED" }), "order-1"),
     { kind: "NO_ACTION", reason: "ORDER_NOT_ACTIVE" });
+  assert.deepEqual(await planOrderProgressReminder(planner({ opening: { id:"opening-1", status:"CONFIRMED" }, current:true, staleFee:true }), "order-1"),
+    { kind: "NO_ACTION", reason: "SETTLEMENT_FEE_RECONFIRM_REQUIRED" });
 });
 
 test("a late failure cannot overwrite a sent reminder and transport errors stay unknown", async () => {

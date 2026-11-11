@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { admitLegacyEvidence, planLegacyContinuation, planVerifiedLegacySettlement, LEGACY_REJECT_ASSIGNMENTS, type LegacyContinuationSource, type LegacyPrices, type LegacyQuantities, type LegacySettlementBasis } from "../src/order/legacy-continuation-calc";
-import { deriveLegacyFacts, initialLegacyFacts, legacyPlanYuanToCents } from "../src/order/legacy-continuation-model";
+import { deriveLegacyFacts, initialLegacyFacts, legacyFeeReconfirmationRequired, legacyPlanYuanToCents } from "../src/order/legacy-continuation-model";
 
 const names = ["barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
 const prices = (value: string | null): LegacyPrices => Object.fromEntries(names.map(name => [name, value])) as LegacyPrices;
@@ -40,11 +40,22 @@ test("verified old orders use quantity-only threshold and the shared early fee f
   const mismatch = planVerifiedLegacySettlement(admitLegacyEvidence(original), { kind: "propose", caller: renter, quantities }, { ...basis, baseBot: "111" });
   assert.equal(mismatch.ok, false);
   const withPayout = planVerifiedLegacySettlement(admitLegacyEvidence({...original,isFullPayout:"1"}), { kind: "propose", caller: renter, quantities, endReason:"TENANT_VOLUNTARY_EARLY" }, { ...basis, fullPayout: true });
-  assert(withPayout.ok); assert.equal(withPayout.amounts.renterPayoutFee, "7.28"); assert.equal(withPayout.amounts.ownerNet, "55.00");
+  assert(withPayout.ok); assert.equal(withPayout.amounts.renterPayoutFee, "0.00"); assert.equal(withPayout.amounts.fullPayoutMoney, "4.40"); assert.equal(withPayout.amounts.ownerNet, "50.60");
+  assert.equal(withPayout.amounts.returnOrderMoney, "37.75");
   const payoutCommand={kind:"propose" as const,caller:renter,quantities,endReason:"TENANT_VOLUNTARY_EARLY" as const,settlementBasis:{...basis,fullPayout:true}};
   const payoutFacts=deriveLegacyFacts(initialLegacyFacts({...original,isFullPayout:"1"}),withPayout,payoutCommand,"input","payout_proposal");
+  assert.equal(legacyFeeReconfirmationRequired(payoutFacts.evidence.source),false);
+  const previousSource = {...payoutFacts.evidence.source,settlementV2:{...payoutFacts.evidence.source.settlementV2!,renterPayoutFee:"7.28"}};
+  assert.equal(legacyFeeReconfirmationRequired(previousSource),true);
+  assert.equal(legacyFeeReconfirmationRequired({...previousSource,orderStatus:"4"}),false,"already completed history remains readable");
+  assert.equal(legacyFeeReconfirmationRequired({...payoutFacts.evidence.source,fullPayoutMoney:"7.28"}),true,"former full-income fee basis also needs a new proposal");
   const payoutConfirm=planLegacyContinuation(payoutFacts.evidence,{kind:"confirm",caller:owner});assert(payoutConfirm.ok);
-  assert.equal(payoutConfirm.amounts.renterPayoutFee,"7.28");assert.equal(payoutConfirm.amounts.commissionPool,withPayout.amounts.commissionPool);
+  assert.equal(payoutConfirm.amounts.renterPayoutFee,"0.00");assert.equal(payoutConfirm.amounts.fullPayoutMoney,"4.40");assert.equal(payoutConfirm.amounts.commissionPool,withPayout.amounts.commissionPool);
+  const zeroUse = planVerifiedLegacySettlement(admitLegacyEvidence({...original,isFullPayout:"1"}), { kind:"propose", caller:renter, quantities:qty("0"), endReason:"TENANT_VOLUNTARY_EARLY" }, {...basis,fullPayout:true});
+  assert(zeroUse.ok); assert.equal(zeroUse.amounts.fullPayoutMoney,"0.00");
+  const partialBasis={...basis,fullPayout:true,openingItems:{...basis.openingItems,barrett:null},ownerPrices:{...basis.ownerPrices,barrett:null}};
+  const unusedUnknown = planVerifiedLegacySettlement(admitLegacyEvidence({...original,isFullPayout:"1"}), {kind:"propose",caller:renter,quantities,endReason:"TENANT_VOLUNTARY_EARLY"},partialBasis);
+  assert(unusedUnknown.ok); assert.equal(unusedUnknown.amounts.fullPayoutMoney,"4.40");
   const proposalCommand = { kind: "propose" as const, caller: renter, quantities, settlementBasis: basis, endReason:"TENANT_VOLUNTARY_EARLY" as const };
   const proposed = results[0]!; assert(proposed.ok);
   const facts = deriveLegacyFacts(initialLegacyFacts(original), proposed, proposalCommand, "input", "proposal");
@@ -83,6 +94,23 @@ test("旧单客服特殊取消按原实付分配，不改变旧单价格且不�
     plan({commissions:[{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"1",storedEarnings:"1.00"},{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"1",storedEarnings:"1.00"}]},command),
     plan({commissions:[{id:"1",beneficiaryId:"44",ratio:"20",level:"2",status:"2",storedEarnings:"1.00"}]},command),
   ])assert.equal(invalid.ok,false);
+});
+
+test("旧单特殊取消按号主扣费前收入计算包赔费，旧回执仍按原合同重算",()=>{
+  const caller={role:"admin" as const,legacyUserId:""};
+  const command={kind:"support_cancel" as const,caller,refundCents:"5000",ownerCents:"2000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1" as const};
+  const original=initialLegacyFacts(source({isFullPayout:"1"}));
+  const result=planLegacyContinuation(original.evidence,command);assert(result.ok);
+  assert.deepEqual([result.amounts.ownerGross,result.amounts.fullPayoutMoney,result.amounts.ownerNet,result.amounts.refundNet,result.amounts.platformContribution,result.amounts.commissionPool],
+    ["20.00","1.60","18.40","50.00","31.60","0.00"]);
+  const after=deriveLegacyFacts(original,result,command,"source","cancel");
+  assert.equal(after.evidence.source.saleEarnings,"20.00");assert.equal(after.evidence.source.fullPayoutMoney,"1.60");
+  const noPayout=plan({isFullPayout:"0"},command);assert(noPayout.ok);assert.equal(noPayout.amounts.ownerNet,"20.00");
+  const unknown=plan({isFullPayout:null},command);assert(!unknown.ok);assert.equal(unknown.code,"FULL_PAYOUT_UNKNOWN");
+  const zero=plan({isFullPayout:null},{...command,ownerCents:"0"});assert(zero.ok);assert.equal(zero.amounts.fullPayoutMoney,"0.00");
+  const rounded=plan({isFullPayout:"1"},{...command,ownerCents:"19"});assert(rounded.ok);assert.equal(rounded.amounts.fullPayoutMoney,"0.02");
+  const old=plan({isFullPayout:"1"},{kind:"support_cancel",caller,refundCents:"5000",ownerCents:"2000"});assert(old.ok);
+  assert.equal(old.amounts.ownerNet,"20.00");assert.equal(old.amounts.fullPayoutMoney,"0.00");
 });
 
 test("hand golden matches the isolated Java transcription for ordinary, advance, and payout", () => {

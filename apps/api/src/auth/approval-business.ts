@@ -538,18 +538,27 @@ function settlementView(
     if (value) summary[viewField] = value;
   }
   const amounts = payload.amounts;
+  const canReadOwnerFee = viewer.access.isBoss || hasPermission(viewer.access, ADMIN_PERMISSION.orderSettlementWrite);
   if (amounts && typeof amounts === "object") {
     const value = amounts as Record<string, unknown>;
     const systemOwnerNet = moneyField(value.ownerNet, "SYSTEM_OWNER_NET");
+    const systemOwnerGross = moneyField(value.ownerGross, "SYSTEM_OWNER_GROSS");
+    const systemPayoutFee = moneyField(value.feeAmount, "SYSTEM_PAYOUT_FEE");
     const systemRenterRefund = moneyField(value.renterRefund, "SYSTEM_RENTER_REFUND");
     if (systemOwnerNet) summary.systemOwnerNet = systemOwnerNet;
+    if (canReadOwnerFee && systemOwnerGross) summary.systemOwnerGross = systemOwnerGross;
+    if (canReadOwnerFee && systemPayoutFee) summary.systemPayoutFee = systemPayoutFee;
     if (systemRenterRefund) summary.systemRenterRefund = systemRenterRefund;
   }
   const proposedOwnerNet = moneyField(payload.proposedOwnerNet, "PROPOSED_OWNER_NET");
+  const proposedOwnerGross = moneyField(payload.proposedOwnerGross, "PROPOSED_OWNER_GROSS");
+  const proposedPayoutFee = moneyField(payload.proposedFullPayoutFee, "PROPOSED_PAYOUT_FEE");
   const proposedRenterRefund = moneyField(payload.proposedRenterRefund, "PROPOSED_RENTER_REFUND");
   const captured = moneyField(payload.capturedAmount, "CAPTURED");
   const deposit = moneyField(payload.depositAmount, "DEPOSIT");
   if (proposedOwnerNet) summary.proposedOwnerNet = proposedOwnerNet;
+  if (canReadOwnerFee && proposedOwnerGross) summary.proposedOwnerGross = proposedOwnerGross;
+  if (canReadOwnerFee && proposedPayoutFee) summary.proposedPayoutFee = proposedPayoutFee;
   if (proposedRenterRefund) summary.proposedRenterRefund = proposedRenterRefund;
   if (captured) summary.capturedAmount = captured;
   if (deposit) summary.depositAmount = deposit;

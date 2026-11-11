@@ -22,7 +22,7 @@ const excellent: SupportCancelFacts = { orderState: "PAID", paymentSource: "JOIN
 
 test('已开租特殊取消金额不超原款剩额，未分配部分计平台贡献且分销为零',()=>{
  assert.deepEqual(supportPoststartCancellationAllocation({paidCents:'10000',previouslyAllocatedCents:'0',refundCents:'5000',ownerCents:'3000'}),
-  {paidCents:'10000',previouslyAllocatedCents:'0',refundCents:'5000',ownerCents:'3000',platformContributionCents:'2000',commissionCents:'0'});
+  {paidCents:'10000',previouslyAllocatedCents:'0',refundCents:'5000',ownerCents:'3000',platformBeforePayoutFeeCents:'2000',commissionCents:'0'});
  for(const values of [
   {paidCents:'10000',previouslyAllocatedCents:'0',refundCents:'8000',ownerCents:'3000'},
   {paidCents:'10000',previouslyAllocatedCents:'2000',refundCents:'8001',ownerCents:'0'},
@@ -63,7 +63,7 @@ function termRow(patch: FactPatch = {}) {
     basis_digest: basis.digest, payment_basis: basis, liability_root_id: "prestart_refund_1", liability_event_id: "prestart_liability_1",
     ...patch };
 }
-function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderUpdate?: boolean; poststartReady?: boolean } = {}) {
+function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderUpdate?: boolean; poststartReady?: boolean; fullPayoutSelected?: boolean | null } = {}) {
   const calls: { sql: string; values: any[] }[] = [];
   const recognized: { basis: any; policy?: string }[] = [];
   const audits: any[] = [];
@@ -74,10 +74,15 @@ function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderU
     if (sql.startsWith("SELECT o.id,o.status,o.revision")) return { rows: [facts], rowCount: 1 };
     if (sql.includes("to_regprocedure('zzsh_order.prestart_liability_complete")) return { rows: [{ ready: true }], rowCount: 1 };
     if (sql.includes("to_regprocedure('zzsh_order.cancel_order_after_start")) return { rows: [{ ready: options.poststartReady !== false }], rowCount: 1 };
+    if (sql.startsWith("SELECT zzsh_order.poststart_full_payout_selected"))
+      return {rows:[{selected:options.fullPayoutSelected === undefined ? false : options.fullPayoutSelected}],rowCount:1};
     if (sql.includes("SELECT zzsh_order.cancel_order_after_start")) {
-      const refund=BigInt(values[2]),owner=BigInt(values[3]),paid=BigInt(facts.amount_cents);
+      const refund=BigInt(values[2]),gross=BigInt(values[3]),paid=BigInt(facts.amount_cents);
+      const selected=options.fullPayoutSelected === undefined ? false : options.fullPayoutSelected;
+      const fee=selected?(gross*8n+50n)/100n:0n,owner=gross-fee;
       return {rows:[{value:{caseId:'case_1',orderId:values[0],status:'CANCELLED',paidCents:String(paid),refundCents:String(refund),
-       ownerCents:String(owner),platformContributionCents:String(paid-refund-owner),commissionCents:'0',channelResult:'NOT_SUBMITTED'}}],rowCount:1};
+       ownerCents:String(owner),ownerGrossCents:String(gross),fullPayoutFeeCents:String(fee),fullPayoutSelected:selected,
+       platformContributionCents:String(paid-refund-owner),commissionCents:'0',channelResult:'NOT_SUBMITTED'}}],rowCount:1};
     }
     if (sql.startsWith("SELECT revision::text") && sql.includes("SUPPORT_AFTER_START_CANCELLED"))
       return {rows:[{revision:'2',cancelled_at:'2026-11-10T00:00:00.000000Z'}],rowCount:1};
@@ -115,18 +120,26 @@ const input = { orderId: "order_1", expectedOrderRevision: "1", reason: "客服�
 
 test('客服开租后取消复用锁与原款守卫，按填写金额分配，不直接调用渠道',async t=>{
  const h=fixture(t,{facts:{opening_confirmed:true,pending_settlement:true,pending_adjustment:true}});
- const result=await supportCancelAfterOpening(h.client,actor,{...input,refundCents:'5000',ownerCents:'3000'});
+ const amountBasis='GROSS_BEFORE_FEE_V1' as const;
+ await assert.rejects(supportCancelAfterOpening(h.client,actor,{...input,refundCents:'5000',ownerCents:'3000'}),/OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED/);
+ const result=await supportCancelAfterOpening(h.client,actor,{...input,refundCents:'5000',ownerCents:'3000',ownerAmountBasis:amountBasis});
  assert.equal(result.status,200);assert.equal((result.body as any).poststartCancellation.refundCents,'5000');
  assert.equal((result.body as any).poststartCancellation.platformContributionCents,'7908');
  assert.equal((result.body as any).poststartCancellation.commissionCents,'0');
  assert.equal((result.body as any).channel.result,'NOT_SUBMITTED');
  assert(h.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start')));
  const bad=fixture(t,{facts:{opening_confirmed:true}});
- await assert.rejects(supportCancelAfterOpening(bad.client,actor,{...input,refundCents:'15000',ownerCents:'1000'}),(e:any)=>e.status===409);
+ await assert.rejects(supportCancelAfterOpening(bad.client,actor,{...input,refundCents:'15000',ownerCents:'1000',ownerAmountBasis:amountBasis}),(e:any)=>e.status===409);
  assert.equal(bad.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start')),false);
  const partial=fixture(t,{facts:{opening_confirmed:true},poststartReady:false});
- await assert.rejects(supportCancelAfterOpening(partial.client,actor,{...input,refundCents:'5000',ownerCents:'3000'}),(e:any)=>e.status===503);
+ await assert.rejects(supportCancelAfterOpening(partial.client,actor,{...input,refundCents:'5000',ownerCents:'3000',ownerAmountBasis:amountBasis}),(e:any)=>e.status===503);
  assert.equal(partial.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start')),false);
+ const insured=fixture(t,{facts:{opening_confirmed:true},fullPayoutSelected:true});
+ const withFee=await supportCancelAfterOpening(insured.client,actor,{...input,refundCents:'5000',ownerCents:'2000',ownerAmountBasis:amountBasis});
+ assert.deepEqual([(withFee.body as any).poststartCancellation.ownerGrossCents,(withFee.body as any).poststartCancellation.fullPayoutFeeCents,(withFee.body as any).poststartCancellation.ownerCents],['2000','160','1840']);
+ const unknown=fixture(t,{facts:{opening_confirmed:true},fullPayoutSelected:null});
+ await assert.rejects(supportCancelAfterOpening(unknown.client,actor,{...input,refundCents:'5000',ownerCents:'2000',ownerAmountBasis:amountBasis}),/FULL_PAYOUT_UNKNOWN/);
+ assert.equal(unknown.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start')),false);
 });
 
 test("未开租允许全额原款应退；已开租/结算/草稿/佣金/退款/终止阻断", () => {

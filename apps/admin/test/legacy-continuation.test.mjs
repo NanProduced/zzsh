@@ -152,9 +152,9 @@ test("legacy support cancellation validates allocation and requires an explicit 
  await change('input[id$="-refund"]',"80",w.HTMLInputElement.prototype);await change('input[id$="-owner"]',"30",w.HTMLInputElement.prototype);await change('textarea[id$="-cancel-reason"]',"双方协商取消",w.HTMLTextAreaElement.prototype);
  assert.match(host.textContent,/合计不能超过原实付/);let next=[...host.querySelectorAll("button")].find(x=>x.textContent==="核对并继续");assert(next.disabled);assert.equal(sent,undefined);
  await change('input[id$="-owner"]',"20",w.HTMLInputElement.prototype);next=[...host.querySelectorAll("button")].find(x=>x.textContent==="核对并继续");assert.equal(next.disabled,false);
- await React.act(async()=>{next.click();await tick();});assert.equal(sent,undefined);assert.match(host.querySelector('[role="alertdialog"]').textContent,/退给租客 ¥80\.00.*号主收益 ¥20\.00/);
+ await React.act(async()=>{next.click();await tick();});assert.equal(sent,undefined);assert.match(host.querySelector('[role="alertdialog"]').textContent,/退给租客 ¥80\.00.*号主扣费前收入 ¥20\.00/);
  await React.act(async()=>{[...host.querySelectorAll('[role="alertdialog"] button')].find(x=>x.textContent==="确认取消订单并退款").click();await tick();});
- assert.equal(sent.command,"support_cancel");assert.deepEqual(sent.body,{expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"8000",ownerCents:"2000",reason:"双方协商取消",originalPaymentChecked:true});
+ assert.equal(sent.command,"support_cancel");assert.deepEqual(sent.body,{expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"8000",ownerCents:"2000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1",reason:"双方协商取消",originalPaymentChecked:true});
 });
 test("legacy cancellation recovery retains original actor, amounts and key",async t=>{
  storage(t);let reply={state:"UNKNOWN"};const c=client(async()=>reply),subject=c.legacyAdminSubject("admin_A",orderId);
@@ -165,6 +165,14 @@ test("legacy cancellation recovery retains original actor, amounts and key",asyn
  const fingerprint=Buffer.from(await crypto.subtle.digest("SHA-256",bytes)).toString("hex");
  reply={state:"KNOWN_SUCCESS",status:200,fingerprint,receipt:{orderId,command:"support_cancel",inputEvidenceId:body.inputEvidenceId,versionId:"version_1",resultEvidenceId:"evidence_2",revision:"3",stage:"5",channelState:"UNKNOWN"}};
  assert.equal((await c.recoverLegacyAdminIntent(intent)).state,"KNOWN_SUCCESS");reply.receipt.stage="4";await assert.rejects(c.recoverLegacyAdminIntent(intent),/待核对/);
+});
+test("legacy cancellation with owner gross recovers the server's exact original fingerprint",async t=>{
+ storage(t);let reply={state:"UNKNOWN"};const c=client(async()=>reply),subject=c.legacyAdminSubject("admin_A",orderId);
+ const body={expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"5000",ownerCents:"2000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1",reason:"双方协商取消",originalPaymentChecked:true};
+ const intent=await c.retainLegacyAdminIntent(subject,orderId,"support_cancel",body);
+ reply={state:"KNOWN_SUCCESS",status:200,fingerprint:"f439a702899e5853ae411f79ca9e18d9329ce10753cb330964e7f11d24e4b895",
+  receipt:{orderId,command:"support_cancel",inputEvidenceId:body.inputEvidenceId,versionId:"version_1",resultEvidenceId:"evidence_2",revision:"3",stage:"5",channelState:"UNKNOWN"}};
+ assert.equal((await c.recoverLegacyAdminIntent(intent)).state,"KNOWN_SUCCESS");
 });
 test("legacy refund request recovery remains bound to the original amounts and duty",async t=>{
  storage(t);let reply={state:'UNKNOWN'};const c=client(async()=>reply),subject=c.legacyAdminSubject('staff',orderId);

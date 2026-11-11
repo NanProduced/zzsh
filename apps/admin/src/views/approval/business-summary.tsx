@@ -163,6 +163,8 @@ function SettlementSummary({ summary }: { summary: Record<string, unknown> }) {
 /** 系统计算值 → 拟调整值。拟调整租客应退是应退责任，不是渠道已到账。 */
 function SettlementCompare({ summary }: { summary: Record<string, unknown> }) {
   const rows = [
+    ["号主扣费前收入", "systemOwnerGross", "proposedOwnerGross"],
+    ["全额包赔费", "systemPayoutFee", "proposedPayoutFee"],
     ["号主净入账", "systemOwnerNet", "proposedOwnerNet"],
     ["租客应退", "systemRenterRefund", "proposedRenterRefund"],
   ] as const;

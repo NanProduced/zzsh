@@ -91,7 +91,7 @@ test("领域提交后commit响应未知返回202原键恢复，不伪造成取�
 });
 
 test("开租后取消绑定当前管理员并冻结双方金额，身份漂移不得执行",async t=>{
- const f=fixture(t),input={expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"support_1"};
+ const f=fixture(t),input={expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1",expectedAdminId:"support_1"};
  await assert.rejects(handleSupportCancelAdminRoute(f.request("POST","order_1",{...input,expectedAdminId:"other"}),f.response,f.options,"order_1",new URLSearchParams(),"POST"),(e:any)=>e.status===401);
  assert.equal(f.seen.some(v=>v.startsWith("scope:")),false);
  t.mock.method(domain,"supportCancelAfterOpening",async(_c:any,actor:any,payload:any)=>{
@@ -101,4 +101,12 @@ test("开租后取消绑定当前管理员并冻结双方金额，身份漂移�
  await handleSupportCancelAdminRoute(f.request("POST","order_1",input),f.response,f.options,"order_1",new URLSearchParams(),"POST");
  assert(f.seen.includes("scope:"+JSON.stringify({principalId:"support_1",operation:"order.support_cancel_after_opening",resourceId:"order_1"})));
  assert(f.seen.some(v=>v.includes('"expectedAdminId":"support_1"')));
+});
+
+test("旧金额口径的新请求在原键下记录确定拒绝，不执行取消",async t=>{
+ const f=fixture(t);let called=false;
+ t.mock.method(domain,"supportCancelAfterOpening",async()=>{called=true;throw Error("must not execute");});
+ const old={expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"support_1"};
+ await handleSupportCancelAdminRoute(f.request("POST","order_1",old),f.response,f.options,"order_1",new URLSearchParams(),"POST");
+ assert.equal(f.status(),409);assert.deepEqual(f.body().reasons,["OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"]);assert.equal(called,false);
 });

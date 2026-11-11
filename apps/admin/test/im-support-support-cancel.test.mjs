@@ -273,10 +273,10 @@ test("结果未确认保留同一幂等键，重试不会换键或伪造成功",
 test("开租后客服取消先核对再确认，未知结果跨页面恢复同一金额和原键",async t=>{
  Object.defineProperty(browser.navigator,"locks",{configurable:true,value:{request:async(_name,_options,run)=>run({})}});
  const requests=[];
- const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true}};
+ const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true,fullPayoutSelected:true}};
  const accepted={...initial,orderRevision:"2",orderStatus:"CANCELLED",cancelReason:"SUPPORT_AFTER_START_CANCELLED",
   eligibility:{allowed:false,reason:"ALREADY_CANCELLED",refundCents:"5000",openingConfirmed:true},
-  poststartCancellation:{caseId:"sc_1",refundCents:"5000",ownerCents:"3000",platformContributionCents:"2000",commissionCents:"0",reason:"双方协商取消"},
+  poststartCancellation:{caseId:"sc_1",refundCents:"5000",ownerCents:"2760",ownerGrossCents:"3000",fullPayoutFeeCents:"240",fullPayoutSelected:true,platformContributionCents:"2240",commissionCents:"0",reason:"双方协商取消"},
   channel:{result:"NOT_SUBMITTED",bankArrival:"UNKNOWN"}};
  globalThis.fetch=async(input,init={})=>{
   if((init.method??"GET")==="GET")return response(initial);
@@ -294,7 +294,7 @@ test("开租后客服取消先核对再确认，未知结果跨页面恢复同�
  await input("退还租客金额","50");await input("号主收益金额","30");await input("取消原因","双方协商取消");
  await click(button(document.body,"核对并取消"));
  assert.equal(requests.length,0,"opening confirmation never submits");
- assert.match(document.body.textContent,/平台贡献 ¥20\.00/);
+ assert.match(document.body.textContent,/包赔费 ¥2\.40/);assert.match(document.body.textContent,/号主入账 ¥27\.60/);
  await click(button(document.body,"确认取消并退款"));
  await waitFor(()=>document.body.textContent.includes("取消结果未确认"));
  assert.equal(requests.length,1);
@@ -305,6 +305,34 @@ test("开租后客服取消先核对再确认，未知结果跨页面恢复同�
  await click(button(document.body,"核对原请求"));await click(button(document.body,"按原请求核对"));
  await waitFor(()=>second.host.textContent.includes("订单已取消"));
  assert.deepEqual(requests[1],requests[0]);
- assert.deepEqual(requests[0].body,{expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"admin-A"});
+ assert.deepEqual(requests[0].body,{expectedOrderRevision:"1",reason:"双方协商取消",refundCents:"5000",ownerCents:"3000",expectedAdminId:"admin-A",ownerAmountBasis:"GROSS_BEFORE_FEE_V1"});
  assert.equal(browser.localStorage.getItem("zzsh.support.poststart-cancel.admin-A.order-A"),null);
+});
+
+test("旧取消请求只有收到原键确定未执行的回执后才允许重新填写",async t=>{
+ Object.defineProperty(browser.navigator,"locks",{configurable:true,value:{request:async(_name,_options,run)=>run({})}});
+ const key="zzsh.support.poststart-cancel.admin-A.order-A";
+ browser.localStorage.setItem(key,JSON.stringify({subject:"admin-A",orderId:"order-A",key:"support_cancel_old",revision:"1",
+  paidCents:"10000",refundCents:"5000",ownerCents:"3000",reason:"双方协商取消"}));
+ globalThis.fetch=async()=>response({error:{code:"CONFLICT"},reasons:["OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"]},409);
+ const mounted=mount();t.after(async()=>{await act(async()=>mounted.root.unmount());mounted.host.remove();});
+ await act(async()=>mounted.root.render(createElement(SupportPoststartCancelCard,{orderId:"order-A",displayNo:"ZZ-TEST-0001",viewerId:"admin-A"})));
+ await waitFor(()=>button(mounted.host,"核对原取消请求"));await click(button(mounted.host,"核对原取消请求"));
+ await click(button(document.body,"核对原请求"));await click(button(document.body,"按原请求核对"));
+ await waitFor(()=>document.body.textContent.includes("原请求已确认未执行"));
+ assert.equal(browser.localStorage.getItem(key),null);
+});
+
+test("包赔选择未知时禁止正额号主分配，仍允许全额退款",async t=>{
+ Object.defineProperty(browser.navigator,"locks",{configurable:true,value:{request:async(_name,_options,run)=>run({})}});
+ const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true,fullPayoutSelected:null}};
+ globalThis.fetch=async()=>response(initial);
+ const mounted=mount();t.after(async()=>{await act(async()=>mounted.root.unmount());mounted.host.remove();});
+ await act(async()=>mounted.root.render(createElement(SupportPoststartCancelCard,{orderId:"order-A",displayNo:"ZZ-TEST-0001",viewerId:"admin-A"})));
+ await waitFor(()=>button(mounted.host,"取消订单并退款"));await click(button(mounted.host,"取消订单并退款"));
+ const input=async(label,value)=>{const node=document.body.querySelector(`[aria-label="${label}"]`);const setter=Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,"value").set;setter.call(node,value);await act(async()=>node.dispatchEvent(new browser.Event("input",{bubbles:true})));await settle();};
+ await input("退还租客金额","99");await input("号主收益金额","1");await input("取消原因","双方协商取消");
+ assert.match(document.body.textContent,/包赔选择尚未核实/);assert.equal(button(document.body,"核对并取消").disabled,true);
+ await input("退还租客金额","100");await input("号主收益金额","0");
+ assert.equal(button(document.body,"核对并取消").disabled,false);
 });

@@ -36,7 +36,7 @@ export type LegacyContinuationEvidence = {
 type Caller = { role: "renter" | "owner" | "admin" | "other"; legacyUserId: string; onBehalf?: "renter" | "owner" };
 export type LegacyCommand =
   | { kind: "preview" | "propose"; caller: Caller; quantities: LegacyQuantities; endReason?: LegacyEndReason; settlementBasis?: LegacySettlementBasis }
-  | { kind: "support_cancel"; caller: Caller; refundCents: string; ownerCents: string }
+  | { kind: "support_cancel"; caller: Caller; refundCents: string; ownerCents: string; ownerAmountBasis?: "GROSS_BEFORE_FEE_V1" }
   | { kind: "confirm" | "reject" | "hold" | "release" | "confiscate"; caller: Caller };
 export type CalcRefusal = { ok: false; code: string; amounts: Record<string, string | null> };
 export const LEGACY_REJECT_ASSIGNMENTS = {
@@ -256,9 +256,6 @@ export function planVerifiedLegacySettlement(evidence: LegacyContinuationEvidenc
       if (qtyOf(name, command.quantities)) {
         if (!source.orderPrices[name] || !gt(dec(source.orderPrices[name]!, name), zero()) || basis.ownerPrices[name] == null) return refuse("EVIDENCE_ISOLATED");
       }
-      if (early && basis.fullPayout && endReason === "TENANT_VOLUNTARY_EARLY") {
-        if (basis.openingItems[name] == null || qtyOf(name, basis.openingItems) && basis.ownerPrices[name] == null) return refuse("OPENING_ITEMS_UNVERIFIED");
-      }
     }
     const toCents = (value: Decimal) => divideToScale(value, {value: 1n, scale: 0}, 2).value;
     const current = splits(used, base, profit);
@@ -267,13 +264,8 @@ export function planVerifiedLegacySettlement(evidence: LegacyContinuationEvidenc
     const ownerGross = toCents(addDecimal(current.wide, ownerItems));
     const buyerHaff = toCents(current.narrow);
     const makeup = early && endReason === "TENANT_VOLUNTARY_EARLY" ? earlyMakeupCents(spreadCents, q, Q) : 0n;
-    let ownerFee = 0n, renterFee = 0n;
-    if (basis.fullPayout) {
-      if (early && endReason === "TENANT_VOLUNTARY_EARLY") {
-        const fullItems = toCents(expend(basis.openingItems, basis.ownerPrices, "account", source.policy));
-        renterFee = fullPayoutServiceFeeCents(toCents(ownerFullHaff) + fullItems);
-      } else ownerFee = fullPayoutServiceFeeCents(ownerGross);
-    }
+    const ownerFee = basis.fullPayout ? fullPayoutServiceFeeCents(ownerGross) : 0n;
+    const renterFee = 0n;
     const refund = paid - buyerHaff - buyerItems - makeup - renterFee, ownerNet = ownerGross - ownerFee;
     if (refund < 0n) return refuse("DEPOSIT_SHORT");
     if (ownerNet < 0n) return refuse("OWNER_NET_NEGATIVE");
@@ -317,6 +309,13 @@ export function planLegacyContinuation(evidence: LegacyContinuationEvidence, com
     const refund=BigInt(command.refundCents),owner=BigInt(command.ownerCents);
     if(paid<=0n||refund+owner>paid)return refuse("CANCEL_AMOUNT_INVALID");
     const yuan=(value:bigint)=>formatScaledInteger(value,2);
+    if(command.ownerAmountBasis==="GROSS_BEFORE_FEE_V1") {
+      if(owner>0n && !["0","1"].includes(source.isFullPayout??""))return refuse("FULL_PAYOUT_UNKNOWN");
+      const fee=source.isFullPayout==="1" ? fullPayoutServiceFeeCents(owner) : 0n;
+      return finish(evidence,command,{kind:command.kind,nextStatus:"5",isSettle:"0",isAdvanceSet:null,
+        amounts:{payMoney:yuan(paid),saleEarnings:yuan(owner),ownerNet:yuan(owner-fee),returnOrderMoney:yuan(refund),refundNet:yuan(refund),
+          detainMoney:"0.00",fullPayoutMoney:yuan(fee),platformContribution:yuan(paid-refund-owner+fee),commissionPool:"0.00",ownerGross:yuan(owner)},commissionRevisions:[]});
+    }
     return finish(evidence,command,{kind:command.kind,nextStatus:"5",isSettle:"0",isAdvanceSet:null,
       amounts:{payMoney:yuan(paid),saleEarnings:yuan(owner),ownerNet:yuan(owner),returnOrderMoney:yuan(refund),refundNet:yuan(refund),
         detainMoney:"0.00",fullPayoutMoney:"0.00",platformContribution:yuan(paid-refund-owner),commissionPool:"0.00"},commissionRevisions:[]});

@@ -50,6 +50,8 @@ type PersistedIntent = { subject: string; intent: FulfillmentIntent; accepted?: 
 const ACCEPTED_STORAGE_WARNING = "操作已受理，但本地无法保存恢复状态；不会重复提交。请勿刷新或离开页面，先查看当前状态或联系维护处理。";
 const SETTLEMENT_REASON_LABELS:Record<string,string>={
   DISCOUNT_OWNER_FUNDING_INSUFFICIENT:"折后实际消耗不足以覆盖号主应得，暂不能结算；请联系双方线下协调并记录处理情况。",
+  SETTLEMENT_FEE_RECONFIRM_REQUIRED:"包赔费计算规则已更正，请重新生成方案并由双方确认。",
+  OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED:"金额口径已更新，请刷新并重新填写号主扣费前收入。",
   INSUFFICIENT_PREPAYMENT:"本单实付不足以覆盖结算费用，请核对数量并与双方沟通。",
   SETTLEMENT_PRICING_INVALID:"本单冻结价格资料无法核实，请联系维护人员。",
   ORDER_PARTY_UNAVAILABLE:"订单一方账号当前不可用，请核实身份和资金状态后处理。",
@@ -80,6 +82,7 @@ const REMINDER_REASON_TEXT:Record<string,string>={
   INTAKE_PENDING:"本单已有结算申请待客服处理，暂不需要提醒双方。",
   PARTIES_CONFIRMED:"双方已完成当前阶段的确认，暂不需要提醒。",
   DECISION_REJECTED:"结算方案已被一方拒绝，请先协调或重新发起，不再提醒另一方确认原方案。",
+  SETTLEMENT_FEE_RECONFIRM_REQUIRED:"原方案的包赔费计算口径需要更正，请先重新生成方案。",
   STAGE_CHANGED:"原提醒对应的阶段已变化，已结束旧请求；请按当前订单状态重新发起提醒。",
   SETTLEMENT_POSTED:"本单结算已生效，不再发送阶段提醒。",
   TEAM_NOT_READY:"订单群尚未就绪，暂不能发送提醒；订单页不受影响。",
@@ -197,7 +200,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const [lines, setLines] = useState<LineDraft[]>([]);
   const [endReason, setEndReason] = useState<"" | EarlyEndReason>("");
   const [reason, setReason] = useState("");
-  const [ownerNet, setOwnerNet] = useState("");
+  const [ownerGross, setOwnerGross] = useState("");
   const [renterRefund, setRenterRefund] = useState("");
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [intent, setIntent] = useState<FulfillmentIntent | null>(null);
@@ -420,9 +423,16 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       setNotice(target.kind === "preview" ? "" : success[target.kind] ?? "操作已受理。");
       if (target.kind === "preview") {
         const body = outcome.body;
-        const amounts = (body.amounts ?? body.settlement?.computation?.amounts ?? null) as Record<string, unknown> | null;
+        const systemAmounts = (body.amounts ?? body.settlement?.computation?.amounts ?? null) as Record<string, unknown> | null;
         const versionHash = typeof body.versionHash === "string" ? body.versionHash : body.settlement?.versionHash ?? null;
-        const armed = target.body.proposedOwnerNet !== undefined || target.body.proposedRenterRefund !== undefined;
+        const armed = target.body.proposedOwnerGross !== undefined || target.body.proposedOwnerNet !== undefined || target.body.proposedRenterRefund !== undefined;
+        const numbers=[body.proposedOwnerGross,body.proposedFullPayoutFee,body.proposedOwnerNet,body.proposedRenterRefund];
+        if(armed && (!numbers.every(value=>typeof value==="string" && /^(0|[1-9]\d*)\.\d{2}$/.test(value))
+          || BigInt((numbers[0] as string).replace(".",""))-BigInt((numbers[1] as string).replace(".",""))!==BigInt((numbers[2] as string).replace(".","")))) {
+          if(!clearIntent()){setBusy(false);return;}
+          setPreview(null);setError("调整预览金额不完整，请重新读取后核对。");setBusy(false);return;
+        }
+        const amounts = armed ? {ownerGross:body.proposedOwnerGross,feeAmount:body.proposedFullPayoutFee,ownerNet:body.proposedOwnerNet,renterRefund:body.proposedRenterRefund} : systemAmounts;
         if (!clearIntent()) { setBusy(false); return; }
         setPreview({ amounts, versionHash, early: typeof body.early === "boolean" ? body.early : body.settlement?.early ?? null, adjustArmed: armed });
         setNotice(armed ? "已生成人工调整预览；确认后提交调整申请。" : "结算方案已生成，请核对金额后提交。");
@@ -540,6 +550,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
   const legacyOpeningEntry = view?.openingGeneration == null && !openingRecoveryRequired;
   const current = view?.settlement ?? null;
   const posting = view?.posting ?? null;
+  const feeReconfirmationRequired = !posting && view?.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED") === true;
   const partyConfirmed = Boolean(current?.decisions?.some((d) => d.party === "RENTER" && d.action === "CONFIRM")
     && current?.decisions?.some((d) => d.party === "OWNER" && d.action === "CONFIRM"));
   const supportReviewed = Boolean(current?.decisions?.some((d) => d.party === "SUPPORT" && d.action === "REVIEW"));
@@ -549,13 +560,14 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     if (!openingConfirmed && latestOpening) return { key: "opening-pending", label: "等待双方确认开租" } as const;
     if (!openingConfirmed) return { key: "needs-opening", label: openingReview ? "开租资料待客服核对" : legacyOpeningEntry ? "待发起开租确认" : "待系统生成开租清单" } as const;
     if (view?.currentRequest?.kind === "INTAKE") return { key: "intake-pending", label: "有结算申请待处理" } as const;
+    if (feeReconfirmationRequired) return { key: "needs-settlement", label: "结算方案待重新核对" } as const;
     if (!current) return { key: "needs-settlement", label: "履约中 · 待结算" } as const;
     if (current.decisions?.some(d=>d.action==="REJECT"&&d.versionHash===current.versionHash)) return {key:"decision-rejected",label:"结算方案有争议"} as const;
     if (current.early && !partyConfirmed) return { key: "awaiting-decision", label: "等待双方确认结算" } as const;
     if (current.early && partyConfirmed && !supportReviewed) return { key: "needs-review", label: "待客服复核" } as const;
     if (current.early) return { key: "reviewed", label: "已复核" } as const;
     return { key: "normal-version", label: "正常结算版本" } as const;
-  }, [posting, openingConfirmed, latestOpening, openingReview, legacyOpeningEntry, view?.currentRequest?.kind, current, partyConfirmed, supportReviewed]);
+  }, [posting, openingConfirmed, latestOpening, openingReview, legacyOpeningEntry, view?.currentRequest?.kind, feeReconfirmationRequired, current, partyConfirmed, supportReviewed]);
 
   const task = useMemo(() => {
     switch (stage.key) {
@@ -673,15 +685,15 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     void beginIntent({ kind: "preview", lines: linesForRemaining(), ...(endReason?{endReason}:{}) });
   };
   const previewAdjustment = () => {
-    if (ownerNet.trim() === "" || renterRefund.trim() === "" || reason.trim().length < 3) {
-      setError("人工调整需要填写号主拟净额、租客拟退款和不少于3字的原因。");
+    if (ownerGross.trim() === "" || renterRefund.trim() === "" || reason.trim().length < 3) {
+      setError("人工调整需要填写号主扣费前收入、租客拟退款和不少于3字的原因。");
       return;
     }
     void beginIntent({
       kind: "preview",
       lines: linesForRemaining(),
       ...(endReason === "" ? {} : { endReason }),
-      proposedOwnerNet: ownerNet.trim(),
+      proposedOwnerGross: ownerGross.trim(),
       proposedRenterRefund: renterRefund.trim(),
       reason: reason.trim(),
     });
@@ -703,12 +715,12 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
     void beginIntent({kind:"confirm-opening",openingId:openingTarget.id,versionNo:openingTarget.versionNo,party:openingTarget.party,reason:openingReason.trim()});
   };
   const adjust = () => {
-    if (!preview?.versionHash || ownerNet.trim() === "" || renterRefund.trim() === "" || reason.trim().length < 3) return;
+    if (!preview?.versionHash || ownerGross.trim() === "" || renterRefund.trim() === "" || reason.trim().length < 3) return;
     void beginIntent({
       kind: "adjust",
       lines: linesForRemaining(),
       ...(endReason === "" ? {} : { endReason }),
-      proposedOwnerNet: ownerNet.trim(),
+      proposedOwnerGross: ownerGross.trim(),
       proposedRenterRefund: renterRefund.trim(),
       reason: reason.trim(),
       acceptedHash: preview.versionHash,
@@ -737,7 +749,13 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         return <label key={line.itemId ?? "line"}><span>{facts.name ?? "物资"}{facts.unit ? ` · ${facts.unit==="HAFF_BASE"?"M":UNIT_LABELS[facts.unit] ?? facts.unit}` : ""}{line.consumedQuantity===undefined?" · 期末剩余":" · 实际消耗"}</span><output>{quantity===undefined?"—":quantityForDisplay(quantity,facts.unit)}</output></label>;
       })}
     </div> : null}
-    {amountRows(currentAmounts).length > 0 ? <dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl> : <small>暂无金额明细。</small>}
+    {amountRows(currentAmounts).length > 0 ? <>{current.kind==="MANUAL_ADJUSTMENT"?<small>系统原算（调整前）</small>:null}<dl>{amountRows(currentAmounts).map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl></> : <small>暂无金额明细。</small>}
+    {current.kind==="MANUAL_ADJUSTMENT" ? <><strong>拟调整方案</strong><dl>
+      {current.inputSnapshot?.proposedOwnerGross != null?<div><dt>号主扣费前收入</dt><dd>{amountText(current.inputSnapshot.proposedOwnerGross,true)??"—"}</dd></div>:null}
+      {current.inputSnapshot?.proposedFullPayoutFee != null?<div><dt>包赔费</dt><dd>{amountText(current.inputSnapshot.proposedFullPayoutFee,true)??"—"}</dd></div>:null}
+      <div><dt>号主拟净额</dt><dd>{current.proposedOwnerNet == null?"—":formatFundingCents(current.proposedOwnerNet)}</dd></div>
+      <div><dt>租客拟应退</dt><dd>{current.proposedRenterRefund == null?"—":formatFundingCents(current.proposedRenterRefund)}</dd></div>
+    </dl></>:null}
     {currentAmounts?.unusedItemRefund || currentAmounts?.unusedHaffRefund ? <small>未消耗预付款按下单时分配计算；实际应退会重新计算会员折扣和费用。</small> : null}
   </div> : null;
 
@@ -919,6 +937,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
 
       {stage.key === "needs-settlement" || stage.key === "intake-pending" ? <div className="im-support-fulfillment-stage-panel">
         <strong>履约中 · 结算</strong>
+        {feeReconfirmationRequired ? <Alert variant="warning"><AlertTitle>原方案需要重新生成</AlertTitle><AlertDescription>包赔费按号主实际收入计算并由号主承担。请重新核对消耗并生成方案，再由双方确认。</AlertDescription></Alert> : null}
         <small>核对数量并预览结算方案；提前结束需要选择原因。</small>
         {view?.consumptionMode==="ACTUAL"?<small>核对实际消耗；期初未申报的物资默认 0。</small>:null}
         {view?.consumptionMode==="UNAVAILABLE"?<Alert variant="destructive"><AlertTitle>结算价格资料暂不可用</AlertTitle><AlertDescription>请先核实本单的冻结价格。</AlertDescription></Alert>:null}
@@ -979,7 +998,7 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         {posting ? <p className="im-support-fulfillment-empty">已过账；退款到期 {posting.refundDueAt ?? "按规则"}。应退不代表渠道退款已到账。</p> : null}
       </div> : null}
 
-      {canManualClose&&current?.kind==="SYSTEM"&&current.id&&current.versionHash&&!posting&&view?.currentRequest?.kind!=="INTAKE"?<div className="im-support-fulfillment-stage-panel">
+      {canManualClose&&current?.kind==="SYSTEM"&&current.id&&current.versionHash&&!posting&&!feeReconfirmationRequired&&view?.currentRequest?.kind!=="INTAKE"?<div className="im-support-fulfillment-stage-panel">
         <strong>客服处理</strong><small>核实双方情况后，可按当前方案直接结算并记录原因。</small>
         {!finalizationAmountsReady?<Alert variant="warning"><AlertTitle>结算信息尚未完整读取</AlertTitle><AlertDescription>请刷新并核对结算方式、提前结束费用、号主净额与租客应退后再处理。</AlertDescription></Alert>:null}
         <Button type="button" variant="outline" disabled={primaryDisabled||!finalizationAmountsReady} onClick={()=>{
@@ -1006,14 +1025,20 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
       </div> : null}
 
       {postingRows.length > 0 ? <div className="im-support-fulfillment-preview" aria-label="已生效金额">
-        <strong>已生效金额</strong>
+        <strong>{posting?.manualAdjustment?"系统原算（调整前）":"已生效金额"}</strong>
         <dl>{postingRows.map((row) => <div key={row.key}><dt>{row.label}</dt><dd>{row.text}</dd></div>)}</dl>
+        {posting?.manualAdjustment?<><strong>调整后生效金额</strong><dl>
+          {posting.manualAdjustment.proposedOwnerGross != null?<div><dt>号主扣费前收入</dt><dd>{amountText(posting.manualAdjustment.proposedOwnerGross,true)??"—"}</dd></div>:null}
+          {posting.manualAdjustment.proposedFullPayoutFee != null?<div><dt>包赔费</dt><dd>{amountText(posting.manualAdjustment.proposedFullPayoutFee,true)??"—"}</dd></div>:null}
+          <div><dt>号主净入账</dt><dd>{posting.owner?.availableCents == null?"—":formatFundingCents(posting.owner.availableCents)}</dd></div>
+          <div><dt>租客应退</dt><dd>{posting.refund?.payableCents == null?"—":formatFundingCents(posting.refund.payableCents)}</dd></div>
+        </dl></>:null}
       </div> : null}
 
       {canManualClose&&openingConfirmed&&!posting?<div className="im-support-fulfillment-adjust">
         <Button type="button" variant="ghost" className="im-support-quiet-action" aria-expanded={adjustOpen} onClick={() => setAdjustOpen((value) => !value)}>人工调整（例外）</Button>
-        {adjustOpen ? <><p className="text-sm text-muted-foreground">双方对系统方案有争议时，填写协商后的拟结算金额；提交后仍须按现有流程审批与确认。</p><div className="im-support-fulfillment-controls">
-          <label>拟结给号主<Input value={ownerNet} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerNet(event.target.value); }} placeholder="元，如 123.45" /></label>
+        {adjustOpen ? <><p className="text-sm text-muted-foreground">双方对系统方案有争议时，填写协商后的号主扣费前收入和租客应退；选择全额包赔时，号主收入扣除 8%。提交后仍须按现有流程审批与确认。</p><div className="im-support-fulfillment-controls">
+          <label>号主扣费前收入<Input value={ownerGross} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setOwnerGross(event.target.value); }} placeholder="元，如 123.45" /></label>
           <label>拟退给租客<Input value={renterRefund} inputMode="decimal" disabled={locked} onChange={(event) => { invalidate(); setRenterRefund(event.target.value); }} placeholder="元，如 12.00" /></label>
           <label>原因说明<Input value={reason} maxLength={500} disabled={locked} onChange={(event) => { invalidate(); setReason(event.target.value); }} placeholder="不少于3字" /></label>
         </div></> : null}

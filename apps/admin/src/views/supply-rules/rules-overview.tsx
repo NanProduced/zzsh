@@ -527,15 +527,15 @@ export function SettlementRules() {
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="section-panel">
       <CollapsibleTrigger render={<Button type="button" variant="ghost" className="h-auto w-full justify-start px-0 py-2 text-left whitespace-normal" />}>
-        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">结算与包赔规则说明</span><span className="text-xs text-muted-foreground">平台统一结算标准，本页不可修改 · 全额包赔服务费 8% · 租客提前结束按实际消耗比例补差</span></span>
+        {open ? <ChevronDownIcon className="size-4 shrink-0" /> : <ChevronRightIcon className="size-4 shrink-0" />}<span className="grid min-w-0 gap-1 sm:flex sm:items-center sm:gap-2"><span className="shrink-0 text-base font-semibold">包赔服务费与提前结束补差</span><span className="text-xs text-muted-foreground">两项费用分别计算 · 平台统一规则，本页不可修改</span></span>
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="mt-4 grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="min-w-0">
             <div className="mb-2 flex items-center gap-1.5">
-              <h4 className="text-xs font-semibold text-foreground">全额包赔服务费（8%）· 承担方矩阵</h4>
+              <h4 className="text-xs font-semibold text-foreground">全额包赔服务费（8%）</h4>
               <HelpTip label="服务费承担说明">
-                全额包赔服务费由平台独立收取并记账，按此履约矩阵划分号主或租客承担，不与常规物资及哈夫币价差合并。
+                选择全额包赔后，服务费由号主承担。提前结束补差是另一项费用，分别计算。
               </HelpTip>
             </div>
             <ScrollTable label="包赔承担方">
@@ -549,18 +549,8 @@ export function SettlementRules() {
                 </TableHeader>
                 <TableBody>
                   <TableRow>
-                    <TableCell className="font-medium">正常履约结束</TableCell>
-                    <TableCell className="text-muted-foreground">号主按实际消耗结算金额</TableCell>
-                    <TableCell className="text-right font-medium text-foreground">号主承担</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">租客主动提前结束</TableCell>
-                    <TableCell className="text-muted-foreground">号主开租时全额申报金额</TableCell>
-                    <TableCell className="text-right font-medium text-foreground">租客承担</TableCell>
-                  </TableRow>
-                  <TableRow>
-                    <TableCell className="font-medium">号主或账号异常提前结束</TableCell>
-                    <TableCell className="text-muted-foreground">号主按实际消耗结算金额</TableCell>
+                    <TableCell className="font-medium">正常结束 / 提前结束</TableCell>
+                    <TableCell className="text-muted-foreground">号主按实际消耗计算的扣费前收入</TableCell>
                     <TableCell className="text-right font-medium text-foreground">号主承担</TableCell>
                   </TableRow>
                   <TableRow>

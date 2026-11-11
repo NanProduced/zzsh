@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../im/identity-lifecycle";
 import { assertSupportOrderAccess, type ManualCloseActor } from "./manual-close";
+import { settlementFeeReconfirmationRequired } from "./settlement";
 
 export type ReminderParty = "RENTER" | "OWNER";
 export type ReminderStage = "OPENING_PENDING" | "SETTLEMENT_DECISION" | "IN_RENTAL";
@@ -14,6 +15,7 @@ export type ReminderReason =
   | "INTAKE_PENDING"
   | "PARTIES_CONFIRMED"
   | "DECISION_REJECTED"
+  | "SETTLEMENT_FEE_RECONFIRM_REQUIRED"
   | "SETTLEMENT_POSTED";
 
 export type ReminderPlan =
@@ -102,10 +104,11 @@ export async function planOrderProgressReminder(client: Pick<PoolClient, "query"
     [orderId],
   )).rows[0];
   if (intake) return { kind: "NO_ACTION", reason: "INTAKE_PENDING" };
-  const current = (await client.query<{ id: string }>(
-    `SELECT id FROM zzsh_order.settlement_version WHERE order_id = $1 AND superseded_at IS NULL`, [orderId],
+  const current = (await client.query<{ id: string; inputSnapshot: unknown }>(
+    `SELECT id, input_snapshot AS "inputSnapshot" FROM zzsh_order.settlement_version WHERE order_id = $1 AND superseded_at IS NULL`, [orderId],
   )).rows[0];
   if (current) {
+    if (settlementFeeReconfirmationRequired(current.inputSnapshot)) return { kind: "NO_ACTION", reason: "SETTLEMENT_FEE_RECONFIRM_REQUIRED" };
     const decisions = (await client.query<{ party: string; action: string }>(
       `SELECT party, action FROM zzsh_order.settlement_decision
         WHERE settlement_version_id = $1 AND party IN ('RENTER','OWNER') AND action IN ('CONFIRM','REJECT')`,

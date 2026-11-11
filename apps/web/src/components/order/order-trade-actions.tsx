@@ -79,6 +79,7 @@ export type OrderStageFacts = {
   /** Opening generation outcome; null when the read omits the field. */
   openingGenerationState: "CREATED" | "REVIEW_REQUIRED" | null;
   openingGenerationRecoveryRequired: boolean;
+  feeReconfirmationRequired?: boolean;
   /** This party's final settlement figure, straight from the posting's final column. `null` until posted. */
   settled: { label: string; text: string } | null;
 };
@@ -1014,7 +1015,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
   </div>;
 }
 
-function DecisionPanel({ version, party, order, onChanged, readOnly = false }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void; readOnly?: boolean }) {
+function DecisionPanel({ version, party, order, onChanged, readOnly = false, feeReconfirmationRequired = false }: { version: SettlementVersion; party: OrderParty; order: Order; onChanged: () => void; readOnly?: boolean; feeReconfirmationRequired?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState<"CONFIRM" | "REJECT" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1119,14 +1120,14 @@ function DecisionPanel({ version, party, order, onChanged, readOnly = false }: {
   const subject = party === "owner" ? "净额" : "应退";
   return <div className="order-trade-block">
     <div className="order-trade-heading"><h3>结算确认</h3><span className="order-trade-tag">第{version.versionNo}版</span><span className="order-trade-tag is-accent">{version.early ? "提前结算" : version.kind === "MANUAL_ADJUSTMENT" ? "人工调整" : "正常结算"}</span></div>
-    <p className="order-muted">金额取自已确认的期初与本次期末数据，按冻结单价计算；双方同一版本确认后生效。拒绝与确认是不同的结果，拒绝不会生效这一版。</p>
+    {feeReconfirmationRequired ? <p className="order-inline-notice" role="status">原方案的包赔费计算口径需要更正，暂不能生效。请联系客服重新生成方案；双方需确认新方案。</p> : <p className="order-muted">金额取自已确认的期初与本次期末数据，按冻结单价计算；双方同一版本确认后生效。拒绝与确认是不同的结果，拒绝不会生效这一版。</p>}
     {adjusted ? <div className="order-notice is-warning" role="status"><AlertCircle size={17} aria-hidden="true" /><div><strong>这一版含人工调整</strong><span>确认后会按「本次将确认的{subject}」生效，而不是系统计算值；请先核对两组金额与调整说明。</span></div></div> : null}
     <AmountTable rows={amounts} caption={adjusted ? `系统计算与拟调整金额（${party === "renter" ? "租客口径" : "号主口径"}）` : `本版结算金额明细（${party === "renter" ? "租客口径" : "号主口径"}，服务端计算）`} />
     {adjusted ? <p className="order-muted">调整说明：{version.inputSnapshot?.reason ?? version.inputSnapshot?.endReason ?? "服务端未返回说明"}</p> : null}
     {unknown ? <UnknownNotice label="结算决定结果未知" message={unknown} onQuery={() => void query()} onOpenOrder={onChanged} /> : null}
     {error ? <p className="order-inline-notice" role="alert">{error}</p> : null}
-    {version.early && order.earlySettlementDisclosure && !decided && !locked ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
-    {decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {formatOrderTime(decided.createdAt)}</p> :
+    {version.early && order.earlySettlementDisclosure && !decided && !locked && !feeReconfirmationRequired ? <><p>{order.earlySettlementDisclosure.body}</p><label className="order-trade-consent"><input type="checkbox" checked={termsAccepted} disabled={busy !== null} onChange={(event) => setTermsAccepted(event.target.checked)} /><span>我已核对并接受本次提前结束的费用与退款安排</span></label></> : null}
+    {feeReconfirmationRequired ? <p className="order-muted">原版本仅供核对；如有结果未知的申请，请用上方「查询原请求」核对。</p> : decided ? <p className="order-muted">{decided.action === "CONFIRM" ? "你已确认这一版结算" : "你已拒绝这一版结算"} · {formatOrderTime(decided.createdAt)}</p> :
       readOnly ? <p className="order-muted">订单主状态已完成，本页不再提供新的确认或拒绝操作；如有一笔结果未知的申请，请用上方「查询原请求」按原键核对。</p> :
       locked ? null :
       <div className="order-trade-actions">
@@ -1188,6 +1189,7 @@ function stageFacts(data: OrderSettlement, opening: SettlementOpening | null, pa
     autoConfirmDueAt: opening?.autoConfirmDueAt ?? null,
     openingGenerationState: data.openingGeneration?.state ?? null,
     openingGenerationRecoveryRequired: data.openingGenerationRecoveryRequired === true,
+    feeReconfirmationRequired: data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED") === true,
     early: posting?.early === true,
     postedAt: posting?.postedAt ?? null,
     openingVersionNo: opening?.versionNo ?? null,
@@ -1325,6 +1327,7 @@ function SettlementAction({ order, party, onChanged, onStageFacts }: { order: Or
       : <OpeningPanel opening={opening} order={order} party={party} onChanged={refresh} readOnly={terminal} />}
     {opening && data.rentalStarted ? <>
       {posting ? <PostingResult data={data} order={order} party={party} posting={posting} /> :
+        current && data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED") ? <DecisionPanel version={current} party={party} order={order} onChanged={refresh} readOnly feeReconfirmationRequired /> :
         openIntake ? <div className="order-trade-block"><h3>结束申请待客服处理</h3><p className="order-muted">已提交期末数据，等待受权客服核实原因并复核；复核与双方确认完成后结算生效。期间不会重复受理同一份结束申请。</p></div> :
           current && rejected ? <div className="order-trade-block">
               <h3>{myDecision?.action === "REJECT" ? "你已拒绝" : "未达成一致的结算"}第{current.versionNo}版</h3>

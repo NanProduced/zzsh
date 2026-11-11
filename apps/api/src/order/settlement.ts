@@ -357,7 +357,6 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   let Gb = 0n;
   let Go = 0n;
   let unusedItems = 0n;
-  let ownerFull = O;
   let resourcePrepaid = B;
   let anyItemConsumed = false;
   const itemConsumed: Array<{ itemId: string; consumed: string; remaining: string }> = [];
@@ -392,7 +391,6 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       reasons.push(`${prefix}_AMOUNT_INVALID`);
       continue;
     }
-    ownerFull += prepaidO;
     resourcePrepaid += prepaidB;
     const qty = lineConsumed(line, reasons, prefix);
     if (!qty) continue;
@@ -450,23 +448,18 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
 
   let fee = 0n;
   let feeBase = 0n;
-  let feePayer: "OWNER" | "RENTER" | "NONE" = "NONE";
+  let feePayer: "OWNER" | "NONE" = "NONE";
   if (cancelledBeforeStart || input.fullPayout === "NOT_SELECTED") {
     fee = 0n;
   } else if (input.fullPayout === "SELECTED" && started && !reasons.includes("FULL_PAYOUT_POLICY_REF_MISSING")) {
-    if (input.endReason === "TENANT_VOLUNTARY_EARLY") {
-      feeBase = ownerFull;
-      feePayer = "RENTER";
-    } else if (input.endReason === "NORMAL" || input.endReason === "OWNER_OR_ACCOUNT_EARLY") {
-      feeBase = ownerConsumed;
-      feePayer = "OWNER";
-    }
+    feeBase = ownerConsumed;
+    feePayer = "OWNER";
     fee = fullPayoutServiceFeeCents(feeBase);
   }
 
   const ownerGross = ownerConsumed;
   const ownerNet = feePayer === "OWNER" ? ownerGross - fee : ownerGross;
-  const renterCharge = renterHaffTotal + Gb + (feePayer === "RENTER" ? fee : 0n);
+  const renterCharge = renterHaffTotal + Gb;
   const renterRefund = captured - renterCharge;
   if (captured !== resourcePrepaid + deposit) reasons.push("CAPTURED_MISMATCH");
   if (renterRefund < 0n) reasons.push("INSUFFICIENT_PREPAYMENT");
@@ -516,6 +509,20 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       platformContribution: yuan(platformContribution),
     },
   };
+}
+
+/** Pending versions with an outdated fee basis or payer must be replaced, not silently recalculated. */
+export function settlementFeeReconfirmationRequired(snapshot: unknown): boolean {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+  const value = snapshot as { kind?:unknown;fullPayoutSelected?:unknown;proposedOwnerGross?:unknown;proposedFullPayoutFee?:unknown;proposedOwnerNet?:unknown;endReason?: unknown; amounts?: { feePayer?: unknown; feeBase?: unknown; ownerGross?: unknown } | null };
+  const amounts = value.amounts;
+  if (amounts?.feePayer === "RENTER" || (value.endReason === "TENANT_VOLUNTARY_EARLY" && amounts?.feePayer === "OWNER"
+    && (typeof amounts.feeBase !== "string" || typeof amounts.ownerGross !== "string" || amounts.feeBase !== amounts.ownerGross))) return true;
+  if (value.kind !== "MANUAL_ADJUSTMENT" || value.proposedOwnerGross === undefined && value.fullPayoutSelected !== true) return false;
+  const cents=(value:unknown)=>typeof value==="string"&&/^(0|[1-9]\d{0,18})\.\d{2}$/.test(value)?BigInt(value.replace(".","")):null;
+  const gross=cents(value.proposedOwnerGross),fee=cents(value.proposedFullPayoutFee),net=cents(value.proposedOwnerNet);
+  if(gross===null||fee===null||net===null||typeof value.fullPayoutSelected!=="boolean")return true;
+  return fee!==(value.fullPayoutSelected?fullPayoutServiceFeeCents(gross):0n) || net!==gross-fee;
 }
 
 export function settlementConfirmationReady(facts: SettlementConfirmationFacts): { ready: boolean; reasons: string[] } {

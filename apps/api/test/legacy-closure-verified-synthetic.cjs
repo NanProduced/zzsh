@@ -90,12 +90,51 @@ const user=(legacyId,userId,requestId)=>({realm:'user',userId,sessionId:'synthet
   assert.deepEqual(initialView.continuation.settlementBasis,expectedBasis);
   assert.equal('ownerPrices' in initialView.continuation.settlementBasis,false);
   assert.equal(plan.ok,true);
+  if(payout){
+   assert.equal(plan.amounts.fullPayoutMoney,'4.40');
+   assert.equal(plan.amounts.renterPayoutFee,'0.00');
+   assert.equal(plan.amounts.ownerNet,'50.60');
+   assert.equal(plan.amounts.returnOrderMoney,'37.75');
+  }
   await client.query('SET CONSTRAINTS ALL DEFERRED');
   const proposed=await command.applyLegacyContinuationCommand(client,renter,b.id,command.parseLegacyMutation('propose',{
    expectedRevision:locked.head?.revision??null,inputEvidenceId:sourceRow.id,planFingerprint:plan.fingerprint,quantities:v.quantities,endReason:early?'TENANT_VOLUNTARY_EARLY':'NORMAL'}));
   assert.equal(proposed.body.stage,'8');
   const head=await evidence.readLegacyContinuationHead(client,b.id),row=await evidence.readLegacyContinuationEvidence(client,b.id,head);
   const owner=user(b.legacyOwnerId,b.ownerUserId,'synthetic-owner-confirm');await setAuditContext(client,'user',owner.userId,owner.sessionId,owner.requestId);
+  if(payout){
+   await client.query('SAVEPOINT former_renter_fee');await client.query('RESET ROLE');await client.query("SET LOCAL session_replication_role='replica'");
+   const former=structuredClone(model.readSealedLegacyFacts(row)),source=former.evidence.source;
+   source.settlementV2.renterPayoutFee='7.28';source.fullPayoutMoney='0.00';source.returnOrderMoney='30.47';
+   former.evidence=calc.admitLegacyEvidence(source);
+   Object.assign(former.amounts,{renterPayoutFee:'7.28',fullPayoutMoney:'0.00',ownerNet:'55.00',returnOrderMoney:'30.47'});
+   const seal=model.sealLegacyFacts(former);
+   await client.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,facts=$4::jsonb,facts_canonical=$5,facts_digest=$6 WHERE id=$1`,
+    [row.id,former.evidence.parameterDigest,former.evidence.admission,JSON.stringify(former),seal.canonical,seal.digest]);
+   await client.query(`UPDATE zzsh_order.legacy_continuation_version SET amounts=$2::jsonb WHERE id=$1`,[head.id,JSON.stringify(former.amounts)]);
+   await client.query("SET LOCAL session_replication_role='origin'");await client.query('SET LOCAL ROLE zzsh_synth_runtime');
+   await setAuditContext(client,'user',owner.userId,owner.sessionId,owner.requestId);
+   const oldHead=await evidence.readLegacyContinuationHead(client,b.id),oldRow=await evidence.readLegacyContinuationEvidence(client,b.id,oldHead),oldView=await evidence.readLegacyContinuation(client,owner,b.id);
+   assert(oldView.continuation.reasons.includes('LEGACY_PROPOSAL_RECONFIRM_REQUIRED'));
+   assert(!oldView.continuation.capabilities.includes('confirm'));assert(oldView.continuation.capabilities.includes('reject'));
+   const oldPlan=calc.planLegacyContinuation(model.readSealedLegacyFacts(oldRow).evidence,{kind:'confirm',caller:{role:'owner',legacyUserId:b.legacyOwnerId}});assert(oldPlan.ok);
+   await assert.rejects(command.applyLegacyContinuationCommand(client,owner,b.id,command.parseLegacyMutation('confirm',{
+    expectedRevision:head.revision,inputEvidenceId:oldRow.id,planFingerprint:oldPlan.fingerprint})),/LEGACY_PROPOSAL_RECONFIRM_REQUIRED/);
+   assert.equal((await evidence.readLegacyContinuationDuties(client,b.id)).length,0);
+   await client.query('RESET ROLE');await client.query("SET LOCAL session_replication_role='replica'");
+   source.settlementV2.renterPayoutFee='0.00';source.fullPayoutMoney='7.28';source.returnOrderMoney='37.75';
+   former.evidence=calc.admitLegacyEvidence(source);
+   Object.assign(former.amounts,{renterPayoutFee:'0.00',fullPayoutMoney:'7.28',ownerNet:'47.72',returnOrderMoney:'37.75'});
+   const fullSeal=model.sealLegacyFacts(former);
+   await client.query(`UPDATE zzsh_order.legacy_continuation_evidence SET parameter_digest=$2,admission=$3,facts=$4::jsonb,facts_canonical=$5,facts_digest=$6 WHERE id=$1`,
+    [row.id,former.evidence.parameterDigest,former.evidence.admission,JSON.stringify(former),fullSeal.canonical,fullSeal.digest]);
+   await client.query(`UPDATE zzsh_order.legacy_continuation_version SET amounts=$2::jsonb WHERE id=$1`,[head.id,JSON.stringify(former.amounts)]);
+   await client.query("SET LOCAL session_replication_role='origin'");await client.query('SET LOCAL ROLE zzsh_synth_runtime');
+   const fullView=await evidence.readLegacyContinuation(client,owner,b.id);
+   assert(fullView.continuation.reasons.includes('LEGACY_PROPOSAL_RECONFIRM_REQUIRED'));
+   assert(!fullView.continuation.capabilities.includes('confirm'));
+   await client.query('ROLLBACK TO SAVEPOINT former_renter_fee');
+  }
   const proposalView=await evidence.readLegacyContinuation(client,owner,b.id);
   assert.deepEqual(proposalView.continuation.settlementBasis,expectedBasis);
   const confirmPlan=calc.planLegacyContinuation(model.readSealedLegacyFacts(row).evidence,{kind:'confirm',caller:{role:'owner',legacyUserId:b.legacyOwnerId}});
@@ -121,11 +160,11 @@ const user=(legacyId,userId,requestId)=>({realm:'user',userId,sessionId:'synthet
   const completedView=await evidence.readLegacyContinuation(client,owner,b.id);
   assert.deepEqual(completedView.continuation.settlementBasis,expectedBasis);
   const duties=await evidence.readLegacyContinuationDuties(client,b.id);
-  assert.equal(duties.find(d=>d.kind==='RENTER_REFUND').amountCents,payout?'3047':early?'3775':'8200');
-  assert.equal(duties.find(d=>d.kind==='OWNER_CREDIT').amountCents,early?'5500':'1300');
+  assert.equal(duties.find(d=>d.kind==='RENTER_REFUND').amountCents,early?'3775':'8200');
+  assert.equal(duties.find(d=>d.kind==='OWNER_CREDIT').amountCents,payout?'5060':early?'5500':'1300');
   assert.equal(duties.find(d=>d.kind==='OWNER_CREDIT').status,'SETTLED');
   const ownerCredits=(await client.query(`SELECT credit_cents::text AS cents FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code='OWNER_AVAILABLE'`,[b.ownerUserId])).rows;
-  assert.deepEqual(ownerCredits,[{cents:early?'5500':'1300'}]);
+  assert.deepEqual(ownerCredits,[{cents:payout?'5060':early?'5500':'1300'}]);
   const growth=(await client.query(`SELECT source_type,amount_cents::text AS cents FROM zzsh_iam.membership_growth_contribution WHERE user_id=$1 ORDER BY source_type`,[b.renterUserId])).rows;
   assert.deepEqual(growth,early?[{source_type:'MATERIAL_CONSUMPTION',cents:'0'},{source_type:'MINIMUM_BILLING',cents:'225'},{source_type:'RENTAL_SETTLEMENT',cents:'6000'}]
    :[{source_type:'MATERIAL_CONSUMPTION',cents:'0'},{source_type:'RENTAL_SETTLEMENT',cents:'1300'}]);

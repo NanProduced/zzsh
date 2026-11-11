@@ -122,7 +122,7 @@ test("CAS and exact preview fingerprint reject before mutation; first proposal c
 });
 test("旧单客服特殊取消无需预览指纹，按原款登记双方责任且不生成佣金",async t=>{
  const p=arrange(t),who=actor("admin");
- const input=parseLegacyMutation("support_cancel",{expectedRevision:null,inputEvidenceId:"fixture_evidence",refundCents:"5000",ownerCents:"3000",reason:"双方已沟通取消",originalPaymentChecked:true});
+ const input=parseLegacyMutation("support_cancel",{expectedRevision:null,inputEvidenceId:"fixture_evidence",refundCents:"5000",ownerCents:"3000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1",reason:"双方已沟通取消",originalPaymentChecked:true});
  assert.throws(()=>parseLegacyMutation("support_cancel",{expectedRevision:null,inputEvidenceId:"fixture_evidence",refundCents:"5000",ownerCents:"3000",reason:"双方已沟通取消"}),/核对原付款/);
  await assert.rejects(()=>applyLegacyContinuationCommand(p.client,actor("user"),legacyBinding.id,input,undefined,undefined,undefined,"OPERATOR"),/PAYMENT_BASIS_UNAVAILABLE/);
  await assert.rejects(()=>applyLegacyContinuationCommand(p.client,who,legacyBinding.id,{...input,refundCents:"8000"},undefined,undefined,undefined,"OPERATOR"),/CANCEL_AMOUNT_INVALID/);
@@ -133,6 +133,11 @@ test("旧单客服特殊取消无需预览指纹，按原款登记双方责任�
  assert.deepEqual(duties.map(q=>[q.values[3],q.values[6]]),[["RENTER_REFUND","5000"],["OWNER_CREDIT","3000"]]);
  assert(!duties.some(q=>q.values[3]==="COMMISSION"));
  const version=p.calls.find(q=>q.sql.startsWith("INSERT INTO zzsh_order.legacy_continuation_version"));assert.equal(version?.values[3],"SUPPORT_CANCEL");
+});
+test("特殊取消新金额口径的回执指纹与客户端恢复合同一致",()=>{
+ const body={expectedRevision:"2",inputEvidenceId:"evidence_result",refundCents:"5000",ownerCents:"2000",ownerAmountBasis:"GROSS_BEFORE_FEE_V1",reason:"双方协商取消",originalPaymentChecked:true};
+ const parsed=parseLegacyMutation("support_cancel",body);
+ assert.equal(fingerprintRequest("order.legacy.continuation.support_cancel","legacy_order_"+"a".repeat(40),parsed),"f439a702899e5853ae411f79ca9e18d9329ce10753cb330964e7f11d24e4b895");
 });
 test("staff initiates a legacy settlement with explicit party, reason and unchanged finance evidence", async t => {
   for (const onBehalf of ["renter", "owner"] as const) {

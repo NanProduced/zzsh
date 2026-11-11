@@ -100,6 +100,7 @@ export async function legacySupportCancellationReady(client: Pick<PoolClient,"qu
     AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.legacy_continuation_version')
       AND conname='legacy_continuation_version_stage_check' AND pg_get_constraintdef(oid) LIKE '%5%')
     AND position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.check_legacy_continuation_result()')))>0
+    AND position('ownerGross' IN pg_get_functiondef(to_regprocedure('zzsh_order.check_legacy_continuation_result()')))>0
     AND position('SUPPORT_CANCEL' IN pg_get_functiondef(to_regprocedure('zzsh_order.guard_legacy_duty()')))>0
     AND NOT EXISTS(SELECT 1 FROM unnest(ARRAY['id','order_id','revision','command','actor','input_evidence_id','result_evidence_id','stage','is_settle','is_advance_set','amounts','commission_revisions','assignments','plan_fingerprint','created_at']) col
       WHERE NOT has_column_privilege(current_user,to_regclass('zzsh_order.legacy_continuation_version'),col,'INSERT'))

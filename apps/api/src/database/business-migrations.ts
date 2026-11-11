@@ -493,7 +493,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
 /** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
 export async function configureSupportPoststartCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
  const table='zzsh_order.support_poststart_cancellation',role=quoteIdentifier(runtimeRole);
- const names=['zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','zzsh_order.support_poststart_cancellation_complete(text)',
+ const names=['zzsh_order.cancel_order_after_start_v2(text,bigint,numeric,numeric,text)','zzsh_order.support_poststart_cancellation_complete(text)',
   'zzsh_order.support_cancellation_refund_liability_complete(text)','zzsh_order.support_cancellation_refund_terminal_complete(text)'];
  const row=(await pool.query(`SELECT to_regclass($1) IS NOT NULL AS present,
   (SELECT count(*)::int FROM unnest($2::text[]) f(name) WHERE to_regprocedure(f.name) IS NOT NULL) AS functions,
@@ -506,7 +506,7 @@ export async function configureSupportPoststartCancellationPrivileges(pool:Pick<
  if(!row.present||row.functions!==names.length||row.triggers!==12||!row.executor_safe)throw new Error('Poststart cancellation contract incomplete');
  await resetRuntimeTablePrivileges(pool,table,'PUBLIC',{select:false});
  await resetRuntimeTablePrivileges(pool,table,role);
- await pool.query(`REVOKE ALL ON FUNCTION ${names.join(',')} FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION ${names.join(',')} TO ${role}`);
+ await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text) FROM PUBLIC, ${role}; REVOKE ALL ON FUNCTION ${names.join(',')} FROM PUBLIC, ${role}; GRANT EXECUTE ON FUNCTION ${names.join(',')} TO ${role}`);
 }
 
 /** An absent contract is allowed on older databases; a partial one must not receive money-write privileges. */

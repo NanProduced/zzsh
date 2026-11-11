@@ -5,12 +5,12 @@ import { conflict, ensureOnlyFields, invalid, newSupplyId, notFound, sha256Hex }
 import { canonicalize } from "../supply/content-hash";
 import { planLegacyContinuation, planVerifiedLegacySettlement, type LegacyCommand, type LegacyEndReason, type LegacyQuantities } from "./legacy-continuation-calc";
 import { authorizeLegacyContinuation, LEGACY_DUTY_FIELDS, legacyBeneficiaryUserId, lockLegacyContinuationOrder, readLegacyContinuationBinding, readLegacyContinuationEvidence,readLegacyContinuationUserIds } from "./legacy-continuation-evidence";
-import { deriveLegacyFacts, legacyContinuationRole, legacyDecimalEquals, legacyEconomicDutyId, legacyPlanYuanToCents, readSealedLegacyFacts, sealLegacyFacts, visibleLegacyReason,
+import { deriveLegacyFacts, legacyContinuationRole, legacyDecimalEquals, legacyEconomicDutyId, legacyFeeReconfirmationRequired, legacyPlanYuanToCents, readSealedLegacyFacts, sealLegacyFacts, visibleLegacyReason,
   type LegacyContinuationActor, type LegacyDutyFinalizationReader, type LegacyDutyKind, type LegacyDutyRow, type LegacyHeadRow, type LegacyOrderBinding } from "./legacy-continuation-model";
 import { legacyEarlyPartyConfirmed, readLegacyBasisInputEvidence, readLegacyProposalBasis, readLegacySettlementBasis } from "./legacy-settlement-basis";
 
 export type LegacyMutationKind = "propose" | "confirm" | "reject" | "hold" | "release" | "confiscate" | "support_cancel";
-export type LegacyMutationInput = { kind: LegacyMutationKind; expectedRevision: string | null; inputEvidenceId: string; planFingerprint?: string; quantities?: LegacyQuantities; endReason?: LegacyEndReason; reason?: string; onBehalf?: "renter" | "owner"; refundCents?: string; ownerCents?: string; originalPaymentChecked?: true };
+export type LegacyMutationInput = { kind: LegacyMutationKind; expectedRevision: string | null; inputEvidenceId: string; planFingerprint?: string; quantities?: LegacyQuantities; endReason?: LegacyEndReason; reason?: string; onBehalf?: "renter" | "owner"; refundCents?: string; ownerCents?: string; ownerAmountBasis?: "GROSS_BEFORE_FEE_V1"; originalPaymentChecked?: true };
 const QUANTITIES = ["expendHaff", "barrett", "bullet", "awm", "armor", "helmet", "coffee", "card"] as const;
 export function parseLegacyQuantities(value: unknown): LegacyQuantities {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("QUANTITY_INVALID");
@@ -24,7 +24,8 @@ export function parseLegacyQuantities(value: unknown): LegacyQuantities {
   return result as LegacyQuantities;
 }
 export function parseLegacyMutation(kind: LegacyMutationKind, body: Record<string, unknown>): LegacyMutationInput {
-  ensureOnlyFields(body, ["expectedRevision", "inputEvidenceId", ...(kind === "support_cancel" ? ["refundCents", "ownerCents", "reason", "originalPaymentChecked"] : ["planFingerprint"]), ...(kind === "propose" ? ["quantities", "onBehalf", "reason", "endReason"] : []), ...(["confirm", "reject"].includes(kind) ? ["reason"] : [])]);
+  ensureOnlyFields(body, ["expectedRevision", "inputEvidenceId", ...(kind === "support_cancel" ? ["refundCents", "ownerCents", "ownerAmountBasis", "reason", "originalPaymentChecked"] : ["planFingerprint"]), ...(kind === "propose" ? ["quantities", "onBehalf", "reason", "endReason"] : []), ...(["confirm", "reject"].includes(kind) ? ["reason"] : [])]);
+  if (body.ownerAmountBasis !== undefined && body.ownerAmountBasis !== "GROSS_BEFORE_FEE_V1") throw invalid("Invalid owner amount basis");
   if (body.expectedRevision !== null && (typeof body.expectedRevision !== "string" || !/^[1-9]\d{0,17}$/.test(body.expectedRevision))) throw invalid("Invalid continuation revision");
   if (typeof body.inputEvidenceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.inputEvidenceId)) throw invalid("Invalid evidence identifier");
   if (kind !== "support_cancel" && (typeof body.planFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(body.planFingerprint))) throw invalid("Invalid plan fingerprint");
@@ -33,7 +34,7 @@ export function parseLegacyMutation(kind: LegacyMutationKind, body: Record<strin
     || body.originalPaymentChecked!==true || ![body.refundCents,body.ownerCents].every(value=>typeof value==="string"&&/^(0|[1-9]\d{0,15})$/.test(value)))) throw invalid("请核对原付款并填写取消原因、退款金额和号主收益");
   if (body.onBehalf !== undefined && body.onBehalf !== "renter" && body.onBehalf !== "owner") throw invalid("STAFF_ROLE_INVALID");
   if (body.endReason !== undefined && !["NORMAL", "TENANT_VOLUNTARY_EARLY", "OWNER_OR_ACCOUNT_EARLY"].includes(String(body.endReason))) throw invalid("END_REASON_INVALID");
-  return { kind, expectedRevision: body.expectedRevision as string | null, inputEvidenceId: body.inputEvidenceId, ...(kind === "support_cancel" ? {refundCents:body.refundCents as string,ownerCents:body.ownerCents as string,originalPaymentChecked:true as const} : {planFingerprint:body.planFingerprint as string}),
+  return { kind, expectedRevision: body.expectedRevision as string | null, inputEvidenceId: body.inputEvidenceId, ...(kind === "support_cancel" ? {refundCents:body.refundCents as string,ownerCents:body.ownerCents as string,originalPaymentChecked:true as const,...(body.ownerAmountBasis ? {ownerAmountBasis:"GROSS_BEFORE_FEE_V1" as const} : {})} : {planFingerprint:body.planFingerprint as string}),
     ...(kind === "propose" ? { quantities: parseLegacyQuantities(body.quantities), ...(body.endReason ? {endReason:body.endReason as LegacyEndReason} : {}) } : {}), ...(typeof body.reason === "string" ? { reason: body.reason.trim() } : {}), ...(body.onBehalf === "renter" || body.onBehalf === "owner" ? { onBehalf: body.onBehalf } : {}) };
 }
 export type LegacyMutationAuthority={binding:LegacyOrderBinding;userIds:readonly string[];actor:LegacyContinuationActor};
@@ -120,6 +121,8 @@ async function readReviewedCommissionVoid(client: PoolClient, binding: LegacyOrd
 }
 /** Caller owns transaction and wraps this action with the existing withIdempotency/runIdempotentWrite. */
 export async function applyLegacyContinuationCommand(client: PoolClient, actor: LegacyContinuationActor, orderId: string, input: LegacyMutationInput, finance?: LegacyDutyFinalizationReader,authority?:LegacyMutationAuthority,ownerCredit?:LegacyOwnerCreditOnConfirm,cancelScope?:"OPERATOR"|"SIMULATED"|"UNAVAILABLE") {
+  // Old receipt replays are handled before this action; a new write needs the explicit gross-income contract.
+  if(input.kind==="support_cancel" && input.ownerAmountBasis!=="GROSS_BEFORE_FEE_V1")throw conflict("OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED");
   const a=authority??await authorizeLegacyMutation(client,actor,orderId),binding=a.binding;
   if((input.kind==="confirm"||input.kind==="support_cancel") && ownerCredit
     && !(await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR SHARE`,[binding.accountId])).rowCount)throw conflict("OWNER_CREDIT_ACCOUNT_UNAVAILABLE");
@@ -158,7 +161,7 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
   if(input.kind === "propose" && !basis)throw conflict("OPENING_BASIS_UNVERIFIED");
   if(input.kind === "confirm") {
     const v2=facts.evidence.source.settlementV2;
-    if(!v2)throw conflict("LEGACY_PROPOSAL_RECONFIRM_REQUIRED");
+    if(!v2 || legacyFeeReconfirmationRequired(facts.evidence.source))throw conflict("LEGACY_PROPOSAL_RECONFIRM_REQUIRED");
     const verified=await readLegacyProposalBasis(client,binding,v2.basisId,v2.inputEvidenceId);
     const original=await readLegacyBasisInputEvidence(client,binding,v2.inputEvidenceId);
     if(!verified || !original || verified.fullPayout!==v2.fullPayout)throw conflict("OPENING_BASIS_UNAVAILABLE");
@@ -169,7 +172,7 @@ export async function applyLegacyContinuationCommand(client: PoolClient, actor: 
         .some(key=>!legacyDecimalEquals(replay.amounts[key]??null,facts.amounts[key]??null)))throw conflict("OPENING_BASIS_UNAVAILABLE");
   }
   const command: LegacyCommand = input.kind === "propose" ? { kind: "propose", caller, quantities: input.quantities!, settlementBasis:basis!, ...(input.endReason?{endReason:input.endReason}:{}) }
-    : input.kind === "support_cancel" ? {kind:"support_cancel",caller,refundCents:input.refundCents!,ownerCents:input.ownerCents!} : { kind: input.kind, caller };
+    : input.kind === "support_cancel" ? {kind:"support_cancel",caller,refundCents:input.refundCents!,ownerCents:input.ownerCents!,ownerAmountBasis:input.ownerAmountBasis!} : { kind: input.kind, caller };
   const plan = command.kind === "propose" ? planVerifiedLegacySettlement(facts.evidence,command,basis!) : planLegacyContinuation(facts.evidence, command);
   if (!plan.ok) throw conflict(plan.code);
   if (input.kind !== "support_cancel" && plan.fingerprint !== input.planFingerprint) throw conflict("PLAN_FINGERPRINT_MISMATCH");

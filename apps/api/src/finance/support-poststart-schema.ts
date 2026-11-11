@@ -20,5 +20,9 @@ export const supportPoststartTriggersSql=`SELECT count(*)::int FROM pg_trigger t
 
 export const supportPoststartExecutorSafeSql=`EXISTS(SELECT 1 FROM pg_proc p
  JOIN pg_class c ON c.oid=to_regclass('zzsh_order.support_poststart_cancellation')
- WHERE p.oid=to_regprocedure('zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)')
-  AND p.proowner=c.relowner AND p.prosecdef AND 'search_path=pg_catalog'=ANY(p.proconfig))`;
+ WHERE p.oid=to_regprocedure('zzsh_order.cancel_order_after_start_v2(text,bigint,numeric,numeric,text)')
+  AND p.proowner=c.relowner AND p.prosecdef AND 'search_path=pg_catalog'=ANY(p.proconfig)
+  AND EXISTS(SELECT 1 FROM pg_proc h WHERE h.oid=to_regprocedure('zzsh_order.poststart_full_payout_selected(jsonb,text,text,text,text,text,text)')
+   AND h.proowner=c.relowner AND NOT h.prosecdef AND h.provolatile='i')
+  AND EXISTS(SELECT 1 FROM pg_constraint k WHERE k.conrelid=c.oid AND k.conname='support_poststart_owner_fee_shape' AND k.convalidated)
+  AND (SELECT count(*) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname IN('owner_gross_cents','full_payout_fee_cents','full_payout_selected') AND a.attnum>0 AND NOT a.attisdropped)=3)`;

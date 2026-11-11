@@ -411,7 +411,7 @@ export type SettlementVersion = {
   systemRenterRefund?: string | null;
   proposedOwnerNet?: string | null;
   proposedRenterRefund?: string | null;
-  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }>; endReason?: string | null; reason?: string | null } | null;
+  inputSnapshot?: { lines?: Array<{ itemId: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }>; endReason?: string | null; reason?: string | null; proposedOwnerGross?: string | null; proposedFullPayoutFee?: string | null } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> }; amounts?: Record<string, unknown> } | null;
   decisions?: Array<{ party: string; action: string; reason?: string | null; createdAt?: string }>;
 };
@@ -425,8 +425,8 @@ export type SettlementPosting = {
   capturedCents?: string | null;
   compensationFeeCents?: string | null;
   amounts?: Record<string, unknown> | null;
-  /** `gross` is the yuan Money object from the posted snapshot; the Cents fields are the exact net/refund columns. */
-  owner?: { gross?: Money | null; systemNetCents?: string; availableCents?: string } | null;
+  /** `gross` comes from the frozen yuan snapshot; the Cents fields are the exact net/refund columns. */
+  owner?: { gross?: Money | string | null; systemNetCents?: string; availableCents?: string } | null;
   /**
    * `includesDeposit` is *not* a boolean in the current server projection: the backend assigns the
    * depositRefund amount object (or null) to it. The deposit to refund is read from
@@ -435,6 +435,8 @@ export type SettlementPosting = {
   refund?: { systemCents?: string; payableCents?: string; includesDeposit?: unknown } | null;
   manualAdjustment?: {
     reason?: string | null;
+    proposedOwnerGross?: string | null;
+    proposedFullPayoutFee?: string | null;
     systemOwnerNetCents?: string;
     postedOwnerNetCents?: string;
     systemRenterRefundCents?: string;

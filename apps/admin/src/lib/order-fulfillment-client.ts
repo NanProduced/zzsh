@@ -27,7 +27,9 @@ export type SettlementVersionView = {
   early?: boolean;
   versionHash?: string;
   supersededAt?: string | null;
-  inputSnapshot?: { lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }> } | null;
+  proposedOwnerNet?: string | null;
+  proposedRenterRefund?: string | null;
+  inputSnapshot?: { proposedOwnerGross?: string | null; proposedFullPayoutFee?: string | null; lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }> } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; amounts?: Record<string, SettlementAmount>; consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> } } | null;
   decisions?: Array<{ party?: string; action?: string; reason?: string | null; versionHash?: string; createdAt?: string }>;
 };
@@ -46,7 +48,8 @@ export type SettlementReadView = {
   openings?: Array<{ id?: string; versionNo?: number; status?: string; confirmedAt?: string | null; confirmSource?:string|null; createdBySource?:string|null; autoConfirmDueAt?:string|null; autoConfirmWaitMinutes?:number|null; createdAt?: string; lines?: Array<{ itemId?: string; quantity?: string; unit?: string; pricingKind?: string }>; acks?: Array<{ party?: string; source?: string; createdAt?: string }> }>;
   openingGeneration?: { state?: "CREATED" | "REVIEW_REQUIRED"; reason?: string | null; paymentConfirmationId?: string; createdAt?: string; updatedAt?: string } | null;
   openingGenerationRecoveryRequired?: boolean;
-  posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount> } | null;
+  posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount>;
+    owner?:{availableCents?:string};refund?:{payableCents?:string};manualAdjustment?:{proposedOwnerGross?:string|null;proposedFullPayoutFee?:string|null}|null } | null;
   versions?: SettlementVersionView[];
   amounts?: Record<string, SettlementAmount>;
   consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> };
@@ -56,16 +59,20 @@ export type SettlementReadView = {
   early?: boolean;
   systemOwnerNet?: string;
   systemRenterRefund?: string;
+  proposedOwnerGross?: string;
+  proposedFullPayoutFee?: string;
+  proposedOwnerNet?: string;
+  proposedRenterRefund?: string;
 };
 
 export type FulfillmentCommand =
   | { kind: "record-opening"; lines: FulfillmentLine[] }
   | { kind: "confirm-opening"; openingId: string; versionNo: number; party: "RENTER" | "OWNER"; reason: string }
-  | { kind: "preview"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerNet?: string; proposedRenterRefund?: string; reason?: string }
+  | { kind: "preview"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerGross?: string; proposedOwnerNet?: string; proposedRenterRefund?: string; reason?: string }
   | { kind: "classify"; lines: RemainingLine[]; endReason: SettlementEndReason; acceptedHash: string }
   | { kind: "review"; versionId: string; versionHash: string }
   | { kind: "finalize"; versionId: string; versionHash: string; reason: string }
-  | { kind: "adjust"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerNet: string; proposedRenterRefund: string; reason: string; acceptedHash: string };
+  | { kind: "adjust"; lines: RemainingLine[]; endReason?: EarlyEndReason; proposedOwnerGross?: string; proposedOwnerNet?: string; proposedRenterRefund: string; reason: string; acceptedHash: string };
 
 export type FulfillmentIntent = {
   id: string;
@@ -113,8 +120,9 @@ export type SupportCancelView = {
   eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
   openingConfirmed: boolean;
   supportCancellation: SupportCancelRow | null;
-  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean };
+  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean; fullPayoutSelected?: boolean | null };
   poststartCancellation?: { caseId: string; refundCents: string; ownerCents: string; platformContributionCents: string;
+    ownerGrossCents?: string | null; fullPayoutFeeCents?: string | null; fullPayoutSelected?: boolean | null;
     commissionCents: string; reason: string; refundState?: string };
   refund: SupportCancelRefund | null;
   existing: boolean;
@@ -138,7 +146,7 @@ export async function readSupportCancel(orderId: string): Promise<SupportCancelV
 
 /** Send or replay one frozen support cancellation. The caller must reuse `key` after an unknown result. */
 export async function sendSupportCancel(orderId: string, expectedOrderRevision: string, reason: string, key: string,
-  allocation?: { refundCents: string; ownerCents: string; expectedAdminId: string }): Promise<SupportCancelOutcome> {
+  allocation?: { refundCents: string; ownerCents: string; expectedAdminId: string; ownerAmountBasis?: "GROSS_BEFORE_FEE_V1" }): Promise<SupportCancelOutcome> {
   try {
     const raw = await adminRequest<Record<string, unknown>>(`${orderBase(orderId)}/support-cancel`,
       { expectedOrderRevision, reason, ...allocation }, "POST", { "idempotency-key": key });
@@ -148,7 +156,9 @@ export async function sendSupportCancel(orderId: string, expectedOrderRevision: 
       || allocation && (raw.orderStatus !== 'CANCELLED' || raw.cancelReason !== 'SUPPORT_AFTER_START_CANCELLED'
         || !raw.poststartCancellation || typeof raw.poststartCancellation !== 'object'
         || (raw.poststartCancellation as {refundCents?:unknown}).refundCents !== allocation.refundCents
-        || (raw.poststartCancellation as {ownerCents?:unknown}).ownerCents !== allocation.ownerCents
+        || (allocation.ownerAmountBasis === "GROSS_BEFORE_FEE_V1"
+          ? (raw.poststartCancellation as {ownerGrossCents?:unknown}).ownerGrossCents !== allocation.ownerCents
+          : (raw.poststartCancellation as {ownerCents?:unknown}).ownerCents !== allocation.ownerCents)
         || (raw.poststartCancellation as {commissionCents?:unknown}).commissionCents !== '0')
       || raw.simulationScope !== undefined && (typeof raw.simulationScope !== 'string'||!['LOCAL_DEMO_SIMULATED','ECS_TEST_SIMULATED'].includes(raw.simulationScope)
         || !raw.channel || typeof raw.channel !== 'object' || (raw.channel as {result?:unknown}).result !== 'NOT_SUBMITTED'
@@ -223,6 +233,7 @@ function commandBody(command: FulfillmentCommand): Record<string, unknown> {
         lines: command.lines,
         ...(command.endReason === undefined ? {} : { endReason: command.endReason }),
         ...(command.proposedOwnerNet === undefined ? {} : { proposedOwnerNet: command.proposedOwnerNet }),
+        ...(command.proposedOwnerGross === undefined ? {} : { proposedOwnerGross: command.proposedOwnerGross }),
         ...(command.proposedRenterRefund === undefined ? {} : { proposedRenterRefund: command.proposedRenterRefund }),
         ...(command.reason === undefined ? {} : { reason: command.reason }),
       };
@@ -236,7 +247,7 @@ function commandBody(command: FulfillmentCommand): Record<string, unknown> {
       return {
         lines: command.lines,
         ...(command.endReason === undefined ? {} : { endReason: command.endReason }),
-        proposedOwnerNet: command.proposedOwnerNet,
+        ...(command.proposedOwnerGross === undefined ? {proposedOwnerNet:command.proposedOwnerNet} : {proposedOwnerGross:command.proposedOwnerGross}),
         proposedRenterRefund: command.proposedRenterRefund,
         reason: command.reason,
         acceptedHash: command.acceptedHash,

@@ -67,7 +67,7 @@ export async function readLegacyDutyBasis(client: PoolClient, orderId: string, d
   const caller:LegacyCommand["caller"]={ role, legacyUserId: role === "renter" ? binding.legacyRenterId : role === "owner" ? binding.legacyOwnerId : "" };
   if(command==="SUPPORT_CANCEL" && (role!=="admin" || typeof v.amounts.refundNet!=="string" || typeof v.amounts.ownerNet!=="string"))return {state:"UNKNOWN",reason:"CANCELLATION_AMOUNT_UNAVAILABLE"};
   const cmd: LegacyCommand = command === "SUPPORT_CANCEL"
-    ? {kind:"support_cancel",caller,refundCents:legacyPlanYuanToCents(v.amounts.refundNet!),ownerCents:legacyPlanYuanToCents(v.amounts.ownerNet!)}
+    ? {kind:"support_cancel",caller,refundCents:legacyPlanYuanToCents(v.amounts.refundNet!),ownerCents:legacyPlanYuanToCents(v.amounts.ownerGross??v.amounts.ownerNet!),...(v.amounts.ownerGross!==undefined?{ownerAmountBasis:"GROSS_BEFORE_FEE_V1" as const}:{})}
     : { kind: command === "CONFIRM" ? "confirm" : "confiscate", caller };
   const plan = planLegacyContinuation(facts.evidence,cmd);
   if (!plan.ok || plan.fingerprint !== v.planFingerprint || canonicalize(plan.commissionRevisions) !== canonicalize(v.commissionRevisions) || canonicalize(deriveLegacyFacts(facts,plan,cmd,before.id,v.id)) !== canonicalize(readSealedLegacyFacts(result))) throw conflict("FINAL_COMMAND_EVIDENCE_MISMATCH");

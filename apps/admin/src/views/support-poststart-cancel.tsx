@@ -14,7 +14,7 @@ import { formatFundingCents } from "./supply-review/model";
 
 type CancelIntent = {
   subject: string; orderId: string; key: string; revision: string; paidCents: string;
-  refundCents: string; ownerCents: string; reason: string; simulationScope?: string;
+  refundCents: string; ownerCents: string; ownerAmountBasis?: "GROSS_BEFORE_FEE_V1"; fullPayoutSelected?: boolean | null; reason: string; simulationScope?: string;
 };
 const cents = /^(0|[1-9][0-9]{0,15})$/;
 const storageKey = (subject: string, orderId: string) => `zzsh.support.poststart-cancel.${subject}.${orderId}`;
@@ -27,6 +27,9 @@ function validIntent(value: unknown, subject: string, orderId: string): value is
     && BigInt(i.paidCents) > 0n && BigInt(i.refundCents) + BigInt(i.ownerCents) <= BigInt(i.paidCents)
     && typeof i.reason === "string" && [...i.reason].length >= 3 && new TextEncoder().encode(i.reason).length <= 600
     && !/[\u0000-\u001f\u007f]/.test(i.reason)
+    && (i.ownerAmountBasis === undefined || i.ownerAmountBasis === "GROSS_BEFORE_FEE_V1")
+    && (i.ownerAmountBasis === undefined || i.fullPayoutSelected === true || i.fullPayoutSelected === false || i.fullPayoutSelected === null)
+    && (i.ownerAmountBasis === undefined || i.fullPayoutSelected !== null || i.ownerCents === "0")
     && (i.simulationScope === undefined || ["LOCAL_DEMO_SIMULATED", "ECS_TEST_SIMULATED"].includes(i.simulationScope));
 }
 
@@ -72,7 +75,10 @@ export function SupportPoststartCancelCard({ orderId, displayNo, viewerId, compa
   const amountsValid = refundCents !== null && ownerCents !== null && paidCents !== null && cents.test(refundCents)
     && cents.test(ownerCents) && cents.test(paidCents) && BigInt(refundCents) + BigInt(ownerCents) <= BigInt(paidCents);
   const contribution = amountsValid ? (BigInt(paidCents!) - BigInt(refundCents!) - BigInt(ownerCents!)).toString() : null;
-  const valid = visible && !storageBlocked && reasonValid && amountsValid && (pending !== null || preview?.poststartEligibility?.allowed === true);
+  const selected = pending?.ownerAmountBasis ? pending.fullPayoutSelected : preview?.poststartEligibility?.fullPayoutSelected;
+  const fee = ownerCents !== null && cents.test(ownerCents) && (selected === true || selected === false || selected === null && ownerCents === "0")
+    ? (selected === true ? (BigInt(ownerCents)*8n+50n)/100n : 0n) : null;
+  const valid = visible && !storageBlocked && reasonValid && amountsValid && (pending !== null || preview?.poststartEligibility?.allowed === true && fee !== null);
 
   const openForm = async () => {
     if (!visible || busy) return;
@@ -110,7 +116,7 @@ export function SupportPoststartCancelCard({ orderId, displayNo, viewerId, compa
         } else {
           if (pending || !preview?.poststartEligibility?.allowed) throw new Error("missing original intent");
           frozen = { subject: viewerId, orderId, key: `support_cancel_${orderId}_${crypto.randomUUID()}`,
-            revision: preview.orderRevision, paidCents, refundCents, ownerCents, reason: reasonText,
+            revision: preview.orderRevision, paidCents, refundCents, ownerCents, ownerAmountBasis:"GROSS_BEFORE_FEE_V1", fullPayoutSelected:preview.poststartEligibility.fullPayoutSelected ?? null, reason: reasonText,
             ...(preview.simulationScope ? { simulationScope: preview.simulationScope } : {}) };
           if (!validIntent(frozen, viewerId, orderId)) throw new Error("invalid intent");
           window.localStorage.setItem(key, JSON.stringify(frozen));
@@ -118,21 +124,22 @@ export function SupportPoststartCancelCard({ orderId, displayNo, viewerId, compa
         if (identity.current.epoch !== epoch || identity.current.scope !== scope) return;
         setPending(frozen);
         const outcome = await sendSupportCancel(orderId, frozen.revision, frozen.reason, frozen.key,
-          { refundCents: frozen.refundCents, ownerCents: frozen.ownerCents, expectedAdminId: frozen.subject });
+          { refundCents: frozen.refundCents, ownerCents: frozen.ownerCents, expectedAdminId: frozen.subject,
+            ...(frozen.ownerAmountBasis ? {ownerAmountBasis:frozen.ownerAmountBasis} : {}) });
         if (identity.current.epoch !== epoch || identity.current.scope !== scope) return;
         if (outcome.kind === "accepted" && outcome.view.simulationScope === frozen.simulationScope
           && outcome.view.poststartCancellation?.reason === frozen.reason
-          && outcome.view.poststartCancellation.platformContributionCents === (BigInt(frozen.paidCents)-BigInt(frozen.refundCents)-BigInt(frozen.ownerCents)).toString()) {
+          && matchesAllocation(outcome.view.poststartCancellation, frozen)) {
           const stored: unknown = JSON.parse(window.localStorage.getItem(key) ?? "null");
           if (!validIntent(stored, viewerId, orderId) || stored.key !== frozen.key) throw new Error("intent changed");
           window.localStorage.removeItem(key); setPending(null); setResult(outcome.view); setConfirm(false); setOpen(false);
           return;
         }
-        if (outcome.kind === "blocked" && !replay) {
+        if (outcome.kind === "blocked" && (!replay || !frozen.ownerAmountBasis && outcome.reasons.includes("OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"))) {
           const stored: unknown = JSON.parse(window.localStorage.getItem(key) ?? "null");
           if (!validIntent(stored, viewerId, orderId) || stored.key !== frozen.key) throw new Error("intent changed");
           window.localStorage.removeItem(key); setPending(null);
-          setMessage("订单状态已变化，取消未被接受；请刷新后核对。");
+          setMessage(replay ? "原请求已确认未执行，请重新填写扣费前收入。" : "订单状态已变化，取消未被接受；请刷新后核对。");
         } else setMessage("取消结果未确认，请先查看订单状态；可在此按原请求重新核对，不要另建请求。");
       });
     } catch {
@@ -144,22 +151,23 @@ export function SupportPoststartCancelCard({ orderId, displayNo, viewerId, compa
   return <Card className={`im-support-fulfillment im-order-card${compact ? " oc-action-card" : ""}`} data-support-poststart-cancel="true">
     <CardContent className={compact ? "grid gap-2 p-0" : "grid gap-2 p-4"}>
       <CardTitle className="text-sm">取消订单并退款</CardTitle>
-      <CardDescription>与双方沟通后填写退款与号主收益；本单取消后不产生分销佣金。</CardDescription>
-      {visible && result ? <Alert><AlertTitle>订单已取消</AlertTitle><AlertDescription>退款责任已登记，实际退款结果请查看资金记录。</AlertDescription></Alert>
+      <CardDescription>与双方沟通后填写退款与号主扣费前收入；本单取消后不产生分销佣金。</CardDescription>
+      {visible && result ? <Alert><AlertTitle>订单已取消</AlertTitle><AlertDescription>退款责任已登记；{result.poststartCancellation?.fullPayoutFeeCents != null ? `包赔费 ${formatFundingCents(result.poststartCancellation.fullPayoutFeeCents)}，号主入账 ${formatFundingCents(result.poststartCancellation.ownerCents)}。` : ""}实际退款结果请查看资金记录。</AlertDescription></Alert>
         : <Button variant="outline" size="sm" disabled={!visible || storageBlocked} onClick={() => void openForm()}>{pending ? "核对原取消请求" : "取消订单并退款"}</Button>}
       {visible && storageBlocked ? <p role="alert">原请求记录无法读取，已暂停操作，请联系维护人员。</p> : null}
     </CardContent>
     <Dialog open={visible && open} onOpenChange={next => { if (!busy) setOpen(next); }}>
       <DialogContent size="md" aria-label="填写取消订单方案">
         <DialogTitle>取消订单并退款</DialogTitle>
-        <DialogDescription>订单 {displayNo}。填写双方协商结果，退款与号主收益合计不能超过本单实付。</DialogDescription>
+        <DialogDescription>订单 {displayNo}。退款与号主扣费前收入合计不能超过本单实付；选择全额包赔时从号主收入中扣除 8%。</DialogDescription>
         {pending ? <Alert><AlertTitle>上次请求结果未确认</AlertTitle><AlertDescription>请核对以下原申请；确认后只重试原请求。</AlertDescription></Alert> : null}
         {paidCents ? <p className="text-sm">本单实付：<strong>{formatFundingCents(paidCents)}</strong></p> : null}
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="grid gap-1 text-sm">退还租客（元）<Input aria-label="退还租客金额" inputMode="decimal" value={pending ? formatInput(pending.refundCents) : refund} disabled={busy || !!pending} onChange={e => setRefund(e.target.value)} /></label>
-          <label className="grid gap-1 text-sm">号主收益（元）<Input aria-label="号主收益金额" inputMode="decimal" value={pending ? formatInput(pending.ownerCents) : owner} disabled={busy || !!pending} onChange={e => setOwner(e.target.value)} /></label>
+          <label className="grid gap-1 text-sm">{pending && !pending.ownerAmountBasis ? "号主收益（原请求口径）" : "号主扣费前收入（元）"}<Input aria-label="号主收益金额" inputMode="decimal" value={pending ? formatInput(pending.ownerCents) : owner} disabled={busy || !!pending} onChange={e => setOwner(e.target.value)} /></label>
         </div>
-        <p className="text-sm">平台结算贡献：{contribution === null ? "—" : formatFundingCents(contribution)}；分销佣金：¥0.00</p>
+        <p className="text-sm">扣包赔费前的平台剩余：{contribution === null ? "—" : formatFundingCents(contribution)}；分销佣金：¥0.00</p>
+        {!(pending && !pending.ownerAmountBasis) && ownerCents !== null ? <p className="text-sm">{fee === null ? "包赔选择尚未核实；若需给号主分配收入，请先核对。" : `包赔费 ${formatFundingCents(fee.toString())} · 号主实际入账 ${formatFundingCents((BigInt(ownerCents)-fee).toString())}`}</p> : null}
         <label className="grid gap-1 text-sm">取消原因<Input aria-label="取消原因" value={pending?.reason ?? reason} maxLength={200} disabled={busy || !!pending} onChange={e => setReason(e.target.value)} /></label>
         {message ? <p role="alert" className="text-sm text-destructive">{message}</p> : null}
         <div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>返回</Button>
@@ -169,11 +177,20 @@ export function SupportPoststartCancelCard({ orderId, displayNo, viewerId, compa
     <ConfirmAlertDialog open={visible && confirm} onOpenChange={next => { if (!busy) setConfirm(next); }}
       title="确认取消订单？" contentLabel="确认取消已开租订单" description="确认后订单会立即取消，并登记以下资金分配；退款进度以渠道处理结果为准。"
       confirmLabel={busy ? "提交中…" : pending ? "按原请求核对" : "确认取消并退款"} cancelLabel="返回核对" busy={busy} confirmDisabled={!valid} onConfirm={() => void submit()}>
-      <p>退还租客 {formatFundingCents(refundCents)} · 号主收益 {formatFundingCents(ownerCents)} · 平台贡献 {formatFundingCents(contribution)}</p>
+      <p>退还租客 {formatFundingCents(refundCents)} · {pending && !pending.ownerAmountBasis ? "号主收益（原请求口径）" : "号主扣费前收入"} {formatFundingCents(ownerCents)}{fee !== null && !(pending && !pending.ownerAmountBasis) && ownerCents !== null ? ` · 包赔费 ${formatFundingCents(fee.toString())} · 号主入账 ${formatFundingCents((BigInt(ownerCents)-fee).toString())}` : ""}</p>
       <p>取消原因：{reasonText}</p>
       {message ? <p role="alert" className="text-sm text-destructive">{message}</p> : null}
     </ConfirmAlertDialog>
   </Card>;
+}
+
+function matchesAllocation(row: NonNullable<SupportCancelView["poststartCancellation"]>, intent: CancelIntent): boolean {
+  const paid=BigInt(intent.paidCents), refund=BigInt(intent.refundCents), gross=BigInt(intent.ownerCents);
+  if (!intent.ownerAmountBasis) return row.ownerCents === intent.ownerCents && row.platformContributionCents === (paid-refund-gross).toString();
+  if (row.ownerGrossCents !== intent.ownerCents || row.fullPayoutSelected !== intent.fullPayoutSelected || (row.fullPayoutSelected !== true && row.fullPayoutSelected !== false && !(row.fullPayoutSelected === null && gross === 0n))) return false;
+  const fee=row.fullPayoutSelected ? (gross*8n+50n)/100n : 0n;
+  return row.fullPayoutFeeCents===fee.toString() && row.ownerCents===(gross-fee).toString()
+    && row.platformContributionCents===(paid-refund-gross+fee).toString();
 }
 
 function formatInput(value: string): string {

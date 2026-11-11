@@ -14,6 +14,8 @@ test("stage rules are party-scoped and carry no amounts", () => {
   assert.equal(settlementStageOf({ ...base, currentVersionNo: 2, renterAction: "CONFIRM" }).code, "DECISION_WAITING");
   assert.equal(settlementStageOf({ ...base, viewerParty: "OWNER", currentVersionNo: 2, renterAction: "CONFIRM" }).viewerActionRequired, true);
   assert.equal(settlementStageOf({ ...base, currentVersionNo: 2, ownerAction: "REJECT" }).code, "DECISION_REJECTED");
+  assert.deepEqual(settlementStageOf({ ...base, currentVersionNo: 2, feeReconfirmationRequired: true }), { code: "UNKNOWN", label: "状态待核实", viewerActionRequired: false, settlementVersionNo: 2 });
+  assert.equal(settlementStageOf({ ...base, posted: true, currentVersionNo: 2, feeReconfirmationRequired: true }).code, "POSTED");
   assert.equal(settlementStageOf({ ...base, orderStatus: "COMPLETED", posted: true, currentVersionNo: 3 }).code, "POSTED");
   for (const k of Object.keys(pending)) assert.ok(!/cents|amount/i.test(k));
 });
@@ -76,10 +78,10 @@ test("settlement fresh and replay projections isolate each party by current serv
     depositRefund: money("123.00"), haffConsumedBuyer: money("300.00"), haffConsumedOwner: money("800.00"),
     feePayer: "OWNER", feeAmount: money("12.34"), feeBase: money("888.88"), feeRate: "0.08" };
   const version = { id: "v1", systemOwnerNet: "87654", systemRenterRefund: "23456", proposedOwnerNet: "87654", proposedRenterRefund: "23456",
-    inputSnapshot: { capturedAmount: "99999", depositAmount: "12300", amounts }, computation: { ok: true, amounts }, decisions: [] };
+    inputSnapshot: { capturedAmount: "99999", depositAmount: "12300", proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",amounts }, computation: { ok: true, amounts }, decisions: [] };
   const body = { orderId: "route-order-id", amounts, versions: [version], settlement: version,
     posting: { id: "p1", capturedCents: "99999", owner: { availableCents: "87654" }, refund: { payableCents: "23456" }, amounts, compensationFeeCents: "1234",
-      manualAdjustment: { reason: "reviewed", postedOwnerNetCents: "87654", postedRenterRefundCents: "23456" } } };
+      manualAdjustment: { reason: "reviewed", proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",postedOwnerNetCents: "87654", postedRenterRefundCents: "23456" } } };
   const before = JSON.stringify(body);
   const client = { query: async (_sql: string, values: unknown[]) => {
     assert.deepEqual(values, ["route-order-id"]); return { rows: [{ ownerUserId: "owner", renterUserId: "renter" }] };
@@ -93,11 +95,13 @@ test("settlement fresh and replay projections isolate each party by current serv
     assert.equal(owned.posting.manualAdjustment.postedRenterRefundCents, undefined);
     assert.equal(owned.amounts.feeAmount.amount, "12.34");
     assert.equal(owned.posting.compensationFeeCents, "1234");
+    assert.equal(owned.settlement.inputSnapshot.proposedOwnerGross,"120.00");assert.equal(owned.posting.manualAdjustment.proposedFullPayoutFee,"9.60");
     const rented = (await projectSettlementResponse(client, { realm: "user", userId: "renter", sessionId: "s" }, result, "route-order-id")).body as Record<string, any>;
     assert.equal(rented.amounts.renterRefund.amount, "234.56"); assert.equal(rented.amounts.ownerNet, undefined);
     assert.equal(rented.posting.owner, undefined); assert.equal(rented.settlement.systemOwnerNet, undefined);
     assert.equal(rented.posting.manualAdjustment.postedOwnerNetCents, undefined);
     assert.equal(rented.amounts.feeAmount, undefined); assert.equal(rented.posting.compensationFeeCents, undefined);
+    assert.equal(rented.settlement.inputSnapshot.proposedOwnerGross,undefined);assert.equal(rented.posting.manualAdjustment.proposedFullPayoutFee,undefined);
   }
   await assert.rejects(projectSettlementResponse(client, { realm: "user", userId: "stranger", sessionId: "s" }, { status: 200, body }, "route-order-id"),
     (error: unknown) => (error as { status?: number }).status === 404);

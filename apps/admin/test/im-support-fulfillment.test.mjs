@@ -658,6 +658,27 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   assert.equal(find(host, "生成结算方案"), undefined, "editing invalidates the preview hash");
 });
 
+test("人工调整按扣费前收入提交并显示服务端计算的包赔费与净额",async t=>{
+ const requests=[];
+ globalThis.fetch=async(input,init={})=>{
+  const url=String(input);
+  if(url.endsWith("/orders/order-A/settlement"))return response(confirmedOpening);
+  if(url.endsWith("/orders/order-A/settlement-preview")){
+   requests.push(JSON.parse(init.body));
+   return response({accepted:false,early:false,amounts:{},versionHash:"hash_manual",proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",proposedOwnerNet:"110.40",proposedRenterRefund:"470.00"});
+  }
+  throw Error(`unexpected request ${url}`);
+ };
+ const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});
+ await render(root,host,{canManualClose:true});await click(host,"人工调整（例外）");
+ const set=async(placeholder,value)=>{const input=document.body.querySelector(`input[placeholder="${placeholder}"]`);assert(input);
+  await act(async()=>{Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,"value").set.call(input,value);input.dispatchEvent(new Event("input",{bubbles:true}));});await settle();};
+ await set("元，如 123.45","120");await set("元，如 12.00","470");await set("不少于3字","双方核对调整");
+ await click(host,"生成调整预览");
+ assert.equal(requests[0].proposedOwnerGross,"120");assert.equal(requests[0].proposedOwnerNet,undefined);
+ assert.match(document.body.textContent,/120\.00 元/);assert.match(document.body.textContent,/9\.60 元/);assert.match(document.body.textContent,/110\.40 元/);
+});
+
 test("staff preview keeps the customer's actual consumption and includes a zero-opening resource", async (t) => {
   const requests=[];
   const pending={...confirmedOpening,consumptionMode:"ACTUAL",currentRequest:{kind:"INTAKE",id:"intake_1"},
@@ -702,6 +723,18 @@ test("support finalization records the exact version, reason, and original inten
   await click(host,"确认按当前方案结算");
   const request=requests.find(row=>row.method==="POST");assert.ok(request);assert.deepEqual(JSON.parse(request.body),{versionHash:hash,reason:"双方已沟通确认"});
   assert.ok(String(request.headers["idempotency-key"]??"").startsWith("im_ful_finalize_order-A_"));
+});
+
+test("旧承担方方案提示重新计算，客服不能复核或直接结算",async t=>{
+  const hash="a".repeat(64),writes=[];
+  const current={...confirmedOpening,reasons:["SETTLEMENT_FEE_RECONFIRM_REQUIRED"],settlement:{id:"settle-old",versionNo:3,kind:"SYSTEM",early:true,versionHash:hash,
+    decisions:[{party:"RENTER",action:"CONFIRM",versionHash:hash},{party:"OWNER",action:"CONFIRM",versionHash:hash}]}};
+  globalThis.fetch=async(_input,init={})=>{if(init.method==="POST")writes.push(init);return response(current);};
+  const {host,root}=mount();t.after(async()=>{await act(async()=>root.unmount());host.remove();});await render(root,host,{canManualClose:true});
+  assert.match(document.body.textContent,/原方案需要重新生成/);
+  const buttons=[...document.body.querySelectorAll("button")].map(item=>item.textContent.trim());
+  assert(buttons.includes("预览结算方案"));assert(!buttons.includes("确认复核"));assert(!buttons.includes("客服确认结算"));
+  assert.equal(writes.length,0);
 });
 
 test("提前结算缺少费用时客服不能确认",async t=>{

@@ -1,5 +1,5 @@
 // Disposable PostgreSQL only; verifies the production path without demo tables.
-const assert=require('node:assert/strict'),{Client}=require('pg');
+const assert=require('node:assert/strict'),fs=require('node:fs'),{Client}=require('pg');
 assert.equal(process.env.POSTSTART_REFUND_SYNTH_OPT_IN,'1');
 const port=Number(process.env.POSTSTART_REFUND_SYNTH_PORT);assert(Number.isInteger(port)&&port>1024&&port<65536);
 assert(/^[1-9]\d*$/.test(process.env.POSTSTART_REFUND_SYNTH_OID||''));
@@ -15,12 +15,17 @@ async function main(){
   assert.deepEqual(identity,{db,role:'postgres',oid:process.env.POSTSTART_REFUND_SYNTH_OID,
    marker:'zzsh:synthetic:production-refund-v1',system_id:process.env.POSTSTART_REFUND_SYNTH_SYSTEM_ID});
   await c.query('BEGIN');
+  await c.query('SET LOCAL ROLE zzsh_synth_migrator');
+  await c.query(fs.readFileSync('migrations/business/0195_approval_center_link.sql','utf8'));
+  await c.query(fs.readFileSync('migrations/business/0196_owner_payout_fee.sql','utf8'));
+  await c.query('RESET ROLE');
   await require('../dist/src/database/business-migrations.js').applyRuntimePrivileges(c,'zzsh_synth_runtime');
   const rights=(await c.query(`SELECT has_table_privilege('zzsh_synth_runtime','zzsh_order.support_poststart_cancellation','SELECT') AS readable,
    has_table_privilege('zzsh_synth_runtime','zzsh_order.support_poststart_cancellation','INSERT') AS direct_insert,
-   has_function_privilege('zzsh_synth_runtime','zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','EXECUTE') AS can_cancel,
+   has_function_privilege('zzsh_synth_runtime','zzsh_order.cancel_order_after_start(text,bigint,numeric,numeric,text)','EXECUTE') AS old_cancel,
+   has_function_privilege('zzsh_synth_runtime','zzsh_order.cancel_order_after_start_v2(text,bigint,numeric,numeric,text)','EXECUTE') AS can_cancel,
    to_regclass('zzsh_order.ecs_test_demo_finance_registration') IS NULL AS no_demo`)).rows[0];
-  assert.deepEqual(rights,{readable:true,direct_insert:false,can_cancel:true,no_demo:true});
+  assert.deepEqual(rights,{readable:true,direct_insert:false,old_cancel:false,can_cancel:true,no_demo:true});
   await c.query('SET LOCAL ROLE zzsh_synth_runtime');
   assert.equal(await require('../dist/src/order/support-cancel.js').supportPoststartSchemaReady(c,false),true);
   assert.equal(await require('../dist/src/order/support-cancel.js').supportPoststartSchemaReady(c,true),false);

@@ -39,7 +39,7 @@ export async function handleSupportCancelAdminRoute(
   const context = await readAdminContext(request, options);
   const actor = { userId: context.userId, sessionId: context.sessionId, settlementAdmission: options.settlementAdmission, ecsTestDemo: options.ecsTestDemo };
   const body = bodyOf(request);
-  ensureOnlyFields(body, ["expectedOrderRevision", "reason","refundCents","ownerCents","expectedAdminId"]);
+  ensureOnlyFields(body, ["expectedOrderRevision", "reason","refundCents","ownerCents","ownerAmountBasis","expectedAdminId"]);
   const poststart=body.refundCents!==undefined||body.ownerCents!==undefined;
   if (poststart && (typeof body.expectedAdminId !== "string" || !ID.test(body.expectedAdminId))) throw invalid("Missing cancellation administrator");
   if (poststart && body.expectedAdminId !== actor.userId) throw new SecurityApiError(401,"UNAUTHENTICATED","Administrator identity changed");
@@ -51,6 +51,12 @@ export async function handleSupportCancelAdminRoute(
       { realm: "admin", id: actor.userId, sessionId: actor.sessionId }, frozen,
       async (client) => { await assertSupportOrderAccess(client, orderId, actor); },
       async (client) => {
+        if (poststart && !("ownerAmountBasis" in frozen)) {
+          // Record a definitive refusal under the original key before allowing the client to start a new contract.
+          actionCompleted = true;
+          return {status:409,body:{error:{code:"CONFLICT",message:"OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED",requestId},
+            reasons:["OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"],outcome:"REJECTED"}};
+        }
         const result = poststart
           ?await supportCancelAfterOpening(client,actor,{orderId,...assertSupportPoststartCancelInput(frozen),requestId})
           :await supportCancelOrder(client,actor,{orderId,...assertSupportCancelInput(frozen),requestId});

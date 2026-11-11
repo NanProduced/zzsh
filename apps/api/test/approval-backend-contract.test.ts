@@ -792,6 +792,8 @@ test("business projection trims by permission and keeps money and result refs ex
     reason: "提前结束，号主净入账调整",
     capturedAmount: "300.00",
     proposedOwnerNet: "120.50",
+    proposedOwnerGross: "130.98",
+    proposedFullPayoutFee: "10.48",
     proposedRenterRefund: "179.50",
     amounts: { ownerNet: "150.00", renterRefund: "150.00", feeAmount: "20.00", platformContribution: "10.00" },
   };
@@ -817,6 +819,8 @@ test("business projection trims by permission and keeps money and result refs ex
   assert.equal(settle.businessTitle, "人工调整订单结算");
   const settleSummary = settle.summary as Record<string, unknown>;
   assert.deepEqual(settleSummary.proposedOwnerNet, { amount: "120.50", currency: "CNY", unit: "yuan", scale: 2, basis: "PROPOSED_OWNER_NET" });
+  assert.deepEqual(settleSummary.proposedOwnerGross, { amount: "130.98", currency: "CNY", unit: "yuan", scale: 2, basis: "PROPOSED_OWNER_GROSS" });
+  assert.deepEqual(settleSummary.proposedPayoutFee, { amount: "10.48", currency: "CNY", unit: "yuan", scale: 2, basis: "PROPOSED_PAYOUT_FEE" });
   assert.deepEqual(settleSummary.systemOwnerNet, { amount: "150.00", currency: "CNY", unit: "yuan", scale: 2, basis: "SYSTEM_OWNER_NET" });
   assert.equal(settleSummary.baseSettlementVersionNo, "3", "the frozen base version number must survive projection");
   assert.equal(settleSummary.baseSettlementVersionId, "setver_1");
@@ -824,6 +828,10 @@ test("business projection trims by permission and keeps money and result refs ex
   assert.deepEqual(settle.pendingConditionCodes, ["OWNER_CONFIRMATION_REQUIRED", "SUPPORT_REVIEW_REQUIRED", "SETTLEMENT_NOT_POSTED"]);
   assert.equal((settle.settlementResult as Record<string, unknown>).posted, false);
   assert.equal(JSON.stringify(settle.objectRefs).includes("settlement_posting"), false, "a missing posting must not be invented");
+  const orderReader = await projectApprovalBusinesses(view.pool, rows as never, { userId: REQUESTER.id,
+    access: {status:"ACTIVE",isBoss:false,passwordChangeRequired:false,permissions:new Set(["order.read"])},gameScope:{mode:"ALL_GAMES",gameIds:[]} });
+  const limitedSummary=orderReader.views.get("approval_req_settle")!.summary as Record<string,unknown>;
+  assert.equal(limitedSummary.proposedOwnerGross,undefined);assert.equal(limitedSummary.proposedPayoutFee,undefined);
 
   const grant = projection.views.get("approval_req_grant")!;
   assert.equal((grant.summary as Record<string, unknown>).gameName, "三角洲行动");

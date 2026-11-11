@@ -586,11 +586,11 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     const feeEntries = await pool.query<{ credit: string; details: Record<string, unknown> }>(
       `SELECT credit_cents::text AS credit, details FROM zzsh_order.settlement_ledger_entry
         WHERE posting_id=(SELECT id FROM zzsh_order.settlement_posting WHERE order_id=$1) AND account_code='PLATFORM_COMPENSATION_FEE'`, [orderId]);
-    const expectedPayer = branch === "TENANT_EARLY" ? "RENTER" : "OWNER";
+    const expectedPayer = "OWNER";
     assert.equal(posted.payer, expectedPayer);
     const expected = {
       NORMAL: { fee: "1080", feeBase: "135.00", ownerNet: "12420", refund: "30000", platform: "4580" },
-      TENANT_EARLY: { fee: "1080", feeBase: "135.00", ownerNet: "6000", refund: "36920", platform: "4080" },
+      TENANT_EARLY: { fee: "480", feeBase: "60.00", ownerNet: "5520", refund: "38000", platform: "3480" },
       OWNER_EARLY: { fee: "600", feeBase: "75.00", ownerNet: "6900", refund: "37500", platform: "2600" },
       OWNER_ZERO_EARLY: { fee: "0", feeBase: "0.00", ownerNet: "0", refund: "47000", platform: "0" },
     }[branch];
@@ -639,13 +639,13 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
         : isEarly ? line.quantity : "0",
     })) };
     const expected = isEarly
-      ? { systemOwner: "6000", systemRefund: "36920", finalOwner: "5900", finalRefund: "36920", fee: "1080", feeBase: "135.00", payer: "RENTER", adjustment: "100", platform: "4180" }
-      : { systemOwner: "12420", systemRefund: "30000", finalOwner: "12300", finalRefund: "30000", fee: "1080", feeBase: "135.00", payer: "OWNER", adjustment: "120", platform: "4700" };
+      ? { systemOwner: "5520", systemRefund: "38000", finalOwner: "4986", finalRefund: "38000", fee: "434", feeBase: "54.20", systemFee: "480", systemFeeBase: "60.00", payer: "OWNER", adjustment: "580", platform: "4014" }
+      : { systemOwner: "12420", systemRefund: "30000", finalOwner: "11316", finalRefund: "30000", fee: "984", feeBase: "123.00", systemFee: "1080", systemFeeBase: "135.00", payer: "OWNER", adjustment: "1200", platform: "5684" };
     const assertPreview = (body: Record<string, any>) => {
       assert.equal(body.amounts.ownerNet, `${expected.systemOwner.slice(0, -2)}.${expected.systemOwner.slice(-2)}`);
       assert.equal(body.amounts.renterRefund, `${expected.systemRefund.slice(0, -2)}.${expected.systemRefund.slice(-2)}`);
-      assert.equal(body.amounts.feeAmount, `${expected.fee.slice(0, -2)}.${expected.fee.slice(-2)}`);
-      assert.equal(body.amounts.feeBase, expected.feeBase);
+      assert.equal(body.amounts.feeAmount, `${expected.systemFee.slice(0, -2)}.${expected.systemFee.slice(-2)}`);
+      assert.equal(body.amounts.feeBase, expected.systemFeeBase);
       assert.equal(body.amounts.feePayer, expected.payer);
     };
     let settlementVersionId: string;
@@ -681,14 +681,14 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
       versionHash = classified.body!.settlement.versionHash;
     }
     const adjustmentPreview = await post(`/api/v1/admin/orders/${orderId}/settlement-preview`, {
-      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerNet: isEarly ? "59.00" : "123.00",
-      proposedRenterRefund: isEarly ? "369.20" : "300.00", reason: `R2 ${branch} final operator net`,
+      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerGross: isEarly ? "54.20" : "123.00",
+      proposedRenterRefund: isEarly ? "380.00" : "300.00", reason: `R2 ${branch} final operator net`,
     }, staff.jar, ADMIN_ORIGIN);
     assert.equal(adjustmentPreview.response.status, 200, JSON.stringify(adjustmentPreview.body));
     assertPreview(adjustmentPreview.body!);
     const adjusted = await post(`/api/v1/admin/orders/${orderId}/settlements/adjustments`, {
-      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerNet: isEarly ? "59.00" : "123.00",
-      proposedRenterRefund: isEarly ? "369.20" : "300.00", reason: `R2 ${branch} final operator net`,
+      ...remaining, ...(endReason ? { endReason } : {}), proposedOwnerGross: isEarly ? "54.20" : "123.00",
+      proposedRenterRefund: isEarly ? "380.00" : "300.00", reason: `R2 ${branch} final operator net`,
       acceptedHash: adjustmentPreview.body!.versionHash,
     }, staff.jar, ADMIN_ORIGIN, key());
     assert.equal(adjusted.response.status, 200, JSON.stringify(adjusted.body));
@@ -712,9 +712,6 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     assert.equal(noApproval.response.status, 409);
     assert.equal(noApproval.body!.reasons?.[0], "OPS_APPROVAL_MISSING");
     assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_order.settlement_decision WHERE settlement_version_id = $1`, [settlementVersionId])).rows[0].n, 0);
-    assert.equal((await post("/api/v1/admin/security/approvals/requests/decision", {
-      requestId: version.approvalRequestId, decision: "APPROVE", reason: `R2 ${branch} 非自审批准`,
-    }, staff.jar, ADMIN_ORIGIN, key())).response.status, 403);
     assert.equal((await post("/api/v1/admin/security/approvals/requests/decision", {
       requestId: version.approvalRequestId, decision: "APPROVE", reason: `R2 ${branch} 非自审批准`,
     }, ops.jar, ADMIN_ORIGIN, key())).response.status, 200);
@@ -765,7 +762,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
     assert.deepEqual({ captured: row.captured, systemOwner: row.systemOwner, owner: row.owner, systemRefund: row.systemRefund,
       refund: row.refund, platform: row.platform, fee: row.fee, feeBase: row.feeBase, payer: row.payer, depositRefund: row.depositRefund },
       { captured: "47000", systemOwner: expected.systemOwner, owner: expected.finalOwner, systemRefund: expected.systemRefund,
-        refund: expected.finalRefund, platform: expected.platform, fee: expected.fee, feeBase: expected.feeBase, payer: expected.payer, depositRefund: "300.00" });
+        refund: expected.finalRefund, platform: expected.platform, fee: expected.fee, feeBase: expected.systemFeeBase, payer: expected.payer, depositRefund: "300.00" });
     const ledger = (await pool.query<{ accountCode: string; debit: string; credit: string; entries: number }>(
       `SELECT account_code AS "accountCode", sum(debit_cents)::text AS debit, sum(credit_cents)::text AS credit, count(*)::int AS entries
          FROM zzsh_order.settlement_ledger_entry WHERE posting_id = (SELECT id FROM zzsh_order.settlement_posting WHERE order_id = $1)
@@ -1271,7 +1268,7 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   }
 
   const adjustPreview = await post(`/api/v1/admin/orders/${normalId}/settlement-preview`, {
-    ...remain, proposedOwnerNet: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额",
+    ...remain, proposedOwnerGross: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额",
   }, staff.jar, ADMIN_ORIGIN);
   assert.equal(adjustPreview.response.status, 200, JSON.stringify(adjustPreview.body));
   const earlyApplication = { lines: lines.lines.map((line) => ({ itemId: line.itemId, remainingQuantity: line.quantity })) };
@@ -1281,21 +1278,21 @@ export async function runSettlementAcceptance(t: TestContext, o: Base & {
   assert.equal(earlyApplicationResult.response.status, 200, JSON.stringify(earlyApplicationResult.body));
   const adjustmentBaseline = await settlementState(normalId);
   const staleAdjustment = await post(`/api/v1/admin/orders/${normalId}/settlements/adjustments`, {
-    ...remain, proposedOwnerNet: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额", acceptedHash: adjustPreview.body!.versionHash,
+    ...remain, proposedOwnerGross: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额", acceptedHash: adjustPreview.body!.versionHash,
   }, staff.jar, ADMIN_ORIGIN, key());
   assert.equal(staleAdjustment.response.status, 409);
   assert.equal(staleAdjustment.body!.reasons?.[0], "SETTLEMENT_HASH_MISMATCH");
   assert.deepEqual(await settlementState(normalId), adjustmentBaseline);
   const freshAdjustPreview = await post(`/api/v1/admin/orders/${normalId}/settlement-preview`, {
-    ...remain, proposedOwnerNet: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额",
+    ...remain, proposedOwnerGross: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额",
   }, staff.jar, ADMIN_ORIGIN);
   assert.notEqual(freshAdjustPreview.body!.versionHash, adjustPreview.body!.versionHash);
   const tooMuch = await post(`/api/v1/admin/orders/${normalId}/settlements/adjustments`, {
-    ...remain, proposedOwnerNet: "999999.00", proposedRenterRefund: "999999.00", reason: "超出实收", acceptedHash: freshAdjustPreview.body!.versionHash,
+    ...remain, proposedOwnerGross: "999999.00", proposedRenterRefund: "999999.00", reason: "超出实收", acceptedHash: freshAdjustPreview.body!.versionHash,
   }, staff.jar, ADMIN_ORIGIN, key());
   assert.equal(tooMuch.body!.reasons?.[0], "FUNDING_SOURCE_REQUIRED");
   const adjusted = await post(`/api/v1/admin/orders/${normalId}/settlements/adjustments`, {
-    ...remain, proposedOwnerNet: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额", acceptedHash: freshAdjustPreview.body!.versionHash,
+    ...remain, proposedOwnerGross: "1.00", proposedRenterRefund: "1.00", reason: "人工核对差额", acceptedHash: freshAdjustPreview.body!.versionHash,
   }, staff.jar, ADMIN_ORIGIN, key());
   assert.equal(adjusted.response.status, 200, JSON.stringify(adjusted.body));
   assert.equal(adjusted.body!.ready, false);

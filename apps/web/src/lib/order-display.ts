@@ -578,6 +578,7 @@ export type OrderProgressFacts = {
   autoConfirmDueAt?: string | null;
   openingGenerationState?: "CREATED" | "REVIEW_REQUIRED" | null;
   openingGenerationRecoveryRequired?: boolean;
+  feeReconfirmationRequired?: boolean;
 };
 
 /** Only the facts the channel payment read returned. `readFailed` means no conclusion is available. */
@@ -723,6 +724,11 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     }
     // The server can explicitly mark the stage unverifiable. Never turn that into a confident
     // "confirm the checklist" or "end the rental" next step.
+    if (facts.feeReconfirmationRequired) {
+      return { ...base, tone: "warning", title: "等待重新核对结算方案", owner: "客服",
+        note: "原方案的包赔费计算口径需要更正，请联系客服重新生成。新方案需要双方重新确认。",
+        primary: progressSupport, secondary: [progressRefresh, progressRefund] };
+    }
     if (facts.stageCode === "UNKNOWN") {
       return { ...base, tone: "unknown", title: "状态待核实", owner: "平台",
         note: "服务端本次把结算阶段标记为待核实。已读到的订单事实保持有效；页面不推断开租、结算或退款结论，可刷新读取或联系客服核对。",
@@ -1034,8 +1040,13 @@ export function proposedConfirmationCents(party: OrderParty, version: Settlement
  * different figures, and a missing proposed value stays unknown instead of falling back to the system one.
  */
 export function decisionAmountRows(party: OrderParty, version: SettlementVersion | null | undefined): SettlementAmountRow[] {
-  const rows = settlementAmountRows(party, versionAmounts(version));
+  let rows = settlementAmountRows(party, versionAmounts(version));
   if (!isAdjustedVersion(version)) return rows;
+  if(party==="owner" && version?.inputSnapshot?.proposedOwnerGross != null) {
+    rows=rows.map(row=>row.label==="号主毛收入" || row.label.startsWith("包赔费用") ? {...row,label:`系统计算${row.label}`,note:"调整前的系统计算"} : row);
+    rows.push({label:"调整后号主扣费前收入",value:moneyText(version.inputSnapshot.proposedOwnerGross)});
+    rows.push({label:"调整后包赔费",value:moneyText(version.inputSnapshot.proposedFullPayoutFee)});
+  }
   const target = netLabel(party, "estimate");
   const system = party === "owner" ? version?.systemOwnerNet : version?.systemRenterRefund;
   const proposed = proposedConfirmationCents(party, version);
@@ -1059,11 +1070,18 @@ export function postingAmountRows(party: OrderParty, posting: SettlementPosting)
   const target = netLabel(party, "effective");
   const chargeLabel = chargeRowLabel(adjusted);
   const finalValue = party === "owner" ? moneyCents(posting.owner?.availableCents) : moneyCents(posting.refund?.payableCents);
-  return rows.map((row) => {
+  const projected=rows.map((row) => {
     if (row.label === target) return { ...row, value: finalValue };
-    if (adjusted && row.label === "本次结算扣费") return { ...row, label: chargeLabel, note: "按系统计算；人工调整只改变最终净额与应退" };
+    if (adjusted && row.label === "本次结算扣费") return { ...row, label: chargeLabel, note: "调整前的系统计算；最终应退以人工调整结果为准" };
+    if (adjusted && party==="owner" && posting.manualAdjustment?.proposedOwnerGross != null && (row.label==="号主毛收入" || row.label.startsWith("包赔费用")))
+      return {...row,label:`系统计算${row.label}`,note:"调整前的系统计算"};
     return adjusted ? { ...row, note: row.note ?? "系统计算快照" } : row;
   });
+  if(adjusted && party==="owner" && posting.manualAdjustment?.proposedOwnerGross != null) {
+    projected.push({label:"调整后号主扣费前收入",value:moneyText(posting.manualAdjustment.proposedOwnerGross)});
+    projected.push({label:"调整后包赔费",value:moneyText(posting.manualAdjustment.proposedFullPayoutFee)});
+  }
+  return projected;
 }
 
 export type ConsumptionRow = {

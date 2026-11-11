@@ -1,4 +1,5 @@
 import { canonicalize } from "../supply/content-hash";
+import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { decimalToBigInt, divideToScale, formatScaledInteger, parseNonNegativeDecimal } from "../supply/decimal";
 import { conflict, invalid, notFound, sha256Hex } from "../supply/supply-util";
 import { admitLegacyEvidence, planLegacyContinuation, planVerifiedLegacySettlement, type AmountPlan, type LegacyCommand, type LegacyContinuationEvidence, type LegacyContinuationSource, type LegacyEndReason, type LegacyQuantities, type LegacySettlementBasis } from "./legacy-continuation-calc";
@@ -57,7 +58,7 @@ export type LegacyContinuationView = {
   capabilities: string[]; commandFingerprints: Record<string, string>; reasons: string[]; duties: Array<{ id: string; kind: LegacyDutyKind; amountCents: string; currency: "CNY"; status: LegacyDutyStatus; maturityAt: string | null; sourceStatus: string | null; revision: string; settledBy: string | null; financeVerified:boolean }>;
   channelState: "UNKNOWN";
 };
-const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE", "PAYMENT_BASIS_UNAVAILABLE", "CANCEL_AMOUNT_INVALID", "COMMISSION_ALREADY_PAID", "COMMISSION_SOURCE_UNAVAILABLE", "REFUND_HISTORY_REQUIRES_OFFLINE", "OPENING_BASIS_UNVERIFIED", "OPENING_BASIS_UNAVAILABLE", "OPENING_BASIS_CHANGED", "OPENING_BASIS_PRICE_MISMATCH", "OPENING_ITEMS_UNVERIFIED", "END_REASON_REQUIRED", "END_REASON_INCONSISTENT", "HAFF_SPREAD_RATIO_UNSAFE", "LEGACY_PROPOSAL_RECONFIRM_REQUIRED"]);
+const LEGACY_VISIBLE_REASONS = new Set(["DEPOSIT_SHORT", "RETURN_NEGATIVE", "EVIDENCE_ISOLATED", "MISSING_STORED_SETTLEMENT", "FINANCE_FACT_UNAVAILABLE", "FINANCE_FACT_UNKNOWN", "DEPOSIT_ALREADY_SETTLED", "CONTINUATION_REVISION_CONFLICT", "PLAN_FINGERPRINT_MISMATCH", "DUTY_REVISION_CONFLICT", "STATUS_INVALID", "QUANTITY_INVALID", "PRECISION_UNSUPPORTED", "CONFIRM_POOL_NEGATIVE", "OWNER_NET_NEGATIVE", "WALLET_CREDIT_HISTORY_UNPROVEN", "WALLET_CREDIT_BASIS_UNAVAILABLE", "PAYMENT_BASIS_UNAVAILABLE", "CANCEL_AMOUNT_INVALID", "COMMISSION_ALREADY_PAID", "COMMISSION_SOURCE_UNAVAILABLE", "REFUND_HISTORY_REQUIRES_OFFLINE", "OPENING_BASIS_UNVERIFIED", "OPENING_BASIS_UNAVAILABLE", "OPENING_BASIS_CHANGED", "OPENING_BASIS_PRICE_MISMATCH", "OPENING_ITEMS_UNVERIFIED", "END_REASON_REQUIRED", "END_REASON_INCONSISTENT", "HAFF_SPREAD_RATIO_UNSAFE", "LEGACY_PROPOSAL_RECONFIRM_REQUIRED", "FULL_PAYOUT_UNKNOWN", "OWNER_AMOUNT_CONTRACT_REFRESH_REQUIRED"]);
 export function visibleLegacyReason(value: unknown): string | undefined { return typeof value === "string" && LEGACY_VISIBLE_REASONS.has(value) ? value : undefined; }
 
 /** Calc emits exact decimals of variable scale; the persisted contract is integer cents. */
@@ -72,6 +73,17 @@ export function legacyPlanYuanToCents(value: string): string {
 export function legacyDecimalEquals(a: string | null, b: string | null): boolean {
   if (a === null || b === null) return a === b;
   try { return decimalToBigInt(parseNonNegativeDecimal(a, 8, "legacy decimal"), 8) === decimalToBigInt(parseNonNegativeDecimal(b, 8, "legacy decimal"), 8); } catch { return false; }
+}
+
+/** Pending proposals with the previous fee payer or fee basis need a new decision. */
+export function legacyFeeReconfirmationRequired(source: LegacyContinuationSource): boolean {
+  const version = source.settlementV2;
+  if (!["8", "9"].includes(source.orderStatus) || version?.fullPayout !== true || version.endReason !== "TENANT_VOLUNTARY_EARLY") return false;
+  if (!legacyDecimalEquals(version.renterPayoutFee, "0")) return true;
+  try {
+    const gross = BigInt(legacyPlanYuanToCents(source.saleEarnings!));
+    return BigInt(legacyPlanYuanToCents(source.fullPayoutMoney!)) !== fullPayoutServiceFeeCents(gross);
+  } catch { return true; }
 }
 export function legacyOrderAdvisoryKey(orderId: string): string {
   if (!/^legacy_order_[a-f0-9]{40}$/.test(orderId)) throw invalid("Invalid mapped historical order");
@@ -203,11 +215,12 @@ export function projectLegacyContinuation(binding: LegacyOrderBinding, actor: Le
   }));
   const reasons = [...facts.evidence.reasons, ...(actor.realm === "admin" && disposition === "UNKNOWN" ? ["FINANCE_FACT_UNAVAILABLE"] : [])];
   if (["8","9"].includes(source.orderStatus) && !source.settlementV2) reasons.push("LEGACY_PROPOSAL_RECONFIRM_REQUIRED");
+  if (legacyFeeReconfirmationRequired(source)) reasons.push("LEGACY_PROPOSAL_RECONFIRM_REQUIRED");
   const commandFingerprints: Record<string, string> = {};
   let confirmationAmounts: LegacyContinuationView["confirmationAmounts"] = null;
   const capabilities = (facts.evidence.admission === "PARAMETER_COMPLETE" ? legacyCapabilities(source, role, canOperate, disposition) : []).filter(kind => {
     if (kind === "preview" || kind === "propose") return true;
-    if (kind === "confirm" && !source.settlementV2) return false;
+    if (kind === "confirm" && (!source.settlementV2 || legacyFeeReconfirmationRequired(source))) return false;
     if (role === "admin" && kind === "confirm" && !canSettle) return false;
     const plan = planLegacyContinuation(facts.evidence, { kind: kind as "confirm" | "reject" | "hold" | "release" | "confiscate", caller: { role, legacyUserId: role === "owner" ? binding.legacyOwnerId : role === "renter" ? binding.legacyRenterId : "" } });
     if (!plan.ok) { reasons.push(plan.code); return false; }

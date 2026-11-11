@@ -5,6 +5,7 @@ import { computeQuote } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import {
   computeSettlement,
+  settlementFeeReconfirmationRequired,
   earlyMakeupCents,
   settlementConfirmationReady,
   SETTLEMENT_ROUNDING_POLICY,
@@ -20,6 +21,20 @@ test("shared early makeup curve uses exact consumption and rounds to cents", () 
 });
 
 const HAFF = "100000000";
+
+test("outdated fee payer or early fee basis requires a new decision", () => {
+  assert.equal(settlementFeeReconfirmationRequired({endReason:"TENANT_VOLUNTARY_EARLY",amounts:{feePayer:"RENTER"}}), true);
+  assert.equal(settlementFeeReconfirmationRequired({endReason:"TENANT_VOLUNTARY_EARLY",amounts:{feePayer:"OWNER",feeBase:"240.00",ownerGross:"108.00"}}), true);
+  assert.equal(settlementFeeReconfirmationRequired({endReason:"TENANT_VOLUNTARY_EARLY",amounts:{feePayer:"OWNER",feeBase:"108.00",ownerGross:"108.00"}}), false);
+  assert.equal(settlementFeeReconfirmationRequired({endReason:"NORMAL",amounts:{feePayer:"OWNER"}}), false);
+  assert.equal(settlementFeeReconfirmationRequired({kind:"MANUAL_ADJUSTMENT",fullPayoutSelected:true,amounts:{feePayer:"OWNER"}}),true);
+  assert.equal(settlementFeeReconfirmationRequired({kind:"MANUAL_ADJUSTMENT",fullPayoutSelected:false,amounts:{feePayer:"NONE"}}),false);
+  const manual={kind:"MANUAL_ADJUSTMENT",fullPayoutSelected:true,amounts:{feePayer:"OWNER"},proposedOwnerGross:"20.00",proposedFullPayoutFee:"1.60",proposedOwnerNet:"18.40"};
+  assert.equal(settlementFeeReconfirmationRequired(manual),false);
+  assert.equal(settlementFeeReconfirmationRequired({...manual,proposedFullPayoutFee:"2.00"}),true);
+  assert.equal(settlementFeeReconfirmationRequired({...manual,proposedOwnerNet:"20.00"}),true);
+  assert.equal(settlementFeeReconfirmationRequired(null), false);
+});
 
 function baseInput(over: {
   remainingHaff: string | null;
@@ -152,13 +167,14 @@ test("tenant voluntary early 50M/2 items selected payout matches Owner vector", 
   assert.equal(r.ok, true, r.reasons.join(","));
   assert.equal(r.early, true);
   assert.equal(money(r, "ownerGross"), "108.00");
-  assert.equal(money(r, "ownerNet"), "108.00");
+  assert.equal(money(r, "ownerNet"), "99.36");
   assert.equal(money(r, "earlyMakeup"), "25.00");
-  assert.equal(money(r, "feeAmount"), "19.20");
-  assert.equal(r.amounts!.feePayer, "RENTER");
-  assert.equal(money(r, "renterCharge"), "189.20");
-  assert.equal(money(r, "renterRefund"), "460.80");
-  assert.equal(money(r, "platformContribution"), "81.20");
+  assert.equal(money(r, "feeBase"), "108.00");
+  assert.equal(money(r, "feeAmount"), "8.64");
+  assert.equal(r.amounts!.feePayer, "OWNER");
+  assert.equal(money(r, "renterCharge"), "170.00");
+  assert.equal(money(r, "renterRefund"), "480.00");
+  assert.equal(money(r, "platformContribution"), "70.64");
 });
 
 test("owner or account early 50M/2 items does not shift makeup or fee to renter", () => {
@@ -202,14 +218,15 @@ test("cancel before start charges no fee or makeup", () => {
   assert.equal(money(r, "renterRefund"), "650.00");
 });
 
-test("started zero consumption tenant voluntary still uses full payout base", () => {
+test("started zero consumption has no payout fee but retains early makeup", () => {
   const r = computeSettlement(baseInput({ remainingHaff: HAFF, remainingItems: "10", endReason: "TENANT_VOLUNTARY_EARLY" }));
   assert.equal(r.ok, true, r.reasons.join(","));
   assert.equal(r.early, true);
-  assert.equal(money(r, "feeBase"), "240.00");
-  assert.equal(money(r, "feeAmount"), "19.20");
-  assert.equal(r.amounts!.feePayer, "RENTER");
+  assert.equal(money(r, "feeBase"), "0.00");
+  assert.equal(money(r, "feeAmount"), "0.00");
+  assert.equal(money(r, "ownerNet"), "0.00");
   assert.equal(money(r, "earlyMakeup"), "50.00");
+  assert.equal(money(r, "renterRefund"), "600.00");
 });
 
 test("unused and fully used items, deposit fully refunded", () => {
@@ -428,7 +445,7 @@ test("F1: haff consume uses frozen exactRatios, not rounded prepaid", () => {
   assert.equal(blocked.amounts, null);
 });
 
-test("F2: charges may use the actual deposit; capture must match frozen prepaid", () => {
+test("F2: owner fee does not consume the renter's prepayment or deposit", () => {
   const expensive = baseInput({ remainingHaff: "50000000", remainingItems: "0", endReason: "TENANT_VOLUNTARY_EARLY" });
   expensive.capturedAmount = "1301.00";
   expensive.haff.prepaidBuyerAmount = "1.00";
@@ -453,27 +470,19 @@ test("F2: charges may use the actual deposit; capture must match frozen prepaid"
   }];
   const deposit = computeSettlement(expensive);
   assert.equal(deposit.ok, true, deposit.reasons.join(","));
-  assert.equal(money(deposit, "renterCharge"), "1072.66");
-  assert.equal(money(deposit, "renterRefund"), "228.34");
-  assert.equal(money(deposit, "depositRefund"), "228.34");
-  assert.equal(money(deposit, "ownerNet"), "900.40");
-  assert.equal(money(deposit, "platformContribution"), "172.26");
+  assert.equal(money(deposit, "renterCharge"), "1000.60");
+  assert.equal(money(deposit, "renterRefund"), "300.40");
+  assert.equal(money(deposit, "depositRefund"), "300.00");
+  assert.equal(money(deposit, "ownerNet"), "828.37");
+  assert.equal(money(deposit, "platformContribution"), "172.23");
 
   const depositExact = structuredClone(expensive);
-  depositExact.depositAmount = "71.66";
-  depositExact.capturedAmount = "1072.66";
+  depositExact.depositAmount = "0.00";
+  depositExact.capturedAmount = "1001.00";
   const exactDepositUse = computeSettlement(depositExact);
   assert.equal(exactDepositUse.ok, true, exactDepositUse.reasons.join(","));
-  assert.equal(money(exactDepositUse, "renterRefund"), "0.00");
+  assert.equal(money(exactDepositUse, "renterRefund"), "0.40");
   assert.equal(money(exactDepositUse, "depositRefund"), "0.00");
-
-  const depositShort = structuredClone(expensive);
-  depositShort.depositAmount = "71.65";
-  depositShort.capturedAmount = "1072.65";
-  const insufficient = computeSettlement(depositShort);
-  assert.equal(insufficient.ok, false);
-  assert.ok(insufficient.reasons.includes("INSUFFICIENT_PREPAYMENT"));
-  assert.equal(insufficient.amounts, null);
 
   const mismatch = computeSettlement(baseInput({ remainingHaff: "50000000", remainingItems: "8", endReason: "TENANT_VOLUNTARY_EARLY", capturedAmount: "400.00" }));
   assert.equal(mismatch.ok, false);
@@ -652,7 +661,7 @@ test("actual discounted consumption conserves captured funds across partial and 
   }
 });
 
-test("normal and early settlement preserve the full paid amount with either fee payer", () => {
+test("normal and early settlement preserve the full paid amount with owner-paid payout fee", () => {
   const cents = (s: string) => BigInt(s.replace(".", ""));
   for (const consumed of [0, 25, 50, 69, 70, 99, 100]) for (const remainingItems of [0, 5, 10]) {
     for (const fullPayout of ["SELECTED", "NOT_SELECTED"] as const) {
@@ -666,7 +675,7 @@ test("normal and early settlement preserve the full paid amount with either fee 
       assert.equal(charge + refund, captured);
       assert.equal(owner + platform + refund, captured);
       assert.ok(refund >= 0n && owner >= 0n && platform >= 0n);
-      if (fullPayout === "SELECTED") assert.equal(result.amounts!.feePayer, consumed < 70 ? "RENTER" : "OWNER");
+      if (fullPayout === "SELECTED") assert.equal(result.amounts!.feePayer, "OWNER");
       else assert.equal(result.amounts!.feePayer, "NONE");
     }
   }
