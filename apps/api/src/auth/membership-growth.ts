@@ -1,6 +1,7 @@
 import { computeDeltaQuote, type InternalQuote, type QuoteInput } from "../supply/pricing";
 import { decimalToBigInt, formatDecimalExact, parseNonNegativeDecimal, subtractDecimal } from "../supply/decimal";
 import { normalizeTime } from "../supply/content-hash";
+import { DELTA_HAFF_FIXED_SCHEMA, validateDeltaHaffRule } from "../supply/delta-rental";
 
 export const MEMBERSHIP_GROWTH_SCHEMA = "membership-growth-v1" as const;
 export const GROWTH_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
@@ -566,6 +567,12 @@ export function sealedEnabledRentalModes(haffRule: unknown): RentalMode[] | null
   if (typeof haffRule !== "object" || Array.isArray(haffRule)) return null;
   const rule = haffRule as Record<string, unknown>;
   if (rule.schema === "haff-ratio-v1") return ["ordinary"];
+  if (rule.schema === DELTA_HAFF_FIXED_SCHEMA) {
+    try {
+      const modes = validateDeltaHaffRule(rule, "PERCENT").fixedModes!;
+      return (["ordinary", "custom", "fast"] as const).filter(mode => modes[mode].enabled);
+    } catch { return null; }
+  }
   if (rule.schema !== "haff-ratio-v2") return null;
   const compatibility = rule.compatibility;
   if (!compatibility || typeof compatibility !== "object" || Array.isArray(compatibility)) return null;

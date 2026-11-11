@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, growthContributionSourceDigest, mapAcceptedSettlementToGrowthFacts, membershipGrowthPostCommitCallback, normalizeGrowthInstant, policyTierForGrowthProjection, readGrowthSourceCompleteness, readMembershipGrowth, readMembershipGrowthQuoteCandidates, readMembershipGrowthQuoteCandidatesAt, resolveGrowthEffectiveTime, settlementBackfillActorAllowed } from "../src/auth/membership-growth-integration";
 import { computeDeltaQuote, type QuoteInput } from "../src/supply/pricing";
+import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
 import { chooseCompleteOffer, isLegacyPricingContract, isNotPriced, validateBenefitPolicy } from "../src/auth/membership-growth";
@@ -470,6 +471,35 @@ test("one unified entitlement discounts the actual ordinary, custom and fast bas
       assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
       assert.equal(gift.plan.depositCents, "10000");
       assert.equal(JSON.stringify(input), before, "membership never rewrites base pricing input");
+    }
+  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
+});
+
+test("fixed-fee growth reads enabled modes and rejects a discount below the frozen fee floor", async () => {
+  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
+  try {
+    const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
+    const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
+    const contribution = { ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) };
+    const policy = normalizeUnifiedMembershipPolicy(readerPolicy(), unifiedTestPricing(), { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
+    const entitlement = { id: "ent-unified", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "20000", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "price-v1" } };
+    const { compatibility, ...fixedBase } = compatRule();
+    for (const rentalMode of ["ordinary", "custom", "fast"] as const) {
+      const input = quoteInput(); input.mode = "PERCENT"; input.fixedFeeAlgorithm = FIXED_FEE_ALGORITHM; input.commissionRate = "0.10";
+      input.haffRule = { ...structuredClone(fixedBase), schema: "haff-ratio-v3", fixedModes: structuredClone(compatibility!.modes) };
+      input.conditions.rentalPricing = { rentalMode, ...(rentalMode === "custom" ? { ownerRatioB: "45" } : rentalMode === "fast" ? { ownerRatioB: "60" } : {}) };
+      input.lines = [...input.lines, { itemId: "item", quantity: "5", pricingKind: "FIXED_UNIT", unit: "PIECE", customerTier: "STANDARD", unitQuantity: "1", buyerUnitAmount: "2" }];
+      const base = computeDeltaQuote(input); assert(base.quotable, rentalMode);
+      const request = { userId: "user-1", gameId: "game-1", accountId: "account-1", listingVersionId: "listing-1", listingHash: "h".repeat(64), priceVersionId: "price-v1", baseQuote: base.quote, ruleReleaseId: "release-1", ownerUserId: "owner-1", quantityDigest: "quantity-1", quoteInput: input, asOfUtc: at };
+      const read = (activePolicy: GrowthBenefitPolicy) => readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], activePolicy, "10000.00", "a".repeat(64), false, input.haffRule, [entitlement]), request);
+      const output = await read(policy); assert.equal(output.knowledge, "KNOWN", JSON.stringify(output)); if (output.knowledge !== "KNOWN") throw Error(rentalMode);
+      const gift = output.candidates.find(candidate => candidate.plan.source === "FRIEND"); assert(gift);
+      assert.equal(gift.quote.schemaVersion, 4); assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
+      const legacy = await read(readerPolicy()); assert.equal(legacy.knowledge, "UNKNOWN");
+      if (legacy.knowledge === "UNKNOWN") assert.equal(legacy.reason, "GROWTH_QUOTE_UNAVAILABLE");
+      const incompatible = { ...entitlement, pricingPayload: { ...entitlement.pricingPayload, payableRatio: "0.89" } };
+      const denied = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, input.haffRule, [incompatible]), request);
+      assert.equal(denied.knowledge, "UNKNOWN"); if (denied.knowledge === "UNKNOWN") assert.equal(denied.reason, "ENTITLEMENT_QUOTE_UNAVAILABLE");
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });

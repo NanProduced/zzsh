@@ -38,6 +38,7 @@ import {
 } from "./membership-growth";
 import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
+import { FIXED_FEE_ALGORITHM } from "../supply/fixed-fee";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { canonicalize, normalizeQuote, normalizeTime } from "../supply/content-hash";
 import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
@@ -565,6 +566,7 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
     if (!discounted) return null;
     return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput), payableRatio: contract.payableRatio };
   }
+  if (base.fixedFeeAlgorithm === FIXED_FEE_ALGORITHM) return null;
   if (frozenLegacyBase) return null;
   const input = quoteInputForGrowth(base, contract);
   if (!input) return null;
