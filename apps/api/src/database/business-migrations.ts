@@ -488,6 +488,38 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+  await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+}
+
+/** Do not grant the v5 verifier when its listing, order or funding guards are only partially installed. */
+export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query">, runtimeRole: string): Promise<void> {
+  const role=quoteIdentifier(runtimeRole);
+  const inventory=(await pool.query(`SELECT
+    to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)') IS NOT NULL AS verifier,
+    to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()') IS NOT NULL AS guard,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
+      AND t.tgname='rental_order_fixed_fee_personal_guard' AND t.tgfoid=to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()')
+      AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgqual IS NULL) AS fixed_trigger,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
+      AND t.tgname='rental_order_personal_guard' AND t.tgfoid=to_regprocedure('zzsh_order.guard_personal_order()')
+      AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23
+      AND position('personal-quote-v5' IN pg_get_triggerdef(t.oid))>0
+      AND position('IS DISTINCT FROM' IN pg_get_triggerdef(t.oid))>0) AS legacy_trigger,
+    EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_supply.listing_version')
+      AND c.conname='listing_version_schema_version_check' AND c.contype='c' AND c.convalidated
+      AND pg_get_constraintdef(c.oid)='CHECK ((schema_version = ANY (ARRAY[1, 2, 3, 4])))') AS listing_constraint,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+      WHERE p.oid=to_regprocedure('zzsh_order.guard_supply_final_funding()') AND p.proowner=c.relowner AND NOT p.prosecdef
+        AND position('personal-quote-v5' IN p.prosrc)>0) AS funding_guard,
+    NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+      WHERE p.oid IN(to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()'))
+        AND (p.proowner<>c.relowner OR p.prosecdef)) AS functions_safe`)).rows[0];
+  const keys=["verifier","guard","fixed_trigger","legacy_trigger","listing_constraint","funding_guard","functions_safe"] as const;
+  if(!inventory||keys.some(key=>typeof inventory[key]!=="boolean"))throw new Error("Fixed fee order contract inventory unavailable");
+  if(!inventory.verifier&&!inventory.guard&&!inventory.fixed_trigger&&!inventory.legacy_trigger&&!inventory.listing_constraint&&!inventory.funding_guard)return;
+  if(keys.some(key=>inventory[key]!==true))throw new Error("Fixed fee order contract is partially deployed");
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order) TO ${role}`);
 }
 
 /** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */

@@ -6,7 +6,28 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureFixedFeePersonalPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+
+test("fixed-fee order privileges reject partially installed guards before any grant",async()=>{
+  const complete={verifier:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};
+  const keys=Object.keys(complete) as Array<keyof typeof complete>;
+  for(const key of keys){
+    const writes:string[]=[];
+    const pool={query:async(sql:string)=>{writes.push(sql);return {rows:[{...complete,[key]:false}]};}} as unknown as Pool;
+    await assert.rejects(configureFixedFeePersonalPrivileges(pool,"fixture_runtime"),/partially deployed/);
+    assert.equal(writes.length,1);
+  }
+  const writes:string[]=[];
+  const empty={...complete,verifier:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false};
+  for(const key of keys.filter(key=>key!=="functions_safe")){
+    const pool={query:async()=>({rows:[{...empty,[key]:true}]})} as unknown as Pool;
+    await assert.rejects(configureFixedFeePersonalPrivileges(pool,"fixture_runtime"),/partially deployed/);
+  }
+  const absent={query:async(sql:string)=>{writes.push(sql);return {rows:[empty]};}} as unknown as Pool;
+  await configureFixedFeePersonalPrivileges(absent,"fixture_runtime");assert.equal(writes.length,1);
+  const ready={query:async(sql:string)=>{writes.push(sql);return {rows:[complete]};}} as unknown as Pool;
+  await configureFixedFeePersonalPrivileges(ready,"fixture_runtime");assert.match(writes.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.assert_fixed_fee_personal_order_v5/);
+});
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
   const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
@@ -142,6 +163,7 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
     if (sql.includes("user_auth_throttle_event_id_seq")) return { rows: [{ event: false, captcha: false, sequence: false }] };
     if (sql.includes("post_order_compensation(text)")) return { rows: [{ present: false, executor: false, verifier: false, triggers: 0, functions_safe: false, incident_index: false }] };
     if (sql.includes("cancel_order_after_start(text,bigint,numeric,numeric,text)")) return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
+    if (sql.includes("assert_fixed_fee_personal_order_v5")) return { rows: [{ verifier:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false,functions_safe:true }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
