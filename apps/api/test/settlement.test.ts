@@ -6,6 +6,7 @@ import { compatRule } from "./pricing-compat-fixture";
 import {
   computeSettlement,
   allocateFixedOwnerIncome,
+  fixedFeePostingAllocation,
   settlementFeeReconfirmationRequired,
   earlyMakeupCents,
   settlementConfirmationReady,
@@ -19,6 +20,23 @@ import {
 test("shared early makeup curve uses exact consumption and rounds to cents", () => {
   assert.deepEqual([50n, 60n, 70n].map(q => earlyMakeupCents(10000n, q, 100n)), [5000n, 2500n, 0n]);
   assert.throws(() => earlyMakeupCents(10000n, 1n, 0n));
+});
+
+test("fixed-fee posting classifies the actual fee and discount while conserving manual adjustments", () => {
+  const system = {
+    captured: 11500n, systemOwner: 8200n, systemRefund: 2000n, systemPlatform: 1300n,
+    systemServiceFee: 1000n, systemDiscount: 500n, systemCoverageFee: 800n, earlyMakeup: 0n,
+    ownerNet: 8200n, renterRefund: 2000n, appliedServiceFee: 1000n, appliedCoverageFee: 800n,
+  };
+  assert.deepEqual(fixedFeePostingAllocation(system), { adjustment: 0n, platformContribution: 1300n });
+  assert.deepEqual(fixedFeePostingAllocation({ ...system, ownerNet: 4920n, renterRefund: 3500n,
+    appliedServiceFee: 600n, appliedCoverageFee: 480n }), { adjustment: 2500n, platformContribution: 3080n });
+  const zeroGross = { ...system, captured: 9500n, systemOwner: 9000n, systemRefund: 0n, systemPlatform: 500n,
+    systemCoverageFee: 0n, ownerNet: 0n, renterRefund: 9500n, appliedServiceFee: 0n, appliedCoverageFee: 0n };
+  assert.deepEqual(fixedFeePostingAllocation(zeroGross), { adjustment: 500n, platformContribution: 0n });
+  assert.equal(fixedFeePostingAllocation({ ...system, systemDiscount: 1001n }), null);
+  assert.equal(fixedFeePostingAllocation({ ...system, systemPlatform: 1301n }), null);
+  assert.equal(fixedFeePostingAllocation({ ...system, renterRefund: 10000n }), null);
 });
 
 const HAFF = "100000000";

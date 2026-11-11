@@ -30,6 +30,7 @@ import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type Demo
 import {
   allocateFixedOwnerIncome,
   computeSettlement,
+  fixedFeePostingAllocation,
   settlementFeeReconfirmationRequired,
   settlementConfirmationReady,
   SETTLEMENT_ROUNDING_POLICY,
@@ -1939,8 +1940,18 @@ async function postReadySettlement(
       || ownerNet!==manualGross-fee || manualGross+renterRefund>captured)throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
   }
   const feeDelta=fee-systemFee;
-  const adjustment = systemOwner + systemRefund - ownerNet - renterRefund - feeDelta;
-  const platformContribution = systemPlatform + feeDelta + adjustment;
+  const systemServiceFee = snapshot.schema === "settlement-version-v4" ? exactCents(amounts.platformServiceFee,"PLATFORM_SERVICE_FEE") : 0n;
+  const appliedServiceFee = snapshot.schema === "settlement-version-v4" && version.kind === "MANUAL_ADJUSTMENT"
+    ? exactCents(snapshot.proposedPlatformServiceFee,"PLATFORM_SERVICE_FEE") : systemServiceFee;
+  const systemDiscount = snapshot.schema === "settlement-version-v4" ? exactCents(amounts.membershipDiscount,"MEMBERSHIP_DISCOUNT") : 0n;
+  const fixedAllocation = snapshot.schema === "settlement-version-v4" ? fixedFeePostingAllocation({
+    captured, systemOwner, systemRefund, systemPlatform, systemServiceFee, systemDiscount,
+    systemCoverageFee:systemFee, earlyMakeup:exactCents(amounts.earlyMakeup,"EARLY_MAKEUP"),
+    ownerNet, renterRefund, appliedServiceFee, appliedCoverageFee:fee,
+  }) : null;
+  if (snapshot.schema === "settlement-version-v4" && !fixedAllocation) throw conflict("SETTLEMENT_SNAPSHOT_INVALID");
+  const adjustment = fixedAllocation?.adjustment ?? (systemOwner + systemRefund - ownerNet - renterRefund - feeDelta);
+  const platformContribution = fixedAllocation?.platformContribution ?? (systemPlatform + feeDelta + adjustment);
   if (captured < 0n || ownerNet < 0n || renterRefund < 0n || platformContribution < 0n
       || ownerNet + renterRefund + platformContribution !== captured) {
     throw conflict("FUNDING_SOURCE_REQUIRED");
@@ -2001,8 +2012,15 @@ async function postReadySettlement(
     systemRefund: moneyString(systemRefund), depositRefund: computed.depositRefund,
     unusedItemRefund: computed.unusedItemRefund, unusedHaffRefund: computed.unusedHaffRefund,
   }, { counterpartyUserId: order.renterUserId });
-  addPostingEntry(entries, "PLATFORM_HAFF_SPREAD", exactCents(amounts.haffSpread, "HAFF_SPREAD"), { amount: computed.haffSpread });
-  addPostingEntry(entries, "PLATFORM_ITEM_SPREAD", exactCents(amounts.itemSpread, "ITEM_SPREAD"), { amount: computed.itemSpread });
+  if (fixedAllocation) {
+    addPostingEntry(entries, "PLATFORM_SERVICE_FEE", appliedServiceFee, {
+      amount: centsToYuan(appliedServiceFee), systemAmount: computed.platformServiceFee,
+    });
+    addPostingEntry(entries, "PLATFORM_MEMBER_DISCOUNT", -systemDiscount, { amount: computed.membershipDiscount });
+  } else {
+    addPostingEntry(entries, "PLATFORM_HAFF_SPREAD", exactCents(amounts.haffSpread, "HAFF_SPREAD"), { amount: computed.haffSpread });
+    addPostingEntry(entries, "PLATFORM_ITEM_SPREAD", exactCents(amounts.itemSpread, "ITEM_SPREAD"), { amount: computed.itemSpread });
+  }
   addPostingEntry(entries, "PLATFORM_EARLY_MAKEUP", exactCents(amounts.earlyMakeup, "EARLY_MAKEUP"), {
     amount: computed.earlyMakeup, endReason: snapshot.endReason,
   });
@@ -2014,6 +2032,7 @@ async function postReadySettlement(
     systemRenterRefund: moneyString(systemRefund), postedRenterRefund: moneyString(renterRefund),
     deltaOwnerNet: moneyString(ownerNet - systemOwner), deltaRenterRefund: moneyString(renterRefund - systemRefund),
     ...(manualGross===null?{}:{deltaPayoutFee:moneyString(feeDelta)}),
+    ...(fixedAllocation && manualGross!==null?{deltaPlatformServiceFee:moneyString(appliedServiceFee-systemServiceFee)}:{}),
     approvalRequestId: version.approvalRequestId,
   });
   for (const [index, entry] of entries.entries()) {

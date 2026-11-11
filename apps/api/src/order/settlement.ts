@@ -112,6 +112,24 @@ export type SettlementComputation = {
   consumed: { haff: string; items: Array<{ itemId: string; consumed: string; remaining: string }> } | null;
 };
 
+/** Reclassify the fixed-fee posting without changing the accepted payment or refund. */
+export function fixedFeePostingAllocation(input: {
+  captured: bigint; systemOwner: bigint; systemRefund: bigint; systemPlatform: bigint;
+  systemServiceFee: bigint; systemDiscount: bigint; systemCoverageFee: bigint; earlyMakeup: bigint;
+  ownerNet: bigint; renterRefund: bigint; appliedServiceFee: bigint; appliedCoverageFee: bigint;
+}): { adjustment: bigint; platformContribution: bigint } | null {
+  if (Object.values(input).some(value => value < 0n)
+      || input.systemDiscount > input.systemServiceFee
+      || input.systemPlatform !== input.systemServiceFee - input.systemDiscount + input.systemCoverageFee + input.earlyMakeup
+      || input.systemOwner + input.systemRefund + input.systemPlatform !== input.captured) return null;
+  const adjustment = input.systemOwner + input.systemRefund - input.ownerNet - input.renterRefund
+    - (input.appliedCoverageFee - input.systemCoverageFee)
+    - (input.appliedServiceFee - input.systemServiceFee);
+  const platformContribution = input.appliedServiceFee - input.systemDiscount + input.earlyMakeup + input.appliedCoverageFee + adjustment;
+  if (platformContribution < 0n || input.ownerNet + input.renterRefund + platformContribution !== input.captured) return null;
+  return { adjustment, platformContribution };
+}
+
 export type SettlementConfirmationFacts = {
   settlementVersionId: string;
   currentVersionHash: string;
