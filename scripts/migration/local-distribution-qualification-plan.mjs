@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { NEXT_MIGRATION_PROFILE } from "./local-target-registry.mjs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readVerifiedSourceRows } from "./local-source-adapter.mjs";
@@ -248,11 +249,15 @@ export function normalizedDistributionPolicyFormat(format, roundReceipt) {
   return true;
 }
 
-/** Catch missing or invalid source policy before a long core migration begins. */
-export async function verifyLegacyDistributionPrerequisite({ sourceDir, receipt, sourceSha256, canonicalize, parsePolicy, safePath = value => value }) {
+/** The payload and its summary are built from the same verified source bytes. */
+export async function loadLegacyDistributionPrerequisite({ sourceDir, receipt, sourceSha256, canonicalize, parsePolicy, safePath = value => value }) {
   assert(receipt?.status === "CAPTURED_READ_ONLY" && receipt.rollbackConfirmed === true && receipt.clientClosed === true
     && hex.test(sourceSha256 ?? "") && typeof sourceDir === "string" && typeof canonicalize === "function"
     && typeof parsePolicy === "function" && typeof safePath === "function", "DISTRIBUTION_PREFLIGHT_SOURCE_REQUIRED");
+  const receiptPath = safePath(join(sourceDir, "receipt.json"));
+  const receiptBytes = readFileSync(receiptPath);
+  assert(sha(receiptBytes) === sourceSha256, "DISTRIBUTION_PREFLIGHT_RECEIPT_CHANGED");
+  assert.deepEqual(JSON.parse(receiptBytes), receipt, "DISTRIBUTION_PREFLIGHT_RECEIPT_CHANGED");
   const rows = {};
   for (const name of ["distributionConfig", "distributionLevels"]) {
     const entry = receipt.files?.[name];
@@ -265,11 +270,18 @@ export async function verifyLegacyDistributionPrerequisite({ sourceDir, receipt,
     configurationSha256: receipt.files.distributionConfig.sha256, levelsSha256: receipt.files.distributionLevels.sha256,
     configuration: rows.distributionConfig, rawLevels: rows.distributionLevels });
   const payload = validatedLegacyDistributionPayload(rawPayload, parsePolicy, canonicalize, true);
-  return { status: "DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN", sourceReceiptSha256: sourceSha256,
+  assert(sha(readFileSync(receiptPath)) === sourceSha256, "DISTRIBUTION_PREFLIGHT_RECEIPT_CHANGED");
+  const summary = { status: "DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN", sourceReceiptSha256: sourceSha256,
     configurationSha256: receipt.files.distributionConfig.sha256, levelsSha256: receipt.files.distributionLevels.sha256,
     configurationRows: rows.distributionConfig.length, sourceLevels: rows.distributionLevels.length,
     activeLevels: payload.config.levels.length, settlementDelayDays: payload.config.settlementDelayDays,
     policyDigest: sha(canonicalize(payload.config)), connections: 0, targetWrites: 0 };
+  return { payload, summary };
+}
+
+/** Catch missing or invalid source policy before a long core migration begins. */
+export async function verifyLegacyDistributionPrerequisite(options) {
+  return (await loadLegacyDistributionPrerequisite(options)).summary;
 }
 
 /** Plan exactly the target's imported participants against immutable source-backed audit facts. */
