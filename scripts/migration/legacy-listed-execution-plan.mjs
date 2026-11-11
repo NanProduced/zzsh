@@ -5,6 +5,11 @@ import { validateRoundAccountSet, validateRoundTrialReceipt } from './legacy-lis
 import { NEXT_MIGRATION_PROFILE } from './local-target-registry.mjs';
 const sha=value=>createHash('sha256').update(value).digest('hex');
 
+/** The next migration imports old listings as history; owners must confirm the new pricing before relisting. */
+export function assertLegacyAutoPublicationPermitted(target) {
+  if (target?.migrationProfile === NEXT_MIGRATION_PROFILE) throw new Error('NEXT_LEGACY_LISTING_OWNER_CONFIRMATION_REQUIRED');
+}
+
 export const LISTED_API_MODULES = ['auth/auth-security','auth/security-core','database/business-migrations','order/order','order/legacy-continuation-model','supply/content-hash','supply/funding-authority',
   'supply/legacy-display-snapshot','supply/legacy-listing-read','supply/legacy-published-reference','supply/legacy-trade-takeover','supply/publishing','supply/supply-util',
   'supply/legacy-listed-source-quote','supply/legacy-listed-policy','supply/legacy-listed-source','supply/legacy-listed-pricing','supply/legacy-listed-quote',

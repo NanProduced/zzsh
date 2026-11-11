@@ -1,7 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';import {createRequire} from 'node:module';
 import {spawnSync} from 'node:child_process';import {fileURLToPath} from 'node:url';
 import {existsSync,lstatSync,mkdirSync,mkdtempSync,rmdirSync,unlinkSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
-import {LISTED_API_MODULES,readListedCompiledProof,assertSameCapturePolicyMigration,isSameCaptureListedPolicy,sameCapturePolicyGuardDigest,validateLegacyListedExecutionPlan,validateListedExecutionCheckpoint,validateListedBatchReadbackSet,readUnexpectedListedTarget,readListedExecutionProof,readVerifiedLegacySkinIds} from './legacy-listed-execution-plan.mjs';
+import {LISTED_API_MODULES,readListedCompiledProof,assertLegacyAutoPublicationPermitted,assertSameCapturePolicyMigration,isSameCaptureListedPolicy,sameCapturePolicyGuardDigest,validateLegacyListedExecutionPlan,validateListedExecutionCheckpoint,validateListedBatchReadbackSet,readUnexpectedListedTarget,readListedExecutionProof,readVerifiedLegacySkinIds} from './legacy-listed-execution-plan.mjs';
+import {NEXT_MIGRATION_PROFILE} from './local-target-registry.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),canonical=x=>JSON.stringify(x);
 function fixture(){
  const sourceCanonical='{"id":"1"}',policyCanonical='{"evidence":"fixture"}',sourceDigest=sha(sourceCanonical),proofSha256=sha(policyCanonical),sourceReceiptSha256='a'.repeat(64);
@@ -11,6 +12,10 @@ function fixture(){
   rows:[{sourceId:'1',body:{intake},scope:'scope',key:'key',fingerprint:'fingerprint',sourceQuoteDigest:'b'.repeat(64),policyDigest:'c'.repeat(64)}]};
 }
 const binding=()=>({scope:'scope',key:'key',fingerprint:'fingerprint'}),check=x=>validateLegacyListedExecutionPlan(x,{oid:'1'},{api:'hash'},canonical,binding);
+test('next migration cannot auto-publish old listings; the new gate does not block older profiles',()=>{
+ assert.throws(()=>assertLegacyAutoPublicationPermitted({migrationProfile:NEXT_MIGRATION_PROFILE}),/OWNER_CONFIRMATION_REQUIRED/);
+ assert.doesNotThrow(()=>assertLegacyAutoPublicationPermitted({migrationProfile:null}));
+});
 test('all-batch readback defaults to a zero-connection plan and refuses incomplete arguments',()=>{
  const script=fileURLToPath(new URL('./readback-listed-batches.mjs',import.meta.url));
  const plan=spawnSync(process.execPath,[script],{encoding:'utf8',timeout:5000});assert.equal(plan.status,0,plan.stderr);

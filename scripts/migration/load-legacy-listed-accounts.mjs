@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { readBoundSourceRows } from "./local-source-adapter.mjs";
 import { verifyLegacyListedPolicyDump } from "./verify-legacy-listed-policy-dump.mjs";
-import { assertSameCapturePolicyMigration, isSameCaptureListedPolicy, readListedCompiledProof, validateLegacyListedExecutionPlan, validateListedExecutionCheckpoint, readListedExecutionProof, readVerifiedLegacySkinIds } from "./legacy-listed-execution-plan.mjs";
+import { assertLegacyAutoPublicationPermitted, assertSameCapturePolicyMigration, isSameCaptureListedPolicy, readListedCompiledProof, validateLegacyListedExecutionPlan, validateListedExecutionCheckpoint, readListedExecutionProof, readVerifiedLegacySkinIds } from "./legacy-listed-execution-plan.mjs";
 import { inspectDeferredLegacyCredit, lockDeferredLegacyCreditTables, deferredCreditGateForRow, requiresFullRollbackTrial, rejectUnmarkedObservation } from "./legacy-listed-provisional-credit.mjs";
 import { verifyRoundBoundSourcePlan, validateRoundTrialReceipt, verifySameCaptureListedPolicySource } from "./legacy-listed-round-source.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
@@ -55,6 +55,7 @@ if (inputSha !== option("--input-sha") || !/^\d+$/.test(oid ?? "") || !/^[a-z0-9
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json")));
 const credentials = JSON.parse(readFileSync(credentialsFile));
 const registered = loadRegisteredTarget(credentialsFile);
+if (["--prepare", "--trial", "--execute"].includes(action)) assertLegacyAutoPublicationPermitted(registered);
 if (action === "--trial" || action === "--execute") assertNextMigrationWriteReady(registered);
 const roleKind = action === "--execute" || action === "--trial" ? "migration" : "runtime";
 const role = credentials[roleKind];
