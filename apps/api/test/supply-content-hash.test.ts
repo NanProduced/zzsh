@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
 import { canonicalize } from "../src/supply/content-hash";
 import { publicMediaCategory } from "../src/supply/publishing";
+import { readListingPricingModel } from "../src/supply/pricing-policy-schedule";
 import { deltaPublicationLevels, normalizeDeltaAttributes, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
 
 test("new declarations validate abilities and Beijing intervals while historical normalization stays unchanged", () => {
@@ -113,6 +114,29 @@ function payload(overrides: Partial<ContentPayloadInput> = {}): ContentPayloadIn
     ...overrides,
   };
 }
+
+test("published v1 listings retain their original pricing mode after the platform default changes", async () => {
+  const spread = computeQuote({
+    priceVersionId: "price_1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1",
+    haffRule: { schema: "haff-ratio-v1", baseBySafeBox: { a: "40" }, vitalityDeltaByLevel: { 6: "0" }, bearDeltaByLevel: { 6: "0" }, dailyDeltaByTermOption: { d: "0" }, options: { s: { delta: "0", enabled: true } }, spreadDelta: "5" },
+    lines: [{ itemId: "item-a", quantity: "60000000", pricingKind: "HAFF_RATIO" }, { itemId: "item-b", quantity: "2", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "1", ownerUnitAmount: "0.8" }],
+    conditions: { safeBoxCode: "a", vitLevel: 6, bearLevel: 6, termOptionCode: "d", pricingOptionCode: "s" },
+    termOption: { code: "d", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+  });
+  assert.ok(spread.quotable);
+  for (const [stored, expected] of [
+    [payload(), "LEGACY_PERCENT"],
+    [payload({ quoteValues: spread.quote as unknown as Record<string, unknown> }), "LEGACY_SPREAD"],
+  ] as const) {
+    const client = { query: async (sql: string) => {
+      if (sql.includes("to_regclass")) return { rows: [{ modes: true, prices: true, asOf: "2026-11-02T00:00:00.000000Z" }] };
+      if (sql.includes("listing_publication")) return { rows: [{ schemaVersion: 1, contentHash: computeContentHash(stored), payload: stored }] };
+      throw new Error("The current default must not replace a published account's model");
+    } };
+    const selection = await readListingPricingModel(client as never, { accountId: stored.accountId, ownerUserId: "owner", gameId: stored.gameId });
+    assert.equal(selection?.model, expected);
+  }
+});
 
 test("published fixed-fee accounts retain their selected ratio while new rules apply to new listings", () => {
   const fixedRule = (base: string) => { const { compatibility, ...rest } = compatRule(base); return { ...rest, schema: "haff-ratio-v3", fixedModes: compatibility!.modes }; };

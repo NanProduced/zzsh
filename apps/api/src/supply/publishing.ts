@@ -52,6 +52,8 @@ import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
+import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
+import { readEffectiveFixedFeePrice, readEffectiveSpreadPrice, readListingPricingModel } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -1150,6 +1152,27 @@ export async function quoteListing(
     )
   ).rows[0];
   if (!release) throw conflict("暂无可用规则");
+  let priceVersionId:string=release.price_version_id;
+  let priceMode:"SPREAD"|"PERCENT"=release.mode;
+  let priceRule=release.haff_rule,priceRounding:string=release.rounding_policy,commissionRate:string|null=release.commission_rate;
+  let pricingPolicy:ContentPayloadInput["pricingPolicy"];
+  if(!legacyQuote){
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id});
+    if(selected?.model==="FIXED_FEE"){
+      const rentalMode=normalizeRentalPricing(d.attributes.rentalPricing).rentalMode;
+      const effective=await readEffectiveFixedFeePrice(client,a.game_id,rentalMode,selected.asOf);
+      if(!effective)throw conflict("当前尚未配置固定手续费价格政策");
+      priceVersionId=effective.priceVersionId;priceMode="PERCENT";priceRule=effective.haffRule;priceRounding=effective.roundingPolicy;commissionRate=effective.commissionRate;
+      pricingPolicy={schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
+    }else if(selected?.model==="SPREAD"){
+      const effective=await readEffectiveSpreadPrice(client,a.game_id,selected.asOf);
+      if(!effective||effective.priceVersionId!==release.price_version_id||release.mode!=="SPREAD")throw conflict("当前价差政策与上架规则尚未同步");
+      pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
+    }else if(selected?.model==="LEGACY_SPREAD"||selected?.model==="LEGACY_PERCENT"){
+      const expected=selected.model==="LEGACY_SPREAD"?"SPREAD":"PERCENT";
+      if(release.mode!==expected)throw conflict("原账号的抽成模式与当前规则不一致，请联系客服");
+    }
+  }
   const term = (
     await client.query(
       `SELECT code,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 AND code=$2`,
@@ -1161,7 +1184,7 @@ export async function quoteListing(
   const rows = (
     await client.query(
       `SELECT l.item_id AS "itemId", i.code, l.quantity::text,i.unit,i.name,i.enabled,i.quantity_scale AS "quantityScale",p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE l.version_id=$1 ORDER BY l.item_id`,
-      [v.id, release.price_version_id],
+      [v.id, priceVersionId],
     )
   ).rows;
   if (!rows.length || rows.some((r) => !r.enabled || !r.pricingKind))
@@ -1214,13 +1237,14 @@ export async function quoteListing(
     : undefined;
   const normalInput = {
     customerTier: "STANDARD",
-    priceVersionId: release.price_version_id,
-    mode: release.mode,
-    roundingPolicy: release.rounding_policy,
-    ...(release.commission_rate === null
+    priceVersionId,
+    mode: priceMode,
+    roundingPolicy: priceRounding,
+    ...(commissionRate === null
       ? {}
-      : { commissionRate: release.commission_rate }),
-    haffRule: release.haff_rule,
+      : { commissionRate }),
+    ...(pricingPolicy?.pricingModel==="FIXED_FEE"?{fixedFeeAlgorithm:FIXED_FEE_ALGORITHM}:{}),
+    haffRule: priceRule,
     lines: rows.map((r) => ({
       customerTier: "STANDARD",
       itemId: r.itemId,
@@ -1287,6 +1311,7 @@ export async function quoteListing(
       agreementDigest: release.digest,
     },
     quoteValues: result.quote as unknown as Record<string, unknown>,
+    ...(pricingPolicy && (result.quote.schemaVersion===2||result.quote.schemaVersion===4)?{pricingPolicy}:{}),
     ...(result.quote.schemaVersion === 3 ? { quoteSource:"LEGACY_QUOTED" as const, legacyQuote:result.quote.legacyQuote } : {}),
   });
   if (legacyQuote && policyCanonical && result.quote.schemaVersion === 3) {
@@ -1422,6 +1447,18 @@ export async function assertCurrentRelease(
   if (game?.current_release_id !== v.rule_release_id ||
     (v.review_state === "DRAFT" && v.origin === "NATIVE" && (!v.payload?.ruleRefs.catalogRevision || v.payload.ruleRefs.catalogRevision !== game.catalog_revision)))
     throw conflict("规则已更新，请创建新草稿并重新确认");
+  if(v.review_state==="DRAFT"&&v.origin==="NATIVE"&&v.payload&&v.payload.schemaVersion!==3){
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id});
+    if(selected&&selected.model!=="LEGACY_PERCENT"&&selected.model!=="LEGACY_SPREAD"){
+      const policy=v.payload.pricingPolicy;
+      if(!policy||policy.pricingModel!==selected.model)throw conflict("抽成模式已更新，请重新核价并确认");
+      const effective=selected.model==="FIXED_FEE"
+        ?await readEffectiveFixedFeePrice(client,a.game_id,normalizeRentalPricing(v.payload.declaration.attributes.rentalPricing).rentalMode,selected.asOf)
+        :await readEffectiveSpreadPrice(client,a.game_id,selected.asOf);
+      if(!effective||effective.scheduleId!==policy.scheduleId||effective.generation!==policy.generation||effective.priceVersionId!==policy.priceVersionId)
+        throw conflict("价格政策已更新，请重新核价并确认");
+    }
+  }
 }
 export async function acceptListingRules(
   client: PoolClient,
@@ -1552,6 +1589,8 @@ export async function submitListing(
   const v = await currentVersion(client, a);
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
+  // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
+  if(v.payload?.schemaVersion===4)throw conflict("固定手续费订单结算暂未就绪");
   await assertCurrentRelease(client, a, v);
   await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);
@@ -1606,6 +1645,8 @@ export async function reviewListing(
   if (reason.length < 2 || reason.length > 500)
     throw invalid("请填写具体审核理由");
   if (body.decision === "APPROVE") {
+    // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
+    if(v.payload?.schemaVersion===4)throw conflict("固定手续费订单结算暂未就绪");
     await validatePublicationAttributes(client, a, v.payload!.declaration.attributes, legacyGrading);
     await assertPublicationRentalTerm(client, v);
     const blockers = await publicationBlockers(client, a, v, gate);

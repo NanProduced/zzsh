@@ -103,9 +103,9 @@ test("referenced inventory units cannot be changed in place even when renaming r
 
 test("quote confirmation locks the game and refuses stale catalog/release without rewriting frozen published snapshots",async()=>{
   const queries:string[]=[];
-  const client={query:async(sql:string)=>{queries.push(sql);return {rows:[{current_release_id:'r1',catalog_revision:'89'}]};}};
-  const account={game_id:'g'};
-  const version={rule_release_id:'r1',origin:'NATIVE',review_state:'DRAFT',payload:{ruleRefs:{catalogRevision:'89'}}};
+  const client={query:async(sql:string)=>{queries.push(sql);return {rows:[sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")?{modes:false,prices:false}:{current_release_id:'r1',catalog_revision:'89'}]};}};
+  const account={id:'account',owner_user_id:'owner',game_id:'g'};
+  const version={rule_release_id:'r1',origin:'NATIVE',review_state:'DRAFT',payload:{schemaVersion:2,ruleRefs:{catalogRevision:'89'}}};
   await assertCurrentRelease(client as never,account as never,version as never);
   assert.ok(queries[0]?.endsWith(' FOR SHARE'));
   for(const changes of [{rule_release_id:'r0'},{payload:{ruleRefs:{catalogRevision:'88'}}},{payload:{ruleRefs:{}}}])await assert.rejects(()=>assertCurrentRelease(client as never,account as never,{...version,...changes} as never));

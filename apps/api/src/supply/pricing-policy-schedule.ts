@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
-import { normalizeTime } from "./content-hash";
+import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { effectivePublicationStateSql } from "./listing-query";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
@@ -39,6 +39,55 @@ export async function readEffectivePricingMode(client: PoolClient, gameId: strin
   if(row.pricingModel==="FIXED_FEE")try{parseFixedFeeRates(row.rates);}catch{throw conflict("生效中的固定手续费率无法核实");}
   return {id:row.id,generation:row.generation,effectiveAt:row.effectiveAt,pricingModel:row.pricingModel,
     priceScheduleId:row.priceScheduleId,priceVersionId:row.priceVersionId};
+}
+
+/** Existing owner-published accounts keep their accepted model when the default changes. */
+export async function readListingPricingModel(client:PoolClient,input:{accountId:string;ownerUserId:string;gameId:string;asOf?:string}):Promise<{model:PricingModel|"LEGACY_SPREAD"|"LEGACY_PERCENT";asOf:string}|null> {
+  if(!input||![input.accountId,input.ownerUserId,input.gameId].every(value=>typeof value==="string"&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)))throw invalid("Listing pricing reference is invalid");
+  const tables=(await client.query<{modes:boolean;prices:boolean;asOf:string}>(`SELECT to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
+    to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,${instantSql("clock_timestamp()")} AS "asOf"`)).rows[0];
+  if(!tables||typeof tables.modes!=="boolean"||typeof tables.prices!=="boolean")throw conflict("抽成模式配置暂不可用");
+  if(!tables.modes&&!tables.prices)return null;
+  if(!tables.modes||!tables.prices)throw conflict("抽成模式配置不完整");
+  let asOf:string;
+  try{asOf=normalizeTime(input.asOf??tables.asOf)??"";}catch{throw conflict("抽成模式生效时间无法核实");}
+  if(!asOf)throw conflict("抽成模式生效时间无法核实");
+  const previous=(await client.query<{schemaVersion:number;contentHash:string;payload:ContentPayloadInput|null}>(`SELECT v.schema_version AS "schemaVersion",v.content_hash AS "contentHash",v.payload
+    FROM zzsh_supply.listing_publication p JOIN zzsh_supply.listing_version v ON v.id=p.version_id AND v.account_id=p.account_id
+      AND v.content_hash=p.content_hash AND v.origin='NATIVE'
+    WHERE p.account_id=$1 AND p.owner_user_id=$2 AND p.game_id=$3 AND p.source='OWNER_DIRECT'
+    ORDER BY p.published_at DESC,p.id DESC LIMIT 1`,[input.accountId,input.ownerUserId,input.gameId])).rows[0];
+  if(previous){
+    try{
+      const payload=previous.payload;
+      if(!payload||payload.accountId!==input.accountId||payload.gameId!==input.gameId||payload.schemaVersion!==previous.schemaVersion
+        ||computeContentHash(payload)!==previous.contentHash)throw new Error("listing proof mismatch");
+      const quote=normalizeQuote(payload.quoteValues);
+      if(previous.schemaVersion===4&&quote.schemaVersion===4&&quote.mode==="PERCENT"&&payload.pricingPolicy?.pricingModel==="FIXED_FEE")return {model:"FIXED_FEE",asOf};
+      if(previous.schemaVersion===2&&quote.mode==="SPREAD")return {model:"SPREAD",asOf};
+      if(previous.schemaVersion===1&&quote.schemaVersion===1&&quote.mode==="SPREAD")return {model:"LEGACY_SPREAD",asOf};
+      if(previous.schemaVersion===1&&quote.schemaVersion===1&&quote.mode==="PERCENT")return {model:"LEGACY_PERCENT",asOf};
+    }catch{throw conflict("已上架账号的抽成模式无法核实");}
+    throw conflict("已上架账号的抽成模式无法核实");
+  }
+  const current=await readEffectivePricingMode(client,input.gameId,asOf);
+  if(!current)throw conflict("当前尚未配置新账号抽成模式");
+  return {model:current.pricingModel,asOf};
+}
+
+export async function readEffectiveSpreadPrice(client:PoolClient,gameId:string,asOf:string) {
+  let at:string;
+  try{at=normalizeTime(asOf)??"";}catch{throw invalid("Pricing policy time is invalid");}
+  if(!at||typeof gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId))throw invalid("Pricing policy reference is invalid");
+  const row=(await client.query<{id:string;generation:string;effectiveAt:string;priceVersionId:string;mode:string|null;status:string|null;rates:unknown}>(
+    `SELECT s.id,s.generation::text AS generation,${instantSql("s.effective_at")} AS "effectiveAt",s.price_version_id AS "priceVersionId",
+      p.mode,p.status,p.fixed_fee_rates AS rates FROM zzsh_supply.pricing_policy_schedule s
+      LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=s.game_id
+      WHERE s.game_id=$1 AND s.pricing_model='SPREAD' AND s.effective_at<=$2::timestamptz
+      ORDER BY s.effective_at DESC,s.generation DESC LIMIT 1`,[gameId,at])).rows[0];
+  if(!row)return null;
+  if(row.mode!=="SPREAD"||row.status!=="SEALED"||row.rates!==null)throw conflict("生效中的价差政策无法核实");
+  return {scheduleId:row.id,generation:row.generation,effectiveAt:row.effectiveAt,priceVersionId:row.priceVersionId};
 }
 
 /** asOf comes from the server transaction; absence or an invalid price version is never a zero-fee fallback. */
