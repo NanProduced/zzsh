@@ -73,7 +73,7 @@
 
 R07 本地输入装配器的 `runtime` 需要 `paths.secrets.identity` 和 `paths.secrets.identityProfile`；`round` 需要 `paths.legal`、`paths.secrets.identitySubjectHmac` 和 `paths.secrets.identityProfile`。装配器将两份独立密钥的文件摘要与启动绑定核对，并校验协议输入、业务包回执和同版构建一致；缺失、混用或变更时停止。运行态不输出密钥，旧轮次原回执不因此改写。该装配器仍是本机工具，不等于完整一键迁移。
 
-承接旧实名资料时，源提取必须包含 `la_user.real_name` 和 `id_card`。在受限环境分别提供原 `USER_IDENTITY_SUBJECT_HMAC_KEY_FILE` 和独立的 `USER_LEGACY_IDENTITY_PROFILE_KEY_FILE`；后者用于加密完整资料，正式 API 读取时也需使用相同密钥版本。准备文件含旧源资料，必须受限保存，普通日志和报告不得输出明文。导入和只读对账绑定同一份源及密钥证明；旧实名仍保留原来源，不能标成新渠道核验。
+承接旧实名资料时，源提取必须包含 `la_user.real_name` 和 `id_card`。在受限环境分别提供原 `USER_IDENTITY_SUBJECT_HMAC_KEY_FILE` 和独立的 `USER_LEGACY_IDENTITY_PROFILE_KEY_FILE`；后者用于加密完整资料，正式 API 读取时也需使用相同密钥版本。准备文件含旧源资料，必须受限保存，普通日志和报告不得输出明文。导入和只读对账绑定同一份源及密钥证明；旧实名仍保留原来源，不能标成新渠道核验。NEXT 严格用户批在事务内复核维护身份和时窗，按用户与实名主体锁定并批量补缺；已有主体不覆盖，资料仍按原密文重放规则核验。首轮迁移应使用独立目标并暂停原生用户身份写入；局部锁定不能代替全局停写或完整并发验收。旧轮及非严格路径保留原合同。
 
 ## 脚本职责导航
 

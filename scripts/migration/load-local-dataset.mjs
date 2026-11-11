@@ -125,6 +125,8 @@ function createOutput() {
 // The registered target is resolved before the checkpoint binding is built, so a checkpoint can only
 // ever be compared against the target its registry names - never against a literal in this script.
 const registered = loadRegisteredTarget(option("--credentials"));
+if (execute && importsCore && strictBatch && hasIdentityProfiles && registered.migrationProfile === NEXT_MIGRATION_PROFILE
+    && typeof subject.recordLegacyIdentitySubjects !== "function") throw new Error("NEXT_IDENTITY_SUBJECT_BATCH_BUILD_REQUIRED");
 assertNextBusinessPopulation(population, registered.migrationProfile === NEXT_MIGRATION_PROFILE);
 expectedContinuationImports(manifest, registered.migrationProfile === NEXT_MIGRATION_PROFILE);
 if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
@@ -371,13 +373,19 @@ async function runBatches(domain, items, chunkBody, batchSize = 500) {
 }
 async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
     return runItems(domain, readRows(file), body, batchSize); }
-async function applyUser(row, profiles) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, actor); if (row.trustedIdentityNumber) {
+async function applyUser(row, profiles, batchSubjects) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, actor);
+    if (batchSubjects && result.userId !== row.userId) throw new Error("LEGACY_IDENTITY_SOURCE_BINDING_CONFLICT");
+    if (row.trustedIdentityNumber) {
     const wanted = subject.identitySubjectDigest(row.trustedIdentityNumber, subjectKey);
-    const old = (await client.query("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject WHERE user_id=$1", [row.userId])).rows[0];
-    if (old && (old.subject_digest !== wanted || old.source !== "LEGACY_IMPORT"))
-        throw new Error("LEGACY_SUBJECT_BINDING_CONFLICT");
-    if (!old)
-        await subject.recordLegacyIdentitySubject(client, row.userId, row.trustedIdentityNumber, subjectKey);
+    if (batchSubjects) {
+        batchSubjects.push({ userId: row.userId, sourceRef: "la_user:" + row.sourceId, documentNumber: row.trustedIdentityNumber });
+    } else {
+        const old = (await client.query("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject WHERE user_id=$1", [row.userId])).rows[0];
+        if (old && (old.subject_digest !== wanted || old.source !== "LEGACY_IMPORT"))
+            throw new Error("LEGACY_SUBJECT_BINDING_CONFLICT");
+        if (!old)
+            await subject.recordLegacyIdentitySubject(client, row.userId, row.trustedIdentityNumber, subjectKey);
+    }
     if (hasIdentityProfiles) {
         if (!row.legacyIdentityProfile) throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_MISSING");
         const entry = { binding: { userId: row.userId, sourceRef: "la_user:" + row.sourceId,
@@ -392,13 +400,32 @@ async function applyUsers() {
     if (!strictBatch) return runPhase("users", row => applyUser(row));
     const file = domainFile("users"); if (!file) return;
     return runBatches("users", readRows(file), async (batch, start) => {
-        const results = [], profiles = [];
+        const results = [], profiles = [], batchSubjects = registered.migrationProfile === NEXT_MIGRATION_PROFILE && hasIdentityProfiles ? [] : null;
+        if (batchSubjects) {
+            assertRoundWindow();
+            await mod("auth/admin-auth-session").assertAdminCommandAuthorizedInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+            await mod("finance/personal-finance-maintenance").authorizeFinanceMaintenance(client, actor);
+            assertRoundWindow();
+            const userMigration = mod("supply/legacy-user-migration"), ids = batch.map(row => {
+                const evidence = row.input?.evidence;
+                if (!evidence || row.sourceId !== evidence.legacyId || row.sourceDigest !== evidence.sourceDigest
+                    || row.userId !== userMigration.legacyOwnerUserId(evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId))
+                    throw new Error("LEGACY_IDENTITY_SOURCE_BINDING_CONFLICT");
+                return row.userId;
+            });
+            if (new Set(ids).size !== ids.length) throw new Error("LEGACY_IDENTITY_DUPLICATE_USER");
+            await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE', [ids]);
+            assertRoundWindow();
+        }
         for (const [offset, row] of batch.entries()) {
-            try { results.push(await applyUser(row, profiles)); }
+            try { results.push(await applyUser(row, profiles, batchSubjects)); }
             catch (error) { try { event({ event: "STRICT_ROW_REJECTED", domain: "users", index: start + offset, status: error?.status ?? null }); } catch { } throw error; }
         }
         if (profiles.length) {
-            try { await identityProfile.recordLegacyIdentityProfiles(client, profiles, profileKey, subjectKey); }
+            try {
+                if (batchSubjects) await subject.recordLegacyIdentitySubjects(client, batchSubjects, subjectKey);
+                await identityProfile.recordLegacyIdentityProfiles(client, profiles, profileKey, subjectKey);
+            }
             catch (error) { try { event({ event: "STRICT_BATCH_REJECTED", domain: "users", start, count: profiles.length, status: error?.status ?? null }); } catch { } throw error; }
         }
         return results;

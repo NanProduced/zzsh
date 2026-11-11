@@ -83,9 +83,15 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   }
   const files = new Map(), directories = new Set(), commands = [], events = [], logs = [], saves = [], scopeChecks = [];
   const userRows = structuredClone(users);
+  if (migrationProfile === NEXT_MIGRATION_PROFILE) for (const row of userRows) {
+    row.userId = "synthetic-user-" + row.sourceId; row.sourceDigest = "a".repeat(64);
+    Object.assign(row.input.evidence, { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: row.sourceId, sourceDigest: row.sourceDigest });
+  }
   if (unicodeFirst) userRows[0].input.note = "合成\u2028昵称\u2029保留";
   if (verifiedFirst) Object.assign(userRows[0], { userId: "synthetic-user-101", sourceDigest: "a".repeat(64), trustedIdentityNumber: "99000019900101123X",
-    legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { status: { realNameBound: true } } } });
+    legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: "101", sourceDigest: "a".repeat(64), status: { realNameBound: true } } } });
+  if (failure === "missing-identity-profile") delete userRows[0].legacyIdentityProfile;
+  if (failure === "duplicate-identity-user") userRows[1] = structuredClone(userRows[0]);
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
   const fileEntries = {};
@@ -122,13 +128,14 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
-  let commitAck = false, diskFailed = false;
+  let commitAck = false, diskFailed = false, userLockComplete = false;
   const client = Object.assign(new EventEmitter(), {
     async query(sql) {
       if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", can_inherit: "false", can_bypass_rls: "false", system_identifier: instance?.systemIdentifier ?? null }] };
       if (sql.startsWith("SELECT hash")) return { rows: schema.map(hash => ({ hash })) };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ occupied: false }] };
       commands.push(sql);
+      if (sql.includes('ORDER BY id COLLATE')) userLockComplete = true;
       if (sql.startsWith("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject")) return { rows: [] };
       if (sql === "COMMIT" && failure === "empty-coverage-unknown" && events.some(e => e.domain === "financeEmptyCoverage" && e.event === "INTENT")) throw Object.assign(Error("original coverage commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "lost-commit") {
@@ -149,23 +156,27 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const modules = {
     "supply/content-hash": { canonicalize: JSON.stringify },
     "auth/identity-subject": { deriveIdentitySubjectKey() { return Buffer.alloc(32, 9); }, identitySubjectDigest() { return "b".repeat(64); },
-      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); } },
+      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); },
+      recordLegacyIdentitySubjects: failure === "identity-build-old" ? undefined : () => { commands.push("SYNTHETIC_IDENTITY_SUBJECT_BATCH"); if (failure === "subject-batch-rejected") throw Object.assign(Error("subject batch rejected"), { status: 409 }); } },
     "auth/legacy-identity-profile": { legacyIdentityProfileKey(value) { return createHash("sha256").update(value).digest(); },
       recordLegacyIdentityProfile() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); },
       recordLegacyIdentityProfiles() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); } },
+    "auth/admin-auth-session": { assertAdminCommandAuthorizedInTransaction() { commands.push("BATCH_ACTOR_LOCK"); if (failure === "batch-actor-lost") throw Object.assign(Error("actor unavailable"), { status: 403 }); } },
     "database/business-migrations": { assertBusinessMigrationPrefix() {} },
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
     "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
       importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){} },
-    "supply/legacy-user-migration": { migrateLegacyOwner(_client, row) {
+    "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, migrateLegacyOwner(_client, row) {
+      if (migrationProfile === NEXT_MIGRATION_PROFILE) commands.push("SYNTHETIC_MIGRATE_USER");
       if (row.id === 2 && ["rejected", "lost-rollback"].includes(failure)) throw Object.assign(Error("original rejection"), { status: 409 });
       if (unicodeFirst && row.id === 1) { assert.equal(row.note, "合成\u2028昵称\u2029保留"); commands.push("UNICODE_SOURCE_PRESERVED"); }
-      return { replayed: false };
+      return { replayed: false, ...(row.evidence.legacyId ? { userId: "synthetic-user-" + row.evidence.legacyId } : {}) };
     } },
   };
   const context = {
-    ...path, createHash, createHmac, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
+    ...path, createHash, createHmac, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc,
+    Date: failure === "window-expired-after-prelock" ? class extends Date { static now() { return userLockComplete ? Date.parse(window.expiresAt) + 1 : Date.now(); } } : Date, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
     acquireMigrationSessionFence: fenceFixture ? async () => { commands.push('SESSION_FENCE'); } : acquireMigrationSessionFence,
     assertMigrationFenceHeld: fenceFixture ? async () => { commands.push('FENCE'); if (failure === 'fence-lost') throw Error('TARGET_FENCE_EPOCH_LOST'); } : assertMigrationFenceHeld,
     releaseMigrationSessionFence: fenceFixture ? async () => { commands.push('UNFENCE'); } : releaseMigrationSessionFence,
@@ -209,6 +220,16 @@ test("next-profile dataset execution stops before connecting until all domain ad
  assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
 });
 
+test('NEXT strict identity import refuses an old build before connection',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'identity-build-old'});
+ assert.match(result.error?.message??'',/NEXT_IDENTITY_SUBJECT_BATCH_BUILD_REQUIRED/);
+ assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
+ const legacy=await load({verifiedFirst:true,failure:'identity-build-old'});assert.ifError(legacy.error);
+ assert(legacy.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));assert(!legacy.commands.includes('SYNTHETIC_IDENTITY_SUBJECT_BATCH'));
+ const nonStrict=await load({strict:false,instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'identity-build-old'});
+ assert.match(nonStrict.error?.message??'',/NEXT_MIGRATION_ADMISSION_INCOMPLETE/);assert(!nonStrict.commands.includes('LOCK'));
+});
+
 test('NEXT refuses an old finance build before acquiring the target lock or writing',async()=>{
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'compact-build-old'});
  assert.match(result.error?.message??'',/NEXT_COMPACT_COVERAGE_BUILD_REQUIRED/);
@@ -244,7 +265,10 @@ test('next-profile core batches acquire the transaction fence before writes and 
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
-  assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('SYNTHETIC_IDENTITY_SUBJECT'));
+  assert(applied.commands.indexOf('BATCH_ACTOR_LOCK') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));
+  assert(applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')) < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
+  assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('SYNTHETIC_IDENTITY_SUBJECT_BATCH'));
+  assert(!applied.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
   assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('COMMIT'));
   assert(applied.commands.indexOf('UNFENCE') > applied.commands.indexOf('COMMIT'));
   const rejected = await load({ ...options, failure:'fence-lost' });
@@ -302,12 +326,46 @@ test("strict loader preserves Unicode separators in prepared JSONL", async () =>
   assert.ifError(result.error);assert.equal(result.exit,undefined);assert.ok(result.commands.includes("UNICODE_SOURCE_PRESERVED"));
 });
 
+test("NEXT lost actor authorization rolls back before locking users", async () => {
+  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true, verifiedFirst:true, failure:'batch-actor-lost' });
+  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("BATCH_ACTOR_LOCK"));
+  assert(result.commands.includes("ROLLBACK")); assert(!result.commands.some(sql=>sql.includes('ORDER BY id COLLATE')));
+  assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
+});
+
+test("NEXT window expiry during user lock rolls back before migration writes", async () => {
+  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true, verifiedFirst:true, failure:'window-expired-after-prelock' });
+  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("BATCH_ACTOR_LOCK"));
+  assert(result.commands.some(sql=>sql.includes('ORDER BY id COLLATE'))); assert(result.commands.includes("ROLLBACK"));
+  assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
+});
+
+test("NEXT missing identity evidence or duplicate subject stops the batch", async () => {
+  const options = { instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true, verifiedFirst:true };
+  for (const failure of ["missing-identity-profile", "duplicate-identity-user"]) {
+    const result = await load({ ...options, failure });
+    assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("ROLLBACK"));
+    assert(!result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH")); assert(!result.commands.includes("COMMIT"));
+  }
+});
+
+test("NEXT subject batch failure rolls back before the profile or commit", async () => {
+  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true, verifiedFirst:true, failure:'subject-batch-rejected' });
+  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH"));
+  assert(result.commands.includes("ROLLBACK")); assert(!result.commands.includes("SYNTHETIC_IDENTITY_PROFILE")); assert(!result.commands.includes("COMMIT"));
+});
+
 test("new user import commits the identity subject and encrypted profile together", async () => {
   const result = await load({ verifiedFirst: true });
   assert.ifError(result.error); assert.equal(result.exit, undefined);
   const begin = result.commands.indexOf("BEGIN"), subject = result.commands.indexOf("SYNTHETIC_IDENTITY_SUBJECT"),
     profile = result.commands.indexOf("SYNTHETIC_IDENTITY_PROFILE"), commit = result.commands.indexOf("COMMIT");
   assert.ok(begin < subject && subject < profile && profile < commit);
+  assert(!result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH"));
   assert.equal(JSON.stringify(result.logs).includes("合成姓名"), false);
 });
 
