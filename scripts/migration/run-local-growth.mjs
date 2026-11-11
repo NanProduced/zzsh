@@ -170,7 +170,7 @@ try {
     assert(ruleFiles && Object.keys(ruleFiles).length > 0, "REVIEWED_OLD_RULE_FILES_REQUIRED");
     for (const [file, expected] of Object.entries(ruleFiles)) assert.equal(sha(readFileSync(file)), expected, "OLD_GROWTH_RULE_CHANGED");
     const lineage = { captureReceiptSha256: input.source.sha256, scenarioManifestSha256: input.dataset.sha256, refundReceiptSha256: input.refundAttempts.sha256, targetFactsSha256: sha(canonicalize({ oid: target.oid, nonce: target.nonce, policy: targetProof.policy, orders: targetProof.orders })), orderFileSha256: capture.files.orders.sha256, paymentFileSha256: capture.files.pays.sha256, refundFileSha256: capture.files.refunds.sha256, refundLogFileSha256: refundsReceipt.files.refundLogs.sha256, cohortSha256: m.files.users.sha256, oldRuleFiles: ruleFiles, sourceCutoffMeaning: m.sourceOrigin.cutoffMeaning };
-    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)) });
+    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)), isNextMigration: resource.migrationProfile === NEXT_MIGRATION_PROFILE });
     writePrivate(join(out, "source-review.json"), p.review);
     writePrivate(join(out, "unknown-sources.json"), p.unknownSources);
     let packs,packages;
