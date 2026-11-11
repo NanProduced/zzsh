@@ -174,9 +174,12 @@ export function UserRiskAction({ adapter, user, changed }: { adapter: UserDirect
     <Button variant="outline" size="sm" disabled={action.blocked} onClick={() => { action.reset(); setOpen(true); }}><ShieldAlertIcon size={14} />{user.riskFlag ? '取消高危标记' : '标记高危'}</Button>
     <Dialog open={open} onOpenChange={value => { if (!action.busy) setOpen(value); }}>
       <DialogContent><DialogHeader><DialogTitle>{user.riskFlag ? '取消高危标记' : '标记为高危用户'}</DialogTitle><DialogDescription>仅后台可见，不改变账号、信用或订单状态。</DialogDescription></DialogHeader>
+        <div className="rounded-md border border-border/70 bg-muted/40 p-3 text-xs leading-relaxed text-muted-foreground">
+          {user.riskFlag ? '取消高危标记后，该用户在后台的风险标识将被清除。' : '标记后仅后台管理端可见，用于风控协查与重点关注；建议在下方「内部备注」中同步记录高危判定的依据线索。'}
+        </div>
         {action.message ? <Message kind={action.accepted ? 'success' : 'error'} title={action.message} /> : null}
         <div className="udv-actions"><Button variant="outline" disabled={action.busy} onClick={() => setOpen(false)}>关闭</Button>
-          {!action.accepted ? <Button disabled={action.busy || action.blocked || !action.pending && user.riskRevision === undefined} onClick={() => void action.submit(action.pending ?? { path: `${encodeURIComponent(user.id)}/risk-flag`, body: { flagged: !user.riskFlag, expectedRevision: user.riskRevision }, method: 'POST', key: crypto.randomUUID() })}>{action.busy ? '处理中…' : action.pending?.phase === 'readback' ? '重新读取' : action.pending ? '核对原操作' : '确认'}</Button> : null}
+          {!action.accepted ? <Button variant={user.riskFlag ? 'default' : 'destructive'} disabled={action.busy || action.blocked || !action.pending && user.riskRevision === undefined} onClick={() => void action.submit(action.pending ?? { path: `${encodeURIComponent(user.id)}/risk-flag`, body: { flagged: !user.riskFlag, expectedRevision: user.riskRevision }, method: 'POST', key: crypto.randomUUID() })}>{action.busy ? '处理中…' : action.pending?.phase === 'readback' ? '重新读取' : action.pending ? '核对原操作' : '确认'}</Button> : null}
         </div>
       </DialogContent>
     </Dialog>

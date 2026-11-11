@@ -162,11 +162,28 @@ function AvatarReviewBody({ snapshot, refreshNonce, allowed, policyAllowed }: Re
               <label className="block space-y-1.5 text-sm">
                 <span className="font-medium">审核原因{action.kind === "APPROVE" ? "（可选）" : ""}</span>
                 <Input disabled={busy || Boolean(pending)} value={reason} onChange={(event) => setReason(event.target.value)} maxLength={500} placeholder={action.kind === "APPROVE" ? "可留空" : "说明拒绝、隔离或撤回的原因"} autoFocus />
+                {action.kind !== "APPROVE" ? (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {["涉嫌违规内容", "包含联系方式或广告", "含有二维码或外部链接", "非游戏相关内容"].map((pill) => (
+                      <button
+                        key={pill}
+                        type="button"
+                        onClick={() => setReason(pill)}
+                        className="rounded border border-border/80 bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                      >
+                        {pill}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
               </label>
-              <label className="block space-y-1.5 text-sm">
-                <span className="font-medium">原审核版本（CAS）</span>
-                <Input aria-label="原审核版本" value={action.item.revision} readOnly />
-                <span className="text-muted-foreground text-xs">固定使用列表读取的版本；并发变化时需重新读取，不能跳过版本校验。</span>
+              <label className="block space-y-1 text-xs text-muted-foreground">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-foreground text-xs">原审核版本（CAS）</span>
+                  <span className="text-[11px]">并发更新自动校验</span>
+                </div>
+                <Input aria-label="原审核版本" value={action.item.revision} readOnly className="h-8 font-mono text-xs bg-muted/30 border-dashed text-muted-foreground" />
+                <span className="block text-[11px] leading-tight">固定使用列表读取的版本；并发变化时需重新读取，不能跳过版本校验。</span>
               </label>
               <div className="flex justify-end gap-2">
                 <Button type="button" variant="ghost" onClick={() => setAction(null)} disabled={busy}>取消</Button>

@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Icons } from "../components/icons";
 import { Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator, TimelineItem, TimelineSeparator } from "@/components/reui/timeline";
-import { ArrowDown, ArrowUp, ArrowUpDown, CircleHelp, Eye, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, TriangleAlert, UserCog } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, CircleHelp, Copy, Eye, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, TriangleAlert, UserCog } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -320,6 +320,7 @@ function SecurityActionDialog({
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [copiedCredentials, setCopiedCredentials] = useState(false);
   /** 重置密码返回的一次性临时密码：只在本弹窗显示，显式确认后才关闭。 */
   const [issuedPassword, setIssuedPassword] = useState<string>();
   const copy = ACTION_COPY[action];
@@ -403,7 +404,21 @@ function SecurityActionDialog({
             </div>
           </div>
           <p className="text-xs leading-relaxed text-muted-foreground">请当面交付或走既有安全通道。对方下次登录必须先改密。</p>
-          <DialogFooter>
+          <DialogFooter className="flex items-center justify-between sm:justify-between">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const text = `登录账号：${target.username}\n临时密码：${issuedPassword}\n对方下次登录必须先改密。`;
+                void navigator.clipboard?.writeText(text);
+                setCopiedCredentials(true);
+                setTimeout(() => setCopiedCredentials(false), 2000);
+              }}
+            >
+              <Copy className="mr-1.5 size-3.5" />
+              {copiedCredentials ? "已复制" : "复制全部凭据"}
+            </Button>
             <Button type="button" size="sm" onClick={() => { setIssuedPassword(undefined); onDone(`已确认抄录 ${target.username} 的临时密码，其全部会话已撤销。`); }}>
               我已抄录并关闭
             </Button>
@@ -415,7 +430,7 @@ function SecurityActionDialog({
 
   return (
     <Dialog open onOpenChange={(open) => (open || busy ? undefined : onClose())}>
-      <DialogContent className="flex h-[min(76vh,34rem)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
+      <DialogContent className="flex max-h-[85vh] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader className="shrink-0 px-6 pb-4 pt-6">
           <DialogTitle>{copy.title}</DialogTitle>
           <DialogDescription>
@@ -464,6 +479,7 @@ function SecurityActionDialog({
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               rows={2}
+              placeholder="例：员工离职注销权限、岗位季度安全例行轮换"
               className="min-h-16 text-sm"
             />
           </label>
@@ -622,6 +638,7 @@ export function AdminDirectoryView({
   const [createAllow, setCreateAllow] = useState<string[]>([]);
   const [createDeny, setCreateDeny] = useState<string[]>([]);
   const [delivery, setDelivery] = useState<CreatedAdministrator>();
+  const [copiedDelivery, setCopiedDelivery] = useState(false);
   // Q2：200 但没拿到凭据 —— 账号已存在但没有可交付的秘密，不能进入可抄录的交付态。
   const [createUndelivered, setCreateUndelivered] = useState<string>();
   const [securityAction, setSecurityAction] = useState<SecurityAction>();
@@ -1907,7 +1924,21 @@ export function AdminDirectoryView({
               <p className="text-xs leading-relaxed text-muted-foreground">
                 请当面交付或走既有安全通道。账号在本人完成改密并绑定双因素验证前保持"待激活"，此期间无法通过恢复流程找回凭据。
               </p>
-              <DialogFooter>
+              <DialogFooter className="flex items-center justify-between sm:justify-between">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const text = `登录账号：${delivery.username}\n初始密码：${delivery.temporaryPassword}\n本人首次登录需改密并绑定 2FA（双因素身份验证 / TOTP 动态口令）。`;
+                    void navigator.clipboard?.writeText(text);
+                    setCopiedDelivery(true);
+                    setTimeout(() => setCopiedDelivery(false), 2000);
+                  }}
+                >
+                  <Copy className="mr-1.5 size-3.5" />
+                  {copiedDelivery ? "已复制" : "复制全部凭据"}
+                </Button>
                 <Button
                   type="button"
                   size="sm"
@@ -1974,7 +2005,7 @@ export function AdminDirectoryView({
                     )}
                   </div>
                 ) : null}
-                <p className="text-xs text-muted-foreground">首次登录需修改密码并绑定双因素身份验证 (TOTP / 动态口令)。</p>
+                <p className="text-xs text-muted-foreground">本人首次登录需改密并绑定 2FA（双因素身份验证 / TOTP 动态口令）。</p>
                 <label className="block">
                   <FieldLabel>显示名称</FieldLabel>
                   <Input value={createName} onChange={(event) => setCreateName(event.target.value)} className="focus-visible:outline-none!" required />

@@ -189,7 +189,24 @@ export function CreditPanel({ adapter, user, refreshNonce, active = true, change
     </CollapsibleContent></Collapsible> : null}
     <Dialog open={dialog !== null} onOpenChange={value => { if (!value) setDialog(null); }}><DialogContent closeLabel="关闭" className="sm:max-w-md"><form className="grid gap-4" onSubmit={event => { event.preventDefault(); submit(); }}>
       <DialogHeader><DialogTitle>{dialog === 'deduct' ? '手动扣分' : '更正扣分'}</DialogTitle><DialogDescription>{user.name} · 当前 {score ?? '未知'} 分{dialog && dialog !== 'deduct' ? `，原扣分 ${Math.abs(dialog.appliedDeltaScore)} 分` : ''}</DialogDescription></DialogHeader>
-      {dialog === 'deduct' ? <Field label="扣分数量" hint={score === null ? '信用分尚未建立' : `可扣 1–${score} 分`} required><Input aria-label="扣分数量" inputMode="numeric" autoComplete="off" value={amount} onChange={event => setAmount(event.target.value)} /></Field> : null}
+      {dialog === 'deduct' ? <div className="rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-900 dark:text-amber-300">⚠️ 此说明将直接在用户的客户端信用记录中展示，请填写规范友善的官方说明。</div> : null}
+      {dialog === 'deduct' ? <Field label="扣分数量" hint={score === null ? '信用分尚未建立' : `可扣 1–${score} 分`} required>
+        <div className="grid gap-2">
+          <Input aria-label="扣分数量" inputMode="numeric" autoComplete="off" value={amount} onChange={event => setAmount(event.target.value)} />
+          <div className="flex flex-wrap gap-1.5">
+            {[5, 10, 20].filter(n => score !== null && n <= score).map(n => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setAmount(String(n))}
+                className="rounded border border-border/80 bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+              >
+                -{n}分
+              </button>
+            ))}
+          </div>
+        </div>
+      </Field> : null}
       <Field label={dialog === 'deduct' ? '扣分说明' : '更正说明'} hint="用户可以看到这条说明，2–500 字。" required><Textarea aria-label={dialog === 'deduct' ? '扣分说明' : '更正说明'} rows={4} maxLength={500} value={explanation} onChange={event => setExplanation(event.target.value)} /></Field>
       <DialogFooter><Button type="button" variant="outline" onClick={() => setDialog(null)}>取消</Button><Button type="submit" variant={dialog === 'deduct' ? 'destructive' : 'default'} disabled={!canWrite || busy || !knownRevision || !reasonValid || (dialog === 'deduct' && !amountValid)}>{dialog === 'deduct' ? '确认扣分' : '确认更正'}</Button></DialogFooter>
     </form></DialogContent></Dialog>

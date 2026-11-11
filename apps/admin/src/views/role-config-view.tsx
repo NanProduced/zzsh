@@ -875,10 +875,13 @@ export function RoleConfigView({
           <Skeleton className="h-[420px] w-full" />
         </div>
       ) : roles.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border/70 px-6 py-16 text-center">
-          <p className="text-sm font-medium text-foreground">还没有角色</p>
-          <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
-            角色决定管理员能做什么。新建一个，之后在管理员账号上分配给需要的人。
+        <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-6 py-12 text-center">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary mb-3">
+            <Icons.ShieldCheck size={24} />
+          </div>
+          <p className="text-base font-semibold text-foreground">还没有角色</p>
+          <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-muted-foreground">
+            角色决定管理员能做什么。建议先按业务岗位创建基础角色（如：运营审核、财务结算、客服专员），再为管理员分配。
           </p>
           {canConfigure ? (
             <Button type="button" size="sm" className="mt-4" onClick={() => setDialog({ kind: "create" })}>

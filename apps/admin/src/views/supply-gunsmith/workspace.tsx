@@ -561,6 +561,22 @@ export function GunsmithWorkspace({
               </div>
             </div>
 
+            {/* 结构化操作流程引导 */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl mx-auto pt-1 pb-1 text-left">
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+                <span className="text-xs font-semibold text-primary">① 选择枪械</span>
+                <p className="text-[11px] text-muted-foreground leading-snug">从左侧列表或下方快捷卡片挑选目标武器</p>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+                <span className="text-xs font-semibold text-primary">② 录入改枪码</span>
+                <p className="text-[11px] text-muted-foreground leading-snug">粘贴游戏内生成的导出码并设置方案名称</p>
+              </div>
+              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+                <span className="text-xs font-semibold text-primary">③ 标注与实测</span>
+                <p className="text-[11px] text-muted-foreground leading-snug">标注推荐模式并在游戏内实测生效后上线</p>
+              </div>
+            </div>
+
             {/* 快速开始卡片：展示前几个枪械，点击直接切换 */}
             {quickStartFirearms.length > 0 ? (
               <div className="border-t border-border/60 pt-5 space-y-3">

@@ -39,7 +39,7 @@ export function SupplyActionDialog({ title, objectLabel, imageSrc, stale, unknow
       {unknown && <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>确认按钮仅重试原操作；确认结果前不能修改原因或另发操作。</AlertDescription></Alert>}
       <DialogFooter>
         <Button variant="outline" size="lg" onClick={onClose} disabled={locked}>取消</Button>
-        <Button variant="destructive" size="lg" onClick={onConfirm} disabled={busy || conflict || stale || reason.trim().length < 2} aria-busy={busy || undefined}>{busy ? "处理中…" : "确认" + title.replace(/…$/, "")}</Button>
+        <Button variant={/限制|驳回|隔离|退回|撤回|删除|下架|冻结/.test(title) ? "destructive" : "default"} size="lg" onClick={onConfirm} disabled={busy || conflict || stale || reason.trim().length < 2} aria-busy={busy || undefined}>{busy ? "处理中…" : "确认" + title.replace(/…$/, "")}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

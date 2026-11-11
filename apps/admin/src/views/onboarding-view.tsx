@@ -279,6 +279,11 @@ export function OnboardingView({
             </div>
           </div>
 
+          <div className="mt-3 rounded-lg border border-border/60 bg-muted/30 px-3.5 py-2.5 text-xs text-muted-foreground">
+            <span className="font-medium text-foreground">推荐验证器：</span>
+            <span>微信小程序「腾讯身份验证器」、微软 Authenticator、Google Authenticator。</span>
+          </div>
+
           <form onSubmit={handleVerify2FASubmit} className="mt-6 flex flex-col gap-5" noValidate>
             <div className="flex flex-col items-center gap-2">
               <label className="text-xs font-medium text-muted-foreground" htmlFor="totp-verify-code">
