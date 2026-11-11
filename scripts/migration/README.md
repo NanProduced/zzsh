@@ -13,7 +13,7 @@
 `run-local-source-workflow.mjs --execute --input <受限输入> --input-sha <摘要>` 可依次运行上述准备、恢复、完整采集、资金补采和退款补采，并校验来源与工具版本；受限输入 `schema` 为 `zzsh.local-source-workflow.v1`，包含 `suffix`、`imageId`、`dump`、UTC `exportStartedAt`/`cutoff` 及新建的 `out` 路径。各阶段记录实际耗时和结果，失败保留原资源与回执；`SOURCE_CAPTURED_DATASET_NOT_PREPARED` 只表示来源阶段完成，不表示目标已初始化、数据已转换或整轮已验收。
 
 新源的基础采集和资金、退款补采使用 `capture-local-source.mjs --source-origin-v2 <来源绑定> --source-origin-sha <摘要>`，轮次输入同时携带相同来源绑定；源文件、采集结果、补采或已封存工具不匹配时停止。旧轮已封存输入继续沿原合同验证，不将旧登记补写为新恢复证明。
-2. **安装新平台结构及基础资料**：从 `apps/api/migrations/initial/` 安装明确基线，再执行对应后续迁移和 runtime ACL；首次创建新管理员，再初始化游戏、目录、皮肤词条、价目和规则。旧轮法律文书入口要求有效管理员会话；新轮不得以该入口冒充不依赖 Boss 的首次初始化。旧管理员、会话与 IM 身份不迁入。
+2. **安装新平台结构及基础资料**：从 `apps/api/migrations/initial/` 安装明确基线，再执行对应后续迁移和 runtime ACL；首次创建新管理员，再初始化游戏、目录、皮肤词条、价目和规则。旧轮业务包与法律文书写入依赖管理员归属或会话，禁止用于 NEXT；新轮无需激活 Boss 的初始化入口仍待完成。旧管理员、会话与 IM 身份不迁入。
 
 新库业务包必须使用验证通过的 `OWNER_KIND_V2` 目录，禁止把已退役的皮肤分类表或近战类型数据随旧版包重新写入；旧版包仍可只读验证供溯源。新一轮回执必须绑定当前目录模型，不能复用缺少模型证明的旧初始化回执。
 
@@ -67,9 +67,9 @@
 
 银行卡源文件与恢复快照的比较在只读事务内逐行读取临时盐摘要，再核对原始数据集的数量及完整摘要；不使用有长度上限的 `GROUP_CONCAT`，也不输出姓名或卡号。执行和原键回查均在独立只读事务核验目标身份，逐条核对匹配后再比较整个目标绑定与旧导入审计的数量；零来源同样要求两者为零。权限不足或行级安全可能遮挡数据时停止，发现额外记录则待核。此集合检查面向尚未投入使用的新目标，已有其他绑卡业务的目标需单独核实，不得按数量不符删除。新来源绑定已接入银行卡来源核对；完整银行卡 CLI 与整轮流程仍须独立演练，不能直接作为线上迁移工具。
 
-新轮次目标使用独立本机实例身份。核心导入、成长、信用、银行卡、在架接管和截图路径的候选写入跨批持有目标连接锁，业务基础包、分销资格写入及独立读回使用同一目标事务锁；锁丢失或清理未确认时不能将轮次标为完成。管理员、会员政策和部分分销政策等阶段尚未全部接入此锁，故核心轮次、成长、分销、信用、银行卡、在架接管和路径迁入的新目标写入入口目前主动阻断；初始化和只读专项不能当作完整迁移流程使用。完成全阶段接线和真实并发、恢复验证前不得放开。
+新轮次目标使用独立本机实例身份。核心导入、成长、信用、银行卡、在架接管和截图路径的候选写入跨批持有目标连接锁，分销资格写入及独立读回使用同一目标事务锁；锁丢失或清理未确认时不能将轮次标为完成。旧业务包虽有目标锁实现，但管理员归属不符合新轮要求，入口已阻断；核心轮次、成长、分销、信用、银行卡、在架接管和路径迁入的新目标写入入口也仍主动阻断。初始化和只读专项不能当作完整迁移流程使用；完成全阶段接线和真实并发、恢复验证前不得放开。
 
-本地业务包执行需提供 `--maintenance-admin-id`、`--maintenance-session-id` 和 `--legal-input` / `--legal-input-sha`。法律输入为受限 JSON：`schema` 为 `zzsh.legal-initial-source.v1`，`effectiveAt` 为 UTC 时间，`terms` 与 `privacy` 各有已审正文绝对路径和原始字节 `sha256`，`build` 映射同版 `legal/legal-documents.js`、`auth/security-core.js`、`supply/content-hash.js`、`supply/supply-util.js` 四个构建文件的摘要。两篇当前生效版本须与输入完全一致；缺一篇、内容冲突或来源变化均停止，不覆盖已有运营内容。轮次执行器验证目标绑定的初始化回执，并在只读对账再次核两篇当前版本；它目前**不会自动执行**管理员、业务包或法律初始化，仍需预先取得对应回执。
+旧轮本地业务包执行需提供 `--maintenance-admin-id`、`--maintenance-session-id` 和 `--legal-input` / `--legal-input-sha`，不能用于 NEXT。法律输入为受限 JSON：`schema` 为 `zzsh.legal-initial-source.v1`，`effectiveAt` 为 UTC 时间，`terms` 与 `privacy` 各有已审正文绝对路径和原始字节 `sha256`，`build` 映射同版 `legal/legal-documents.js`、`auth/security-core.js`、`supply/content-hash.js`、`supply/supply-util.js` 四个构建文件的摘要。两篇当前生效版本须与输入完全一致；缺一篇、内容冲突或来源变化均停止，不覆盖已有运营内容。旧轮执行器会核初始化回执，但**不会自动执行**管理员、业务包或法律初始化；新轮合同及完整编排仍待实现。
 
 R07 本地输入装配器的 `runtime` 需要 `paths.secrets.identity` 和 `paths.secrets.identityProfile`；`round` 需要 `paths.legal`、`paths.secrets.identitySubjectHmac` 和 `paths.secrets.identityProfile`。装配器将两份独立密钥的文件摘要与启动绑定核对，并校验协议输入、业务包回执和同版构建一致；缺失、混用或变更时停止。运行态不输出密钥，旧轮次原回执不因此改写。该装配器仍是本机工具，不等于完整一键迁移。
 
@@ -81,7 +81,7 @@ R07 本地输入装配器的 `runtime` 需要 `paths.secrets.identity` 和 `path
 | --- | --- | --- |
 | `build-business-initial.mjs` | 从受控空库安装后的最终结构生成新装基线 | 原迁移链、种子白名单、结构/ACL等价验证；不转换旧业务数据 |
 | `admin-staging-handoff.mjs` / `retire-r07-local-auth.mjs` | 精确退役交付副本中的本机认证材料，保留业务身份和用户密码 | 仅接受专用合成库或绑定回执的第七轮独立本机副本；不连接线上、不清空全局验证记录 |
-| `bootstrap-local-reference.mjs` | 旧本地演练的管理员初始化，封包/装载已审业务基础资料 | 管理员旧入口禁止 NEXT 目标；业务包不包含管理员凭据、会话、审批执行或交易 |
+| `bootstrap-local-reference.mjs` | 旧本地演练的管理员初始化，封包/装载已审业务基础资料 | 旧管理员及业务包写入口禁止 NEXT；业务包可只读验证，不包含管理员凭据、会话、审批执行或交易 |
 | `initialize-local-policy.mjs` | 旧本地演练的会员政策发布 | 使用旧审批流程，禁止 NEXT 目标；新政策初始化待接入 |
 | `capture-local-source.mjs` | 在本地源 MySQL 一致只读事务中提取数据 | 绑定源、物理字段和截点；输出受限 JSONL、摘要及读回收尾回执 |
 | `prepare-local-dataset.mjs` | 构建有完整关联的迁移 cohort 与各域输入 | 已核 SHA 的源包；输出执行包、依赖及隔离清单，不写目标 |
@@ -138,7 +138,7 @@ readiness核对应plan摘要，合成对账仅标FIXTURE_PASS。缺证种子随p
 
 - `capture-local-source.mjs`：只读已绑定的本地MySQL恢复容器，保留原物理字段、支付原号、身份/密码来源及资金旁证；同一只读一致快照逐域流式写受限JSONL，确认ROLLBACK及客户端关闭。原始数据不进Git。
 - `prepare-local-dataset.mjs`：逐件核源SHA，复用正式身份/账号/订单/续办与资金纯函数，生成受限执行输入及完整隔离分母；原dump截止点与采集时间分开。READY只是源侧参数准入。
-- `bootstrap-local-reference.mjs`：旧本地管理员入口创建并激活两 Boss 及运营、客服，禁止对 NEXT 目标使用；另行装载不含管理员身份和交易的已审业务基础资料。旧管理员、凭据/会话和 IM 映射的恢复路径已经拒绝；不改 realm secret、不复制订单付款、不禁用触发器。
+- `bootstrap-local-reference.mjs`：旧本地管理员入口创建并激活两 Boss 及运营、客服，旧业务包将非空管理员归属映射到执行人；两类写入均禁止对 NEXT 目标使用。旧管理员、凭据/会话和 IM 映射的恢复路径已经拒绝；不改 realm secret、不复制订单付款、不禁用触发器。
 - `load-local-dataset.mjs`：显式execute后才读取已登记migration身份；复用正式writer按身份→账号/观察/快照→旧单→历史观察/续办/责任/佣金执行，分批事务保存checkpoint和原键。COMMIT UNKNOWN停止，recover只读，不自动换键重发。
 - `prepare-local-display.mjs`：独立补提账号展示字段，逐字段核对原冻结提取，任何共同字段漂移即拒绝；不修改原dataset或把缺项补成0。
 - `load-local-dataset.mjs --enrich-display`：只在核心导入完成的已知checkpoint追加正式历史展示快照；`--import-openings`独立绑定已审原余额证明，金额写入仍走正式maintenance准入/原键/账务writer，不按流水求和。

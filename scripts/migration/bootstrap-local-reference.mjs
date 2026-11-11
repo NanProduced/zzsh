@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFile
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
 import { verifySkinRetirementPackage } from "./derive-business-reference-skin-retirement.mjs";
@@ -108,6 +108,7 @@ const expectedOid = option("--oid"), expectedNonce = option("--nonce"), credenti
 if (!expectedOid || !expectedNonce || !credentialFile)
     throw new Error("EXACT_TARGET_BINDING_REQUIRED");
 const registered = loadRegisteredTarget(credentialFile);
+if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) throw new Error("NEXT_LEGACY_BUSINESS_BOOTSTRAP_RETIRED");
 const credentials = JSON.parse(readFileSync(credentialFile));
 if (registered.database !== "zzsh_test_regression" || registered.oid !== expectedOid || registered.nonce !== expectedNonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid))
     throw new Error("REGISTERED_RESOURCE_CHANGED");
@@ -465,6 +466,7 @@ async function initializeFormalAdmins() {
     const inputBytes = readFileSync(inputFile), input = JSON.parse(inputBytes);
     if (input.target?.instance && (!/^[a-f0-9]{64}$/.test(option("--input-sha") ?? "") || sha(inputBytes) !== option("--input-sha"))) throw new Error("FORMAL_INITIALIZATION_INPUT_SHA_CHANGED");
     if (input.kind !== "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1" || input.numberingDigits !== 5 || input.target?.database !== "zzsh_test_regression" || !input.target.oid || !input.target.nonce || !/^[a-z][a-z0-9_-]{0,63}$/.test(input.resource ?? "")) throw new Error("FORMAL_INITIALIZATION_CONTRACT_REQUIRED");
+    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE) throw new Error("NEXT_LEGACY_ADMIN_INITIALIZER_RETIRED");
     const aliases = ["boss-one", "boss-two", "operations", "support"];
     if (Object.keys(input.names ?? {}).sort().join() !== [...aliases].sort().join() || aliases.some(alias => typeof input.names[alias] !== "string" || !input.names[alias].trim() || input.names[alias].length > 120 || input.names[alias].startsWith("ROOT_REQUIRED_"))) throw new Error("EXACT_FOUR_ADMIN_NAMES_REQUIRED");
     const bindingBytes = readFileSync(input.serverBinding.file), binding = JSON.parse(bindingBytes);
@@ -474,7 +476,7 @@ async function initializeFormalAdmins() {
     const out = resolve(output), restricted = realpathSync("E:/zzsh-local-state/restricted");
     if (dirname(out).toLowerCase() !== restricted.toLowerCase() || !/^data-first-bootstrap-[a-z0-9-]+$/i.test(basename(out)) || existsSync(out)) throw new Error("NEW_RESTRICTED_BOOTSTRAP_DIRECTORY_REQUIRED");
     const registered = loadRegisteredTarget(credentialFile);
-    assertNextMigrationWriteReady(registered);
+    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) throw new Error("NEXT_LEGACY_ADMIN_INITIALIZER_RETIRED");
     const credentialBytes = readFileSync(credentialFile), credentials = JSON.parse(credentialBytes);
     if (registered.instance && (input.stage !== stage || !/^[a-f0-9]{64}$/.test(input.credentialsSha256 ?? "") || sha(credentialBytes) !== input.credentialsSha256)) throw new Error("FORMAL_INITIALIZATION_STAGE_OR_CREDENTIAL_CHANGED");
     if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid)) throw new Error("REGISTERED_RESOURCE_CHANGED");

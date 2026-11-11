@@ -3,13 +3,14 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
-import { assertNextMigrationWriteReady, isRegisteredMigrationInstance } from "./local-target-registry.mjs";
+import { isRegisteredMigrationInstance, NEXT_MIGRATION_PROFILE } from "./local-target-registry.mjs";
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const security = "/api/v1/admin/security/approvals/";
 const policyPath = "/api/v1/admin/membership-growth/policy";
 const operationCode = "membership.benefit.policy.publish", triggerCondition = "membership.policy.publish.requested";
 const fail = code => { throw new Error(code); };
+const assertLegacyPolicyTarget = target => { if (target?.migrationProfile === NEXT_MIGRATION_PROFILE) fail("NEXT_LEGACY_POLICY_INITIALIZER_RETIRED"); };
 const TEST_POLICY_KIND = "LOCAL_TEST_MEMBERSHIP_POLICY_CONTENT_V1";
 const testRatios = { STANDARD: "1", SILVER: "0.98", GOLD: "0.96", PLATINUM: "0.94", DIAMOND: "0.92" };
 const testDeposits = { STANDARD: ["ACCOUNT_BASE", "0"], SILVER: ["ACCOUNT_BASE", "2000"], GOLD: ["ACCOUNT_BASE", "10000"], PLATINUM: ["WAIVED", "0"], DIAMOND: ["WAIVED", "0"] };
@@ -100,7 +101,7 @@ export function buildPolicyDraft(template, effectiveAtUtc, now = Date.now()) {
 
 /** Fixed formal policy flow; authority and idempotency stay in the existing API. No database or resource lock. */
 export async function runPolicyInitialization({ profile, template, effectiveAtUtc, apiOrigin, commandKeyPrefix, write, fetcher = fetch, now = Date.now(), target, provenance }) {
-    assertNextMigrationWriteReady(target);
+    assertLegacyPolicyTarget(target);
     const started = performance.now(), startedAt = new Date().toISOString();
     validateProfile(profile); apiOrigin = localOrigin(apiOrigin);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,88}$/.test(commandKeyPrefix ?? "")) fail("STABLE_POLICY_COMMAND_PREFIX_REQUIRED");
@@ -197,7 +198,7 @@ async function main() {
     const bytes = readFileSync(option("--input")); if (sha(bytes) !== option("--input-sha")) fail("POLICY_INPUT_SHA_MISMATCH");
     const input = JSON.parse(bytes);
     if (input.kind !== "FORMAL_LOCAL_MEMBERSHIP_POLICY_INITIALIZATION_V1" || input.target?.database !== "zzsh_test_regression" || !input.target.oid || !input.target.nonce) fail("EXACT_POLICY_TARGET_INPUT_REQUIRED");
-    assertNextMigrationWriteReady(input.target);
+    assertLegacyPolicyTarget(input.target);
     const bindingBytes = readFileSync(input.serverBinding.file), binding = JSON.parse(bindingBytes);
     assertPolicyRuntimeBinding(input, binding, bindingBytes);
     const contentBytes = readFileSync(input.contentManifest.file); if (sha(contentBytes) !== input.contentManifest.sha256) fail("POLICY_CONTENT_MANIFEST_SHA_MISMATCH");
