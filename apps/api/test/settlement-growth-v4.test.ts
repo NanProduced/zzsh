@@ -143,6 +143,47 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
  assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedUnit,confirmationDigest:signed(changedUnit)}}));
 });
 
+test('fixed-fee refunds reconcile after discounts, excess consumption and early makeup',()=>{
+ const makeInput=(haffQuantity:string,ratio:string,itemPrice:string,itemQuantity:string,payableRatio:string)=>{
+  const {compatibility,...baseRule}=compatRule(ratio);
+  const result=computeDeltaQuote({priceVersionId:'fixed-price',mode:'PERCENT',fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:'0.10',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',
+   haffRule:{...baseRule,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},
+   conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},
+   termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},
+   lines:[{itemId:'haff',quantity:haffQuantity,unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'},
+    {itemId:'item',quantity:itemQuantity,unit:'PIECE',pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:itemPrice,customerTier:'STANDARD'}]});
+  assert(result.quotable);
+  const basis=freezeSettlementPricing(result.quote,payableRatio,[{item_id:'item',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:itemPrice,owner_unit_amount:null,item_unit:'PIECE',item_enabled:true}],'0.10');
+  const selected=applyTotalDiscountToQuote(result.quote,payableRatio);assert(selected);
+  const quote=selected.quote;
+  const toLine=(line:typeof quote.lines[number]):SettlementInventoryLine=>{
+   const exact=quote.pricingInputs.exactRatios.find(row=>row.itemId===line.itemId),item=basis.items.find(row=>row.itemId===line.itemId);
+   return {itemId:line.itemId,unit:line.unit,pricingKind:line.pricingKind,openingQuantity:line.quantity,remainingQuantity:'0',unitQuantity:line.unitQuantity,
+    buyerUnitAmount:line.buyerUnitAmount.amount,ownerUnitAmount:line.ownerUnitAmount.amount,prepaidBuyerAmount:line.buyerAmount.amount,prepaidOwnerAmount:line.ownerAmount.amount,
+    ...(exact?{exactRatio:exact,baseHaffBuyerRatio:{numerator:basis.haff.buyerNumerator,denominator:basis.haff.buyerDenominator}}:{}),
+    ...(item?{baseBuyerUnitAmount:item.buyerUnitAmount,baseOwnerUnitAmount:item.ownerUnitAmount}:{})};
+  };
+  return {orderId:'order',settlementVersionId:'settlement',openingVersionId:'opening',quoteDigest:'quote',paymentDigest:'payment',
+   roundingPolicy:SETTLEMENT_ROUNDING_POLICY,feePolicyVersion:'payout',renterUserId:'renter',ownerUserId:'owner',rentalStarted:true,endReason:'NORMAL' as const,
+   depositAmount:'0.00',capturedAmount:quote.resourceTotal.amount,fullPayout:'NOT_SELECTED' as const,fullPayoutPolicyRef:null,pricingMode:'FIXED_FEE_TOTAL_V1' as const,
+   fixedFeeRate:basis.fixedFeeRate,totalPayableRatio:basis.payableRatio,haff:toLine(quote.lines.find(line=>line.pricingKind==='HAFF_RATIO')!),
+   items:[toLine(quote.lines.find(line=>line.pricingKind==='FIXED_UNIT')!)]};
+ };
+ const input=makeInput('30000000','50','4','10','0.95');
+ assert.equal(input.capturedAmount,'95.00');assert.equal(input.items[0]!.buyerUnitAmount,'4.00000000');
+ const full=computeSettlement(input);assert.equal(full.ok,true,full.reasons.join(','));
+ assert.equal(full.amounts!.unusedItemRefund.amount,'0.00');assert.equal(full.amounts!.unusedHaffRefund.amount,'0.00');assert.equal(full.amounts!.renterRefund.amount,'0.00');
+ const partial=computeSettlement({...input,items:[{...input.items[0]!,remainingQuantity:'5'}]});assert.equal(partial.ok,true,partial.reasons.join(','));
+ assert.equal(partial.amounts!.unusedItemRefund.amount,'19.00');assert.equal(partial.amounts!.unusedHaffRefund.amount,'0.00');assert.equal(partial.amounts!.renterRefund.amount,'19.00');
+ const excess=computeSettlement({...input,haff:{...input.haff,remainingQuantity:null,consumedQuantity:'40000000'},items:[{...input.items[0]!,remainingQuantity:'10'}]});
+ assert.equal(excess.ok,true,excess.reasons.join(','));assert.equal(excess.amounts!.unusedItemRefund.amount,'19.00');assert.equal(excess.amounts!.unusedHaffRefund.amount,'0.00');assert.equal(excess.amounts!.renterRefund.amount,'19.00');
+ const early=computeSettlement({...input,endReason:'TENANT_VOLUNTARY_EARLY',haff:{...input.haff,remainingQuantity:'15000000'},items:[{...input.items[0]!,remainingQuantity:'5'}]});
+ assert.equal(early.ok,true,early.reasons.join(','));assert.equal(early.amounts!.earlyMakeup.amount,'3.00');assert.equal(early.amounts!.unusedHaffRefund.amount,'25.50');assert.equal(early.amounts!.unusedItemRefund.amount,'19.00');assert.equal(early.amounts!.renterRefund.amount,'44.50');
+ const small=makeInput('1200000','2000','0.05','1','0.95');
+ const rounded=computeSettlement({...small,endReason:'OWNER_OR_ACCOUNT_EARLY',haff:{...small.haff,remainingQuantity:'900000'},items:[{...small.items[0]!,remainingQuantity:'1'}]});
+ assert.equal(rounded.ok,true,rounded.reasons.join(','));assert.equal(rounded.amounts!.unusedHaffRefund.amount,'0.03');assert.equal(rounded.amounts!.unusedItemRefund.amount,'0.05');assert.equal(rounded.amounts!.renterRefund.amount,'0.08');
+});
+
 test('actual-consumption inputs add only item types from the frozen order price list',()=>{
  const fill=load(readFileSync(resolve(tree,path),'utf8'),'withRemaining');
  const basis={lines:[{itemId:'haff',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',openingQuantity:'100',remainingQuantity:null}],

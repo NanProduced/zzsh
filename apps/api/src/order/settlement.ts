@@ -508,6 +508,14 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     }
   }
   const makeupCents = totalPricing?rRoundCents(makeup):rRoundCents(radd(exactHb, makeup)) - rRoundCents(exactHb);
+  if (fixedPricing) {
+    // Discount and excess usage are settled against the combined prepayment before the deposit.
+    const remaining = resourcePrepaid - Hb - Gb - makeupCents;
+    const resourceRefund = remaining > 0n ? remaining : 0n;
+    const itemRemainder = resourcePrepaid - B - Gb;
+    unusedItems = itemRemainder > 0n ? (itemRemainder < resourceRefund ? itemRemainder : resourceRefund) : 0n;
+    unusedHaff = resourceRefund - unusedItems;
+  }
   const renterHaffTotal = Hb + makeupCents;
   const ownerConsumed = Ho + Go;
 
