@@ -196,6 +196,25 @@ test("formal initialization plan preserves the current five-digit number contrac
     assert.match(result.stderr, /FORMAL_INITIALIZATION_INPUT_REQUIRED/);
 });
 
+for (const stage of ["bosses", "staff"]) test("next target refuses legacy admin enrollment before credentials: " + stage, { skip: process.platform !== "win32" }, t => {
+    const pkg = fixture(t), root = pkg.root;
+    const instance = { host: "127.0.0.1", port: 55439, systemIdentifier: "123456" };
+    const target = { database: "zzsh_test_regression", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c", instance, migrationProfile: "LOCAL_MIGRATION_NEXT_V1" };
+    const binding = { resource: { database: target.database, resourceOid: target.oid }, initialization: { nonce: target.nonce, imProvisioner: false, imIdentityRepository: false, imAppId: null }, origins: { apiOrigin: "http://127.0.0.1:4292", adminOrigin: "http://127.0.0.1:4291" } };
+    const bindingBytes = JSON.stringify(binding), bindingFile = join(root, "binding.json");
+    writeFileSync(bindingFile, bindingBytes);
+    const input = { kind: "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1", numberingDigits: 5, target, resource: "scene_test", names: { "boss-one": "Boss1", "boss-two": "Boss2", operations: "运营", support: "客服" }, serverBinding: { file: bindingFile, sha256: hash(bindingBytes) } };
+    const inputBytes = JSON.stringify(input), inputFile = join(root, "input.json");
+    writeFileSync(inputFile, inputBytes);
+    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } }));
+    const out = join("E:/zzsh-local-state/restricted", "data-first-bootstrap-next-" + root.split(/[\\/]/).at(-1).toLowerCase());
+    const result = run(["--execute", "--initialize-admins", "--stage", stage, "--input", inputFile, "--input-sha", hash(inputBytes), "--credentials", join(root, "missing-credentials.json"), "--out", out]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
+    assert.equal(existsSync(out), false);
+});
+
 test("business initialization refuses missing or changed legal input before reading credentials", t => {
     const pkg = fixtureV2(t), missing = run(["--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--credentials", "must-not-be-read"]);
     assert.notEqual(missing.status, 0); assert.match(missing.stderr, /BUSINESS_LEGAL_INPUT_REQUIRED/);

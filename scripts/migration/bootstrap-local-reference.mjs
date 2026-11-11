@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFile
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { execFileSync } from "node:child_process";
 import { LocalSession, localOrigin, totp, validateProfile, writePrivate } from "../local-auth.mjs";
 import { verifySkinRetirementPackage } from "./derive-business-reference-skin-retirement.mjs";
@@ -473,7 +473,9 @@ async function initializeFormalAdmins() {
     if (["3100", "3101", "3102", "4220", "4221", "4222"].includes(new URL(apiOrigin).port)) throw new Error("ISOLATED_INITIALIZATION_API_REQUIRED");
     const out = resolve(output), restricted = realpathSync("E:/zzsh-local-state/restricted");
     if (dirname(out).toLowerCase() !== restricted.toLowerCase() || !/^data-first-bootstrap-[a-z0-9-]+$/i.test(basename(out)) || existsSync(out)) throw new Error("NEW_RESTRICTED_BOOTSTRAP_DIRECTORY_REQUIRED");
-    const registered = loadRegisteredTarget(credentialFile), credentialBytes = readFileSync(credentialFile), credentials = JSON.parse(credentialBytes);
+    const registered = loadRegisteredTarget(credentialFile);
+    assertNextMigrationWriteReady(registered);
+    const credentialBytes = readFileSync(credentialFile), credentials = JSON.parse(credentialBytes);
     if (registered.instance && (input.stage !== stage || !/^[a-f0-9]{64}$/.test(input.credentialsSha256 ?? "") || sha(credentialBytes) !== input.credentialsSha256)) throw new Error("FORMAL_INITIALIZATION_STAGE_OR_CREDENTIAL_CHANGED");
     if (registered.database !== input.target.database || registered.oid !== input.target.oid || registered.nonce !== input.target.nonce || registered.pendingReset || credentials.migration?.name !== registered.migrationRole || (registered.migrationRoleOid !== null && credentials.migration?.oid !== registered.migrationRoleOid)) throw new Error("REGISTERED_RESOURCE_CHANGED");
     if (JSON.stringify(input.target.instance ?? null) !== JSON.stringify(registered.instance)

@@ -45,7 +45,7 @@
 7. **补齐账号可读内容**：`--enrich-display` 追加账号展示属性，`--enrich-holdings` 将旧皮肤字符串映射到已确认的新词条。二者依赖账号和目录，并不依赖钱包期初；同一检查点内仍串行执行。无法完整映射的集合保留原因，不能写成空集合。
 8. **读回对账并接入服务**：`readback-local-dataset.mjs` 核对关系、逐项金额、记录集合、状态、来源摘要、责任与余额。数据库对账后，才切换同版 API/BFF/页面，验证连续时间查询和后续操作。字段来源保留在证据层，不要求用户区分升级前后的记录。
 
-旧本地演练的会员政策通过 `initialize-local-policy.mjs` 走新管理员申请、审批与执行；该旧入口对 NEXT 目标在读取会话或发起请求前拒绝。审批流程调整后，NEXT 的首版会员政策初始化须另行接入已确认的配置并验证，不能把测试折扣或旧审批当作经营政策。信用初始化复用 `apps/api/src/credit/credit-initialization-cli.ts` 及其批处理；它们属于新平台初始化，不复制旧管理员或凭空制造旧成长消费。历史成长补齐仍需原消费/退款及覆盖证明，不能把缺证当成零。
+旧本地演练的管理员初始化会自动完成改密和 TOTP 绑定；`--initialize-admins` 对 NEXT 目标在读取凭据或发起请求前拒绝。新部署须保留两个固定 Boss 的首次登录激活流程，由管理员自行修改初始密码并绑定 TOTP，新的初始化和读回入口尚待完成。旧本地演练的会员政策通过 `initialize-local-policy.mjs` 走新管理员申请、审批与执行；该旧入口对 NEXT 目标在读取会话或发起请求前拒绝。审批流程调整后，NEXT 的首版会员政策初始化须另行接入已确认的配置并验证，不能把测试折扣或旧审批当作经营政策。信用初始化复用 `apps/api/src/credit/credit-initialization-cli.ts` 及其批处理；它们属于新平台初始化，不复制旧管理员或凭空制造旧成长消费。历史成长补齐仍需原消费/退款及覆盖证明，不能把缺证当成零。
 
 新轮次成长输入可使用 `packageLayout=PACKED_V2`：每 1,000 个用户原始包按序合入一个文件，每个包仍保留原字节、摘要和原幂等键，并核对分包布局及整体摘要。写入前检查全部包，写入完成后重新打开并复核；准备、续跑与原键恢复均绑定 PostgreSQL 实例身份。旧 `v1` 包和其恢复凭据保持原格式。该布局只减少文件数量，不改变逐用户事务或已有成长来源规则。
 
@@ -79,8 +79,8 @@ R07 本地输入装配器的 `runtime` 需要 `paths.secrets.identity` 和 `path
 | --- | --- | --- |
 | `build-business-initial.mjs` | 从受控空库安装后的最终结构生成新装基线 | 原迁移链、种子白名单、结构/ACL等价验证；不转换旧业务数据 |
 | `admin-staging-handoff.mjs` / `retire-r07-local-auth.mjs` | 精确退役交付副本中的本机认证材料，保留业务身份和用户密码 | 仅接受专用合成库或绑定回执的第七轮独立本机副本；不连接线上、不清空全局验证记录 |
-| `bootstrap-local-reference.mjs` | 正式初始化新管理员，封包/装载已审业务基础资料 | 新目标与正式认证入口；业务包不包含管理员凭据、会话、审批执行或交易 |
-| `initialize-local-policy.mjs` | 用新两Boss正式发布已审本地会员政策 | 正式 API、明确政策正文、原请求键；不直接写政策表 |
+| `bootstrap-local-reference.mjs` | 旧本地演练的管理员初始化，封包/装载已审业务基础资料 | 管理员旧入口禁止 NEXT 目标；业务包不包含管理员凭据、会话、审批执行或交易 |
+| `initialize-local-policy.mjs` | 旧本地演练的会员政策发布 | 使用旧审批流程，禁止 NEXT 目标；新政策初始化待接入 |
 | `capture-local-source.mjs` | 在本地源 MySQL 一致只读事务中提取数据 | 绑定源、物理字段和截点；输出受限 JSONL、摘要及读回收尾回执 |
 | `prepare-local-dataset.mjs` | 构建有完整关联的迁移 cohort 与各域输入 | 已核 SHA 的源包；输出执行包、依赖及隔离清单，不写目标 |
 | `prepare-listed-same-capture-policy.mjs` | 从完整源账号流和同一快照配置准备在架报价证据 | 核对源包、绑定、原 dump 与编译依赖；可依据已确认的测试授权模板生成每批审计资料和测试授权，不创建正式切换授权或接管账号 |
@@ -136,7 +136,7 @@ readiness核对应plan摘要，合成对账仅标FIXTURE_PASS。缺证种子随p
 
 - `capture-local-source.mjs`：只读已绑定的本地MySQL恢复容器，保留原物理字段、支付原号、身份/密码来源及资金旁证；同一只读一致快照逐域流式写受限JSONL，确认ROLLBACK及客户端关闭。原始数据不进Git。
 - `prepare-local-dataset.mjs`：逐件核源SHA，复用正式身份/账号/订单/续办与资金纯函数，生成受限执行输入及完整隔离分母；原dump截止点与采集时间分开。READY只是源侧参数准入。
-- `bootstrap-local-reference.mjs`：通过正式初始化/创建流程新建两Boss及运营、客服；另行装载不含管理员身份和交易的已审业务基础资料。旧管理员、凭据/会话和IM映射的恢复路径已经拒绝；不改realm secret、不复制订单付款、不禁用触发器。
+- `bootstrap-local-reference.mjs`：旧本地管理员入口创建并激活两 Boss 及运营、客服，禁止对 NEXT 目标使用；另行装载不含管理员身份和交易的已审业务基础资料。旧管理员、凭据/会话和 IM 映射的恢复路径已经拒绝；不改 realm secret、不复制订单付款、不禁用触发器。
 - `load-local-dataset.mjs`：显式execute后才读取已登记migration身份；复用正式writer按身份→账号/观察/快照→旧单→历史观察/续办/责任/佣金执行，分批事务保存checkpoint和原键。COMMIT UNKNOWN停止，recover只读，不自动换键重发。
 - `prepare-local-display.mjs`：独立补提账号展示字段，逐字段核对原冻结提取，任何共同字段漂移即拒绝；不修改原dataset或把缺项补成0。
 - `load-local-dataset.mjs --enrich-display`：只在核心导入完成的已知checkpoint追加正式历史展示快照；`--import-openings`独立绑定已审原余额证明，金额写入仍走正式maintenance准入/原键/账务writer，不按流水求和。
