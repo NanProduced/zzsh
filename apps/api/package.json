@@ -54,6 +54,7 @@
     "test:db:lock": "node --env-file-if-exists=.env scripts/regression-lock-check.mjs",
     "test:user-identity-subject:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(process.env.USER_IDENTITY_SUBJECT_PG==='1' && /^[0-9]+$/.test(process.env.ZZSH_REGRESSION_DB_OID||'') && /^[a-z0-9_]{12,40}$/.test(process.env.ZZSH_REGRESSION_RUN||''),'Required: USER_IDENTITY_SUBJECT_PG=1 plus current regression OID/nonce')\" && npm run build && node --env-file-if-exists=.env --test dist/test/user-identity-subject-postgres.test.js",
     "test:db:once": "node --env-file-if-exists=.env --test dist/test/database-safety.test.js && node --env-file-if-exists=.env scripts/run-regression-suites.mjs --rounds 1",
+    "test:legacy-identity:pg": "node --test dist/test/legacy-identity-profile-postgres.test.js",
     "test:admin-finance-filter:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(process.env.ADMIN_FINANCE_PG==='1' && process.env.ADMIN_FINANCE_PG_DATABASE==='zzsh_test_regression' && /^[0-9]+$/.test(process.env.ZZSH_REGRESSION_DB_OID||'') && /^[a-z0-9_]{12,40}$/.test(process.env.ZZSH_REGRESSION_RUN||''),'Required: explicit regression PG identity and fresh OID/nonce')\" && npm run build && node --env-file-if-exists=.env --test dist/test/admin-finance-query-postgres.test.js"
   },
   "dependencies": {
