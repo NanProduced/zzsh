@@ -109,6 +109,39 @@ export async function readIndividualFinanceHistoryEvidence(query,groups,actor,pl
  return{expected:planned.length,matched,differences};
 }
 
+/** Reconstruct the same system batch boundaries; a receipt never substitutes for its source coverage. */
+export async function readSystemFinanceHistoryEvidence(query,groups,actor,planFinanceObservations,buildProof,canonical){
+ if(typeof query!=='function'||!Array.isArray(groups)||typeof planFinanceObservations!=='function'||typeof buildProof!=='function'||typeof canonical!=='function'
+   ||actor?.kind!=='SYSTEM_FINANCE_MIGRATION'||!/^legacy-finance-migration:[a-f0-9]{64}$/.test(actor.id??'')||!/^[a-f0-9]{64}$/.test(actor.sourceDatasetSha256??''))
+  throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+ const plans=groups.map(group=>({input:group.input,plan:planFinanceObservations(group.input)}));
+ if(new Set(plans.map(row=>row.plan.coverage.id)).size!==plans.length)throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+ const scope=JSON.stringify(['system',actor.id,'finance.history.batch.import.v1',null]),differences=[];let matchedGroups=0,matchedBatches=0;
+ for(let i=0;i<plans.length;i+=500){
+  const part=plans.slice(i,i+500),proof=buildProof(part.map(row=>row.input),actor),ids=part.map(row=>row.plan.coverage.id);
+  if(proof.body?.schema!=='finance-history-batch.system.v1'||proof.body.batchId!==proof.batchId||proof.body.coverageCount!==part.length
+    ||proof.body.sourceDatasetSha256!==actor.sourceDatasetSha256||proof.body.inputsDigest!==sha(canonical(part.map(row=>row.input)))||proof.body.financialEffect!=='NONE')
+   throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+  const coverage=(await query(`SELECT id,user_id,source_kind,source_count,imported_count,isolated_count,body_digest,source_canonical FROM zzsh_order.personal_finance_observation_coverage WHERE id=ANY($1::text[])`,[ids])).rows;
+  const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`,[scope,proof.batchId])).rows;
+  const audits=(await query(`SELECT e.object_id,e.actor_type,e.actor_id,e.session_id,e.request_id,e.outcome,e.details,to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest FROM zzsh_iam.audit_event e WHERE action='finance.history.batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=$1`,[proof.batchId])).rows;
+  const saved=receipts[0],audit=audits[0],batchOk=receipts.length===1&&saved.scope_key===scope&&saved.key===proof.batchId&&saved.request_fingerprint===proof.fingerprint&&saved.response_status===200&&saved.publish_required===false&&isDeepStrictEqual(saved.response_body,proof.body)
+   &&audits.length===1&&audit.actor_type==='system'&&audit.actor_id===actor.id&&audit.session_id===null&&audit.request_id===actor.requestId&&audit.outcome==='SUCCESS'&&audit.source_manifest===actor.sourceDatasetSha256&&isDeepStrictEqual(audit.details,proof.body);
+  if(batchOk)matchedBatches++;else differences.push({id:proof.batchId,reason:'SYSTEM_HISTORY_BATCH_EVIDENCE_MISSING_OR_CHANGED'});
+  const byId=Map.groupBy(coverage,row=>row.id);
+  for(const {plan} of part){const c=plan.coverage,found=byId.get(c.id)??[],row=found[0];
+   if(found.length!==1||row.user_id!==c.userId||row.source_kind!==c.sourceKind||row.source_count!==c.sourceCount||row.imported_count!==c.importedCount||row.isolated_count!==c.isolatedCount||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical)
+    differences.push({id:c.id,reason:'HISTORY_COVERAGE_MISSING_OR_CHANGED'});
+   else if(batchOk)matchedGroups++;
+  }
+ }
+ const receiptCount=(await query(`SELECT count(*)::text n FROM zzsh_supply.idempotency_record WHERE scope_key=$1`,[scope])).rows[0]?.n;
+ const auditCount=(await query(`SELECT count(*)::text n FROM zzsh_iam.audit_event WHERE action='finance.history.batch.imported' AND object_type='personal_finance_observation_coverage_batch'`,[])).rows[0]?.n;
+ const batches=Math.ceil(plans.length/500);
+ if(receiptCount!==String(batches)||auditCount!==String(batches))differences.push({id:'COHORT',reason:'SYSTEM_HISTORY_BATCH_TOTAL_DIFFERS'});
+ return{expectedGroups:plans.length,matchedGroups,expectedBatches:batches,matchedBatches,differences};
+}
+
 /** Compare a newly derived source chunk with the exact immutable bytes the loader consumed. */
 export function assertRebuiltEmptyCoverageChunk(descriptor, rebuilt, savedBytes) {
   if (!descriptor || !rebuilt || !Buffer.isBuffer(savedBytes) || !Array.isArray(rebuilt.entries)

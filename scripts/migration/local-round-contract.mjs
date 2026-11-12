@@ -371,6 +371,13 @@ export function compactEmptyCoverageReadbackMatches(phase,readback){
   &&batch?.mode===phase.receiptMode&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
 }
 
+export function systemFinanceHistoryReadbackMatches(phase,readback){
+ const history=readback?.financialHistory,coverage=history?.coverageEvidence,batches=coverage?.batches;
+ return phase?.receiptMode==='SYSTEM_BATCH_V1'&&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&history?.sourceRebuilt===true
+  &&history.walletEffectsFromObservation===false&&history.arrivalVerified===false&&coverage?.expected===phase.rows&&coverage.matched===phase.rows
+  &&batches?.expected===Math.ceil(phase.rows/500)&&batches.matched===batches.expected;
+}
+
 export function systemCoreAttributionMatches(checkpoint,readback){
  const binding=checkpoint?.binding??{},pairs=[["systemUserId","legacy-user-migration"],["systemAccountId","legacy-account-migration"],["systemOrderId","legacy-order-migration"]];
  if(pairs.every(([key])=>binding[key]===undefined)&&binding.systemFinanceId===undefined)return true;
@@ -591,6 +598,8 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     }
     const empty=checkpoint?.generatedPhases?.financeEmptyCoverage;
     if(checkpoint?.binding?.systemFinanceId&&empty?.receiptMode!=='SYSTEM_BATCH_V1')issues.push('ROUND_SYSTEM_EMPTY_RECEIPT_MODE_UNCONFIRMED');
+    if(checkpoint?.binding?.systemFinanceId&&!systemFinanceHistoryReadbackMatches(checkpoint?.generatedPhases?.financeHistory,readback))
+      issues.push('ROUND_SYSTEM_FINANCE_HISTORY_READBACK_UNCONFIRMED');
     if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
       ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
       ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");

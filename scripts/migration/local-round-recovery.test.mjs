@@ -14,7 +14,7 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemCoreAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test("readback checks every core system identity against the registered target",()=>{
   const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
@@ -89,6 +89,15 @@ test('next-round readback must prove every compact empty coverage batch receipt'
   {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{mode:'BATCH_V2',expected:2,matched:1}}},
   {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,readable:799}}])assert.equal(compactEmptyCoverageReadbackMatches(phase,changed),false);
  assert.equal(compactEmptyCoverageReadbackMatches({...phase,receiptMode:undefined},readback),false);
+});
+
+test('next-round system history requires rebuilt source and all original batch evidence',()=>{
+ const phase={receiptMode:'SYSTEM_BATCH_V1',rows:501},financialHistory={sourceRebuilt:true,walletEffectsFromObservation:false,arrivalVerified:false,coverageEvidence:{expected:501,matched:501,batches:{expected:2,matched:2}}};
+ assert.equal(systemFinanceHistoryReadbackMatches(phase,{financialHistory}),true);
+ for(const changed of [{...financialHistory,sourceRebuilt:false},{...financialHistory,coverageEvidence:{...financialHistory.coverageEvidence,matched:500}},
+  {...financialHistory,coverageEvidence:{...financialHistory.coverageEvidence,batches:{expected:2,matched:1}}},{...financialHistory,arrivalVerified:true}])
+  assert.equal(systemFinanceHistoryReadbackMatches(phase,{financialHistory:changed}),false);
+ assert.equal(systemFinanceHistoryReadbackMatches({...phase,receiptMode:undefined},{financialHistory}),false);
 });
 
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -171,6 +180,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       if (sql.includes('ORDER BY id COLLATE')) userLockComplete = true;
       if (sql.startsWith("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject")) return { rows: [] };
       if (sql === "COMMIT" && failure === "empty-coverage-unknown" && events.some(e => e.domain === "financeEmptyCoverage" && e.event === "INTENT")) throw Object.assign(Error("original coverage commit error"), {code:"ECONNRESET"});
+      if (sql === "COMMIT" && failure === "system-finance-history-unknown" && events.some(e => e.domain === "financeHistory" && e.event === "INTENT")) throw Object.assign(Error("original history commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "lost-commit") {
         const error = Object.assign(Error("original commit error"), { code: "ECONNRESET" });
         this.emit("error", error);
@@ -203,7 +213,10 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       systemCompactEmptyFinanceBatchProof:failure==='system-finance-build-old'?undefined:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
       async bindSystemEmptyReceiptBaseline(_client,acting,inputs){await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_BASELINE');return {fixture:true};},
       async importSystemCompactEmptyFinanceObservationBatch(_client,acting,inputs,baseline){assert.equal(baseline.fixture,true);await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_IMPORT');return {body:{created:inputs.length}};},
-      recoverSystemCompactEmptyFinanceObservationBatch(){} },
+      recoverSystemCompactEmptyFinanceObservationBatch(){},
+      systemFinanceHistoryBatchProof:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
+      async bindSystemHistoryReceiptBaseline(_client,acting,inputs){await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemFinanceHistoryBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_BASELINE');return {fixture:true};},
+      async importSystemFinanceHistoryBatch(_client,acting,inputs,baseline){assert.equal(baseline.fixture,true);await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemFinanceHistoryBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_HISTORY');return {body:{created:inputs.length}};},recoverSystemFinanceHistoryBatch(){} },
     "legacy-load/system-user-migration": { systemUserMigrationId(source, target) { return "synthetic-system-" + sha(JSON.stringify([source,target])); },
       async withSystemUserMigrationBatch(c, acting, body) { commands.push("SYSTEM_USER_BATCH"); if (failure === "batch-actor-lost") throw Object.assign(Error("system actor unavailable"), {status:403});
         await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; },
@@ -257,8 +270,9 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
     loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },
-    financialFixture: () => ({ applyFinancialDomains: ctx => failure==='system-finance-success'
-      ? ctx.runItems("financeEmptyCoverage",[{sourceId:"chunk-1"},{sourceId:"chunk-2"}],()=>ctx.systemFinance.importEmpty([{synthetic:true}]),2)
+    financialFixture: () => ({ applyFinancialDomains: ctx => ['system-finance-success','system-finance-mixed','system-finance-history-only','system-finance-history-unknown'].includes(failure)
+      ? (async()=>{if(!['system-finance-history-only','system-finance-history-unknown'].includes(failure))await ctx.runItems("financeEmptyCoverage",[{sourceId:"chunk-1"},{sourceId:"chunk-2"}],()=>ctx.systemFinance.importEmpty([{synthetic:true}]),2);
+        if(failure!=='system-finance-success')await ctx.runBatches('financeHistory',[{sourceId:'history-1'},{sourceId:'history-2'}],async rows=>{const outcome=await ctx.systemFinance.importHistory(rows);return rows.map(()=>({replayed:outcome.replayed}));},500);})()
       : ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
@@ -420,6 +434,18 @@ test('NEXT empty finance chunks reuse one fenced baseline and their original sou
  assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_BASELINE').length,1);
  assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_IMPORT').length,2);
  assert.equal(result.state.phases.financeEmptyCoverage.nextIndex,2);
+});
+test('NEXT non-empty history reuses the fenced baseline, including when no empty chunk exists',async()=>{
+ for(const failure of ['system-finance-mixed','system-finance-history-only']){
+  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true,failure});
+  assert.ifError(result.error);assert.equal(result.exit,undefined);assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_BASELINE').length,1);
+  assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_HISTORY').length,1);assert.equal(result.state.phases.financeHistory.nextIndex,2);
+ }
+});
+test('NEXT history lost commit retains the original batch keys and never claims success',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true,failure:'system-finance-history-unknown'});
+ assert.equal(result.exit,1);assert.equal(result.state.status,'COMMIT_UNKNOWN');assert.equal(result.state.phases.financeHistory.nextIndex,0);
+ assert.deepEqual(result.state.pending.sourceIds,['history-1','history-2']);assert.equal(result.events.some(e=>e.domain==='financeHistory'&&e.event==='COMMIT_ACK'),false);
 });
 
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {

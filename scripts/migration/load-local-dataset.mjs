@@ -141,7 +141,8 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
       ||typeof finance.recoverReviewedCompactEmptyFinanceObservationBatch!=="function"||typeof finance.compactEmptyFinanceBatchProof!=="function")
         throw new Error("NEXT_COMPACT_COVERAGE_BUILD_REQUIRED");
     if(execute && importsCore && !args.includes("--core-only") && ["systemCompactEmptyFinanceBatchProof","bindSystemEmptyReceiptBaseline",
-      "importSystemCompactEmptyFinanceObservationBatch","recoverSystemCompactEmptyFinanceObservationBatch"].some(name=>typeof finance[name]!=="function"))
+      "importSystemCompactEmptyFinanceObservationBatch","recoverSystemCompactEmptyFinanceObservationBatch","systemFinanceHistoryBatchProof",
+      "bindSystemHistoryReceiptBaseline","importSystemFinanceHistoryBatch","recoverSystemFinanceHistoryBatch"].some(name=>typeof finance[name]!=="function"))
         throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
@@ -571,25 +572,26 @@ async function applyOrders() {
 }
 function systemFinanceAdapter() {
     const module=mod("finance/personal-finance-observation-maintenance"),epoch=fenceEpoch,admitted=new Set();
-    if(!epoch||!fenceHeld||typeof module.systemCompactEmptyFinanceBatchProof!=="function"
-      ||typeof module.bindSystemEmptyReceiptBaseline!=="function"||typeof module.importSystemCompactEmptyFinanceObservationBatch!=="function"
-      ||typeof module.recoverSystemCompactEmptyFinanceObservationBatch!=="function")throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
+    if(!epoch||!fenceHeld||["systemCompactEmptyFinanceBatchProof","bindSystemEmptyReceiptBaseline","importSystemCompactEmptyFinanceObservationBatch",
+      "recoverSystemCompactEmptyFinanceObservationBatch","systemFinanceHistoryBatchProof","bindSystemHistoryReceiptBaseline",
+      "importSystemFinanceHistoryBatch","recoverSystemFinanceHistoryBatch"].some(name=>typeof module[name]!=="function"))throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
     const financeActor={kind:"SYSTEM_FINANCE_MIGRATION",id:systemFinanceId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
       fenceEpochSha256:sha(JSON.stringify(epoch)),requestId:"core-legacy-dataset-"+expectedOid,
       assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error("TARGET_FENCE_EPOCH_LOST");
         await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
       assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error("LEGACY_SYSTEM_FINANCE_SOURCE_NOT_ADMITTED");}};
     let baseline;
-    return {receiptMode:"SYSTEM_BATCH_V1",async importEmpty(inputs){
-      const proof=module.systemCompactEmptyFinanceBatchProof(inputs,financeActor),source={inputsDigest:proof.body.inputsDigest,
+    async function importBatch(inputs,history){
+      const proof=(history?module.systemFinanceHistoryBatchProof:module.systemCompactEmptyFinanceBatchProof)(inputs,financeActor),source={inputsDigest:proof.body.inputsDigest,
         inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
       admitted.clear();admitted.add(JSON.stringify(source));
       try{return await systemUserMigration.withSystemFinanceMigrationBatch(client,financeActor,async()=>{
-        baseline??=await module.bindSystemEmptyReceiptBaseline(client,financeActor,inputs);
-        const result=await module.importSystemCompactEmptyFinanceObservationBatch(client,financeActor,inputs,baseline);
+        baseline??=await (history?module.bindSystemHistoryReceiptBaseline:module.bindSystemEmptyReceiptBaseline)(client,financeActor,inputs);
+        const result=await (history?module.importSystemFinanceHistoryBatch:module.importSystemCompactEmptyFinanceObservationBatch)(client,financeActor,inputs,baseline);
         return {...result.body,replayed:result.body.created===0};
       });}finally{admitted.clear();}
-    }};
+    }
+    return {receiptMode:"SYSTEM_BATCH_V1",importEmpty:inputs=>importBatch(inputs,false),importHistory:inputs=>importBatch(inputs,true)};
 }
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {

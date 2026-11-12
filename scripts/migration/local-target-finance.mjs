@@ -37,13 +37,14 @@ export async function runFinanceCoveragePhases(isNext,writeHistory,writeEmpty){
     if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
     if(isNext){await writeEmpty();await writeHistory();}else{await writeHistory();await writeEmpty();}
 }
-function freezePhase(ctx, name, rows) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
+function freezePhase(ctx, name, rows, receiptMode) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
     mkdirSync(dir); const file = join(dir, name + ".json"); const previous = ctx.state.generatedPhases[name]; if (previous) {
     const bytes = readFileSync(file);
     if (sha(bytes) !== previous.sha256)
         throw new Error("PREPARED_PHASE_SHA_CHANGED");
+    if(previous.receiptMode!==receiptMode)throw new Error('FINANCE_HISTORY_RECEIPT_MODE_CHANGED');
     return JSON.parse(bytes);
-} const bytes = JSON.stringify(rows); writeFileSync(file, bytes, { flag: "wx" }); ctx.state.generatedPhases[name] = { file, sha256: sha(bytes), rows: rows.length }; ctx.save(); return rows; }
+} const bytes = JSON.stringify(rows); writeFileSync(file, bytes, { flag: "wx" }); ctx.state.generatedPhases[name] = { file, sha256: sha(bytes), rows: rows.length, ...(receiptMode?{receiptMode}:{}) }; ctx.save(); return rows; }
 async function facts(ctx, legacyIds) { const { client, actor } = ctx; const parents = (await client.query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId",deposit_amount_cents::text AS "depositAmountCents" FROM zzsh_order.legacy_order_read_snapshot WHERE legacy_id=ANY($1::text[])`, [legacyIds])).rows; const ids = parents.map(p => p.parentOrderId); const duties = (await client.query(`SELECT id,order_id AS "orderId",kind,source_record_id AS "sourceRecordId",amount_cents::text AS "amountCents",status,counterparty_user_id AS "counterpartyUserId",settled_by AS "settledBy",admission_id AS "admissionId" FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])`, [ids])).rows; const admissions = (await client.query(`SELECT id,duty_id AS "dutyId",order_id AS "orderId",admission_digest AS "admissionDigest" FROM zzsh_order.legacy_order_duty_admission WHERE order_id=ANY($1::text[])`, [ids])).rows; const heads = (await client.query(`SELECT order_id AS "orderId",revision::text FROM zzsh_order.legacy_continuation_version WHERE order_id=ANY($1::text[]) AND superseded_at IS NULL`, [ids])).rows; const operations = ["order.legacy.liability.import", "order.legacy.commission.completed-import", "order.legacy.continuation.import"]; const scopes = ids.flatMap(id => operations.map(op => JSON.stringify(["admin", actor.userId, op, id]))); const receipts = (await client.query('SELECT scope_key,key,request_fingerprint AS fingerprint,response_status AS "responseStatus" FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])', [scopes])).rows.map(row => { const [realm, principalId, operation, resourceId] = JSON.parse(row.scope_key); return { principalId, operation, resourceId, key: row.key, fingerprint: row.fingerprint, responseStatus: row.responseStatus }; }); const revisions = new Map(heads.map(h => [h.orderId, h.revision]));
     const dutiesByOrder = Map.groupBy(duties, d => d.orderId);
     const admissionsByOrder = Map.groupBy(admissions, a => a.orderId);
@@ -74,7 +75,7 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
 }
 export async function applyFinancialDomains(ctx) {
     if (typeof ctx.isNextMigration !== 'boolean') throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
-    if (ctx.isNextMigration && (ctx.systemFinance?.receiptMode !== 'SYSTEM_BATCH_V1' || typeof ctx.systemFinance.importEmpty !== 'function'))
+    if (ctx.isNextMigration && (ctx.systemFinance?.receiptMode !== 'SYSTEM_BATCH_V1' || typeof ctx.systemFinance.importEmpty !== 'function' || typeof ctx.systemFinance.importHistory !== 'function'))
         throw new Error('NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED');
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
@@ -99,7 +100,7 @@ export async function applyFinancialDomains(ctx) {
     const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan({ ...ctx, emitEmptyChunk });
     const preparedMs = performance.now() - preparationStarted;
     if (state.generatedPhases?.financeHistory && !state.fundsSupplement) throw new Error("FROZEN_V1_FINANCE_HISTORY_REQUIRES_SEPARATE_REVIEW");
-    const history = freezePhase(ctx, "financeHistory", fundsPlan.history);
+    const history = freezePhase(ctx, "financeHistory", fundsPlan.history,ctx.isNextMigration?'SYSTEM_BATCH_V1':undefined);
     const guarantees = freezePhase(ctx, "guaranteeHistory", fundsPlan.guaranteeHistory);
     if (state.generatedPhases?.financeEmptyCoverage) {
         const previous = state.generatedPhases.financeEmptyCoverage;
@@ -120,7 +121,13 @@ export async function applyFinancialDomains(ctx) {
     state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyCoverage.rows,emptyChunks:fundsPlan.emptyCoverage.chunks,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
     ctx.save();
     await applyInvitationDomains(ctx,reviewCommon,resource,canonical);
-    const writeHistory=()=>ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
+    const writeHistory=()=>ctx.runBatches("financeHistory", history, async (rows) => {
+        const inputs=rows.map(row=>row.input);
+        if(ctx.isNextMigration){const result=await ctx.systemFinance.importHistory(inputs);return rows.map(()=>({replayed:result.replayed}));}
+        const module=mod("finance/personal-finance-observation-maintenance"),reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
+        const scopes=await module.bindReviewedFinanceObservationAdmissionBatch(client,actor,reviews),result=await module.importReviewedFinanceObservationsBatchOn(client,actor,inputs,scopes),created=result.body.created;
+        return rows.map((_,i)=>({replayed:i>=created}));
+    },500);
     const writeEmpty=()=>ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
         const inputs=readEmptyCoverageInputs(chunk,ctx.isNextMigration ? emptyContentHashes.get(chunk.digest) : null);
         if(ctx.isNextMigration)return importEmptyCoverageChunk(null,client,actor,inputs,null,true,ctx.systemFinance);
