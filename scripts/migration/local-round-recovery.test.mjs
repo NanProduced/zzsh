@@ -23,6 +23,7 @@ test("readback checks every core system identity against the registered target",
   const binding={datasetSha256,systemUserId:"u:"+datasetSha256+":42",systemAccountId:"a:"+datasetSha256+":42",systemOrderId:"o:"+datasetSha256+":42"};
   assert.equal(assertCoreSystemMigrationBinding(target,{},identities),false);
   assert.equal(assertCoreSystemMigrationBinding(target,binding,identities),true);
+  assert.throws(()=>assertCoreSystemMigrationBinding(target,{datasetSha256,systemFinanceId:'finance'},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
   assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemOrderId:undefined},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
   assert.throws(()=>assertCoreSystemMigrationBinding({...target,oid:"43"},binding,identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
 });
@@ -33,6 +34,7 @@ test("new system-source receipts require complete independent attribution readba
  const proof={status:"VERIFIED",users:{expected:2,matched:2},accounts:{expected:1,matched:1},orders:{expected:1,matched:1}};
  const readback={systemMigrationAttribution:proof,domains:{users:{expected:2},accounts:{expected:1},orders:{expected:1}}};
  assert.equal(systemCoreAttributionMatches({},{}),true);assert.equal(systemCoreAttributionMatches(checkpoint,readback),true);
+ assert.equal(systemCoreAttributionMatches({binding:{systemFinanceId:'legacy-finance-migration:'+'d'.repeat(64)}},readback),false);
  assert.equal(systemCoreAttributionMatches({...checkpoint,binding:{...checkpoint.binding,systemOrderId:undefined}},readback),false);
  assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:{...proof,orders:{expected:1,matched:0}}}),false);
  assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:undefined}),false);
@@ -154,7 +156,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   files.set("test-secret", "fixture");
   files.set("test-profile-secret", profileSecret);
   const proc = { version: "v24.20.0", env: { DB_PASSWORD_FILE: "test-secret", USER_IDENTITY_SUBJECT_HMAC_KEY_FILE: "test-secret", USER_LEGACY_IDENTITY_PROFILE_KEY_FILE: "test-profile-secret" }, argv: ["node", "script",
-    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...(failure?.startsWith("empty-coverage") ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
+    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...((failure?.startsWith("empty-coverage")||failure?.startsWith("system-finance")) ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
     "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
@@ -197,7 +199,11 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
     "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
-      importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){} },
+      importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){},
+      systemCompactEmptyFinanceBatchProof:failure==='system-finance-build-old'?undefined:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
+      async bindSystemEmptyReceiptBaseline(_client,acting,inputs){await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_BASELINE');return {fixture:true};},
+      async importSystemCompactEmptyFinanceObservationBatch(_client,acting,inputs,baseline){assert.equal(baseline.fixture,true);await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_IMPORT');return {body:{created:inputs.length}};},
+      recoverSystemCompactEmptyFinanceObservationBatch(){} },
     "legacy-load/system-user-migration": { systemUserMigrationId(source, target) { return "synthetic-system-" + sha(JSON.stringify([source,target])); },
       async withSystemUserMigrationBatch(c, acting, body) { commands.push("SYSTEM_USER_BATCH"); if (failure === "batch-actor-lost") throw Object.assign(Error("system actor unavailable"), {status:403});
         await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; },
@@ -206,6 +212,9 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
         const result=await body();await acting.assertMigrationFence(c);return result; },
       systemOrderMigrationId(source,target) { return "synthetic-order-system-" + sha(JSON.stringify([source,target])); },
       async withSystemOrderMigrationBatch(c,acting,body) { commands.push("SYSTEM_ORDER_BATCH");await acting.assertMigrationFence(c);
+        const result=await body();await acting.assertMigrationFence(c);return result; },
+      systemFinanceMigrationId(source,target) { return "synthetic-finance-system-" + sha(JSON.stringify([source,target])); },
+      async withSystemFinanceMigrationBatch(c,acting,body) { commands.push("SYSTEM_FINANCE_BATCH");await acting.assertMigrationFence(c);
         const result=await body();await acting.assertMigrationFence(c);return result; } },
     "legacy-load/legacy-account-seam": { legacyAccountId(_system,_entity,id) { return "synthetic-account-"+id; },
       async createLegacyOwnerRentalAccount(_c,input,acting) {const accountId="synthetic-account-"+input.legacyId;
@@ -242,11 +251,15 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     releaseMigrationSessionFence: fenceFixture ? async () => { commands.push('UNFENCE'); } : releaseMigrationSessionFence,
     advisoryLockSql, assertLiveTarget, assertNextMigrationWriteReady: fenceFixture ? () => {} : assertNextMigrationWriteReady,
     captureMaintenanceLockEpoch: fenceFixture ? async () => { commands.push('FENCE_EPOCH'); return { fixture: true }; } : captureMaintenanceLockEpoch,
-    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
+    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets,
+    requiresInvitationCountClosure: failure?.startsWith('system-finance') ? () => false : requiresInvitationCountClosure,
     readBoundSelectedSourceReceipt: (_source, _digest) => ({}),
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
-    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
+    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },
+    financialFixture: () => ({ applyFinancialDomains: ctx => failure==='system-finance-success'
+      ? ctx.runItems("financeEmptyCoverage",[{sourceId:"chunk-1"},{sourceId:"chunk-2"}],()=>ctx.systemFinance.importEmpty([{synthetic:true}]),2)
+      : ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
     async *readRows(file) { for await (const line of readLfLines(context.createReadStream(file))) if (line.trim()) yield JSON.parse(line); },
@@ -310,6 +323,11 @@ test('NEXT refuses an old finance build before acquiring the target lock or writ
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'compact-build-old'});
  assert.match(result.error?.message??'',/NEXT_COMPACT_COVERAGE_BUILD_REQUIRED/);
  assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
+});
+
+test('NEXT system finance build is checked before connecting',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'system-finance-build-old'});
+ assert.match(result.error?.message??'',/NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED/);assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));
 });
 
 test('NEXT refuses the wrong population or incomplete continuation evidence before target writes',async()=>{
@@ -395,18 +413,29 @@ test('NEXT order batch binds the complete source and target before import', asyn
   assert.equal(rejected.state.phases.orders.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ORDER_IMPORT'));
 });
 
+test('NEXT empty finance chunks reuse one fenced baseline and their original source',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
+  fenceFixture:true,failure:'system-finance-success'});
+ assert.ifError(result.error);assert.equal(result.exit,undefined);assert.match(result.state.binding.systemFinanceId,/^synthetic-finance-system-/);
+ assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_BASELINE').length,1);
+ assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_IMPORT').length,2);
+ assert.equal(result.state.phases.financeEmptyCoverage.nextIndex,2);
+});
+
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
   const options = { instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, verifiedFirst:true };
   const failed = await load({ ...options, failure:'lost-commit', exitAfterUsers:true });
   assert.equal(failed.state.status, 'COMMIT_UNKNOWN'); assert.match(failed.state.binding.systemUserId, /^synthetic-system-/);
   assert.match(failed.state.binding.systemAccountId, /^synthetic-account-system-/);
   assert.match(failed.state.binding.systemOrderId, /^synthetic-order-system-/);
+  assert.match(failed.state.binding.systemFinanceId, /^synthetic-finance-system-/);
   const recovered = await load({ ...options, previous:failed, recover:true });
   assert.ifError(recovered.error); assert.equal(recovered.exit, undefined);
   const receipt = JSON.parse([...recovered.files].find(([file]) => file.startsWith(path.join(out, 'recovery-')))[1]);
   assert.equal(receipt.binding.systemUserId, failed.state.binding.systemUserId); assert.equal(receipt.knowledge, 'EXACT_PENDING_KEYS_REQUIRE_INSPECTION');
   assert.equal(receipt.binding.systemAccountId, failed.state.binding.systemAccountId);
   assert.equal(receipt.binding.systemOrderId, failed.state.binding.systemOrderId);
+  assert.equal(receipt.binding.systemFinanceId, failed.state.binding.systemFinanceId);
   assert(!recovered.commands.includes('SYNTHETIC_MIGRATE_USER')); assert(!recovered.commands.includes('COMMIT'));
 });
 

@@ -15,10 +15,14 @@ async function arrayOf(ctx, name) {
     }
     return result;
 }
-export async function importEmptyCoverageChunk(module,client,actor,inputs,reviews,isNext){
+export async function importEmptyCoverageChunk(module,client,actor,inputs,reviews,isNext,systemFinance){
     if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if(isNext){
+        if(systemFinance?.receiptMode!=='SYSTEM_BATCH_V1'||typeof systemFinance.importEmpty!=='function')throw new Error('NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED');
+        return systemFinance.importEmpty(inputs);
+    }
     const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
-    const result=await (isNext ? module.importReviewedCompactEmptyFinanceObservationBatch : module.importReviewedEmptyFinanceObservationBatch)(client,actor,inputs,scope);
+    const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
     return{...result.body,replayed:result.body.created===0};
 }
 export function readEmptyCoverageInputs(chunk, expectedHash) {
@@ -28,6 +32,10 @@ export function readEmptyCoverageInputs(chunk, expectedHash) {
     const rows = JSON.parse(bytes);
     if (!Array.isArray(rows) || rows.length !== chunk.rows) throw new Error("PREPARED_CHUNK_ROWS_CHANGED");
     return rows.map(row => row.input);
+}
+export async function runFinanceCoveragePhases(isNext,writeHistory,writeEmpty){
+    if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if(isNext){await writeEmpty();await writeHistory();}else{await writeHistory();await writeEmpty();}
 }
 function freezePhase(ctx, name, rows) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
     mkdirSync(dir); const file = join(dir, name + ".json"); const previous = ctx.state.generatedPhases[name]; if (previous) {
@@ -66,6 +74,8 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
 }
 export async function applyFinancialDomains(ctx) {
     if (typeof ctx.isNextMigration !== 'boolean') throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if (ctx.isNextMigration && (ctx.systemFinance?.receiptMode !== 'SYSTEM_BATCH_V1' || typeof ctx.systemFinance.importEmpty !== 'function'))
+        throw new Error('NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED');
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
     const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
@@ -96,12 +106,13 @@ export async function applyFinancialDomains(ctx) {
         if (previous.digest !== fundsPlan.emptyCoverage.digest || previous.rows !== fundsPlan.emptyCoverage.rows)
             throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         assertEmptyCoverageReceiptMode(previous,ctx.isNextMigration);
+        if (ctx.isNextMigration && previous.receiptMode!==ctx.systemFinance.receiptMode) throw new Error("EMPTY_COVERAGE_RECEIPT_MODE_CHANGED");
         if (ctx.isNextMigration && JSON.stringify(previous.chunks) !== JSON.stringify(emptyDescriptors))
             throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         for (const chunk of previous.chunks) if (!existsSync(chunk.file)) throw new Error("PREPARED_CHUNK_MISSING");
     } else {
         state.generatedPhases ??= {};
-        state.generatedPhases.financeEmptyCoverage = { ...fundsPlan.emptyCoverage, chunks: emptyDescriptors, ...(ctx.isNextMigration ? {receiptMode:"BATCH_V2"} : {}) };
+        state.generatedPhases.financeEmptyCoverage = { ...fundsPlan.emptyCoverage, chunks: emptyDescriptors, ...(ctx.isNextMigration ? {receiptMode:ctx.systemFinance.receiptMode} : {}) };
         ctx.save();
     }
     const coverage = assertFundsWriterCoverage(fundsPlan, history, guarantees, fundsPlan.emptyCoverage);
@@ -109,12 +120,14 @@ export async function applyFinancialDomains(ctx) {
     state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyCoverage.rows,emptyChunks:fundsPlan.emptyCoverage.chunks,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
     ctx.save();
     await applyInvitationDomains(ctx,reviewCommon,resource,canonical);
-    await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
-    await ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
-        const module=mod("finance/personal-finance-observation-maintenance"),inputs=readEmptyCoverageInputs(chunk,ctx.isNextMigration ? emptyContentHashes.get(chunk.digest) : null);
-        const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
-        return importEmptyCoverageChunk(module,client,actor,inputs,reviews,ctx.isNextMigration);
+    const writeHistory=()=>ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
+    const writeEmpty=()=>ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
+        const inputs=readEmptyCoverageInputs(chunk,ctx.isNextMigration ? emptyContentHashes.get(chunk.digest) : null);
+        if(ctx.isNextMigration)return importEmptyCoverageChunk(null,client,actor,inputs,null,true,ctx.systemFinance);
+        const module=mod("finance/personal-finance-observation-maintenance"),reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
+        return importEmptyCoverageChunk(module,client,actor,inputs,reviews,false);
     },5);
+    await runFinanceCoveragePhases(ctx.isNextMigration,writeHistory,writeEmpty);
     // The old listing deposit is out of scope: nothing is written for it, and the exclusion is
     // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");

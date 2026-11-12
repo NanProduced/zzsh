@@ -140,6 +140,9 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
     if(finance.COMPACT_EMPTY_COVERAGE_VERSION!=="BATCH_V2"||typeof finance.importReviewedCompactEmptyFinanceObservationBatch!=="function"
       ||typeof finance.recoverReviewedCompactEmptyFinanceObservationBatch!=="function"||typeof finance.compactEmptyFinanceBatchProof!=="function")
         throw new Error("NEXT_COMPACT_COVERAGE_BUILD_REQUIRED");
+    if(execute && importsCore && !args.includes("--core-only") && ["systemCompactEmptyFinanceBatchProof","bindSystemEmptyReceiptBaseline",
+      "importSystemCompactEmptyFinanceObservationBatch","recoverSystemCompactEmptyFinanceObservationBatch"].some(name=>typeof finance[name]!=="function"))
+        throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
 if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
@@ -147,8 +150,9 @@ let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const usesSystemUser = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemUserId === "string"));
 const usesSystemAccount = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemAccountId === "string"));
 const usesSystemOrder = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemOrderId === "string"));
+const usesSystemFinance = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemFinanceId === "string"));
 let systemUserMigration = null;
-if (usesSystemUser || usesSystemAccount || usesSystemOrder) {
+if (usesSystemUser || usesSystemAccount || usesSystemOrder || usesSystemFinance) {
     try { systemUserMigration = mod("legacy-load/system-user-migration"); }
     catch { throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED"); }
 }
@@ -161,6 +165,9 @@ if (usesSystemAccount
 if (usesSystemOrder
     && (typeof systemUserMigration?.systemOrderMigrationId !== "function" || typeof systemUserMigration?.withSystemOrderMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_ORDER_MIGRATION_BUILD_REQUIRED");
+if (usesSystemFinance
+    && (typeof systemUserMigration?.systemFinanceMigrationId !== "function" || typeof systemUserMigration?.withSystemFinanceMigrationBatch !== "function"))
+    throw new Error("NEXT_SYSTEM_FINANCE_MIGRATION_BUILD_REQUIRED");
 const systemUserTarget = systemUserMigration ? {
     systemIdentifier: registered.instance?.systemIdentifier, databaseOid: registered.oid, marker: registered.marker,
     nonce: registered.nonce, roleOid: registered.migrationRoleOid,
@@ -168,11 +175,13 @@ const systemUserTarget = systemUserMigration ? {
 const systemUserId = usesSystemUser ? systemUserMigration.systemUserMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemAccountId = usesSystemAccount ? systemUserMigration.systemAccountMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemOrderId = usesSystemOrder ? systemUserMigration.systemOrderMigrationId(sha(manifestBytes), systemUserTarget) : null;
+const systemFinanceId = usesSystemFinance ? systemUserMigration.systemFinanceMigrationId(sha(manifestBytes), systemUserTarget) : null;
 
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
     ...(systemUserId ? {systemUserId} : {}),
     ...(systemAccountId ? {systemAccountId} : {}),
     ...(systemOrderId ? {systemOrderId} : {}),
+    ...(systemFinanceId ? {systemFinanceId} : {}),
     ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
@@ -560,6 +569,28 @@ async function applyOrders() {
         });
     },100);
 }
+function systemFinanceAdapter() {
+    const module=mod("finance/personal-finance-observation-maintenance"),epoch=fenceEpoch,admitted=new Set();
+    if(!epoch||!fenceHeld||typeof module.systemCompactEmptyFinanceBatchProof!=="function"
+      ||typeof module.bindSystemEmptyReceiptBaseline!=="function"||typeof module.importSystemCompactEmptyFinanceObservationBatch!=="function"
+      ||typeof module.recoverSystemCompactEmptyFinanceObservationBatch!=="function")throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
+    const financeActor={kind:"SYSTEM_FINANCE_MIGRATION",id:systemFinanceId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+      fenceEpochSha256:sha(JSON.stringify(epoch)),requestId:"core-legacy-dataset-"+expectedOid,
+      assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error("TARGET_FENCE_EPOCH_LOST");
+        await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
+      assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error("LEGACY_SYSTEM_FINANCE_SOURCE_NOT_ADMITTED");}};
+    let baseline;
+    return {receiptMode:"SYSTEM_BATCH_V1",async importEmpty(inputs){
+      const proof=module.systemCompactEmptyFinanceBatchProof(inputs,financeActor),source={inputsDigest:proof.body.inputsDigest,
+        inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+      admitted.clear();admitted.add(JSON.stringify(source));
+      try{return await systemUserMigration.withSystemFinanceMigrationBatch(client,financeActor,async()=>{
+        baseline??=await module.bindSystemEmptyReceiptBaseline(client,financeActor,inputs);
+        const result=await module.importSystemCompactEmptyFinanceObservationBatch(client,financeActor,inputs,baseline);
+        return {...result.body,replayed:result.body.created===0};
+      });}finally{admitted.clear();}
+    }};
+}
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {
         if (resourceState.protectedDataset?.manifestSha256 !== manifest.sourceDatasetSha256 || resourceState.protectedDataset?.epoch?.oid !== expectedOid
@@ -679,7 +710,10 @@ try {
                 state.status="LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN";
             }else{
                 const { applyFinancialDomains } = await import("./local-target-finance.mjs");
-                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
+                await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount,
+                    isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE,
+                    systemFinance: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemFinanceAdapter() : null,
+                    targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }
         }

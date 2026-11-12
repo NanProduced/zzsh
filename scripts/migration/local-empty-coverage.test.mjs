@@ -5,9 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { assertFundsWriterCoverage, createEmptyCoverageSink, EMPTY_COVERAGE_CHUNK_SIZE } from "./local-funds-plan.mjs";
-import { importEmptyCoverageChunk, readEmptyCoverageInputs } from "./local-target-finance.mjs";
+import { importEmptyCoverageChunk, readEmptyCoverageInputs, runFinanceCoveragePhases } from "./local-target-finance.mjs";
 
 const entry = (index, domain = "earnings") => ({ sourceId: `subject-${index}:${domain}`, domain, input: { index } });
+
+test("new empty coverage closes before nonempty history can add old-format receipts",async()=>{
+ const order=[],history=async()=>order.push('history'),empty=async()=>order.push('empty');
+ await runFinanceCoveragePhases(true,history,empty);assert.deepEqual(order,['empty','history']);
+ order.length=0;await runFinanceCoveragePhases(false,history,empty);assert.deepEqual(order,['history','empty']);
+ order.length=0;await assert.rejects(runFinanceCoveragePhases(true,history,async()=>{throw Error('EMPTY_FAILED');}),/EMPTY_FAILED/);
+ assert.deepEqual(order,[]);
+});
 
 test("a frozen empty-coverage chunk is rechecked immediately before import", t => {
   const dir=mkdtempSync(join(tmpdir(),"zzsh-empty-coverage-"));t.after(()=>rmSync(dir,{recursive:true}));
@@ -79,13 +87,15 @@ test("the coverage assertion accepts the streamed manifest and rejects a changed
   assert.throws(() => assertFundsWriterCoverage(plan, [], [], { ...manifest, rows: manifest.rows + 1 }), /EMPTY_COVERAGE_SOURCE_SET_CHANGED/);
 });
 
-test("only the next profile selects the compact batch writer",async()=>{
+test("next-profile empty coverage uses its system writer and old rounds keep their original writer",async()=>{
  const calls=[],scope={id:'fixture'};
  const module={bindReviewedEmptyFinanceObservationBatch:async()=>{calls.push('bind');return scope;},
   importReviewedEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('legacy');return{body:{created:1}};},
   importReviewedCompactEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('compact');return{body:{created:0}};}};
  assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],false)).replayed,false);
- assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],true)).replayed,true);
- assert.deepEqual(calls,['bind','legacy','bind','compact']);
+ const system={receiptMode:'SYSTEM_BATCH_V1',async importEmpty(){calls.push('system');return{replayed:true};}};
+ assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],true,system)).replayed,true);
+ assert.deepEqual(calls,['bind','legacy','system']);
+ await assert.rejects(importEmptyCoverageChunk(module,{}, {}, [], [],true),/NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED/);
  await assert.rejects(importEmptyCoverageChunk(module,{}, {}, [], [],undefined),/MIGRATION_PROFILE_FLAG_UNPROVEN/);
 });

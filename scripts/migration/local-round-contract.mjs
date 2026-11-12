@@ -373,8 +373,9 @@ export function compactEmptyCoverageReadbackMatches(phase,readback){
 
 export function systemCoreAttributionMatches(checkpoint,readback){
  const binding=checkpoint?.binding??{},pairs=[["systemUserId","legacy-user-migration"],["systemAccountId","legacy-account-migration"],["systemOrderId","legacy-order-migration"]];
- if(pairs.every(([key])=>binding[key]===undefined))return true;
+ if(pairs.every(([key])=>binding[key]===undefined)&&binding.systemFinanceId===undefined)return true;
  if(pairs.some(([key,prefix])=>typeof binding[key]!=="string"||!new RegExp("^"+prefix+":[a-f0-9]{64}$").test(binding[key])))return false;
+ if(binding.systemFinanceId!==undefined&&!/^legacy-finance-migration:[a-f0-9]{64}$/.test(binding.systemFinanceId))return false;
  const proof=readback?.systemMigrationAttribution;
  return proof?.status==="VERIFIED"&&["users","accounts","orders"].every(domain=>Number.isSafeInteger(proof[domain]?.expected)
   &&proof[domain].expected>=0&&proof[domain].expected===proof[domain].matched&&proof[domain].expected===readback.domains?.[domain]?.expected);
@@ -589,6 +590,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       if (!Number.isSafeInteger(count) || readback[domain]?.expected !== count || readback[domain]?.matched !== count) issues.push("ROUND_READBACK_COUNT_DRIFT:" + domain);
     }
     const empty=checkpoint?.generatedPhases?.financeEmptyCoverage;
+    if(checkpoint?.binding?.systemFinanceId&&empty?.receiptMode!=='SYSTEM_BATCH_V1')issues.push('ROUND_SYSTEM_EMPTY_RECEIPT_MODE_UNCONFIRMED');
     if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
       ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
       ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");

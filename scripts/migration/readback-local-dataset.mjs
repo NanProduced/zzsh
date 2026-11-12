@@ -78,7 +78,7 @@ const maintenance = new Client(maintenanceConnection(registration, { user: "zzsh
 const db = new Client(targetConnection(registration, { user: credential.migration.name, password: credential.migration.password, applicationName: "core-dataset-reconciliation-read-only", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
 const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
-const hasSystemIds = ["systemUserId","systemAccountId","systemOrderId"].some(key => state.binding?.[key] !== undefined);
+const hasSystemIds = ["systemUserId","systemAccountId","systemOrderId","systemFinanceId"].some(key => state.binding?.[key] !== undefined);
 const systemCore = assertCoreSystemMigrationBinding(registration,state.binding,hasSystemIds ? mod("legacy-load/system-user-migration") : null);
 const hasIdentityProfiles = manifest.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1";
 if (manifest.identityProfiles && (!hasIdentityProfiles || manifest.identityProfiles.invalid !== 0
@@ -540,6 +540,7 @@ try {
     const compact=registration.migrationProfile===NEXT_MIGRATION_PROFILE;
     if(compact&&phase?.schema!=="zzsh.empty-coverage-chunks.v1")throw new Error("EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN");
     assertEmptyCoverageReceiptMode(phase,compact);
+    if(state.binding.systemFinanceId && phase?.receiptMode!=='SYSTEM_BATCH_V1')throw new Error("EMPTY_COVERAGE_RECEIPT_MODE_CHANGED");
     if(phase?.schema!=="zzsh.empty-coverage-chunks.v1"){
       const bytes=readFileSync(join(dirname(checkpoint),"phases","financeEmptyCoverage.json"));if(hash(bytes)!==phase?.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
       const expected=JSON.parse(bytes).flatMap(chunk=>chunk.rows.map(row=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage));let readable=0;
