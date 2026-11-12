@@ -506,7 +506,12 @@ test("delisting allows a pending payment but blocks a paid or uncertain order", 
     try {
       await p.render("accounts","acc-occupied");
       const button=[...p.host.querySelectorAll("button")].find(item=>item.textContent.trim()==="下架账号");assert(button);assert.equal(button.disabled,disabled);
-      if (!disabled) { await p.clickDocButton("下架账号");assert.match(p.popup()?.textContent ?? "",/待付款订单将同时关闭/); }
+      if (!disabled) {
+        await p.clickDocButton("下架账号");
+        const warning=p.popup()?.textContent ?? "";
+        assert.match(warning,/未发起支付的待付款订单会随下架取消/);
+        assert.match(warning,/已发起支付或付款状态待核/);
+      }
       else assert.match(p.host.textContent,/请先处理订单后再下架/);
     } finally { await p.close(); }
   }
@@ -532,7 +537,7 @@ test("R03: unknown delist/withdraw survives remount and recovers only the origin
     try {
       await first.render("accounts", "acc-recover");
       await first.clickDocButton(action === "delist" ? "下架账号" : "撤回审核");
-      if (action === "delist") { assert.match(first.popup()?.textContent ?? "", /待付款订单将同时关闭/); await first.clickDocButton("确认下架"); }
+      if (action === "delist") { assert.ok(first.popup(), "下架需要二次确认"); await first.clickDocButton("确认下架"); }
       await first.waitFor(() => JSON.parse(first.window.sessionStorage.getItem(slot) ?? "null")?.uncertain === true);
       stored = first.window.sessionStorage.getItem(slot);
       assert.ok(stored, "a write responsibility must survive closing this component");
