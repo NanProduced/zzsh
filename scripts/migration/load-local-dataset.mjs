@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertSelectedScopeForWrite } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, legacyListedProofVersion } from "./selected-business-scope.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readSourceRows as readRows } from "./local-source-adapter.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
@@ -70,7 +70,10 @@ if (execute && importsCore && manifest.refundRelationshipPolicy !== LEGACY_REFUN
     throw new Error("LEGACY_REFUND_RELATIONSHIP_POLICY_REQUIRED");
 if (execute && importsCore && population.mode === "SELECTED_BUSINESS_SCOPE") {
     const source = readBoundSelectedSourceReceipt(manifest.source, manifest.sourceReceiptSha256);
-    sourceScopeVerification = await verifySelectedPopulationFiles({ datasetDir: dataset, sourceDir: manifest.source, dataset: manifest, source });
+    const priorCheckpoint = join(output, "checkpoint.json");
+    const priorScope = existsSync(priorCheckpoint) ? JSON.parse(readFileSync(priorCheckpoint)).sourceScopeVerification : null;
+    sourceScopeVerification = await verifySelectedPopulationFiles({ datasetDir: dataset, sourceDir: manifest.source, dataset: manifest, source,
+      listedProofVersion: legacyListedProofVersion(priorScope) });
 }
 for (const [name, file] of Object.entries(manifest.files)) {
     if (file.file !== basename(file.file))

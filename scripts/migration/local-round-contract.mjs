@@ -6,6 +6,7 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { LEGACY_DATASET_PREPARATION_TOOLS, assertCapturedSourceOrigin, expectedContinuationImports, readSourceRows } from "./local-source-adapter.mjs";
 import { sameGrowthInstance, validateGrowthPackageLayout, verifyGrowthPackageBytes } from "./local-growth-packages.mjs";
 import { hasVerifiedNextInitialSchema, NEXT_MIGRATION_PROFILE } from "./local-target-registry.mjs";
+import { legacyListedTargetMatches } from "./selected-business-scope.mjs";
 
 const requiredDatasetStages = ["core-and-funds", "display", "opening", "holdings", "paths", "readback"];
 const requiredGrowthStages = ["growth-prepare", "growth-apply", "growth-readback"];
@@ -360,7 +361,7 @@ export function assertRoundOpeningPartition(dataset, opening) {
 }
 
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
-export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true }) {
+export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true, requireCurrentLegacyListed = true }) {
   const issues = [], target = input.target;
   if (target.migrationProfile === NEXT_MIGRATION_PROFILE && expected?.dataset?.population?.mode !== 'SELECTED_BUSINESS_SCOPE') issues.push('ROUND_NEXT_SELECTED_BUSINESS_SCOPE_REQUIRED');
   let continuationExpected;
@@ -505,6 +506,21 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || target.migrationProfile === NEXT_MIGRATION_PROFILE && readback.targetFence !== "HELD_UNTIL_ROLLBACK"
     || readback.targetWrites !== 0 || !readback.rollbackConfirmed || !readback.lockReleased || !readback.connectionsClosed)) issues.push("ROUND_DATASET_READBACK_UNCONFIRMED");
   else if (requireReadback) {
+    if (target.migrationProfile === NEXT_MIGRATION_PROFILE && (requireCurrentLegacyListed
+      || Object.hasOwn(readback, "legacyListedSource") || Object.hasOwn(readback, "legacyListedSourceOrigin")
+      || readback.legacyListedTarget?.sourceProofSha256 !== undefined)) {
+      const listed = readback.legacyListedSource, recorded = checkpoint?.sourceScopeVerification?.legacyListed;
+      const binding = { sourceReceiptSha256: expected?.dataset?.sourceReceiptSha256,
+        sourceAccountsSha256: expected?.source?.files?.accounts?.sha256 ?? null, sourceGamesSha256: expected?.source?.files?.games?.sha256 ?? null,
+        datasetAccountsSha256: expected?.dataset?.files?.accounts?.sha256 ?? null,
+        gameBindingsSha256: createHash("sha256").update(JSON.stringify(expected?.dataset?.gameBindings ?? {})).digest("hex") };
+      const checkpointV2 = recorded?.schema === "zzsh.legacy-listed-source-scope.v2";
+      if (binding.sourceReceiptSha256 !== input.source?.sha256 || readback.legacyListedTarget?.status !== "MAPPED_HISTORICAL_NOT_PUBLISHED"
+        || readback.legacyListedSourceOrigin !== (checkpointV2 ? "CHECKPOINT_BOUND_V2" : "RECOMPUTED_FROM_BOUND_SOURCE")
+        || (checkpointV2 && JSON.stringify(recorded) !== JSON.stringify(listed))
+        || !legacyListedTargetMatches(listed, readback.legacyListedTarget, binding)) issues.push("ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED");
+      else if (listed.status !== "SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN") issues.push("ROUND_LEGACY_LISTED_SOURCE_REVIEW_REQUIRED");
+    }
     if (expected?.dataset?.identityProfiles) {
       const source = expected.dataset.identityProfiles, actual = readback.identityProfiles;
       if (source.schema !== "zzsh.legacy-identity-profile-source.v1" || source.invalid !== 0

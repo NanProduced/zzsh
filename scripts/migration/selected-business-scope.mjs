@@ -23,6 +23,76 @@ const isListed = account => account?.status === SELECTED_SCOPE_POLICY.listedStat
 const bucket = () => ({ retained: [], excluded: [], conflicts: [] });
 const digestOf = ids => sha([...ids].sort().join("\n"));
 
+/** Existing checkpoints retain the exact proof shape that was originally recorded. */
+export function legacyListedProofVersion(existingScope) {
+  if (!existingScope) return 2;
+  if (!Object.hasOwn(existingScope, "legacyListed")) return 0;
+  if (existingScope.legacyListed?.schema === "zzsh.legacy-listed-source-scope.v2") return 2;
+  if (existingScope.legacyListed && !Object.hasOwn(existingScope.legacyListed, "schema")) return 1;
+  throw new Error("LEGACY_LISTED_SCOPE_VERSION_INVALID");
+}
+
+/** Older checkpoints stay immutable; only they need a fresh source-only v2 scan. */
+export async function legacyListedSourceForReadback(recorded, recompute) {
+  if (recorded && legacyListedProofVersion(recorded) === 2)
+    return { source: recorded.legacyListed, origin: "CHECKPOINT_BOUND_V2" };
+  const proof = await recompute();
+  if (proof?.legacyListed?.schema !== "zzsh.legacy-listed-source-scope.v2")
+    throw new Error("LEGACY_LISTED_SOURCE_PROOF_UNAVAILABLE");
+  return { source: proof.legacyListed, origin: "RECOMPUTED_FROM_BOUND_SOURCE" };
+}
+
+/** The same canonical key-set digest binds the source partition to target readback. */
+export function legacyListedIdsDigest(ids) {
+  if (!Array.isArray(ids) || ids.some(id => typeof id !== "string" || !id) || new Set(ids).size !== ids.length)
+    throw new Error("LEGACY_LISTED_KEY_SET_INVALID");
+  return digestOf(ids);
+}
+
+/** Only a source-bound, complete Delta partition can make a target readback conclusive. */
+export function legacyListedTargetMatches(source, target, binding) {
+  const d = source?.delta, other = source?.otherGames, unknown = source?.unknownGame, b = source?.binding;
+  const counts = value => Number.isSafeInteger(value) && value >= 0;
+  const hex = value => /^[a-f0-9]{64}$/.test(value ?? "");
+  const empty = sha("");
+  if (source?.schema !== "zzsh.legacy-listed-source-scope.v2" || source.scope !== "ALL_CAPTURED_GAMES"
+    || !["SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN", "SOURCE_REVIEW_REQUIRED"].includes(source.status)
+    || d?.status !== "SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN" || b?.gameBindingStatus !== "VERIFIED"
+    || !binding || ["sourceReceiptSha256", "sourceAccountsSha256", "sourceGamesSha256", "datasetAccountsSha256", "gameBindingsSha256"]
+      .some(key => !hex(b[key]) || b[key] !== binding[key])
+    || !d || !other || !unknown || ![source.sourceCount, source.readyWithSnapshot, source.readyWithoutSnapshot, source.isolated,
+      d.sourceCount, d.readyWithSnapshot, d.readyWithoutSnapshot, d.isolated,
+      other.sourceCount, other.readyWithoutSnapshot, other.isolated, unknown.sourceCount, unknown.readyWithoutSnapshot, unknown.isolated].every(counts)
+    || source.sourceCount !== source.readyWithSnapshot + source.readyWithoutSnapshot + source.isolated
+    || source.sourceCount !== d.sourceCount + other.sourceCount + unknown.sourceCount
+    || d.sourceCount !== d.readyWithSnapshot + d.readyWithoutSnapshot + d.isolated
+    || source.readyWithoutSnapshot !== d.readyWithoutSnapshot + other.readyWithoutSnapshot + unknown.readyWithoutSnapshot
+    || source.isolated !== d.isolated + other.isolated + unknown.isolated
+    || other.readyWithoutSnapshot + other.isolated > other.sourceCount || unknown.readyWithoutSnapshot + unknown.isolated > unknown.sourceCount
+    || source.status !== (source.readyWithoutSnapshot || source.isolated || unknown.sourceCount ? "SOURCE_REVIEW_REQUIRED" : "SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN")
+    || d.readyWithoutSnapshot !== 0 || d.isolated !== 0 || unknown.sourceCount !== 0
+    || ![source.sourceIdsSha256, source.readyMappedIdsSha256, source.readyWithSnapshotIdsSha256,
+      source.readyWithoutSnapshotIdsSha256, source.isolatedIdsSha256, d.sourceIdsSha256, d.readyMappedIdsSha256,
+      d.readyWithSnapshotIdsSha256, d.readyWithoutSnapshotIdsSha256, d.isolatedIdsSha256, other.sourceIdsSha256,
+      other.readyWithoutSnapshotIdsSha256, other.isolatedIdsSha256, unknown.sourceIdsSha256,
+      unknown.readyWithoutSnapshotIdsSha256, unknown.isolatedIdsSha256].every(hex)
+    || [[source.sourceCount,source.sourceIdsSha256],[source.readyWithSnapshot+source.readyWithoutSnapshot,source.readyMappedIdsSha256],
+      [source.readyWithSnapshot,source.readyWithSnapshotIdsSha256],[source.readyWithoutSnapshot,source.readyWithoutSnapshotIdsSha256],
+      [source.isolated,source.isolatedIdsSha256],[d.sourceCount,d.sourceIdsSha256],[d.readyWithSnapshot+d.readyWithoutSnapshot,d.readyMappedIdsSha256],
+      [d.readyWithSnapshot,d.readyWithSnapshotIdsSha256],[d.readyWithoutSnapshot,d.readyWithoutSnapshotIdsSha256],[d.isolated,d.isolatedIdsSha256],
+      [other.sourceCount,other.sourceIdsSha256],[other.readyWithoutSnapshot,other.readyWithoutSnapshotIdsSha256],[other.isolated,other.isolatedIdsSha256],
+      [unknown.sourceCount,unknown.sourceIdsSha256],[unknown.readyWithoutSnapshot,unknown.readyWithoutSnapshotIdsSha256],[unknown.isolated,unknown.isolatedIdsSha256]]
+      .some(([count,digest]) => (count === 0) !== (digest === empty))
+    || d.sourceIdsSha256 !== d.readyMappedIdsSha256 || d.readyMappedIdsSha256 !== d.readyWithSnapshotIdsSha256
+    || !target || target.scope !== "MAPPED_DELTA_ACCOUNT_FACTS_ONLY" || target.marketAndDirectOrder !== "NOT_ASSESSED"
+    || target.sourceProofSha256 !== sha(JSON.stringify(source)) || target.expectedMapped !== d.readyWithSnapshot
+    || target.verifiedMapped !== d.readyWithSnapshot || target.missingTarget !== 0 || target.missingSnapshot !== 0 || target.published !== 0
+    || target.expectedMappedIdsSha256 !== d.readyMappedIdsSha256 || target.verifiedMappedIdsSha256 !== d.readyWithSnapshotIdsSha256
+    || target.missingTargetIdsSha256 !== empty || target.missingSnapshotIdsSha256 !== empty || target.publishedIdsSha256 !== empty)
+    return false;
+  return true;
+}
+
 /**
  * @param {{accounts: object[], orders: object[], pays: object[]}} source captured source rows
  * @returns a partition whose buckets are disjoint and whose union equals the source key set.
