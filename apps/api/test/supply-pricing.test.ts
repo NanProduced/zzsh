@@ -6,7 +6,7 @@ import { CUSTOMER_TIERS, parseDeltaPriceLines, resolveDeltaHaffContext, resolveD
 import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
-import { activateRelease, updatePriceDraft } from "../src/supply/rules";
+import { activateRelease, sealVersion, updatePriceDraft } from "../src/supply/rules";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { readResourceIncomePreview } from "../src/supply/publishing";
 import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio, fixedFeeRateForMode, parseFixedFeeRates } from "../src/supply/fixed-fee";
@@ -104,6 +104,15 @@ test("the 92% fee cap leaves enough for separately rounded 8% full payout", () =
     const fee = calculateFixedFee([{ itemId: "haff", grossCents: gross }], atCap.ordinary).feeCents;
     assert.equal(fee + fullPayoutServiceFeeCents(gross), gross);
   }
+});
+
+test("sealing an older draft refuses a fixed fee beyond the full-payout cap", async () => {
+  const client = { query: async (sql: string) => {
+    assert.match(sql, /^SELECT .* FOR UPDATE$/);
+    return { rows: [{ id: "p", game_id: "g", status: "DRAFT", revision: "1",
+      fixed_fee_rates: { ordinary: "0.95", custom: "0.08", fast: "0.12" } }] };
+  } } as never;
+  await assert.rejects(sealVersion(client, "fixture-boss", true, "price_version", "p", "1"), /不能超过 92%/);
 });
 
 test("fixed-fee policy requires three explicit rates and selects by rental mode", () => {

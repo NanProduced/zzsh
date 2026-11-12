@@ -291,6 +291,10 @@ export async function sealVersion(
   const current = await lockDraftishVersion(client, adminUserId, isBoss, table, versionId);
   if (current.status !== "DRAFT") throw conflict("Version is already sealed");
   if (typeof expectedRevision !== "string" || current.revision !== expectedRevision) throw conflict("Version changed; refresh and retry");
+  if (table === "price_version" && current.fixed_fee_rates != null) {
+    try { parseFixedFeeRates(current.fixed_fee_rates); }
+    catch { throw invalid("三种手续费率必须完整，且不能超过 92%", "fixedFeeRates"); }
+  }
   const terms=table === "price_version" && current.funding_policy !== null && current.funding_policy !== undefined
     ? await readFullPayoutTerms(client,String(current.game_id),validateFundingPolicy(current.funding_policy)) : undefined;
   if (table === "full_payout_terms_version") verifyFullPayoutTermsRow(current);
