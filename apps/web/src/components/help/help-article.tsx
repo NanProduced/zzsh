@@ -1,14 +1,18 @@
 import Link from "next/link";
 import { ChevronRight, Headphones } from "lucide-react";
-import { ContentSections } from "@zzsh/ui/content-document";
-import { MarkdownDocument } from "@zzsh/ui/content-markdown";
-import "@zzsh/ui/content-markdown.css";
+import { PlateDocument } from "@zzsh/ui/plate-document";
+import "@zzsh/ui/plate-document.css";
 import { resolveRelated } from "@/content/help";
 import { audienceLabels, type HelpArticle } from "@/content/help/types";
 import { HelpCopyLink, HelpLegacyAnchors, HelpToc } from "./help-article-extras";
-import { articleToc, isLongArticle } from "./nav-data";
+import { articleToc, hasArticleToc, isLongArticle } from "./nav-data";
 import { SupportContactButton } from "@/components/support/support-contact-button";
 import "./help.css";
+
+/** PlateDocument 只接受已解析的素材 URL；空值（素材不可用）交给渲染器占位。 */
+function plateMediaUrls(urls?: Readonly<Record<string, string | null>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(urls ?? {}).filter((entry): entry is [string, string] => entry[1] !== null));
+}
 
 function audienceText(article: HelpArticle): string {
   if (article.audience.includes("all")) return audienceLabels.all;
@@ -37,12 +41,12 @@ export function HelpArticleMeta({ article }: { article: HelpArticle }) {
 }
 
 export function HelpArticleInlineToc({ article }: { article: HelpArticle }) {
-  if (!isLongArticle(article)) return null;
+  if (!hasArticleToc(article)) return null;
   return <HelpToc variant="inline" sections={articleToc(article)} />;
 }
 
 export function HelpArticleAsideToc({ article }: { article: HelpArticle }) {
-  if (!isLongArticle(article)) return null;
+  if (!hasArticleToc(article)) return null;
   return <HelpToc variant="aside" sections={articleToc(article)} />;
 }
 
@@ -51,14 +55,14 @@ export function HelpArticleBody({ article, articles }: { article: HelpArticle; a
   const isLong = isLongArticle(article);
   return (
     <article className={`help-article${isLong ? "" : " help-article--short"}`} data-content-version={article.version?.id}>
-      <h1 className="help-article-title">{article.title}</h1>
-      <HelpArticleMeta article={article} />
-      {article.summary ? <p className="help-article-summary">{article.summary}</p> : null}
+      <header className="help-article-heading">
+        <h1 className="help-article-title">{article.title}</h1>
+        {article.summary ? <p className="help-article-summary">{article.summary}</p> : null}
+        <HelpArticleMeta article={article} />
+      </header>
       {isLong ? <HelpArticleInlineToc article={article} /> : null}
-      {article.format === "markdown" && typeof article.markdown === "string" ? <>
-        <HelpLegacyAnchors aliases={article.anchorAliases ?? {}} />
-        <MarkdownDocument markdown={article.markdown} mediaUrls={article.mediaUrls} />
-      </> : <ContentSections sections={article.sections ?? []} mediaUrls={article.mediaUrls} anchors />}
+      <HelpLegacyAnchors aliases={article.anchorAliases ?? {}} />
+      <PlateDocument document={article.document} mediaUrls={plateMediaUrls(article.mediaUrls)} showTableOfContents={false} />
       {article.contactCta ? (
         <div className="help-article-footer">
           <div className="help-article-support-box">

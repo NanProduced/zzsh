@@ -93,8 +93,8 @@ export type PublicListing = {
   sourceUpdatedAt?: string;
   historicalQuote?: { haffRent: Money; goods: Money; deposit: Money; termDays: string };
   inventory?: Array<{ itemId: string; quantity: string | null; unit: string }>;
-  media: Array<{ assetId: string; position: number; url: string; category?: "SHOWCASE" | "PENALTY" }>;
-  legacyImages?: Array<{ position: number; url: string }>;
+  media: Array<{ assetId: string; position: number; url: string; coverUrl?: string; detailUrl?: string; category?: "SHOWCASE" | "PENALTY" }>;
+  legacyImages?: Array<{ position: number; url: string; cdnUrl?: string; state?: "PENDING_IMPORT" | "UNAVAILABLE" }>;
 };
 export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type Favorite = {
@@ -332,6 +332,7 @@ export type PublishingCatalog = {
 export type PublishingOptions = {
   releaseId: string;
   generation: string;
+  accountMediaTransport?: "OSS_POST";
   declarationOptions?: {
     next_season_pass?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };
     demulan_unlocked?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };

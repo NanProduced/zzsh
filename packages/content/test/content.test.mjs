@@ -1,7 +1,15 @@
+import { projectLegacyResource, projectLegacyUpdate } from "../legacy-plate.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { DEFAULT_GUIDES as REGISTERED_GUIDES, DEFAULT_RESOURCES, validateResource, validateResourceKey, validateResourceMedia, safeContentLink, resourceMediaIds, resourceText } from "../index.cjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_RESOURCES, NOTICE_PLACEMENT_KEYS, validateResource, validateResourceKey, validateResourceMedia, safeContentLink, resourceMediaIds, resourceText } from "../index.cjs";
+
+const defaultsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../defaults");
+const readHelp = slug => JSON.parse(fs.readFileSync(path.join(defaultsDir, "help", `${slug}.json`), "utf8"));
+const guidePayload = entry => ({ kind: "guide", ...entry.meta, format: "plate", schemaVersion: 1, document: entry.document, ...(entry.anchorAliases ? { anchorAliases: entry.anchorAliases } : {}) });
+const SAMPLE = readHelp("fees-overview");
 
 test("footer configuration validates links, filing identifiers and QR references", () => {
   const key = "placement:FOOTER", base = DEFAULT_RESOURCES[key];
@@ -19,33 +27,52 @@ test("footer configuration validates links, filing identifiers and QR references
   assert.equal(validateResource(key, { ...base, licenseUrl: "https://Example.test" }).licenseUrl, "https://example.test/");
   assert.deepEqual(validateResource(key, { ...base, help: [], support: [], socials: [], icp: "", policeRegion: "", policeCode: "", complaint: false }).help, []);
 });
-const DEFAULT_GUIDES = JSON.parse(fs.readFileSync(new URL("./fixtures/legacy-guides.json", import.meta.url), "utf8")).map(guide => ({kind: "guide", ...guide}));
 
-test("all existing guides and registered placements preserve their content and identifiers", () => {
-  assert.equal(DEFAULT_GUIDES.length, 24);
-  assert.equal(REGISTERED_GUIDES.length, 24);
-  assert.ok(REGISTERED_GUIDES.every(guide => guide.format === "markdown"));
-  const slugs = new Set(DEFAULT_GUIDES.map(article => article.slug));
-  assert.equal(slugs.size, 24);
-  for (const [key, value] of Object.entries(DEFAULT_RESOURCES)) {
-    const before = JSON.stringify(value);
-    const normalized = validateResource(key, value);
-    assert.equal(JSON.stringify(value), before);
-    assert.ok(resourceText(normalized).length > 0);
-    if (normalized.kind === "guide") for (const related of normalized.related) assert.ok(slugs.has(related), related);
-  }
+test("guide / notice accept only plate; sections and markdown are rejected", () => {
+  const payload = guidePayload(SAMPLE);
+  const validated = validateResource(`guide:${SAMPLE.meta.slug}`, payload);
+  assert.equal(validated.format, "plate");
+  assert.equal(validated.document.preset, "help");
+  assert.ok(resourceText(validated).length > 0);
+  assert.deepEqual(validated.mediaIds, []);
+  const forged = { ...payload, mediaIds: ["forged"] };
+  assert.deepEqual(validateResource(`guide:${SAMPLE.meta.slug}`, forged).mediaIds, []);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, { ...payload, sections: [] }), /plate/);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, { ...payload, markdown: "# x" }), /plate/);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, { ...payload, format: "markdown" }), /plate/);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, { ...payload, format: "blocks" }), /plate/);
+  const notice = JSON.parse(fs.readFileSync(path.join(defaultsDir, "notices", "PUBLISH_SAFE_BOX.json"), "utf8"));
+  const noticePayload = { kind: "notice", title: notice.meta.title, format: "plate", schemaVersion: 1, document: notice.document };
+  assert.equal(validateResource("placement:PUBLISH_SAFE_BOX", noticePayload).format, "plate");
+  assert.throws(() => validateResource("placement:PUBLISH_SAFE_BOX", { ...noticePayload, sections: notice.meta.sections }), /plate/);
 });
 
-test("unknown or mismatched resources and blocks cannot silently become published content", () => {
+test("plate body whitelist is enforced through the resource contract", () => {
+  const payload = guidePayload(SAMPLE);
+  const bad = structuredClone(payload);
+  bad.document.value.push({ type: "script", children: [{ text: "x" }] });
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, bad), /校验/);
+  const link = structuredClone(payload);
+  link.document.value.push({ type: "p", children: [{ type: "a", url: "javascript:alert(1)", children: [{ text: "x" }] }] });
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, link), /校验/);
+});
+
+test("notice placements keep their keys without runtime code defaults", () => {
+  assert.equal(NOTICE_PLACEMENT_KEYS.length, 6);
+  for (const key of NOTICE_PLACEMENT_KEYS) {
+    assert.equal(DEFAULT_RESOURCES[`placement:${key}`], undefined);
+    assert.doesNotThrow(() => validateResourceKey(`placement:${key}`));
+  }
+  assert.equal(DEFAULT_RESOURCES[`guide:${SAMPLE.meta.slug}`], undefined);
+  assert.doesNotThrow(() => validateResourceKey(`guide:${SAMPLE.meta.slug}`));
+});
+
+test("unknown or mismatched resources cannot silently become published content", () => {
   assert.throws(() => validateResourceKey("placement:UNKNOWN"), /尚未接入/);
   assert.throws(() => validateResourceKey("guide:../secret"));
   assert.throws(() => validateResourceKey("guide:updates"), /保留/);
-  assert.throws(() => validateResource("placement:FOLLOW", DEFAULT_GUIDES[0]), /类型/);
-  const guide = structuredClone(DEFAULT_GUIDES[0]);
-  guide.sections[0].blocks = [{ type: "html", text: "<script>run()</script>" }];
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /不支持/);
-  guide.sections[0].blocks = [{ type: "paragraph", text: "safe", style: "position:fixed" }];
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /字段/);
+  assert.throws(() => validateResource("placement:FOLLOW", guidePayload(SAMPLE)), /类型/);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, { ...guidePayload(SAMPLE), storageKey: "private" }), /字段/);
 });
 
 test("safe links reject script, protocol-relative, encoded traversal and control characters", () => {
@@ -53,16 +80,13 @@ test("safe links reject script, protocol-relative, encoded traversal and control
   assert.equal(safeContentLink("/help/fees-overview#answer"), "/help/fees-overview#answer");
 });
 
-test("chapters, tables and metadata must be internally consistent", () => {
-  const guide = structuredClone(DEFAULT_GUIDES[0]);
-  guide.sections[1].id = guide.sections[0].id;
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /锚点/);
-  guide.sections.pop(); guide.sections = [{ id: "answer", title: "费用", blocks: [{ type: "table", columns: ["A", "B"], rows: [["1"]] }] }];
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /列数/);
-  guide.sections[0].blocks[0].rows = [["", "1"]];
-  assert.ok(validateResource(`guide:${guide.slug}`, guide));
+test("guide metadata must be internally consistent", () => {
+  const guide = guidePayload(SAMPLE);
   guide.updatedAt = "2026-02-30";
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /日期/);
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, guide), /日期/);
+  const dup = guidePayload(SAMPLE);
+  dup.related = [dup.slug];
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, dup), /相关文章/);
 });
 
 test("empty media falls back to code while actual references are collected once", () => {
@@ -70,15 +94,15 @@ test("empty media falls back to code while actual references are collected once"
   assert.deepEqual(resourceMediaIds(validateResource("placement:FOLLOW", contact)), []);
   contact.qrMediaId = "asset_1";
   assert.deepEqual(resourceMediaIds(validateResource("placement:FOLLOW", contact)), ["asset_1"]);
-  const guide = structuredClone(DEFAULT_GUIDES[0]);
-  guide.sections[0].blocks.push({ type: "image", mediaId: "asset_1", alt: "操作图示" }, { type: "image", mediaId: "asset_1", alt: "同一图片" });
-  assert.deepEqual(resourceMediaIds(validateResource(`guide:${guide.slug}`, guide)), ["asset_1"]);
+  const guide = guidePayload(SAMPLE);
+  guide.document.value.push({ type: "img", mediaId: "asset_1", alt: "操作图示", children: [{ text: "" }] }, { type: "img", mediaId: "asset_1", alt: "同一图片", children: [{ text: "" }] });
+  assert.deepEqual(resourceMediaIds(validateResource(`guide:${SAMPLE.meta.slug}`, guide)), ["asset_1"]);
 });
 
 test("large text is bounded in UTF-8 and unsupported output fields are rejected", () => {
-  const guide = structuredClone(DEFAULT_GUIDES[0]);
-  guide.sections[0].blocks = Array.from({ length: 10 }, () => ({ type: "paragraph", text: "汉".repeat(10000) }));
-  assert.throws(() => validateResource(`guide:${guide.slug}`, guide), /字节/);
+  const guide = guidePayload(SAMPLE);
+  guide.document.value = Array.from({ length: 30 }, () => ({ type: "p", children: [{ text: "汉".repeat(7000) }] }));
+  assert.throws(() => validateResource(`guide:${SAMPLE.meta.slug}`, guide), /字节|校验/);
   assert.throws(() => validateResource("placement:FOLLOW", { ...DEFAULT_RESOURCES["placement:FOLLOW"], storageKey: "private" }), /字段/);
 });
 
@@ -90,7 +114,7 @@ test("slot dimensions are checked at binding without imposing a QR rule on artic
   const banner = { ...DEFAULT_RESOURCES["placement:MARKET_DELTA_BANNER"], mediaId: "asset_b" };
   assert.throws(() => validateResourceMedia(banner, [{ id: "asset_b", width: 1620, height: 800 }]), /3:1/);
   assert.doesNotThrow(() => validateResourceMedia(banner, [{ id: "asset_b", width: 1620, height: 540 }]));
-  assert.doesNotThrow(() => validateResourceMedia(DEFAULT_GUIDES[0], []));
+  assert.doesNotThrow(() => validateResourceMedia(guidePayload(SAMPLE), []));
 });
 
 test("carousel dates reject impossible calendar dates and preserve UTC time windows", () => {
@@ -98,4 +122,21 @@ test("carousel dates reject impossible calendar dates and preserve UTC time wind
   assert.throws(() => validateResource("placement:HOME_HERO", resource), /时间/);
   resource.slides[0].startsAt = "2026-10-28T10:00:00+08:00";
   assert.equal(validateResource("placement:HOME_HERO", resource).slides[0].startsAt, "2026-10-28T02:00:00.000Z");
+});
+test("legacy Markdown and blocks are projected from stored snapshots without weakening write validation", () => {
+  const markdown = { kind: "guide", title: "旧帮助", format: "markdown",
+    markdown: "## 服务范围\n\n**重点** [目录](/help) [锚点](#content-服务范围) [外链](https://example.invalid) [禁用](javascript:alert)\n\n![图](media://asset_a)\n\n| a | b |\n| - | - |\n| c | d |" };
+  const before = structuredClone(markdown);
+  const help = projectLegacyResource(markdown);
+  assert.deepEqual(markdown, before);
+  assert.equal(help.document.value[0].id, "服务范围");
+  assert.deepEqual(help.mediaIds, ["asset_a"]);
+  assert.ok(help.document.value.some(node => node.type === "table"));
+  const links = help.document.value.flatMap(node => node.children ?? []).filter(node => node.type === "a").map(node => node.url);
+  assert.deepEqual(links, ["/help", "#content-服务范围", "https://example.invalid"]);
+  const blocks = projectLegacyResource({ kind: "guide", sections: [{ id: "scope", title: "服务范围", blocks: [{ type: "list", ordered: true, items: ["甲", "乙"] }] }] });
+  assert.equal(blocks.anchorAliases.scope, "content-服务范围");
+  assert.equal(blocks.document.value[2].listStart, 2);
+  const plain = projectLegacyUpdate("*原样*\n<script>文字</script>", "plain");
+  assert.deepEqual(plain.value.map(node => node.children[0].text), ["*原样*", "<script>文字</script>"]);
 });

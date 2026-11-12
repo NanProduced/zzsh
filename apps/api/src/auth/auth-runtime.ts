@@ -50,6 +50,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { createAuthSchema } from "./auth-schema";
 import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { endSupportPresenceForAuthSession } from "../im/support-presence-session";
 import { buildAdminSelfSecurityPlugin, ADMIN_SELF_SECURITY_MESSAGES } from "./admin-self-security-plugin";
 import { adminSecurityCommandId, deriveAdminSecurityCommandKey } from "./admin-security-commands";
 import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
@@ -60,6 +61,8 @@ import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
+import { AccountImageCdnLifecycle } from "../supply/account-image-cdn-worker";
+import { loadDocsImageFeature, type DocsImageFeature } from "../docs/docs-images";
 import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
 import { mountAdminOverview } from "./admin-overview";
 import { mountAdminDashboard } from "./admin-dashboard";
@@ -74,7 +77,8 @@ import { mountProfileAvatarHandlers } from "../profile/profile-avatar-routes";
 import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { mountContentHandlers } from "../content/content-routes";
 import { mountLegalHandlers } from "../legal/legal-routes";
-import { parsePlatformLegalAcceptance, recordPlatformAcceptances, verifyPlatformLegalAcceptance } from "../legal/legal-documents";
+import { recordPlatformAcceptances, verifyPlatformLegalAcceptance, type PlatformLegalAcceptance } from "../legal/legal-documents";
+import { executeFixedDocumentPublish, FIXED_DOCUMENT_PUBLISH_OPERATION } from "../legal/fixed-document-publish";
 import { mountOrderHandlers, mountUserOrderBff, type OrderRuntimeOptions } from "../order/order-routes";
 import { createTradePublicActivityReaders, loadTradePublicActivityBindings, type TradeActivityBindings } from "../order/public-trade-activity";
 import { readLegacyDutyFinalization } from "../finance/legacy-duty-finance-store";
@@ -145,6 +149,7 @@ export type AuthRuntimeCapabilities = {
 };
 
 export type AuthRuntimeOptions = AuthRuntimeConfig & {
+  docsImages?: DocsImageFeature;
   /** Explicit branded dev/fake local composition; no environment or HTTP installer. */
   localFinancialSandbox?: LocalFinancialSandboxAssembly;
   /** Explicit ECS-test-only capability; never installed by a request body. */
@@ -700,7 +705,7 @@ function buildPhoneRegistrationPlugin(
         const accountId = ctx.context.generateId({ model: "account" }) || `account_${randomUUID().replaceAll("-", "")}`;
         const identifier = phoneRegistrationIdentifier(phoneNumber);
         const requestId = (ctx.headers ?? new Headers()).get("x-request-id") ?? `req_${randomUUID().replaceAll("-", "")}`;
-        let legalAcceptance: ReturnType<typeof parsePlatformLegalAcceptance> = undefined;
+        let legalAcceptance: PlatformLegalAcceptance | undefined = undefined;
         try {
           const invalidVerification = await withTransaction(pool, async (client) => {
             await setAuditContext(client, "system", undefined, undefined, requestId);
@@ -730,11 +735,11 @@ function buildPhoneRegistrationPlugin(
               await client.query(`UPDATE "zzsh_auth_user"."verification" SET "value" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [row.id, `${storedCode}:${attempts + 1}`]);
               return true;
             }
-            const legal = await verifyPlatformLegalAcceptance(client, body.legalAcceptance);
-            legalAcceptance = legal.required ? parsePlatformLegalAcceptance(body.legalAcceptance) : undefined;
-            if (legal.required && !legalAcceptance) throw new APIError("BAD_REQUEST", { message: "Legal acceptance is required" });
             if (await hasLegacyPhoneConflict(client, phoneNumber)) throw new APIError("CONFLICT", { message: "Account association requires review" });
             const existing = await client.query<{ id: string }>(`SELECT "id" FROM "zzsh_auth_user"."user" WHERE "phoneNumber" = $1 FOR UPDATE`, [phoneNumber]);
+            // 按份同意：已注册用户只重新同意变更的那份；注册（尚无用户）两份都要。
+            const legal = await verifyPlatformLegalAcceptance(client, body.legalAcceptance, existing.rows[0]?.id ?? null);
+            legalAcceptance = legal.required ? legal.acceptance : undefined;
             if (existing.rowCount) {
               if (!unified) throw new APIError("CONFLICT", { message: "Phone number is already registered" });
               resolvedUserId = existing.rows[0]!.id;
@@ -1269,7 +1274,23 @@ export async function mountAuthHandlers(
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(withUserAuthThrottle(userAuth.handler, userThrottle, throttleKey, { resolveLegacyNumberSubject: async identifier => (await resolveLegacyNumberLogin(options.pool, identifier))?.throttleSubject ?? null }), request);
   const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
-  const adminWebHandler = withAdminBruteForce((request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor), adminBruteForce);
+  const adminAuthWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor);
+  const adminWebHandler = withAdminBruteForce(async (request: Request) => {
+    if (request.method !== "POST" || new URL(request.url).pathname !== "/api/auth/admin/sign-out") {
+      return adminAuthWebHandler(request);
+    }
+    // Capture the server's receipt time before Better Auth deletes the session.
+    // Cleanup is best-effort: the session itself is already non-dispatchable, and
+    // the tick has a REVOKED fallback if this process dies between the two writes.
+    const receivedAt = new Date();
+    const current = await adminAuth.api.getSession({ headers: request.headers }).catch(() => null);
+    const response = await adminAuthWebHandler(request);
+    if (response.ok && current?.session?.id) {
+      await withTransaction(options.pool, (client) => endSupportPresenceForAuthSession(client, current.session!.id, "LOGOUT", receivedAt))
+        .catch(() => undefined);
+    }
+    return response;
+  }, adminBruteForce);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
   const securityOptions: AuthSecurityOptions = {
@@ -1320,7 +1341,9 @@ export async function mountAuthHandlers(
         ? createDistributionReversalApprovalExecutor()(client, input, actor, requestId)
         : input.operationCode === ORDER_COMPENSATION_OPERATION
           ? executeOrderCompensation(client,input,actor,requestId)
-          : executeMembershipGrowthOperation(client, input, actor, requestId),
+          : input.operationCode === FIXED_DOCUMENT_PUBLISH_OPERATION
+            ? executeFixedDocumentPublish(client, input, actor, requestId)
+            : executeMembershipGrowthOperation(client, input, actor, requestId),
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,
@@ -1393,6 +1416,10 @@ export async function mountAuthHandlers(
   if (yunxinConsultation) yunxinConsultation.readPublicAccount = async (client, id) =>
     readPublicListing(client, await readPublishingAccount(client, id), supplyGateReader, legacyPublicAdmission, false, "DETAIL", legacyPublicAdmissionDetail);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
+  if (mediaStorage.accountImageCdn) {
+    app.get(AccountImageCdnLifecycle).start({ pool: options.pool, storage: mediaStorage, cdn: mediaStorage.accountImageCdn, gate: supplyGateReader,
+      legacyPublicAdmission, legacyPublicAdmissionDetail });
+  }
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();
     if (!raw) return undefined;
@@ -1462,6 +1489,7 @@ export async function mountAuthHandlers(
     distributionManagement: options.distributionManagement,
     ...(options.distributionEarnings ? { distributionEarnings: options.distributionEarnings } : {}),
     supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
+    docsImages: options.docsImages ?? loadDocsImageFeature(process.env),
     order: orderOptions,
     ...(yunxinRuntime ? {
       yunxin: {

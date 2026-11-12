@@ -37,6 +37,7 @@ test("media and restore commands use their restricted endpoints", async t => {
   const h = await harness(t, () => { throw new Error("unexpected request"); });
   assert.deepEqual(h.module.contentWriteRequest("placement:FOLLOW", "content.resource.media-draft.save"), { path: "/content/resources/placement%3AFOLLOW/media-draft", method: "PUT" });
   assert.deepEqual(h.module.contentWriteRequest("guide:alpha", "content.resource.draft.restore"), { path: "/content/resources/guide%3Aalpha/restore", method: "POST" });
+  assert.deepEqual(h.module.contentWriteRequest("guide:alpha", "content.resource.draft.discard"), { path: "/content/resources/guide%3Aalpha/draft", method: "DELETE" });
   const record = { schema: 1, adminId: "admin_1", resourceId: "guide:alpha", operation: "content.resource.publish", key: "idem_abcdefgh", fingerprint: "a".repeat(64), versionId: "draft_1", expectedRevision: "9" };
   assert.equal(h.module.parsePendingContent(JSON.stringify(record), "admin_1").versionId, "draft_1");
   assert.throws(() => h.module.parsePendingContent(JSON.stringify({ ...record, expectedRevision: "zero" }), "admin_1"));
@@ -59,10 +60,10 @@ test("double click and caller mutation cannot change the fingerprinted request",
   let finish;
   const response = new Promise(resolve => { finish = resolve; });
   const h = await harness(t, () => response);
-  const body = { versionId: "draft_1", expectedRevision: "7", payload: { markdown: "原始正文" } };
+  const body = { versionId: "draft_1", expectedRevision: "7", payload: { format: "plate", schemaVersion: 1, document: { format: "plate", schemaVersion: 1, preset: "help", value: [{ type: "p", children: [{ text: "原始正文" }] }] }, mediaIds: [] } };
   let first, second;
-  await act(async () => { first = h.current.write("guide:alpha", "content.resource.draft.save", body); body.payload.markdown = "后来修改"; second = h.current.write("guide:alpha", "content.resource.draft.save", body); await pause(); });
-  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].body.payload.markdown, "原始正文");
+  await act(async () => { first = h.current.write("guide:alpha", "content.resource.draft.save", body); body.payload.document.value[0].children[0].text = "后来修改"; second = h.current.write("guide:alpha", "content.resource.draft.save", body); await pause(); });
+  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].body.payload.document.value[0].children[0].text, "原始正文");
   assert.equal(await second, undefined);
   await act(async () => { finish(json(detail("guide:alpha"))); await first; });
   assert.equal(h.browser.localStorage.getItem(h.module.contentPendingKey("admin_1")), null);
@@ -104,11 +105,13 @@ test("placement drafts contain only media references and shared QR dimensions re
   assert.ok(contentMediaChoiceIssue(definition, { width: 512, height: 256 }));
 });
 
-test("Markdown toolbar omits unsupported HTML comments and retains supported writing commands", async t => {
-  const h = await harness(t, () => { throw new Error("unexpected request"); });
-  const { contentMarkdownCommands } = await h.source.ssrLoadModule("/src/views/content-markdown-input.tsx");
-  const names = contentMarkdownCommands.map(command => command.name);
-  assert.ok(!names.includes("comment"));
-  assert.ok(contentMarkdownCommands.every(command => !String(command.buttonProps?.title ?? "").includes("插入注释")));
-  for (const name of ["bold", "italic", "link", "quote", "table"]) assert.ok(names.includes(name), `${name} remains available`);
+test("409 sets the conflict flag for the editor banner and clears on the next write or explicit acknowledge", async t => {
+  const h = await harness(t, row => row.method !== "GET" ? json({ error: { code: "VERSION_CHANGED" } }, 409) : json(detail("guide:alpha")));
+  assert.equal(h.current.conflict, false);
+  await act(async () => { await h.current.write("guide:alpha", "content.resource.draft.save", { versionId: "draft_1", expectedRevision: "7", payload: { format: "plate", schemaVersion: 1, document: { format: "plate", schemaVersion: 1, preset: "help", value: [] }, mediaIds: [] } }); });
+  assert.equal(h.current.conflict, true, "409 进入冲突态，编辑器停止自动保存");
+  assert.ok(h.current.error.includes("已被其他会话更新"));
+  assert.equal(h.browser.localStorage.getItem(h.module.contentPendingKey("admin_1")), null, "4xx 拒绝不保留恢复记录");
+  await act(async () => { h.current.clearConflict(); });
+  assert.equal(h.current.conflict, false, "重新读取内容后清除冲突");
 });

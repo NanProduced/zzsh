@@ -5,7 +5,7 @@ import { withSupplyWriteLock } from "../lib/supply-write-lock";
 import { resourcePath, type ContentOperation, type ResourceDetail } from "./content-resources-model";
 
 type Pending = { schema: 1; adminId: string; resourceId: string; operation: ContentOperation; key: string; fingerprint: string; versionId?: string; expectedRevision?: string; gameId?: string; accepted?: boolean };
-const operations: ContentOperation[] = ["content.resource.draft.create", "content.resource.draft.save", "content.resource.media-draft.save", "content.resource.draft.restore", "content.resource.publish", "content.resource.withdraw"];
+const operations: ContentOperation[] = ["content.resource.draft.create", "content.resource.draft.save", "content.resource.media-draft.save", "content.resource.draft.restore", "content.resource.draft.discard", "content.resource.publish", "content.resource.withdraw"];
 export const contentPendingKey = (adminId: string) => `zzsh.admin.content.pending.v1:${adminId}`;
 const pendingChanged = "zzsh:content-pending-changed";
 export function parsePendingContent(raw: string | null, adminId: string): Pending | null {
@@ -26,7 +26,7 @@ export async function contentFingerprint(operation: ContentOperation, key: strin
 }
 export function contentWriteRequest(key: string, operation: ContentOperation) {
   const suffix = operation === "content.resource.publish" ? "publish" : operation === "content.resource.withdraw" ? "withdraw" : operation === "content.resource.draft.restore" ? "restore" : operation === "content.resource.media-draft.save" ? "media-draft" : "draft";
-  return { path: `${resourcePath(key)}/${suffix}`, method: operation === "content.resource.draft.save" || operation === "content.resource.media-draft.save" ? "PUT" : "POST" } as const;
+  return { path: `${resourcePath(key)}/${suffix}`, method: operation === "content.resource.draft.discard" ? "DELETE" : operation === "content.resource.draft.save" || operation === "content.resource.media-draft.save" ? "PUT" : "POST" } as const;
 }
 function validResult(value: unknown, key: string): value is ResourceDetail {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -34,14 +34,16 @@ function validResult(value: unknown, key: string): value is ResourceDetail {
   return row.key === key && Boolean(row.item && typeof row.item.id === "string" && /^[1-9]\d*$/.test(row.item.revision)) && Boolean(row.current && row.current.key === key);
 }
 
-export function useContentResourceWrite(adminId: string, sessionId: string) {
+export function useContentResourceWrite(adminId: string, sessionId: string, quietAutosave = false) {
   const [pending, setPending] = useState<Pending | null>(null), [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>(), [success, setSuccess] = useState<string>(), [blocked, setBlocked] = useState(false);
+  /** 409 版本冲突：编辑器据此停止自动保存并进冲突横幅；重新读取内容时清除。 */
+  const [conflict, setConflict] = useState(false);
   const active = useRef({ adminId, sessionId, sequence: 0 }), busyRef = useRef(false), alive = useRef(true);
   active.current.adminId = adminId; active.current.sessionId = sessionId;
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => {
-    ++active.current.sequence; busyRef.current = false; setBusy(false); setError(undefined); setSuccess(undefined);
+    ++active.current.sequence; busyRef.current = false; setBusy(false); setError(undefined); setSuccess(undefined); setConflict(false);
     const read = () => { try { setPending(parsePendingContent(localStorage.getItem(contentPendingKey(adminId)), adminId)); setBlocked(false); } catch { setBlocked(true); setError("原请求恢复记录无法读取，已暂停写入；请联系维护者核对。"); } };
     read();
     const listener = (event: StorageEvent) => { if (event.key === contentPendingKey(adminId)) read(); };
@@ -57,7 +59,7 @@ export function useContentResourceWrite(adminId: string, sessionId: string) {
   };
   const write = async (key: string, operation: ContentOperation, body: Record<string, unknown>): Promise<ResourceDetail | undefined> => {
     if (busyRef.current || pending || blocked) return;
-    const sequence = ++active.current.sequence; busyRef.current = true; setBusy(true); setError(undefined); setSuccess(undefined);
+    const sequence = ++active.current.sequence; busyRef.current = true; setBusy(true); setError(undefined); setSuccess(undefined); setConflict(false);
     let record: Pending | null = null, sent = false;
     try {
       const bodySnapshot = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
@@ -72,7 +74,7 @@ export function useContentResourceWrite(adminId: string, sessionId: string) {
         const result = await adminRequest<unknown>(request.path, bodySnapshot, request.method, { "idempotency-key": record.key });
         if (!validResult(result, key)) throw new Error("内容回执不完整");
         clear(record);
-        if (current(sequence)) { setPending(null); setSuccess(operation === "content.resource.publish" ? "已发布，用户页面将读取这一版本。" : operation === "content.resource.withdraw" ? "已撤回，用户页面不再读取这一版本。" : operation === "content.resource.draft.restore" ? "历史版本已恢复为新草稿，线上内容保持不变。" : "草稿已保存，线上内容保持不变。"); }
+        if (current(sequence)) { setPending(null); setSuccess(operation === "content.resource.publish" ? "已发布，用户页面将读取这一版本。" : operation === "content.resource.withdraw" ? "已撤回，用户页面不再读取这一版本。" : operation === "content.resource.draft.restore" ? "已恢复为草稿。" : operation === "content.resource.draft.discard" ? "已丢弃草稿，正在查看线上版本。" : operation === "content.resource.draft.create" ? "草稿已创建，可以编辑。" : quietAutosave && operation === "content.resource.draft.save" ? undefined : "草稿已保存。"); }
         return current(sequence) ? result : undefined;
       });
     } catch (failure) {
@@ -82,9 +84,12 @@ export function useContentResourceWrite(adminId: string, sessionId: string) {
         try { clear(record); if (current(sequence)) setPending(null); }
         catch { if (current(sequence)) setBlocked(true); }
       }
-      if (current(sequence)) setError(record && sent && !rejected
-        ? "请求结果尚未确认，原键与指纹已保留。请核对原结果，不能再次提交。"
-        : conflict ? "内容已被其他会话更新或替换：当前输入已保留，没有覆盖线上或草稿。请复制修改后重新打开最新内容。" : sent ? friendlyError(failure) : "未发送操作：无法取得内容写入锁或保存恢复记录。");
+      if (current(sequence)) {
+        if (conflict) setConflict(true);
+        setError(record && sent && !rejected
+          ? "请求结果尚未确认，原键与指纹已保留。请核对原结果，不能再次提交。"
+          : conflict ? "内容已被其他会话更新或替换：当前输入已保留，没有覆盖线上或草稿。请复制修改后重新打开最新内容。" : sent ? friendlyError(failure) : "未发送操作：无法取得内容写入锁或保存恢复记录。");
+      }
     } finally { if (current(sequence)) { setBusy(false); busyRef.current = false; } }
   };
   const recover = async (): Promise<ResourceDetail | undefined> => {
@@ -108,5 +113,5 @@ export function useContentResourceWrite(adminId: string, sessionId: string) {
     } catch (failure) { if (current(sequence)) setError(`原结果核对未完成：${friendlyError(failure)} 原请求继续保留。`); }
     finally { if (current(sequence)) { setBusy(false); busyRef.current = false; } }
   };
-  return { pending, busy, error, success, blocked, locked: busy || Boolean(pending) || blocked, write, recover };
+  return { pending, busy, error, success, blocked, conflict, locked: busy || Boolean(pending) || blocked, write, recover, clearConflict: () => setConflict(false) };
 }

@@ -23,10 +23,14 @@ test("content tab requires content permissions instead of an operations role nam
   assert.equal(canOpenKind("content", boss), true);
 });
 
-test("navigation exposes content management only with content permissions", () => {
+test("navigation exposes split content workspaces only within their read permissions", () => {
   const labelsFor = (permissions) => workspaceMenuItems({ isBoss: false, permissions }).map((item) => item.label);
-  assert.equal(labelsFor(["content.platform.read"]).includes("内容管理"), true);
-  assert.equal(labelsFor(["content.read"]).includes("内容管理"), true);
-  assert.equal(labelsFor(["supply.catalog.manage"]).includes("内容管理"), false);
-  assert.equal(labelsFor(["content.edit"]).includes("内容管理"), false, "edit-only permission without read must not expose the entry");
+  assert.ok(labelsFor(["content.platform.read"]).includes("帮助中心"));
+  assert.ok(labelsFor(["content.platform.read"]).includes("平台动态"));
+  assert.ok(labelsFor(["content.read"]).includes("平台动态"));
+  assert.ok(labelsFor(["content.read"]).includes("帮助中心"));
+  assert.ok(labelsFor(["content.help.read"]).includes("帮助中心"));
+  assert.ok(!labelsFor(["content.help.read"]).includes("平台动态"));
+  assert.ok(!labelsFor(["supply.catalog.manage"]).includes("平台动态"));
+  assert.ok(!labelsFor(["content.edit"]).includes("平台动态"));
 });

@@ -1,0 +1,279 @@
+{
+  "schemaVersion": 1,
+  "confirmationSource": "owner-chat-approval-2026-11-12",
+  "items": [
+    {
+      "key": "account-realname-vs-face",
+      "kind": "help",
+      "file": "help/account-realname-vs-face.json",
+      "digest": "5e54113abdff17fc615716b62f64f7235ace2d6deec22d75bcaddd0637aab09b",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "account-recovery",
+      "kind": "help",
+      "file": "help/account-recovery.json",
+      "digest": "7aaf41c639e7c977293f0bbc9cea68f484b05b491a4537a20e0692068b2c736c",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "account-register-login",
+      "kind": "help",
+      "file": "help/account-register-login.json",
+      "digest": "14705c854b65aaad78c9c7783a9d1a87da39a3be580e3e27eefeb04fc5c10f2f",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "anti-fraud-guide",
+      "kind": "help",
+      "file": "help/anti-fraud-guide.json",
+      "digest": "ff759ae0ecb383d27ab897389a4aff90224a3f23250e6096ca280ef930b0a9e8",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "complaint-guide",
+      "kind": "help",
+      "file": "help/complaint-guide.json",
+      "digest": "f2c8ddfcc2350f61d5d474d81b65f4b7915e0b59e10c22a633d0f70eaf2787d9",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "fees-early-end",
+      "kind": "help",
+      "file": "help/fees-early-end.json",
+      "digest": "57aa495593f577a05c33aa5c4660ca3a3cd57d4aeec12d58f3c46d1d50ec834f",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "fees-overview",
+      "kind": "help",
+      "file": "help/fees-overview.json",
+      "digest": "b42c17cb874838987f7e42bd6ab8c620f3cf0156de7745a7d4a15b68f61455a5",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "fees-refund-status",
+      "kind": "help",
+      "file": "help/fees-refund-status.json",
+      "digest": "c216efd2f116782afefa73053454b086611c30494e44312b33f58d88d5bf9fdf",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "fees-settlement",
+      "kind": "help",
+      "file": "help/fees-settlement.json",
+      "digest": "5663841149ab715627548c9e23c7c1a23cb1ac4a245f63bd0279b6c8a86eeaef",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "invitation-earnings",
+      "kind": "help",
+      "file": "help/invitation-earnings.json",
+      "digest": "3df4fc50e2049b1d2078e8bda9ab2899d2fe2c3810d8224955dc4efddc7e0339",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "issue-during-rental",
+      "kind": "help",
+      "file": "help/issue-during-rental.json",
+      "digest": "fd8c4426db277d87b8fa911756a0308c90b76feb4aa91c6be3e4b2fade081a54",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "membership-benefits",
+      "kind": "help",
+      "file": "help/membership-benefits.json",
+      "digest": "43de9b6f8a6d7a5803ce8a743c885d40bed0c768a4a66924ab68c4e505410353",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "minor-protection",
+      "kind": "help",
+      "file": "help/minor-protection.json",
+      "digest": "02dc9748144c431b01b5d4405e3623ca5bd0cdc59d2996a2e0750198bd65cee5",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "platform-upgrade-records",
+      "kind": "help",
+      "file": "help/platform-upgrade-records.json",
+      "digest": "8aa63c26060482148788088d4e809054618a71c45d7884fabfb2dfbf8144b0fd",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "protection-coverage",
+      "kind": "help",
+      "file": "help/protection-coverage.json",
+      "digest": "9db80eabba996c4a3b786aa08325954d5aefdd7831f7e29b8f26e67738e77478",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "publish-account-safety",
+      "kind": "help",
+      "file": "help/publish-account-safety.json",
+      "digest": "998e48c09af09f3f0fb19ab27efa2a54f95d6469d421ae18d77d65980c869b84",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "publish-prepare",
+      "kind": "help",
+      "file": "help/publish-prepare.json",
+      "digest": "bdadbd4383e44539a755f193c21964763788bfbb910be904d25488818fec7fe7",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "publish-pricing-modes",
+      "kind": "help",
+      "file": "help/publish-pricing-modes.json",
+      "digest": "18062ba99c2ce5013d21daba8c8d83b575702d612e3d0cc673716579284468a9",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "rental-check-before-order",
+      "kind": "help",
+      "file": "help/rental-check-before-order.json",
+      "digest": "3a50b6f7bcfdf4bd2c5224b5737ef31e7595d9e5a921dac82d3154d9e7909241",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "rental-confirm-and-return",
+      "kind": "help",
+      "file": "help/rental-confirm-and-return.json",
+      "digest": "fd889b739f4a6814422a6b45c0859eccb489a272c77a153720fe3d2db638f137",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "rental-getting-started",
+      "kind": "help",
+      "file": "help/rental-getting-started.json",
+      "digest": "49a5fd89302f9d4d4b1fb48c2d0018b750e0d9fb99058d45dcd927251c4fe960",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "rental-not-started",
+      "kind": "help",
+      "file": "help/rental-not-started.json",
+      "digest": "f49168b5cc22244908c8661e3e2b2b5883bf8cf20ee42319a4047c3e22444c6a",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "terms-and-privacy",
+      "kind": "help",
+      "file": "help/terms-and-privacy.json",
+      "digest": "bd381638c89490ebe0abdc1d912e8274f7c64cd348b7e269f1bff65e6777d226",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "withdraw-status",
+      "kind": "help",
+      "file": "help/withdraw-status.json",
+      "digest": "18598bae931538ba0ca8114c7be6868f65872d1572fe4619e24b1571aac4475c",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "PUBLISH_NOTICE",
+      "kind": "notice",
+      "file": "notices/PUBLISH_NOTICE.json",
+      "digest": "32c05c1cbca97d3f50977a9cae03bbdc983f888ef828d73f89149d88de5d64ca",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "PUBLISH_RESOURCES",
+      "kind": "notice",
+      "file": "notices/PUBLISH_RESOURCES.json",
+      "digest": "5a63cf9be01a0cce2c109b8363f6bf73e59b9daf29e1b3ca509a8c7db58f80b3",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "PUBLISH_SAFE_BOX",
+      "kind": "notice",
+      "file": "notices/PUBLISH_SAFE_BOX.json",
+      "digest": "437d968cf2d1508ebb8f3139e19f20babe4ca97284801559f3ef370b201f1e09",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "PUBLISH_TERM",
+      "kind": "notice",
+      "file": "notices/PUBLISH_TERM.json",
+      "digest": "964e285fc5c2b3889fa2359dd67995fce02e29a3551e7a6718e766a965dca377",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "RENTAL_FEES",
+      "kind": "notice",
+      "file": "notices/RENTAL_FEES.json",
+      "digest": "a0b61a5486b7598d7a2371c3a780ddad1d17b13ee6fae3f1ab18620a0d465058",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "RENTAL_PROCESS",
+      "kind": "notice",
+      "file": "notices/RENTAL_PROCESS.json",
+      "digest": "a1751c17f5b9ff4c22001487d440e81176609e6582c7371036cbe7bfc6a24113",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "platform-upgrade",
+      "kind": "update",
+      "file": "updates/platform-upgrade.json",
+      "digest": "080658a955706320ace3df705c9545f9db80666912d09ae8df2a6dda5a5b1a89",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "platform-terms",
+      "kind": "legal",
+      "file": "legal/terms.json",
+      "digest": "f18eafd44ef9d862b0af20e83863cdebbcde37e196a164f34e346e2bd4c6f1c0",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "platform-privacy",
+      "kind": "legal",
+      "file": "legal/privacy.json",
+      "digest": "e1575a233e97ed860d8967b9b0f66243000df83f0123aa64ae166e9ad33f56a5",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    },
+    {
+      "key": "early-settlement-v1",
+      "kind": "legal",
+      "file": "legal/early-settlement-v1.txt",
+      "digest": "81f4072ced38de89f047c6c09522145d6a2ce904462a42b8e89405c4c116717d",
+      "confirmedBy": "Owner",
+      "confirmedAt": "2026-11-12"
+    }
+  ],
+  "generatedAt": "2026-11-11T16:57:27.509Z"
+}

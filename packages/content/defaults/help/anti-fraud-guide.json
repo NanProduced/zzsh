@@ -1,0 +1,118 @@
+{
+  "key": "anti-fraud-guide",
+  "kind": "help",
+  "file": "help/anti-fraud-guide.json",
+  "meta": {
+    "id": "S04",
+    "slug": "anti-fraud-guide",
+    "title": "怎样识别平台客服和防范私下交易？",
+    "summary": "平台沟通只在站内进行：平台客服入口与订单群。任何私下加你谈租号、出号或索要验证码的都是高危信号。",
+    "category": "after-sale",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "防骗",
+      "诈骗",
+      "私下交易",
+      "假客服",
+      "安全",
+      "QQ",
+      "微信"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "complaint-guide",
+      "issue-during-rental"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "official": "content-平台只通过站内沟通",
+    "signals": "content-这些情形按高危对待"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "平台只通过站内沟通",
+        "children": [
+          {
+            "text": "平台只通过站内沟通"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "平台客服：站内「联系客服」入口与你订单专属的履约群。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "客服不会用 QQ、微信私下添加你谈订单，不会索要平台密码或短信验证码，也不会要求站外转账或点击不明链接。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "这些情形按高危对待",
+        "children": [
+          {
+            "text": "这些情形按高危对待"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "自称客服或号主，私下联系你租号、出号或「优惠交易」。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "要求绕过平台直接转账、扫码付款或提供验证码。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "以「保证金解冻」「订单异常」为由要求额外付款。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "拿不准对方身份时，不要操作，先通过站内「联系客服」核实。"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -14,10 +14,6 @@ export default defineConfig({
     include: [
       "@zzsh/content",
       "@zzsh/content/updates",
-      "@zzsh/content/markdown",
-      "@zzsh/content/markdown/policy",
-      "@uiw/react-md-editor/nohighlight",
-      "@uiw/react-md-editor/commands-cn",
     ],
   },
   ssr: { external: ["@zzsh/content"] },

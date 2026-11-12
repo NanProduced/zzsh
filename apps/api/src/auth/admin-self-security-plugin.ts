@@ -19,6 +19,7 @@ import {
   type AdminSecurityCommandScope,
 } from "./admin-security-commands";
 import { SecurityApiError, recordAudit, setAuditContext, withTransaction } from "./security-core";
+import { endSupportPresenceForAdmin } from "../im/support-presence-session";
 
 /**
  * 管理员本人安全命令（改密、备份码重生成）的事务化入口。
@@ -196,6 +197,7 @@ export async function buildAdminSelfSecurityPlugin(options: { pool: Pool; adminS
         const nextHash = await ctx.context.password.hash(ctx.body.newPassword);
         // 先撤销全部旧会话再写新密码：中途失败时最坏是重新登录，不会留下"密码已改但旧会话仍有效"。
         const revoked = await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [userId]);
+        await endSupportPresenceForAdmin(client, userId, "REVOKED", new Date());
         await client.query(
           `UPDATE "zzsh_auth_admin"."account" SET "password" = $2, "updatedAt" = clock_timestamp() WHERE "id" = $1`,
           [account.id, nextHash],

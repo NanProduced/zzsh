@@ -1,21 +1,33 @@
-.personal-earnings { min-width:0; }
+/* ==========================================================================
+   Personal Earnings CSS - Wallet Ledger Style (Shopify Polaris + Tactical Gold)
+   ========================================================================== */
 
-/* 头部资产概览 (Earnings Header Summary) */
-.earnings-heading {
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 16px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--color-border-subtle);
-}
-.earnings-header-summary {
+.personal-earnings {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  width: 100%;
 }
+
+/* ==========================================================================
+   1. 头部资产概览 (Earnings Header Summary - Wallet Balance Hero Style)
+   ========================================================================== */
+.earnings-heading {
+  margin-bottom: 16px;
+}
+
+.earnings-header-summary {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 22%, var(--color-border-subtle));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--color-bg-card) 95%, var(--account-accent, #ca8a04)) 0%, var(--color-bg-card) 100%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+}
+
 .earnings-title-row {
   display: flex;
   align-items: center;
@@ -23,6 +35,7 @@
   flex-wrap: wrap;
   gap: 12px;
 }
+
 .earnings-heading h3 {
   margin: 0;
   font-size: 18px;
@@ -30,68 +43,79 @@
   color: var(--color-text-primary);
   scroll-margin-top: 120px;
 }
+
 .earnings-count-badge {
-  font-size: 12.5px;
+  font-size: 12px;
+  font-weight: 600;
   color: var(--color-text-secondary);
   background: var(--color-bg-elevated);
-  padding: 4px 10px;
+  padding: 4px 12px;
   border-radius: 999px;
   border: 1px solid var(--color-border-subtle);
   font-variant-numeric: tabular-nums;
 }
+
 .earnings-total {
-  margin: 0;
+  margin: 12px 0 0;
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 10px;
   font-size: 13.5px;
-  color: var(--color-text-secondary);
 }
+
 .earnings-total-label {
   color: var(--color-text-secondary);
   font-weight: 500;
 }
+
 .earnings-total-amount {
-  font-size: 26px;
+  font-size: 32px;
   font-weight: 800;
   color: var(--account-accent, #ca8a04);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
+  line-height: 1.2;
 }
+
 .earnings-total-tip {
   font-size: 12px;
   color: var(--color-text-muted);
   font-weight: normal;
 }
 
-/* 筛选工具栏 (Filters Toolbar) */
+/* ==========================================================================
+   2. 筛选工具栏 (Filters Toolbar - Base-UI Select)
+   ========================================================================== */
 .earnings-filters {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 18px 0 12px;
+  margin: 18px 0 14px;
   flex-wrap: wrap;
   position: relative;
 }
+
 .earnings-filter-label {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--color-text-secondary);
 }
+
 .earnings-shadcn-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
   height: 38px;
-  min-width: 150px;
-  padding: 0 12px;
+  min-width: 160px;
+  padding: 0 14px;
   border: 1px solid var(--color-border-default);
   border-radius: 8px;
-  background: var(--color-bg-elevated);
+  background: var(--color-bg-surface);
   color: var(--color-text-primary);
   font-size: 13px;
   font-weight: 500;
@@ -100,21 +124,32 @@
   transition: all 0.15s ease;
   user-select: none;
 }
+
 .earnings-shadcn-trigger:hover:not(:disabled) {
   border-color: var(--color-border-hover);
-  background: var(--color-bg-surface);
+  background: var(--color-bg-elevated);
 }
+
 .earnings-shadcn-trigger:focus-visible {
   border-color: var(--account-accent, #ca8a04);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--account-accent, #ca8a04) 22%, transparent);
 }
+
 .earnings-shadcn-trigger:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
 .earnings-select-popup {
-  min-width: 160px;
+  min-width: 170px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-bg-card);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.18), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  padding: 4px;
+  z-index: 100;
 }
+
 .earnings-hidden-select {
   position: absolute;
   width: 1px;
@@ -127,20 +162,24 @@
   pointer-events: none;
   opacity: 0;
 }
+
 .earnings-show-more {
   width: 100%;
-  margin-top: 10px;
+  margin-top: 12px;
   font-size: 13px;
 }
 
-/* 各状态记录指标面板 (Status Breakdown Grid) */
+/* ==========================================================================
+   3. 各状态记录指标面板 (Status Breakdown Grid)
+   ========================================================================== */
 .earnings-breakdown {
   margin: 14px 0 20px;
   border: 1px solid var(--color-border-subtle);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--color-bg-elevated) 40%, var(--color-bg-surface));
-  padding: 10px 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-elevated) 45%, var(--color-bg-surface));
+  padding: 12px 16px;
 }
+
 .earnings-breakdown summary {
   display: flex;
   align-items: center;
@@ -151,191 +190,334 @@
   cursor: pointer;
   user-select: none;
 }
+
 .earnings-breakdown summary:hover {
   color: var(--color-text-primary);
 }
+
 .earnings-breakdown .breakdown-icon {
   color: var(--account-accent, #ca8a04);
 }
+
 .earnings-breakdown .breakdown-chevron {
   margin-left: auto;
   color: var(--color-text-muted);
   transition: transform 0.2s ease;
 }
+
 .earnings-breakdown[open] .breakdown-chevron {
   transform: rotate(180deg);
 }
+
 .breakdown-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 10px;
-  margin: 12px 0 4px;
+  margin: 14px 0 4px;
   padding: 0;
   list-style: none;
 }
+
 .breakdown-chip {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  border-radius: 8px;
+  padding: 10px 14px;
+  border-radius: 10px;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-border-subtle);
 }
+
 .breakdown-chip .chip-state {
   font-size: 12px;
   color: var(--color-text-secondary);
   font-weight: 500;
 }
+
 .breakdown-chip .chip-count {
   font-size: 11.5px;
   color: var(--color-text-muted);
 }
+
 .breakdown-chip .chip-amount {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: 14.5px;
+  font-weight: 750;
   color: var(--color-text-primary);
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
 
-/* 列表与行 (Earnings Records Timeline) */
-.earnings-note, .earnings-empty {
+/* ==========================================================================
+   4. 佣金记录时间线 (Earnings Records - Wallet Ledger List)
+   ========================================================================== */
+.earnings-note,
+.earnings-empty {
   margin: 0;
-  padding: 24px 0;
+  padding: 32px 0;
+  text-align: center;
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 13.5px;
 }
+
 .earnings-records {
   list-style: none;
   padding: 0;
-  margin: 8px 0 16px;
+  margin: 10px 0 16px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
+
 .earning-record {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   width: 100%;
-  padding: 14px 16px;
+  padding: 15px 18px;
   text-align: left;
   border: 1px solid var(--color-border-subtle);
-  border-radius: 10px;
+  border-radius: 12px;
   background: var(--color-bg-surface);
   color: var(--color-text-primary);
   font: inherit;
   cursor: pointer;
   transition: all 0.15s ease;
+  box-sizing: border-box;
 }
+
 .earning-record:hover {
   background: var(--color-bg-elevated);
-  border-color: var(--color-border-default);
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 35%, var(--color-border-default));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transform: translateY(-1px);
 }
-.earning-record>span:first-child {
+
+.earning-record > span:first-child {
   min-width: 0;
   flex: 1;
 }
-.earning-record strong, .earning-record small {
+
+.earning-record strong,
+.earning-record small {
   display: block;
   overflow-wrap: anywhere;
 }
+
 .earning-record strong {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--color-text-primary);
 }
+
 .earning-record small {
   margin-top: 4px;
   color: var(--color-text-secondary);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
+
 .earning-record-value {
   min-width: 0;
   text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
   font-variant-numeric: tabular-nums;
 }
+
 .earning-record-value strong {
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 750;
+  color: var(--color-text-primary);
   max-width: 20ch;
 }
-.earning-record-value small {
-  font-size: 11.5px;
-  color: var(--color-text-muted);
+
+/* Status Badges */
+.earning-status-badge {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  margin-top: 2px !important;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
 }
-.earning-record>svg {
+
+.earning-status-badge.state-settled {
+  background: color-mix(in srgb, #16a34a 12%, transparent);
+  color: #16a34a;
+  border-color: color-mix(in srgb, #16a34a 28%, transparent);
+}
+
+.earning-status-badge.state-matured {
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 14%, transparent);
+  color: var(--account-accent, #ca8a04);
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 30%, transparent);
+}
+
+.earning-status-badge.state-pending {
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+  color: #f59e0b;
+  border-color: color-mix(in srgb, #f59e0b 26%, transparent);
+}
+
+.earning-status-badge.state-void,
+.earning-status-badge.state-revoked,
+.earning-status-badge.state-recovery_required {
+  background: color-mix(in srgb, #ef4444 12%, transparent);
+  color: #ef4444;
+  border-color: color-mix(in srgb, #ef4444 26%, transparent);
+}
+
+.earning-status-badge.state-expired,
+.earning-status-badge.state-unknown {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border-color: var(--color-border-subtle);
+}
+
+.earning-record > svg {
   flex-shrink: 0;
   color: var(--color-text-muted);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.earning-record:hover > svg {
+  transform: translateX(3px);
+  color: var(--account-accent, #ca8a04);
 }
 
 .personal-earnings :is(button, a):focus-visible {
-  outline: 2px solid var(--account-accent);
+  outline: 2px solid var(--account-accent, #ca8a04);
   outline-offset: 3px;
 }
+
 .personal-earnings button:disabled {
   cursor: default;
-  opacity: .6;
+  opacity: 0.6;
 }
 
-/* 详情面板 (Earnings Detail) */
-.earning-detail h4 {
-  margin: 24px 0 12px;
-  font-size: 17px;
-  font-weight: 700;
+/* ==========================================================================
+   5. 详情面板 (Earnings Detail View)
+   ========================================================================== */
+.earning-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
+
+.earning-detail h4 {
+  margin: 18px 0 10px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
 .earning-detail-amount {
-  font-size: 28px;
-  line-height: 1.4;
+  font-size: 32px;
+  line-height: 1.2;
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
   color: var(--account-accent, #ca8a04);
+  margin-bottom: 8px;
 }
+
 .earning-detail dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  margin: 20px 0;
-  padding: 16px;
-  border-radius: 10px;
+  gap: 14px;
+  margin: 16px 0;
+  padding: 18px 20px;
+  border-radius: 12px;
   background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
 }
-.earning-detail dt, .earnings-wallet-link>span {
+
+.earning-detail dt,
+.earnings-wallet-link > span {
   color: var(--color-text-secondary);
-  font-size: 13px;
+  font-size: 12.5px;
 }
+
 .earning-detail dd {
   margin: 4px 0 0;
   overflow-wrap: anywhere;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--color-text-primary);
 }
+
+.earning-calculation {
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  margin-top: 14px;
+}
+
 .earning-calculation h5 {
-  margin: 20px 0 8px;
+  margin: 0 0 10px;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 650;
+  color: var(--color-text-primary);
 }
-.earning-calculation>p {
+
+.earning-calculation > p {
   line-height: 1.7;
   overflow-wrap: anywhere;
   font-size: 13px;
   color: var(--color-text-secondary);
+  margin: 8px 0 0;
 }
+
+.personal-earnings .earnings-error {
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .personal-earnings .earnings-error p {
-  color: var(--account-danger);
+  margin: 0;
+  color: var(--account-danger, #ef4444);
+  font-size: 13.5px;
 }
+
 .earning-record-explanation {
-  margin-top: 20px;
-  border-block: 1px solid var(--color-border-subtle);
+  margin-top: 18px;
+  border-top: 1px solid var(--color-border-subtle);
+  border-bottom: 1px solid var(--color-border-subtle);
   padding: 8px 0;
 }
-.earning-record-explanation>summary {
+
+.earning-record-explanation > summary {
   min-height: 40px;
   display: flex;
   align-items: center;
-  font-weight: 600;
+  font-weight: 650;
   cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: color 0.15s ease;
 }
+
+.earning-record-explanation > summary:hover {
+  color: var(--color-text-primary);
+}
+
 .earnings-wallet-link {
   display: flex;
   align-items: center;
@@ -347,13 +529,27 @@
   border-top: 1px solid var(--color-border-subtle);
 }
 
-@media(max-width: 700px) {
-  .earning-detail dl { grid-template-columns: minmax(0, 1fr); }
-  .earning-record { gap: 10px; }
-  .earning-record-value strong { max-width: 15ch; }
-  .earnings-wallet-link .button { width: 100%; }
+@media (max-width: 700px) {
+  .earning-detail dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .earning-record {
+    gap: 10px;
+  }
+  .earning-record-value strong {
+    max-width: 15ch;
+  }
+  .earnings-wallet-link .button {
+    width: 100%;
+  }
 }
-@media(max-width: 599px) {
-  .earnings-filters { flex-direction: column; align-items: stretch; }
-  .earnings-select-wrapper select { width: 100%; }
+
+@media (max-width: 599px) {
+  .earnings-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .earnings-shadcn-trigger {
+    width: 100%;
+  }
 }

@@ -1,0 +1,73 @@
+{
+  "key": "fees-overview",
+  "kind": "help",
+  "file": "help/fees-overview.json",
+  "meta": {
+    "id": "F01",
+    "slug": "fees-overview",
+    "title": "租金、物资费和押金分别是什么？",
+    "summary": "预付总额由哈夫币金额、全量物品金额和租客押金组成；押金与号主保证金、包赔费分别记录，互不混用。",
+    "category": "fees",
+    "audience": ["renter", "owner"],
+    "keywords": ["费用", "租金", "物资费", "押金", "保证金", "预付", "费用构成", "哈夫币", "哈弗币"],
+    "updatedAt": "2026-10-06",
+    "related": ["fees-early-end", "fees-refund-status", "membership-benefits"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "composition": "content-预付总额的构成",
+    "deposit-kinds": "content-几种容易混淆的资金",
+    "notes": "content-注意"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "预付总额的构成", "children": [{ "text": "预付总额的构成" }] },
+      { "type": "p", "children": [{ "text": "租客预付总额由哈夫币金额、全量物品金额和实际租客押金组成，哈夫币与物品保留独立明细，按下单时冻结的买家、号主双边价格结算。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "资源费用：按账号全量库存预付，结算时按实际消耗计算，未消耗的物品按冻结价格退回。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "租客押金：号主为账号设定的基础押金，平台提供推荐值与上限；正常结束时全额应退，押金不参与资源费用抽成。" }] },
+      { "type": "h2", "id": "几种容易混淆的资金", "children": [{ "text": "几种容易混淆的资金" }] },
+      {
+        "type": "table",
+        "children": [
+          {
+            "type": "tr",
+            "children": [
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "名称" }] }] },
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "谁缴纳" }] }] },
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "用途" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "租客押金" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "租客（是否减免以生效资格为准）" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "保障租用期间的约定责任，正常结束全额应退" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "号主保证金" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "号主" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "按出租账号核定的发布资格要求，与租客押金无关" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "包赔费用" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "按结算责任确定承担方" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "选择包赔保障的订单在结算时计提，单独记录" }] }] }
+            ]
+          }
+        ]
+      },
+      { "type": "h2", "id": "注意", "children": [{ "text": "注意" }] },
+      { "type": "p", "children": [{ "text": "库存减少不会自动降低押金；具体金额以下单确认页冻结的报价为准，帮助说明不改变订单金额。" }] }
+    ]
+  }
+}

@@ -222,13 +222,36 @@ test("existing favorite stays recognizable through another party occupancy, rele
   actor = "other-reader"; assert.deepEqual((await read()).items, []); actor = null;
   await assert.rejects(read(), (e: any) => e.status === 401);
 });
-test("lookup route is matched before the generic listing-id branch and stays anonymous public only", async () => {
-  const f = nativeFixture(); f.facts.occupancy = "OCCUPIED";
-  const client = { query: async (sql: string, args: any[] = []) => sql.includes("SELECT DISTINCT a.id") ? { rows: [{ id: f.account.id }], rowCount: 1 } : f.client.query(sql, args), release() {} };
-  const capture = responseCapture();
-  await handlePublishingRoute({ method: "GET", headers: {} } as never, capture.response as never,
-    { pool: { connect: async () => client }, supplyGateReader: f.gate } as never, "req_lookup", "/listings/lookup", new URLSearchParams("number=AC0000000001&gameId=game-a"), false);
-  assert.equal(capture.result.status, 200); assert.equal(capture.result.body.id, f.account.id); assert.equal(capture.result.body.canCreateOrder, false);
+test("anonymous number lookup, detail and the legacy list expose the same ready CDN images", async () => {
+  const f = nativeFixture();
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    if (sql.includes("SELECT DISTINCT a.id") || sql.includes("SELECT a.id,v.id AS version_id")) {
+      return { rows: [{ id: f.account.id, version_id: f.version.id }], rowCount: 1 };
+    }
+    if (sql.includes("FROM zzsh_supply.account_image_cdn_delivery")) {
+      assert.deepEqual(args, [[f.account.id]]);
+      return { rows: [{ id: "cdn-fixture", accountId: f.account.id, assetId: "media-a" }], rowCount: 1 };
+    }
+    return f.client.query(sql, args);
+  }, release() {} };
+  const cdn = { mode: "serve", url: (_row: unknown, edge: number) => `https://cdn.example.test/cdn-fixture/${edge}.webp` };
+  const options = { pool: { connect: async () => client }, supplyGateReader: f.gate, mediaStorage: { accountImageCdn: cdn } };
+  async function read(path: string, query = "") {
+    const capture = responseCapture();
+    await handlePublishingRoute({ method: "GET", headers: {} } as never, capture.response as never,
+      options as never, "req_lookup", path, new URLSearchParams(query), false);
+    assert.equal(capture.result.status, 200);
+    return capture.result.body;
+  }
+  const list = await read("/listings", "gameId=game-a");
+  f.facts.occupancy = "OCCUPIED";
+  const lookup = await read("/listings/lookup", "number=AC0000000001&gameId=game-a");
+  const detail = await read(`/listings/${f.account.id}`);
+  assert.equal(lookup.id, f.account.id); assert.equal(lookup.canCreateOrder, false);
+  assert.equal(lookup.media[0].coverUrl, cdn.url(null, 640));
+  assert.equal(lookup.media[0].detailUrl, cdn.url(null, 1920));
+  assert.deepEqual(lookup.media, detail.media);
+  assert.deepEqual(lookup.media, list.items[0].media);
 });
 test("default v2 keeps old-platform status=3 rows visible as read-only and separates cursor scope", async t => {
   const f = nativeFixture(); const queries: string[] = [];
@@ -246,10 +269,10 @@ test("default v2 keeps old-platform status=3 rows visible as read-only and separ
   let legacyCalls = 0, legacyRevisions: unknown = null;
   t.mock.method(legacyRead, "listLegacyReadListings", async (_client: unknown, _q: unknown, _key: unknown, revisions: unknown) => {
     legacyCalls++; legacyRevisions = revisions;
-    return { queryVersion: 2, items: [{ id: "legacy-1", source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }], nextCursor: null, sort: "latest", direction: "DESC", sortLabel: "更新时间", filterRevision: "1", catalogRevision: "1", ruleReleaseId: null, scannedCount: 1, scanBudget: 200, scanBudgetReached: false, limit: 20 };
+    return { queryVersion: 2, items: [{ id: "legacy-1", versionId: "legacy-version", media: [], source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }], nextCursor: null, sort: "latest", direction: "DESC", sortLabel: "更新时间", filterRevision: "1", catalogRevision: "1", ruleReleaseId: null, scannedCount: 1, scanBudget: 200, scanBudgetReached: false, limit: 20 };
   });
   t.mock.method(legacyRead, "mixedListingBinding", () => ({ queryVersion: 2, gameId: "game-a", queryHash: "x", sort: "latest", direction: "DESC", coreItemId: null, filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" }));
-  t.mock.method(legacyRead, "readLegacyListing", async () => ({ id: "legacy-1", source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }));
+  t.mock.method(legacyRead, "readLegacyListing", async () => ({ id: "legacy-1", versionId: "legacy-version", media: [], source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null }));
   const options = { pool: { connect: async () => client }, supplyGateReader: f.gate, listingCursorKey: { keyId: "fixture", secret: "x".repeat(32) }, legacyPublicAdmission: { schema: "legacy-public-admission-v2", records: [] } };
   const pageOf = () => listV2({ url: "/listings?queryVersion=2&gameId=game-a" } as never, options as never, new URLSearchParams("queryVersion=2&gameId=game-a"));
   try {

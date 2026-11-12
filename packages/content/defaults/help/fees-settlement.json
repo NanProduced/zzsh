@@ -1,0 +1,47 @@
+{
+  "key": "fees-settlement",
+  "kind": "help",
+  "file": "help/fees-settlement.json",
+  "meta": {
+    "id": "F04",
+    "slug": "fees-settlement",
+    "title": "怎样确认结算，金额有异议怎么办？",
+    "summary": "双方确认同一版结算明细：正常结算确认后自动生效，提前结算还需客服复核；任何修改都会使旧确认失效。",
+    "category": "fees",
+    "audience": ["renter", "owner"],
+    "keywords": ["结算", "确认结算", "结算明细", "异议", "复核", "人工调整", "收益"],
+    "updatedAt": "2026-10-19",
+    "related": ["fees-early-end", "fees-refund-status", "withdraw-status"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "how": "content-结算怎样生效",
+    "dispute": "content-对金额有异议",
+    "after": "content-生效之后"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "结算怎样生效", "children": [{ "text": "结算怎样生效" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 1, "children": [{ "text": "系统按双方确认的数量与下单时冻结的价格生成结算明细，双方确认同一版本。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 2, "children": [{ "text": "正常结算：双方同版确认后自动生效，不需要客服审核。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 3, "children": [{ "text": "提前结算：双方确认后，还须受权客服复核同一版本才生效。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "任何改变消耗、金额或费用承担方的修改都会使已有的确认和复核失效，需要重新确认；旧版本保留为历史记录。" }] }
+        ]
+      },
+      { "type": "h2", "id": "对金额有异议", "children": [{ "text": "对金额有异议" }] },
+      { "type": "p", "children": [{ "text": "先不要确认，在订单群内提出异议。人工金额调整必须写明原因与证据，经运营审核后由双方再次确认；争议无法协商时由受权方按规则裁定。" }] },
+      { "type": "h2", "id": "生效之后", "children": [{ "text": "生效之后" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "号主收入按结算生效后的入账结果进入钱包，不用等租客退款完成；能否申请提现，另看钱包当前的提现资格与可提现金额。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "租客剩余款自动发起原路退款：正常结算生效即发起；不足 70% 的提前结算在复核生效满 7 天后发起。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "「应退」是平台的退款责任记录，不代表支付渠道已经到账，到账时间见退款状态说明。" }] }
+    ]
+  }
+}

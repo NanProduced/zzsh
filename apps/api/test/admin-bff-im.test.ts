@@ -135,6 +135,24 @@ async function route(path: string, method = "GET") {
   return output.result();
 }
 
+test("Admin BFF forwards the strict IM connection header unchanged", async (t) => {
+  const forwarded: any[] = [];
+  t.mock.method(yunxinRoutes, "handleYunxinRoute", async (request: any, response: any) => {
+    forwarded.push(request);
+    response.status(200).json({ ok: true });
+  });
+  const output = capture();
+  await handleAdminBff({
+    method: "POST",
+    url: "/im/consultations/consult_1/claim",
+    originalUrl: "/im/consultations/consult_1/claim",
+    headers: { origin: ADMIN_ORIGIN, "x-zzsh-connection-id": "conn_window_1" },
+    body: {},
+  } as never, output.response as never, options());
+  assert.equal(output.result().status, 200);
+  assert.equal(forwarded.at(-1)?.headers["x-zzsh-connection-id"], "conn_window_1");
+});
+
 test("admin BFF forwards the transfer-targets route and still rejects unknown or wrong-method paths", async () => {
   // Whitelisted: the route reaches the IM handler; without a consultation seam
   // it fails closed with 503, which proves forwarding rather than a 404.

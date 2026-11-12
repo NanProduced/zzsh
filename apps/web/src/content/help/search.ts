@@ -1,3 +1,4 @@
+import { extractPlate } from "@zzsh/content/plate";
 import { allHelpArticles } from "./index.ts";
 import type { HelpArticle } from "./types.ts";
 
@@ -46,16 +47,8 @@ function expandTerms(terms: readonly string[]): readonly string[] {
 }
 
 function articleBodyText(article: HelpArticle): string {
-  if (article.format === "markdown") return article.plainText ?? article.markdown ?? "";
-  return (article.sections ?? [])
-    .map((section) => section.title + " " + section.blocks.map((block) => {
-      if (block.type === "paragraph" || block.type === "callout") return block.text;
-      if (block.type === "list") return block.items.join(" ");
-      if (block.type === "image") return [block.alt, block.caption ?? ""].join(" ");
-      if (block.type === "link") return block.text;
-      return block.columns.join(" ") + " " + block.rows.map((row) => row.join(" ")).join(" ");
-    }).join(" "))
-    .join(" ");
+  // 正文唯一格式 plate：优先用已派生的纯文本投影，否则即时 extractPlate。
+  return article.plainText ?? extractPlate(article.document).plainText;
 }
 
 function scoreArticle(article: HelpArticle, terms: readonly string[]): number {

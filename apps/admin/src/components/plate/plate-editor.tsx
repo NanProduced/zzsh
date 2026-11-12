@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { DndProvider } from "react-dnd";
 import { HTML5Backend } from "react-dnd-html5-backend";
 import {
@@ -7,11 +7,14 @@ import {
   ParagraphPlugin,
   usePlateEditor,
   useEditorRef,
+  createPlatePlugin,
   type PlateElementProps,
   type PlateLeafProps,
 } from "platejs/react";
-import { NodeIdPlugin, KEYS, type Value } from "platejs";
-import { AutoformatPlugin } from "@platejs/autoformat";
+import { NodeIdPlugin, KEYS, RangeApi, TextApi, type RangeRef, type TRange, type TCommentText, type Value } from "platejs";
+import { getCommentCount, getDraftCommentKey, getTransientCommentKey } from "@platejs/comment";
+import { BlockquoteRules, HeadingRules } from "@platejs/basic-nodes";
+import { BulletedListRules, OrderedListRules } from "@platejs/list";
 import {
   H2Plugin,
   H3Plugin,
@@ -53,10 +56,12 @@ import { TooltipProvider } from "./ui/tooltip";
 import { Editor, EditorContainer } from "./shell/editor";
 import { FloatingToolbar } from "./shell/floating-toolbar";
 import { FloatingToolbarButtons } from "./shell/floating-toolbar-buttons";
+import { projectedCommentText, type PlateCommentAnchor } from "./shell/comment-toolbar-button";
 import { LinkFloatingToolbar } from "./shell/link-toolbar";
 import { BlockDraggable } from "./shell/block-draggable";
 import { BlockSelection } from "./shell/block-selection";
-import { SlashInputElement } from "./shell/slash-node";
+import { PlateImagePicker, SlashInputElement } from "./shell/slash-node";
+import { commentIds, PageBlock, PlatePageBlocksProvider, usePlatePageBlocks, type PlatePageBlocks } from "./shell/page-block";
 import { ParagraphElement } from "./nodes/paragraph-node";
 import { H2Element, H3Element, H4Element } from "./nodes/heading-node";
 import { BlockquoteElement } from "./nodes/blockquote-node";
@@ -67,7 +72,8 @@ import { CalloutElement } from "./nodes/callout-node";
 import { ToggleElement } from "./nodes/toggle-node";
 import { TableElement, TableRowElement, TableCellElement, TableCellHeaderElement } from "./nodes/table-node";
 import { LinkElement } from "./nodes/link-node";
-import { ImageElement } from "./nodes/media-image-node";
+import { ImageElement, PlateImageUrls } from "./nodes/media-image-node";
+import { FloatingStatusMessage } from "../ui-elements";
 import { TocElement } from "./nodes/toc-node";
 import { BlockList } from "./nodes/block-list";
 import "@zzsh/ui/plate-document.css";
@@ -79,9 +85,32 @@ export type PlateEditorProps = {
   value: PlateNode[];
   onChange: (envelope: PlateDocumentEnvelope) => void;
   readOnly?: boolean;
+  canvas?: boolean;
   mediaUrls?: Record<string, string>;
   imageUrls?: Record<string, string>;
+  onCommentRequest?: (anchor: PlateCommentAnchor) => void;
+  commentAnchorMax?: number;
+  pageBlocks?: PlatePageBlocks;
+  onPickImages?: (blockId: string) => void;
+  onPasteImages?: (files: File[], blockId: string) => void;
 };
+
+type EditorImage = ({ imageId: string } | { mediaId: string }) & { alt: string };
+
+export type PlateEditorHandle = {
+  focusStart: () => void;
+  currentDraftAnchor: () => { text: string; offset: number } | null;
+  clearDraftComment: () => void;
+  applyDiscussionMark: (id: string, text?: string) => PlateDocumentEnvelope;
+  selectedBlockId: () => string | undefined;
+  focusBlock: (blockId: string) => boolean;
+  hasBlock: (id: string) => boolean;
+  insertImagesAfter: (blockId: string | undefined, images: readonly EditorImage[]) => string | undefined;
+};
+
+const PageBlocksPlugin = createPlatePlugin({ key: "pageBlocks", render: { aboveNodes: PageBlock } });
+const editorBlockId = (blocks: Value, index: number | undefined) =>
+  index !== undefined && typeof blocks[index]?.id === "string" ? blocks[index].id : undefined;
 
 const COLOR_TOKENS = new Set(PALETTE);
 const TOGGLE_MARKS = ["bold", "italic", "strikethrough", "underline", "code"];
@@ -92,60 +121,97 @@ function presetMarks(preset: PlatePreset): Set<string> {
 
 type Attributes = { className?: string; style?: React.CSSProperties; [key: string]: unknown };
 
-function splitAttrs(attributes: Attributes): { className?: string; rest: Attributes } {
-  const { className, ...rest } = attributes;
-  return { className, rest };
-}
-
-function injectUrls(value: PlateNode[], mediaUrls: Record<string, string>, imageUrls: Record<string, string>): PlateNode[] {
-  const urls = { ...mediaUrls, ...imageUrls };
+function toEditorValue(value: PlateNode[]): PlateNode[] {
   const walk = (node: PlateNode): PlateNode => {
-    if (typeof node.text === "string") return node;
-    const children = (node.children ?? []).map(walk);
-    if (node.type === "img") {
-      const key = typeof node.imageId === "string" ? node.imageId : typeof node.mediaId === "string" ? node.mediaId : "";
-      const url = key ? urls[key] : undefined;
-      return { ...node, children, ...(url ? { url } : {}) };
-    }
-    return { ...node, children };
+    // Stored comments carry their ids; Plate needs its runtime leaf flag to render them.
+    if (typeof node.text === "string") return getCommentCount(node as TCommentText) ? { ...node, [KEYS.comment]: true } : node;
+    return node.children ? { ...node, children: node.children.map(walk) } : node;
   };
   return value.map(walk);
 }
 
-function colorStyle(token: unknown, prop: "color" | "backgroundColor"): React.CSSProperties | undefined {
-  return typeof token === "string" && COLOR_TOKENS.has(token) ? { [prop]: `var(--plate-${token})` } : undefined;
-}
+const paletteNodeProps = {
+  validNodeValues: [...COLOR_TOKENS],
+  transformNodeValue: ({ nodeValue }: { nodeValue?: unknown }) =>
+    typeof nodeValue === "string" ? `var(--plate-${nodeValue})` : undefined,
+};
 
-function ColorLeaf(props: PlateLeafProps) {
-  return <PlateLeaf {...props} as="span" style={colorStyle(props.leaf.color, "color")} />;
-}
-
-function BackgroundColorLeaf(props: PlateLeafProps) {
-  return <PlateLeaf {...props} as="span" style={colorStyle(props.leaf.backgroundColor, "backgroundColor")} />;
-}
-
-function CommentLeaf(props: PlateLeafProps) {
-  const { attributes, children, leaf } = props;
-  const { className, rest } = splitAttrs(attributes as Attributes);
-  const commented = Object.keys(leaf).some((k) => k.startsWith("comment_"));
-  if (!commented) return <PlateLeaf {...props} as="span" />;
+// Source: https://platejs.org/r/comment-node.json — Plate UI (MIT), platejs v53.5.2 registry.
+// Adapted to the server's thread ids and the local block discussion trigger.
+function CommentLeaf(props: PlateLeafProps<TCommentText>) {
+  const { children, leaf, attributes } = props;
+  const surface = usePlatePageBlocks();
+  const ids = commentIds(leaf).filter((id) => !surface.openIds || surface.openIds.includes(id));
+  const isDraft = getDraftCommentKey() in leaf;
+  const isActive = surface.activeId !== null && ids.includes(surface.activeId);
+  const isHover = surface.hoverId !== null && ids.includes(surface.hoverId);
+  const currentId = isActive ? surface.activeId : ids[0];
+  if (ids.length === 0 && !isDraft) return <PlateLeaf {...props} as="span" />;
   return (
-    <mark {...rest} className={cn("plate-comment", className)}>
+    <PlateLeaf
+      {...props}
+      as="mark"
+      className={cn(
+        "plate-comment",
+        (isActive || isHover) && "plate-comment--active",
+        ids.length > 1 && "plate-comment--overlap",
+      )}
+      attributes={{
+        ...(attributes as Attributes),
+        "data-comment-id": currentId ?? undefined,
+        "data-comment-ids": ids.length ? ids.join(" ") : undefined,
+        tabIndex: currentId && surface.onCommentClick ? -1 : undefined,
+        onClick: (event: React.MouseEvent<HTMLElement>) => {
+          if (!currentId || !surface.onCommentClick || window.getSelection()?.isCollapsed === false) return;
+          const trigger = event.currentTarget;
+          const blockId = trigger.closest<HTMLElement>("[data-plate-block-id]")?.dataset.plateBlockId;
+          if (!blockId) return;
+          event.preventDefault();
+          surface.onCommentClick({ blockId, ids: surface.idsByBlock.get(blockId) ?? ids, trigger, selectedId: currentId });
+        },
+        onMouseEnter: () => { if (currentId) surface.onCommentHover?.(currentId); },
+        onMouseLeave: () => surface.onCommentHover?.(null),
+      }}
+    >
       {children}
-    </mark>
+    </PlateLeaf>
   );
+}
+
+/** 去掉草稿/瞬态评论标记与裸 comment 旗标：它们只是本地 UI 态，不入存储白名单语义。 */
+function stripCommentArtifacts(value: Value): Value {
+  const draftKey = getDraftCommentKey();
+  const transientKey = getTransientCommentKey();
+  const walk = (node: Value[number]): Value[number] => {
+    if (typeof (node as { text?: unknown }).text === "string") {
+      const leaf = node as Record<string, unknown>;
+      if (!(draftKey in leaf) && !(transientKey in leaf) && !(KEYS.comment in leaf)) return node;
+      const out = { ...leaf };
+      delete out[draftKey];
+      delete out[transientKey];
+      delete out[KEYS.comment];
+      return out as Value[number];
+    }
+    const children = (node as { children?: Value }).children;
+    if (!children) return node;
+    return { ...(node as object), children: children.map(walk) } as Value[number];
+  };
+  return value.map(walk);
 }
 
 const UNSELECTABLE_TYPES: string[] = [KEYS.column, KEYS.codeLine, KEYS.td, KEYS.tr];
 
-function buildPlugins(preset: PlatePreset, readOnly: boolean) {
+function buildPlugins(preset: PlatePreset, pageBlocks: boolean, draftRange: () => TRange | null) {
   const blocks = new Set(BLOCK_TYPES[preset]);
   const marks = presetMarks(preset);
+  const internal = preset === "internal";
   const plugins: unknown[] = [
     ParagraphPlugin.configure({ render: { node: ParagraphElement } }),
     NodeIdPlugin,
-    AutoformatPlugin,
-    ListPlugin.configure({ render: { belowNodes: BlockList } }),
+    ListPlugin.configure({
+      render: { belowNodes: BlockList },
+      inputRules: internal ? [BulletedListRules.markdown(), OrderedListRules.markdown()] : [],
+    }),
     LinkPlugin.configure({ render: { node: LinkElement } }),
     BoldPlugin,
     ItalicPlugin,
@@ -182,10 +248,15 @@ function buildPlugins(preset: PlatePreset, readOnly: boolean) {
     }),
     SlashInputPlugin.configure({ options: { preset } }).withComponent(SlashInputElement),
   ];
-  if (blocks.has("h2")) plugins.push(H2Plugin.configure({ render: { node: H2Element } }));
-  if (blocks.has("h3")) plugins.push(H3Plugin.configure({ render: { node: H3Element } }));
-  if (blocks.has("h4")) plugins.push(H4Plugin.configure({ render: { node: H4Element } }));
-  if (blocks.has("blockquote")) plugins.push(BlockquotePlugin.configure({ render: { node: BlockquoteElement } }));
+  if (pageBlocks) plugins.push(PageBlocksPlugin);
+  const headingRules = internal ? [HeadingRules.markdown()] : [];
+  if (blocks.has("h2")) plugins.push(H2Plugin.configure({ render: { node: H2Element }, inputRules: headingRules }));
+  if (blocks.has("h3")) plugins.push(H3Plugin.configure({ render: { node: H3Element }, inputRules: headingRules }));
+  if (blocks.has("h4")) plugins.push(H4Plugin.configure({ render: { node: H4Element }, inputRules: headingRules }));
+  if (blocks.has("blockquote")) plugins.push(BlockquotePlugin.configure({
+    render: { node: BlockquoteElement },
+    inputRules: internal ? [BlockquoteRules.markdown()] : [],
+  }));
   if (blocks.has("hr")) plugins.push(HorizontalRulePlugin.configure({ render: { node: HrElement } }));
   if (blocks.has("code_block")) {
     plugins.push(
@@ -209,32 +280,45 @@ function buildPlugins(preset: PlatePreset, readOnly: boolean) {
   if (marks.has("code")) plugins.push(CodePlugin.configure({ render: { leaf: CodeLeaf } }));
   if (preset === "legal" || preset === "internal") {
     plugins.push(
-      FontColorPlugin.configure({ render: { leaf: ColorLeaf } }),
-      FontBackgroundColorPlugin.configure({ render: { leaf: BackgroundColorLeaf } }),
+      FontColorPlugin.configure({ inject: { nodeProps: paletteNodeProps } }),
+      FontBackgroundColorPlugin.configure({ inject: { nodeProps: paletteNodeProps } }),
     );
   }
-  if (preset === "internal") plugins.push(CommentPlugin.configure({ render: { leaf: CommentLeaf } }));
+  if (internal) plugins.push(CommentPlugin.configure({
+    render: { leaf: CommentLeaf },
+    decorate: ({ entry: [node, path] }) => {
+      const range = draftRange();
+      if (!range || !TextApi.isText(node)) return;
+      const intersection = RangeApi.intersection(range, { anchor: { path, offset: 0 }, focus: { path, offset: node.text.length } });
+      return intersection && RangeApi.isExpanded(intersection)
+        ? [{ ...intersection, [KEYS.comment]: true, [getDraftCommentKey()]: true }]
+        : undefined;
+    },
+  }));
   return plugins;
 }
 
-function EditorSurface({ preset, readOnly }: { preset: PlatePreset; readOnly: boolean }) {
+function EditorSurface({ preset, readOnly, canvas, onCommentRequest, commentAnchorMax, onPasteImages, pageBlocks }: Pick<PlateEditorProps,
+  "preset" | "canvas" | "onCommentRequest" | "commentAnchorMax" | "onPasteImages" | "pageBlocks"> & { readOnly: boolean }) {
   const editor = useEditorRef();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+  const [notice, setNotice] = useState<{ message: string; count: number } | null>(null);
   const showNotice = useCallback((message: string) => {
-    setNotice(message);
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice(null), 4000);
+    setNotice(current => ({ message, count: (current?.count ?? 0) + 1 }));
   }, []);
-
-  useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current); }, []);
 
   const onPaste = useCallback((event: ClipboardEvent) => {
     if (readOnly) return;
     const data = event.clipboardData;
     if (!data) return;
+    const files = [...(data.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    const blockId = editorBlockId(editor.children, editor.selection?.focus.path[0]);
+    if (onPasteImages && files.length && blockId) {
+      event.preventDefault();
+      event.stopPropagation();
+      onPasteImages(files, blockId);
+      return;
+    }
     const html = data.getData("text/html");
     if (!html) return;
     event.preventDefault();
@@ -266,7 +350,7 @@ function EditorSurface({ preset, readOnly }: { preset: PlatePreset; readOnly: bo
     if (!editor.selection) editor.tf.select(editor.api.end([]));
     editor.tf.insertFragment(cleaned);
     if (droppedImage) showNotice("已忽略粘贴内容中的外链图片，请改用素材库图片。");
-  }, [readOnly, editor, showNotice]);
+  }, [readOnly, editor, onPasteImages, showNotice]);
 
   // PlateContent does not forward onPaste; capture on the container so our
   // handler runs before Slate's own editable listeners.
@@ -280,50 +364,132 @@ function EditorSurface({ preset, readOnly }: { preset: PlatePreset; readOnly: bo
   }, [onPaste]);
 
   return (
-    <div className={cn("plate-document", "plate-editor")} data-readonly={readOnly ? "true" : undefined} ref={containerRef}>
-      <EditorContainer variant="none">
+    <div className={cn("plate-document", "plate-editor", canvas && "plate-editor--page", pageBlocks && "plate-editor--block-gutters")} data-readonly={readOnly ? "true" : undefined} ref={containerRef}>
+      <EditorContainer variant="none" className={pageBlocks ? "plate-editor-container" : undefined}>
         <Editor
           variant="none"
           className="plate-editor-content"
           readOnly={readOnly}
-          placeholder="输入正文，空行输入 / 唤起插入菜单…"
-          aria-label="内容编辑器"
+          placeholder={readOnly ? undefined : "输入正文，或键入 / 插入内容"}
+          aria-label={readOnly ? "文档正文" : "内容编辑器"}
+          tabIndex={readOnly && onCommentRequest ? 0 : undefined}
         />
       </EditorContainer>
-      {!readOnly && (
-        <FloatingToolbar>
-          <FloatingToolbarButtons preset={preset} marks={presetMarks(preset)} />
+      {(!readOnly || onCommentRequest) && (
+        <FloatingToolbar state={readOnly ? { showWhenReadOnly: true } : undefined}>
+          <FloatingToolbarButtons preset={preset} marks={presetMarks(preset)} onRequestComment={onCommentRequest} commentAnchorMax={commentAnchorMax} />
         </FloatingToolbar>
       )}
       {!readOnly && <LinkFloatingToolbar />}
-      {notice && <div className="plate-editor-notice" role="status">{notice}</div>}
+      {notice ? <FloatingStatusMessage key={notice.count} tone="warning" success={notice.message} /> : null}
     </div>
   );
 }
 
-export default function PlateEditor({ preset, value, onChange, readOnly = false, mediaUrls, imageUrls }: PlateEditorProps) {
+const PlateEditor = forwardRef<PlateEditorHandle, PlateEditorProps>(function PlateEditor(
+  { preset, value, onChange, readOnly = false, canvas = false, mediaUrls, imageUrls, onCommentRequest, commentAnchorMax, pageBlocks, onPickImages, onPasteImages },
+  ref,
+) {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const viewUrls = useMemo(() => ({ ...mediaUrls, ...imageUrls }), [mediaUrls, imageUrls]);
+  const annotationValue = useRef<Value | null>(null);
+  const draft = useRef<RangeRef | null>(null);
 
   const initialValue = useMemo(
-    () => injectUrls(value ?? [], mediaUrls ?? {}, imageUrls ?? {}) as Value,
-    // 仅在挂载/preset 切换时注入预览 URL，编辑期间由编辑器持有值。
+    () => toEditorValue(value ?? []) as Value,
+    // 编辑期间由编辑器持有正文，预览 URL 由渲染上下文即时更新。
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [preset],
   );
 
-  const plugins = useMemo(() => buildPlugins(preset, readOnly), [preset, readOnly]);
+  const hasPageBlocks = Boolean(pageBlocks);
+  const plugins = useMemo(() => buildPlugins(preset, hasPageBlocks, () => draft.current?.current ?? null), [preset, hasPageBlocks]);
   const editor = usePlateEditor({ plugins: plugins as never, value: initialValue }, [preset, readOnly]);
+  const clearDraftComment = useCallback(() => {
+    draft.current?.unref();
+    draft.current = null;
+    editor.api.redecorate();
+  }, [editor]);
+  useEffect(() => () => { draft.current?.unref(); draft.current = null; }, [editor]);
+
+  useImperativeHandle(ref, () => ({
+    focusStart: () => editor.tf.focus({ at: editor.api.start([]) }),
+    currentDraftAnchor: () => draft.current?.current ? projectedCommentText(editor.children as PlateNode[], draft.current.current) : null,
+    clearDraftComment,
+    applyDiscussionMark: (id, text) => {
+      const key = `comment_${id}`;
+      const range = draft.current?.current;
+      if (text === undefined) {
+        editor.tf.withNewBatch(() => editor.tf.withoutNormalizing(() => {
+          editor.tf.unsetNodes(key, { at: [], mode: "lowest", match: (node) => TextApi.isText(node) && key in node });
+          editor.tf.unsetNodes(KEYS.comment, {
+            at: [], mode: "lowest",
+            match: (node) => TextApi.isText(node) && KEYS.comment in node && commentIds(node).length === 0,
+          });
+        }));
+      } else if (range && projectedCommentText(editor.children as PlateNode[], range).text === text) {
+        editor.tf.withNewBatch(() => editor.tf.setNodes({ [key]: true, [KEYS.comment]: true }, {
+          at: range, match: TextApi.isText, split: true,
+        }));
+      }
+      annotationValue.current = editor.children;
+      return toPlateEnvelope(stripCommentArtifacts(editor.children), preset);
+    },
+    selectedBlockId: () => editorBlockId(editor.children, editor.selection?.focus.path[0]),
+    focusBlock: (blockId) => {
+      const index = editor.children.findIndex((node) => node.id === blockId);
+      if (index < 0) return false;
+      const block = editor.children[index]!;
+      const target = editor.api.toDOMNode(block);
+      if (!target) return false;
+      editor.tf.focus({ at: editor.api.start([index]) });
+      target.scrollIntoView({ block: "center", inline: "nearest" });
+      return true;
+    },
+    hasBlock: (id) => editor.children.some((node) => node.id === id),
+    insertImagesAfter: (blockId, images) => {
+      if (readOnly || !images.length) return;
+      const index = blockId === undefined ? editor.children.length - 1 : editor.children.findIndex((node) => node.id === blockId);
+      if (blockId !== undefined && index < 0) return;
+      editor.tf.withNewBatch(() => editor.tf.insertNodes(
+        images.map(({ alt, ...reference }) => ({ type: KEYS.img, ...reference, alt: alt.slice(0, 500), children: [{ text: "" }] })),
+        { at: [index + 1] },
+      ));
+      return editorBlockId(editor.children, index + images.length);
+    },
+  }), [clearDraftComment, editor, preset, readOnly]);
 
   const handleChange = useCallback(({ value: next }: { value: Value }) => {
-    onChangeRef.current(toPlateEnvelope(next, preset));
-  }, [preset]);
+    const isAnnotation = annotationValue.current === next;
+    annotationValue.current = null;
+    if (isAnnotation) return;
+    if (!readOnly) onChangeRef.current(toPlateEnvelope(stripCommentArtifacts(next), preset));
+  }, [preset, readOnly]);
+
+  const requestComment = useCallback((anchor: PlateCommentAnchor) => {
+    draft.current?.unref();
+    draft.current = editor.api.rangeRef(anchor.range, { affinity: "inward" });
+    editor.api.redecorate();
+    onCommentRequest?.(anchor);
+  }, [editor, onCommentRequest]);
+
+  const surface = (
+    <PlateImageUrls.Provider value={viewUrls}>
+      <PlateImagePicker.Provider value={readOnly ? undefined : onPickImages}>
+        <EditorSurface preset={preset} readOnly={readOnly} canvas={canvas} pageBlocks={pageBlocks} commentAnchorMax={commentAnchorMax}
+          onCommentRequest={onCommentRequest ? requestComment : undefined} onPasteImages={onPasteImages} />
+      </PlateImagePicker.Provider>
+    </PlateImageUrls.Provider>
+  );
 
   return (
-    <Plate editor={editor} onChange={handleChange} readOnly={readOnly}>
+    <Plate editor={editor} onValueChange={handleChange} readOnly={readOnly}>
       <TooltipProvider delayDuration={300}>
-        <EditorSurface preset={preset} readOnly={readOnly} />
+        {pageBlocks ? <PlatePageBlocksProvider {...pageBlocks}>{surface}</PlatePageBlocksProvider> : surface}
       </TooltipProvider>
     </Plate>
   );
-}
+});
+
+export default PlateEditor;

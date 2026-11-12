@@ -1,0 +1,46 @@
+{
+  "key": "publish-account-safety",
+  "kind": "help",
+  "file": "help/publish-account-safety.json",
+  "meta": {
+    "id": "P06",
+    "slug": "publish-account-safety",
+    "title": "出租前后怎样保护游戏账号？",
+    "summary": "开启游戏侧设备锁等防护、出租结束后及时改密；游戏安全功能的入口以腾讯游戏安全中心当前页面为准。",
+    "category": "publish",
+    "audience": ["owner"],
+    "game": "三角洲行动",
+    "keywords": ["设备锁", "账号安全", "改密码", "游戏安全", "登录保护", "人脸验证", "洗号"],
+    "updatedAt": "2026-10-06",
+    "related": ["publish-prepare", "account-realname-vs-face", "issue-during-rental"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "device-lock": "content-建议开启设备锁",
+    "more": "content-可以叠加的防护",
+    "after-rental": "content-出租结束后"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "建议开启设备锁", "children": [{ "text": "建议开启设备锁" }] },
+      { "type": "p", "children": [{ "text": "设备锁是游戏侧的「新设备必须验证」开关。一般路径：微信关注「腾讯游戏安全中心」公众号 → 自助服务 → 设备管理 → 找到《三角洲行动》，确认设备锁处于开启状态，并将信任设备清零。" }] },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "children": [
+          { "type": "p", "children": [{ "text": "注意", "bold": true }] },
+          { "type": "p", "children": [{ "text": "以上是游戏侧功能的一般说明，具体入口与名称以腾讯游戏安全中心当前页面为准；平台无法代替你操作游戏账号设置。" }] }
+        ]
+      },
+      { "type": "h2", "id": "可以叠加的防护", "children": [{ "text": "可以叠加的防护" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "登录保护：开启后即使密码泄露，登录也需要额外验证。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "游戏内人脸验证：高风险登录时强制人脸识别。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "在网吧等公共设备登录后，及时在设备管理中删除该设备记录。" }] },
+      { "type": "h2", "id": "出租结束后", "children": [{ "text": "出租结束后" }] },
+      { "type": "p", "children": [{ "text": "租赁结束后请及时修改游戏账号密码；平台账号的密码与会话管理见账号与安全分类。" }] }
+    ]
+  }
+}

@@ -1,4 +1,3 @@
-import { DEFAULT_GUIDES } from "@zzsh/content";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -54,7 +53,8 @@ test('game framework keeps tools scoped and migrated guide links resolve', () =>
   assert.ok(appPaths['/help/[slug]/page']);
   assert.ok(existsSync(build('server', appPaths['/help/[slug]/page'])));
   for (const slug of ['rental-getting-started', 'fees-overview', 'publish-prepare', 'minor-protection']) {
-    assert.ok(DEFAULT_GUIDES.some(article => article.slug === slug), `${slug} remains a known default route`);
+    const seed = JSON.parse(readFileSync(resolve(web, `../../packages/content/defaults/help/${slug}.json`), 'utf8'));
+    assert.equal(seed.meta.slug, slug, `${slug} remains in the approved default content`);
     assert.equal(existsSync(build(`server/app/help/${slug}.html`)), false, 'managed articles must not freeze publication state in build-time HTML');
   }
   const delta = readFileSync(resolve(web, 'src/components/delta/delta-section.tsx'), 'utf8');

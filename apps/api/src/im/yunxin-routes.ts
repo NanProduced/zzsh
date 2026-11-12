@@ -41,6 +41,10 @@ import {
   closeUserConsultation,
   createOrResumeUserConsultation,
   dismissSupportRating,
+  claimSupportConnection,
+  releaseSupportConnection,
+  refreshSupportConnection,
+  heartbeatLockedOwnPresence,
   heartbeatOwnPresence,
   listAdminConsultations,
   listConsultationEvents,
@@ -52,8 +56,10 @@ import {
   listUserConsultations,
   markUserConsultationRead,
   parseConsultationBody,
+  parseConnectionIdBody,
   parseLimit,
   parsePresenceBody,
+  parsePresenceHeartbeatBody,
   parseSupportRatingBody,
   parseUserCloseBody,
   readAdminMessageAccess,
@@ -119,6 +125,7 @@ async function handleAftersales(request:NodeRequest,response:NodeResponse,option
     if(action==="claim"){sendJson(response,200,await claimAftersale(config,context,id,parseAftersaleClaim(request.body),requestId),requestId);return;}
     if(action==="resolve"){sendJson(response,200,await resolveAftersale(config,context,id,request.body,requestId),requestId);return;}
     if(action!=="contact"||!request.body||typeof request.body!=="object"||Array.isArray(request.body)||Object.keys(request.body).length)throw new SecurityApiError(400,"INVALID_ARGUMENT","Invalid contact request");
+    const connectionId=requiredConnectionId(request);
     const before=await readAftersaleForAdmin(config,context,id,true);
     if(before.record.state!=="PENDING")throw new SecurityApiError(409,"CONFLICT","该售后记录已处理。");
     await withTransaction(config.pool,async client=>{await assertAdminContextInTransaction(client,context);await assertAftersaleUserActive(client,before.requesterUserId);});
@@ -126,8 +133,8 @@ async function handleAftersales(request:NodeRequest,response:NodeResponse,option
     if(provisioned.outcome!=="READY")throw new SecurityApiError(503,"IM_UNAVAILABLE","用户咨询通道正在准备，请保留记录后重试。");
     const prepared=await prepareAftersaleConsultation(config,context,id,requestId);
     const result=prepared.state==="ACTIVE"&&prepared.assignedAdminId!==context.userId
-      ? await takeoverConsultation(config,context,prepared.id,requestId,null)
-      : await claimConsultation(config,context,prepared.id,requestId,id);
+      ? await takeoverConsultation(config,context,prepared.id,requestId,null,connectionId)
+      : await claimConsultation(config,context,prepared.id,requestId,id,connectionId);
     if(result.consultation.state!=="ACTIVE"||result.consultation.assignedAdmin?.id!==context.userId||result.consultation.messageScopeState!=="READY"||result.consultation.canSend!==true)throw Object.assign(new SecurityApiError(503,"IM_UNAVAILABLE","咨询通道尚未就绪，售后记录已保留，请稍后重试。"),{reason:"AFTERSALE_CONTACT_PENDING"});
     const current=await readAftersaleForAdmin(config,context,id,true);
     const claimed=await claimAftersale(config,context,id,current.record.version,requestId);
@@ -148,6 +155,22 @@ async function handleAftersales(request:NodeRequest,response:NodeResponse,option
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function assertExpectedImUser(request: NodeRequest, userId: string): void {
+  const expected = request.headers["x-zzsh-expected-user-id"];
+  if (expected === undefined) return;
+  if (typeof expected !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(expected)) {
+    throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Expected user is invalid");
+  }
+  if (expected !== userId) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Identity changed");
+}
+
+/** Strict actions are bound to the tab that currently owns the server connection slot. */
+function requiredConnectionId(request: NodeRequest): string {
+  const value = headerValue(request.headers["x-zzsh-connection-id"]);
+  if (!value) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Connection id is required");
+  return value;
 }
 
 function routePath(request: NodeRequest): string {
@@ -257,6 +280,7 @@ function publicIdentity(mapping: ImIdentityMapping): Record<string, unknown> {
 
 async function handleUserToken(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const context = await readUserContext(request, options.security);
+  assertExpectedImUser(request, context.userId);
   const key = keyFor(options.appId, "user", "USER", context.userId);
   if (!await provision(options, { key }, response, requestId)) return;
   // The provider call is outside the auth transaction; recheck the platform session before issuing a token.
@@ -265,7 +289,13 @@ async function handleUserToken(request: NodeRequest, response: NodeResponse, req
     throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
   }
   try {
-    sendJson(response, 200, tokenBody(await options.tokenService.issue(key), options.appId, options.consultation?.messageTransport ? "local-fake" : "nim"), requestId);
+    const issued = await options.tokenService.issue(key);
+    const after = await readUserContext(request, options.security);
+    if (after.userId !== context.userId || after.sessionId !== context.sessionId) {
+      throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+    }
+    assertExpectedImUser(request, after.userId);
+    sendJson(response, 200, tokenBody(issued, options.appId, options.consultation?.messageTransport ? "local-fake" : "nim"), requestId);
   } catch (error) {
     if (error instanceof ImIdentityUnavailableError) sendUnavailable(response, requestId);
     else throw error;
@@ -274,23 +304,56 @@ async function handleUserToken(request: NodeRequest, response: NodeResponse, req
 
 async function handleAdminToken(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
   const context = await readAdminContext(request, options.security);
+  const query = routeQuery(request);
+  strictQuery(query, ["connectionId"]);
+  const connectionId = headerValue(request.headers["x-zzsh-connection-id"]) ?? query.get("connectionId") ?? "";
+  if (!connectionId) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Connection id is required");
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
   await assertAdminSubjectActive(options.security, context.userId);
   await requireDirectoryPermission(options.security.pool, context.userId, ADMIN_PERMISSION.imSupportRead);
+  await requireAdminConnection(options, context, connectionId);
   const key = keyFor(options.appId, "admin", "ADMIN", context.userId);
   if (!await provision(options, { key }, response, requestId)) return;
-  // Recheck session, lock state, active status, and permission after the external provisioning call.
+  // Recheck session, lock state, active status, permission and the exact connection
+  // instance after the external provisioning call.
   const fresh = await readAdminContext(request, options.security);
   if (fresh.userId !== context.userId || fresh.sessionId !== context.sessionId) {
     throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
   }
   await assertAdminSubjectActive(options.security, fresh.userId);
   await requireDirectoryPermission(options.security.pool, fresh.userId, ADMIN_PERMISSION.imSupportRead);
+  await requireAdminConnection(options, fresh, connectionId);
   try {
-    sendJson(response, 200, tokenBody(await options.tokenService.issue(key), options.appId, options.consultation?.messageTransport ? "local-fake" : "nim"), requestId);
+    const issued = await options.tokenService.issue(key);
+    // Issuing is external/asynchronous. A takeover can happen while it runs, so
+    // re-read the session and the exact connection instance before returning the
+    // token. A token that lost that race is discarded, never sent to the client.
+    // The provider may not support revoking an already-issued token; the short TTL
+    // and the server-side connection claim remain the recovery boundary.
+    const after = await readAdminContext(request, options.security);
+    if (after.userId !== context.userId || after.sessionId !== context.sessionId) {
+      throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+    }
+    await assertAdminSubjectActive(options.security, after.userId);
+    await requireDirectoryPermission(options.security.pool, after.userId, ADMIN_PERMISSION.imSupportRead);
+    await requireAdminConnection(options, after, connectionId);
+    sendJson(response, 200, tokenBody(issued, options.appId, options.consultation?.messageTransport ? "local-fake" : "nim"), requestId);
   } catch (error) {
     if (error instanceof ImIdentityUnavailableError) sendUnavailable(response, requestId);
     else throw error;
   }
+}
+
+async function requireAdminConnection(options: YunxinRouteOptions, context: Awaited<ReturnType<typeof readAdminContext>>, connectionId: string): Promise<void> {
+  if (!options.consultation) throw new SecurityApiError(503, API_V1_ERROR_CODES.IM_UNAVAILABLE, "IM service is temporarily unavailable");
+  const lease = await refreshSupportConnection(options.consultation, context, connectionId);
+  if (lease.ok) return;
+  if (lease.reason === "LOCKED") throw new SecurityApiError(423, API_V1_ERROR_CODES.FORBIDDEN, "Account locked");
+  if (lease.reason === "SESSION_INVALID") throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
+  throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Connection claim is stale");
 }
 
 async function handleAdminIdentities(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
@@ -337,6 +400,7 @@ async function handleUserConsultationRead(request: NodeRequest, response: NodeRe
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Read body must be empty");
   }
   const context = await readUserContext(request, options.security);
+  assertExpectedImUser(request, context.userId);
   sendJson(response, 200, await markUserConsultationRead(options.consultation, context, consultationId), requestId);
 }
 
@@ -627,6 +691,7 @@ async function handleUserMessageAccess(request: NodeRequest, response: NodeRespo
     return;
   }
   const context = await readUserContext(request, options.security);
+  assertExpectedImUser(request, context.userId);
   const query = routeQuery(request);
   const operation = parseMessageOperation(query.get("operation"));
   const intent=messageIntent(query);
@@ -847,6 +912,7 @@ async function handleOrderTeamRead(request: NodeRequest, response: NodeResponse,
   }
   if (realm === "user") {
     const context = await readUserContext(request, options.security);
+    assertExpectedImUser(request, context.userId);
     sendJson(response, 200, await markOrderGroupRead(options.consultation.pool, options.consultation.appId, orderId, { realm, userId: context.userId, sessionId: context.sessionId }), requestId);
     return;
   }
@@ -1167,7 +1233,7 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
     return;
   }
   if (action.name === "claim") {
-    sendJson(response, 200, await claimConsultation(options.consultation, context, action.id, requestId), requestId);
+    sendJson(response, 200, await claimConsultation(options.consultation, context, action.id, requestId, undefined, requiredConnectionId(request)), requestId);
     return;
   }
   if (action.name === "close") {
@@ -1187,7 +1253,7 @@ async function handleAdminConsultations(request: NodeRequest, response: NodeResp
     if (body !== undefined && body !== null && (typeof body !== "object" || Array.isArray(body) || Object.keys(body as Record<string, unknown>).length !== 0)) {
       throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Reconcile body must be empty");
     }
-    sendJson(response, 200, await retryMessageScopeOperation(options.consultation, context, action.id, requestId), requestId);
+    sendJson(response, 200, await retryMessageScopeOperation(options.consultation, context, action.id, requestId, requiredConnectionId(request)), requestId);
     return;
   }
   const body = request.body;
@@ -1280,7 +1346,48 @@ async function handleAdminPresenceHeartbeat(request: NodeRequest, response: Node
   }
   strictQuery(routeQuery(request), []);
   const context = await readAdminContext(request, options.security);
-  sendJson(response, 200, await heartbeatOwnPresence(options.consultation, context), requestId);
+  const body = parsePresenceHeartbeatBody(request.body);
+  sendJson(response, 200, await heartbeatOwnPresence(options.consultation, context, body.connectionState, body.stateRevision, body.connectionId), requestId);
+}
+
+async function handleAdminPresenceConnect(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await claimSupportConnection(options.consultation, context, parseConnectionIdBody(request.body).connectionId), requestId);
+}
+
+async function handleAdminPresenceRelease(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await releaseSupportConnection(options.consultation, context, parseConnectionIdBody(request.body).connectionId), requestId);
+}
+
+async function handleAdminPresenceConnection(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const context = await readAdminContext(request, options.security);
+  sendJson(response, 200, await refreshSupportConnection(options.consultation, context, parseConnectionIdBody(request.body).connectionId), requestId);
+}
+
+async function handleAdminPresenceLockedHeartbeat(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
+  if (!options.consultation) {
+    sendUnavailable(response, requestId);
+    return;
+  }
+  strictQuery(routeQuery(request), []);
+  const context = await readAdminContext(request, options.security, { allowLocked: true });
+  sendJson(response, 200, await heartbeatLockedOwnPresence(options.consultation, context), requestId);
 }
 
 async function handleAdminSupportOverview(request: NodeRequest, response: NodeResponse, requestId: string, options: YunxinRouteOptions): Promise<void> {
@@ -1319,7 +1426,7 @@ async function handleAdminTakeover(request: NodeRequest, response: NodeResponse,
   }
   const note = body && typeof body === "object" ? parseHandoverNote((body as Record<string, unknown>).note) : null;
   const context = await readAdminContext(request, options.security);
-  sendJson(response, 200, await takeoverConsultation(options.consultation, context, consultationId, requestId, note), requestId);
+  sendJson(response, 200, await takeoverConsultation(options.consultation, context, consultationId, requestId, note, requiredConnectionId(request)), requestId);
 }
 
 export async function handleYunxinRoute(request: NodeRequest, response: NodeResponse, options: YunxinRouteOptions): Promise<void> {
@@ -1574,6 +1681,54 @@ export async function handleYunxinRoute(request: NodeRequest, response: NodeResp
         return;
       }
       await handleAdminPresenceHeartbeat(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/presence/connect") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin])) {
+        sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
+        return;
+      }
+      if (method !== "POST") {
+        sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminPresenceConnect(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/presence/release") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin])) {
+        sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
+        return;
+      }
+      if (method !== "POST") {
+        sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminPresenceRelease(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/presence/connection") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin])) {
+        sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
+        return;
+      }
+      if (method !== "POST") {
+        sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminPresenceConnection(request, response, requestId, options);
+      return;
+    }
+    if (path === "/admin/presence/locked-heartbeat") {
+      if (!originAllowed(request, [options.security.apiOrigin, options.security.adminOrigin])) {
+        sendError(response, new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected"), requestId);
+        return;
+      }
+      if (method !== "POST") {
+        sendError(response, new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found"), requestId);
+        return;
+      }
+      await handleAdminPresenceLockedHeartbeat(request, response, requestId, options);
       return;
     }
     if (path === "/admin/read-copy-settings") {

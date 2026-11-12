@@ -2,6 +2,7 @@ import {
   SearchIcon,
   WalletIcon,
   BadgeDollarSignIcon,
+  BookOpenIcon,
   BotIcon,
   BoxesIcon,
   CalculatorIcon,
@@ -10,13 +11,15 @@ import {
   CrownIcon,
   FileSignatureIcon,
   EyeIcon,
+  FolderOpenIcon,
   HeadphonesIcon,
   ImageIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   ChartNoAxesCombinedIcon,
   MessagesSquareIcon,
-  NewspaperIcon,
+  MegaphoneIcon,
+  NotebookPenIcon,
   PackageIcon,
   PaletteIcon,
   ScaleIcon,
@@ -33,7 +36,15 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-import type { NavPermission, WorkspaceRouteKind } from "./tab-model";
+import { canOpenKind, CONTENT_WORKSPACES, type ContentWorkspaceKind, type NavPermission, type WorkspaceRouteKind } from "./tab-model.ts";
+
+export const CONTENT_ICONS: Record<ContentWorkspaceKind, LucideIcon> = {
+  "content-help": BookOpenIcon,
+  "content-updates": MegaphoneIcon,
+  "content-legal": FileSignatureIcon,
+  "content-pages": ImageIcon,
+  "content-media": FolderOpenIcon,
+};
 
 export type WorkspaceMenuItem = {
   label: string;
@@ -168,9 +179,11 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "三角洲行动", isTitle: true }, ...delta);
   }
 
-  const content: WorkspaceMenuItem[] = [];
-  if (has("content.platform.read") || has("content.read") || nav.isBoss) {
-    content.push({ label: "内容管理", icon: NewspaperIcon, path: "/content", kind: "content" });
+  const content: WorkspaceMenuItem[] = (Object.keys(CONTENT_WORKSPACES) as ContentWorkspaceKind[])
+    .filter((kind) => canOpenKind(kind, nav))
+    .map((kind) => ({ label: CONTENT_WORKSPACES[kind].title, icon: CONTENT_ICONS[kind], path: CONTENT_WORKSPACES[kind].path, kind }));
+  if (has("docs.internal.read") || nav.isBoss) {
+    content.push({ label: "内部文档", icon: NotebookPenIcon, path: "/docs", kind: "docs" });
   }
   if (content.length > 0) {
     items.push({ label: "运营内容", isTitle: true }, ...content);
@@ -230,6 +243,10 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/supply/reviews") return "账号供给";
   if (pathname === "/supply/media") return "平台素材审核";
   if (pathname === "/content") return "内容管理";
+  const contentPage = Object.values(CONTENT_WORKSPACES).find((page) => page.path === pathname);
+  if (contentPage) return contentPage.title;
+  if (pathname === "/docs") return "内部文档";
+  if (pathname.startsWith("/docs/")) return "文档详情";
   if(pathname==="/finance")return "资金与经营看板";
   if(pathname==="/finance/search" || pathname==="/finance/records")return "资金记录";
   if(pathname==="/finance/records/history")return "旧平台资金记录";
@@ -301,7 +318,12 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/supply/rules?section=skin": ["皮肤推荐押金", "皮肤", "推荐押金", "skin", "pf"],
   "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
   "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
-  "/content": ["内容管理", "运营内容", "content", "nr"],
+  "/content/help": ["帮助目录", "规则与手册", "文档编辑", "help", "bz"],
+  "/content/updates": ["平台公告", "资讯", "发布", "updates", "gg", "zx"],
+  "/content/legal": ["固定文书", "法律文书", "平台协议", "隐私政策", "页面说明", "场景说明", "审批", "legal", "ws"],
+  "/content/pages": ["展示位", "图片与二维码", "首页", "轮播", "海报", "placement", "zsw"],
+  "/content/media": ["素材库", "运营素材", "上传图片", "media", "sc"],
+  "/docs": ["内部文档", "文档库", "知识库", "wiki", "docs", "wendang", "nbwd", "文档"],
   "/finance": ["资金与经营看板", "财务总览", "资金", "待核", "余额", "finance", "zj"],
   "/finance/records": ["资金记录", "收款", "退款", "提现", "finance", "zj"],
   "/finance/balances": ["用户余额", "余额变动", "流水", "wallet", "ye"],

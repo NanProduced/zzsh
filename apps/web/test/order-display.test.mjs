@@ -18,6 +18,20 @@ test("payment observation translates known states without treating the original 
   assert.equal(display.paymentObservation({ disposition: "FUTURE_STATE" }), "已有付款记录（状态未记录）");
 });
 
+test("pending payment link stays on the same order route with a recoverable pay intent", () => {
+  const url = display.orderPaymentUrl("renter", "PENDING_PAYMENT", undefined, "order_1");
+  assert.match(url, /view=rentals/);
+  assert.match(url, /orderId=order_1/);
+  assert.match(url, /pay=1/);
+});
+
+test("payment countdown text never invents time", () => {
+  assert.equal(display.formatPaymentCountdown(0), null);
+  assert.equal(display.formatPaymentCountdown(Number.NaN), null);
+  assert.equal(display.formatPaymentCountdown(65_000), "1:05");
+  assert.equal(display.formatPaymentCountdown(3_665_000), "1:01:05");
+});
+
 test("settlement preview failures remain actionable without exposing internal reason codes", () => {
   assert.match(display.settlementPreviewProblem(["FULL_PAYOUT_UNKNOWN"]), /包赔资料.*联系客服/);
   assert.match(display.settlementPreviewProblem(["SETTLEMENT_QUANTITY_MISMATCH"]), /数量.*核对/);
@@ -334,6 +348,23 @@ test("historical owner income is shown only with explicit original-net evidence"
   assert.equal(display.orderAmountFacts({ ...order, amounts: { ownerRecordedIncome: null } }, "owner").caption, "无号主收益记录");
 });
 
+
+test("membership labels keep the tier and aggregate ratio readable", () => {
+  assert.equal(display.orderMembershipText({ tier: "SILVER", payableRatio: "0.98000000" }), "银卡会员 · 9.8折");
+  assert.equal(display.orderMembershipText({ tier: "GOLD" }), "金卡会员");
+  assert.equal(display.orderMembershipText({ tier: "UNKNOWN_TIER" }), null);
+  assert.equal(display.membershipDiscountLabel("1.00000000"), null);
+  assert.equal(display.membershipDiscountLabel("0.90000000"), "9折");
+});
+
+test("haff quantities show one exact M figure without the raw base units", () => {
+  assert.equal(display.haffMillionsText("0"), "0 M");
+  assert.equal(display.haffMillionsText("500000"), "0.5 M");
+  assert.equal(display.haffMillionsText("1000000"), "1 M");
+  assert.equal(display.haffMillionsText("123456789"), "123.456789 M");
+  assert.equal(display.haffMillionsText(null), "未记录");
+  assert.equal(display.haffMillionsText("not-a-number"), "not-a-number");
+});
 
 test("membership discount requires complete unique resource lines and an authoritative total",()=>{
  const personal=[{itemId:'item-1',quantity:'2',buyerAmount:yuan('8.00')}];

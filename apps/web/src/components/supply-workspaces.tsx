@@ -29,7 +29,7 @@ import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
 import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, toListingDetail, type ResourceLine } from "../lib/listing-view";
 import { deriveAccountTitle } from "../lib/account-title";
-import { supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
+import { mediaAccessUrl, supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MyAccountRow, MySupply, RentalState } from "../lib/supply-types";
@@ -212,7 +212,7 @@ function AccountUnsupported({ view }: { view: string }) {
   return <section className="account-module" data-account-view="unsupported"><header className="account-module-heading"><div><h2>页面不存在</h2><p>个人中心没有这个页面</p></div></header><div className="account-module-card account-empty-state" role="status"><Sparkles size={30} aria-hidden="true" /><h3>链接中的页面“{view.slice(0, 40)}”不存在或已调整</h3><p>没有为你打开其他页面，可以回到总览重新选择。</p><Link className="button secondary" href={accountSectionHref("overview", { view: "overview" })}>回到个人中心总览</Link></div></section>;
 }
 
-export function AccountWorkspace({ view, accountId, orderId, status, source, page, orderNo, createdFrom, createdTo, stage }: { view: string; accountId?: string; orderId?: string; status?: string; source?: string; page?: string; orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string }) {
+export function AccountWorkspace({ view, accountId, orderId, status, source, page, pay, orderNo, createdFrom, createdTo, stage }: { view: string; accountId?: string; orderId?: string; status?: string; source?: string; page?: string; pay?: string; orderNo?: string; createdFrom?: string; createdTo?: string; stage?: string }) {
   const session = useUserSession();
   const nicknameDraft = useRef<SecurityNicknameDraft["current"]>(null);
   const pendingSecurityWrite = useRef<SecurityPendingWrite["current"]>(null);
@@ -253,7 +253,7 @@ export function AccountWorkspace({ view, accountId, orderId, status, source, pag
   const detailOpen = ((active === "accounts" || active === "rented") && Boolean(accountId)) || ((active === "rentals" || active === "leased") && Boolean(orderId));
   return <ServiceShell {...accountShell} breadcrumbs={[]} title={title} headingInContent={detailOpen}>
     <AccountCenterFrame active={active} accountId={accountId} orderId={orderId} status={status} source={source} orderFilters={{orderNo,createdFrom,createdTo,stage}} scope={identityScope} breadcrumbs={accountTrail}>
-      {!isKnownAccountView(view) ? <AccountUnsupported view={view} /> : active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel key="listed" mode="listed" accountId={accountId} filterParam={status} /> : active === "rented" ? <MyAccountsPanel key="rented" mode="rented" accountId={accountId} filterParam={status} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} filters={{orderNo,createdFrom,createdTo,stage}} /> : null}
+      {!isKnownAccountView(view) ? <AccountUnsupported view={view} /> : active === "overview" ? <AccountOverview scope={identityScope} userId={session.userId ?? undefined} nicknameDraft={nicknameDraft} pendingWrite={pendingSecurityWrite} /> : active === "membership" ? <AccountMembershipCenter scope={identityScope} /> : active === "credit" ? <CreditCenter scope={identityScope} /> : active === "wallet" ? <PersonalWallet scope={identityScope} /> : active === "invite" ? <PersonalInvitations scope={identityScope} /> : active === "accounts" ? <MyAccountsPanel key="listed" mode="listed" accountId={accountId} filterParam={status} /> : active === "rented" ? <MyAccountsPanel key="rented" mode="rented" accountId={accountId} filterParam={status} /> : active === "security" ? <AccountSecurityPanel pendingWrite={pendingSecurityWrite} /> : active === "identity" ? <AccountIdentityPanel /> : active === "favorites" ? <FavoritesProvider><FavoritesPanel /></FavoritesProvider> : active === "rentals" || active === "leased" ? <OrderWorkspace party={active === "rentals" ? "renter" : "owner"} orderId={orderId} status={status} accountId={accountId} source={source} pay={pay} filters={{orderNo,createdFrom,createdTo,stage}} /> : null}
     </AccountCenterFrame>
   </ServiceShell>;
 }
@@ -1126,7 +1126,6 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
   </section>;
 }
 
-const mediaAccessUrl = (assetId: string) => `/api/supply/media/${encodeURIComponent(assetId)}/access`;
 
 const CONDITION_LEVELS = new Set(["vit_level", "bear_level", "dive_level", "character_level"]);
 

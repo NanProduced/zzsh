@@ -1,16 +1,34 @@
 import { BeijingInstantField } from "@/components/beijing-datetime-field";
-import { updateVisibility, type UpdateSettings } from '@zzsh/content/updates';
+import { updateSettings, updateVisibility, checkUpdatePublication, type UpdateSettings } from '@zzsh/content/updates';
 import { Checkbox } from '../components/ui/checkbox';
 import { Input } from '../components/ui/input';
 import { ContentSelect } from './content-resource-fields';
 import { contentTime } from './content-resources-model';
 
+/**
+ * P2：update_settings.format 只剩 plate，visibleFrom（ISO UTC 或 null＝立即）随草稿保存。
+ * 共享校验（@zzsh/content/updates）已按 plate 合同执行，这里直接复用。
+ */
+export type PlateUpdateSettings = UpdateSettings;
+
+export function plateUpdateSettings(value?: unknown): PlateUpdateSettings {
+  return updateSettings(value ?? {});
+}
+
+export function checkPlateUpdatePublication(type: string, value: PlateUpdateSettings): PlateUpdateSettings {
+  return checkUpdatePublication(type, value);
+}
+
 export type ExposureFact = { label: string; tone: 'info' | 'success' | 'warning' | 'secondary' };
 const SURFACE_LABEL: Record<UpdateSettings['surfaces'][number], string> = { publish: '上架出租', rental: '账号详情与租号确认', orders: '订单详情' };
 
 /** 列表与编辑器共用：只根据已保存的线上快照解释当前曝光，不把草稿设置说成已生效。 */
-export function updateExposureFacts(settings: UpdateSettings | undefined, now = Date.now()): ExposureFact[] {
+export function updateExposureFacts(settings: PlateUpdateSettings | undefined, now = Date.now()): ExposureFact[] {
   if (!settings) return [];
+  // visibleFrom 未到：公开列表/详情/ticker/置顶/业务提醒都不可见（P2 合同）。
+  if (settings.visibleFrom && now < Date.parse(settings.visibleFrom)) {
+    return [{ label: `定时可见 · ${contentTime(settings.visibleFrom)} 起公开`, tone: "info" }];
+  }
   const facts: ExposureFact[] = [];
   let visibility: ReturnType<typeof updateVisibility>;
   try { visibility = updateVisibility(settings, now); } catch { return facts; }
@@ -19,6 +37,7 @@ export function updateExposureFacts(settings: UpdateSettings | undefined, now = 
     else if (!settings.pinnedUntil || !Number.isFinite(Date.parse(settings.pinnedUntil))) facts.push({ label: '置顶未生效（缺结束时间）', tone: 'warning' });
     else facts.push({ label: `置顶已结束 · ${contentTime(settings.pinnedUntil)}`, tone: 'secondary' });
   }
+  if (settings.homePopup && visibility.visible) facts.push({ label: '首页弹窗已启用', tone: 'info' });
   if (settings.tickerEnabled) {
     if (visibility.ticker) facts.push({ label: `首页轮播中${settings.tickerUntil ? ` · 至 ${contentTime(settings.tickerUntil)}` : ''}`, tone: 'success' });
     else if (!visibility.expired && settings.tickerFrom && now < Date.parse(settings.tickerFrom)) facts.push({ label: `轮播待开始 · ${contentTime(settings.tickerFrom)}`, tone: 'info' });
@@ -29,21 +48,22 @@ export function updateExposureFacts(settings: UpdateSettings | undefined, now = 
   return facts;
 }
 
-export function ContentUpdateSettings({ value, onChange, disabled, announcement }: { value: UpdateSettings; onChange: (value: UpdateSettings) => void; disabled: boolean; announcement: boolean }) {
-  const patch = (field: Partial<UpdateSettings>) => { if (!disabled) onChange({ ...value, ...field }); };
-  const date = (label: string, key: 'tickerFrom' | 'tickerUntil' | 'pinnedUntil' | 'validUntil' | 'effectiveAt') => {
-    const local = value[key] ? new Date(Date.parse(value[key]!) + 8 * 3600_000).toISOString().slice(0, 16) : '';
-    const change = (event: { currentTarget: HTMLInputElement }) => {
-      const text = event.currentTarget.value;
-      if (text === local) return;
-      patch({ [key]: text ? new Date(`${text}+08:00`).toISOString() : null });
-    };
-    void change;
+export function ContentUpdateSettings({ value, onChange, disabled, announcement }: { value: PlateUpdateSettings; onChange: (value: PlateUpdateSettings) => void; disabled: boolean; announcement: boolean }) {
+  const patch = (field: Partial<PlateUpdateSettings>) => { if (!disabled) onChange({ ...value, ...field }); };
+  const date = (label: string, key: 'tickerFrom' | 'tickerUntil' | 'pinnedUntil' | 'validUntil' | 'effectiveAt' | 'visibleFrom') => {
     return <div className="content-settings-field"><BeijingInstantField label={label} value={value[key]} disabled={disabled} onChange={(iso) => patch({ [key]: iso })} /></div>;
   };
 
   return <fieldset disabled={disabled} className="content-settings">
     <p className="content-settings-note">所有时间按北京时间（UTC+8）填写，随草稿保存；发布后才影响用户页面。</p>
+    <section className="content-settings-group">
+      <div><h4>定时可见</h4><p>留空＝发布后立即公开；填写未来时间则到点自动出现在列表、详情与首页，无需额外操作。「下线时间」仍用下方内容有效期。</p></div>
+      {date('定时可见时间（可选，留空立即公开）', 'visibleFrom')}
+    </section>
+    {announcement ? <section className="content-settings-group">
+      <div><h4>首页弹窗</h4><p>发布并生效后在首页弹窗展示；多条时选最近发布的一条。同一浏览器关闭后不再提示该版本，新版本可再次提示。</p></div>
+      <label className="content-check"><Checkbox disabled={disabled} id="home-popup" checked={value.homePopup} onCheckedChange={checked => patch({ homePopup: checked === true })} />在首页弹窗展示此公告</label>
+    </section> : null}
     <section className="content-settings-group">
       <div><h4>首页平台动态轮播</h4><p>启用必须填写结束时间；游戏内容还需平台发布权限才能首页曝光。</p></div>
       <label className="content-check"><Checkbox disabled={disabled} id="ticker-enabled" checked={value.tickerEnabled} onCheckedChange={checked => patch({ tickerEnabled: checked === true })} />在首页平台动态轮播展示</label>

@@ -1,236 +1,211 @@
 import { useEffect, useRef, useState } from "react";
-import { ImageUp } from "lucide-react";
+import { ArrowRight, ImageIcon, ImageUp, MoreHorizontal } from "lucide-react";
 
-import {
-  adminRequest,
-  formatDate,
-  friendlyError,
-  type ContentMediaPage,
-  type ContentMediaRow,
-  type UploadedAssetResponse,
-} from "../api";
+import { adminRequest, friendlyError, type ContentMediaPage, type ContentMediaRow } from "../api";
 import { Badge } from "../components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { StatusMessage } from "../components/ui-elements";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
-import { Input } from "../components/ui/input";
+import { FloatingStatusMessage, StatusMessage } from "../components/ui-elements";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
+import { Field } from "../components/ui/field";
+import { Textarea } from "../components/ui/textarea";
+import { ContentImageAdjust } from "./content-image-adjust";
+import { contentTime } from "./content-resources-model";
+import { ContentImage, ContentMediaFileField, contentMediaFileIssue, contentMediaSize, contentMediaUrl, uploadContentMedia } from "./content-media-upload";
+import "./content-media.css";
 
-const STATE_LABELS: Record<ContentMediaRow["reviewState"], string> = {
-  PENDING: "待审核",
-  APPROVED: "已通过",
-  REJECTED: "已驳回",
-  QUARANTINED: "已隔离",
-};
+const actions = {
+  approve: "审核通过并公开",
+  keepPrivate: "通过但不公开",
+  makePublic: "设为公开",
+  makePrivate: "停止公开",
+  reject: "驳回",
+  quarantine: "隔离",
+} as const;
+type ReviewAction = keyof typeof actions;
 
-export async function uploadContentMedia(file: File): Promise<UploadedAssetResponse> {
-  if (!new Set(["image/jpeg", "image/png", "image/webp"]).has(file.type) || file.size > 10 * 1024 * 1024 || file.size === 0) throw new Error("请选择 JPEG、PNG 或 WebP 图片，文件大小不能超过 10 MiB。");
-  const intent = await adminRequest<{ intentId: string; uploadToken: string }>("/content/media/upload-intents", { purpose: "CONTENT_MEDIA", mime: file.type, size: file.size });
-  const response = await fetch(`/api/bff/admin/content/media/uploads/${intent.intentId}`, {
-    method: "PUT", credentials: "include", headers: { "content-type": file.type, "x-upload-token": intent.uploadToken, "idempotency-key": `idem_${crypto.randomUUID().replaceAll("-", "")}` }, body: file,
-  });
-  const payload = await response.json().catch(() => null) as (UploadedAssetResponse & { error?: { code?: string } }) | null;
-  if (!response.ok || !payload?.assetId) throw new Error(payload?.error?.code === "INVALID_ARGUMENT" ? "文件内容与声明的图片类型不一致，或尺寸超出边界。" : "上传结果未确认，请先检查素材列表，避免重复上传。");
-  return payload;
+function stateLabel(asset: ContentMediaRow) {
+  return asset.reviewState === "APPROVED" ? asset.accessClass === "PUBLIC_DISPLAY" ? "可使用" : "已通过 · 未公开"
+    : { PENDING: "待审核", REJECTED: "已驳回", QUARANTINED: "已隔离" }[asset.reviewState];
 }
 
-export function ContentMediaTab({
-  canEdit,
-  canPublish,
-  refreshNonce,
-  onWriteLockChange,
-}: {
+function needsReason(asset: ContentMediaRow, action: ReviewAction | null) {
+  return action === "reject" || action === "quarantine" ||
+    ((action === "approve" || action === "keepPrivate") && (asset.reviewState === "REJECTED" || asset.reviewState === "QUARANTINED"));
+}
+
+export function ContentMediaTab({ canEdit, canPublish, refreshNonce, onWriteLockChange, onOpenPages }: {
   canEdit: boolean;
   canPublish: boolean;
   refreshNonce: number;
   onWriteLockChange?: (locked: boolean) => void;
+  onOpenPages?: () => void;
 }) {
   const [page, setPage] = useState<ContentMediaPage | null>(null);
   const [selected, setSelected] = useState<ContentMediaRow | null>(null);
-  const [reason, setReason] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [writing, setWriting] = useState(false);
+  const [action, setAction] = useState<ReviewAction | null>(null), [reason, setReason] = useState("");
+  const [uploadOpen, setUploadOpen] = useState(false), [file, setFile] = useState<File | null>(null);
+  const [adjusting, setAdjusting] = useState(false);
+  const [loading, setLoading] = useState(false), [uploading, setUploading] = useState(false), [writing, setWriting] = useState(false);
+  const [listError, setListError] = useState<string>(), [actionError, setActionError] = useState<string>(), [success, setSuccess] = useState<string>();
+  const listSeq = useRef(0), committing = useRef(false), alive = useRef(true);
+  const reviewRequest = useRef<{ fingerprint: string; key: string } | null>(null);
+  const items = page?.items ?? [];
+
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   useEffect(() => { onWriteLockChange?.(writing || uploading); }, [writing, uploading, onWriteLockChange]);
   useEffect(() => () => onWriteLockChange?.(false), [onWriteLockChange]);
-  const [error, setError] = useState<string>();
-  const [success, setSuccess] = useState<string>();
-  const listSeq = useRef(0);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const items = page?.items ?? [];
-  const stateCounts = (["PENDING", "APPROVED", "REJECTED", "QUARANTINED"] as const).map(state => ({ state, count: items.filter(item => item.reviewState === state).length }));
 
   const load = async (cursor?: string) => {
     const seq = ++listSeq.current;
     setLoading(true);
-    setError(undefined);
+    setListError(undefined);
     try {
       const params = new URLSearchParams({ limit: "20" });
       if (cursor) params.set("cursor", cursor);
-      const result = await adminRequest<ContentMediaPage>(`/content/media?${params.toString()}`);
-      if (seq !== listSeq.current) return;
-      setPage(result);
+      const result = await adminRequest<ContentMediaPage>(`/content/media?${params}`);
+      if (seq !== listSeq.current || !alive.current) return;
+      setPage(previous => cursor && previous ? { ...result, items: [...previous.items, ...result.items.filter(item => !previous.items.some(row => row.id === item.id))] } : result);
     } catch (failure) {
-      if (seq !== listSeq.current) return;
-      setError(friendlyError(failure));
+      if (seq === listSeq.current && alive.current) setListError(friendlyError(failure));
     } finally {
-      if (seq === listSeq.current) setLoading(false);
+      if (seq === listSeq.current && alive.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     void load();
-    return () => {
-      listSeq.current += 1;
-    };
+    return () => { listSeq.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshNonce]);
 
-  const decide = async (decision: "APPROVE" | "REJECT" | "QUARANTINE", visibility: "PUBLIC_DISPLAY" | "PRIVATE_REVIEW") => {
-    if (!selected) return;
-    const needsReason = decision !== "APPROVE" || selected.reviewState === "REJECTED" || selected.reviewState === "QUARANTINED";
-    if (needsReason && reason.trim().length < 2) {
-      setError("本次决定需要 2 字以上的具体原因。");
-      return;
-    }
-    setLoading(true);
-    setError(undefined);
-    setSuccess(undefined);
-    setWriting(true);
-    try {
-      await adminRequest(`/content/media/${selected.id}/review`, { decision, ...(reason.trim() ? { reason: reason.trim() } : {}), visibility });
-      setSuccess(`素材已${decision === "APPROVE" ? "通过" : decision === "REJECT" ? "驳回" : "隔离"}。`);
-      setReason("");
-      setSelected(null);
-      await load();
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-      setWriting(false);
-    }
+  const setReviewAction = (next: ReviewAction | null) => { setAction(next); setReason(""); setActionError(undefined); };
+  const showAsset = (asset: ContentMediaRow) => {
+    setSelected(asset);
+    setReviewAction(asset.reviewState === "APPROVED" ? asset.accessClass === "PUBLIC_DISPLAY" ? null : "makePublic" : "approve");
   };
+  const showUpload = () => { setFile(null); setAdjusting(false); setActionError(undefined); setUploadOpen(true); };
 
-  const changeVisibility = async (visibility: "PUBLIC_DISPLAY" | "PRIVATE_REVIEW") => {
-    if (!selected) return;
-    setLoading(true);
-    setError(undefined);
-    setSuccess(undefined);
-    setWriting(true);
+  const decide = async () => {
+    if (!selected || !action || !canPublish || committing.current || (needsReason(selected, action) && [...reason.trim()].length < 2)) return;
+    const isVisibility = action === "makePublic" || action === "makePrivate";
+    const visibility = action === "approve" || action === "makePublic" ? "PUBLIC_DISPLAY" : "PRIVATE_REVIEW";
+    const body = { visibility, ...(isVisibility ? {} : { decision: action === "reject" ? "REJECT" : action === "quarantine" ? "QUARANTINE" : "APPROVE" }), ...(reason.trim() ? { reason: reason.trim() } : {}) };
+    const path = `/content/media/${encodeURIComponent(selected.id)}/${isVisibility ? "visibility" : "review"}`;
+    const fingerprint = JSON.stringify([path, body]);
+    if (reviewRequest.current?.fingerprint !== fingerprint) reviewRequest.current = { fingerprint, key: `idem_${crypto.randomUUID().replaceAll("-", "")}` };
+    committing.current = true; setWriting(true); setActionError(undefined); setSuccess(undefined);
     try {
-      await adminRequest(`/content/media/${selected.id}/visibility`, { visibility, ...(reason.trim() ? { reason: reason.trim() } : {}) });
-      setSuccess(visibility === "PUBLIC_DISPLAY" ? "已恢复公开。" : "已撤销公开。");
+      const result = await adminRequest<{ id: string }>(path, body, "POST", { "idempotency-key": reviewRequest.current.key });
+      if (result?.id !== selected.id) throw new Error();
+      reviewRequest.current = null;
+      if (!alive.current) return;
+      setSuccess(visibility === "PUBLIC_DISPLAY" ? "图片已公开，可以在文章和用户站中选择。"
+        : action === "reject" ? "图片已驳回。" : action === "quarantine" ? "图片已隔离。"
+          : action === "keepPrivate" ? "审核通过，图片保持未公开。" : "图片已停止公开。");
       setSelected(null);
       await load();
     } catch (failure) {
-      setError(friendlyError(failure));
+      if (alive.current) setActionError(friendlyError(failure));
     } finally {
-      setLoading(false);
-      setWriting(false);
+      committing.current = false;
+      if (alive.current) setWriting(false);
     }
   };
 
   const upload = async () => {
-    if (!file) {
-      setError("请选择图片文件（JPEG/PNG/WebP，≤10 MiB）。");
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      setError("单文件不能超过 10 MiB。");
-      return;
-    }
-    setUploading(true);
-    setError(undefined);
-    setSuccess(undefined);
+    if (!file || contentMediaFileIssue(file) || !canEdit || committing.current) return;
+    committing.current = true; setUploading(true); setActionError(undefined); setSuccess(undefined);
     try {
-      await uploadContentMedia(file);
+      const result = await uploadContentMedia(file);
+      if (!alive.current) return;
       setFile(null);
-      setSuccess("已上传，待审核。");
+      setUploadOpen(false);
+      if (canPublish && result.reviewState === "PENDING") showAsset({ ...result, id: result.assetId, reviewState: "PENDING", accessClass: "PRIVATE_REVIEW", byteSize: String(result.byteSize), reviewReason: null, updatedAt: "" });
+      else setSuccess("已上传到图片素材，审核通过后即可使用。");
       await load();
     } catch (failure) {
-      setError(friendlyError(failure));
+      if (alive.current) setActionError(failure instanceof Error ? failure.message : friendlyError(failure));
     } finally {
-      setUploading(false);
+      committing.current = false;
+      if (alive.current) setUploading(false);
     }
   };
 
-  const showReason = (page?.items ?? []).some(asset => asset.reviewReason);
+  const reasonRequired = selected && needsReason(selected, action);
+  const changesPublic = selected?.accessClass === "PUBLIC_DISPLAY" && (action === "makePrivate" || action === "reject" || action === "quarantine");
+  const options: ReviewAction[] = selected ? [
+    ...(selected.reviewState !== "APPROVED" ? ["approve", "keepPrivate"] as const
+      : [selected.accessClass === "PUBLIC_DISPLAY" ? "makePrivate" : "makePublic"] as const),
+    ...(selected.reviewState === "REJECTED" ? [] : ["reject"] as const),
+    ...(selected.reviewState === "QUARANTINED" ? [] : ["quarantine"] as const),
+  ].filter(value => value !== action) : [];
+  const locked = writing || uploading;
+  return <div className="content-media-workspace">
+    <section className="section-panel space-y-5" aria-label="图片素材">
+      <header className="content-heading">
+        <div><h3 className="text-base font-semibold">图片素材</h3><p className="mt-1 text-sm text-muted-foreground">上传并审核图片，之后可用于文章插图、首页轮播、页面海报和二维码。</p></div>
+        {canEdit ? <Button type="button" onClick={showUpload}><ImageUp size={16} aria-hidden="true" />上传图片</Button> : null}
+      </header>
+      {onOpenPages ? <div className="content-media-guide">
+        <div><p className="text-sm font-medium">要换掉用户站上的图片？</p><p className="mt-1 text-sm text-muted-foreground">先找到图片所在的页面位置。换图时也可以直接上传。</p></div>
+        <Button type="button" size="sm" variant="ghost" onClick={onOpenPages}>去用户站展示<ArrowRight size={14} aria-hidden="true" /></Button>
+      </div> : null}
+      <FloatingStatusMessage success={success} />
+      {listError ? <div className="space-y-2"><StatusMessage error={listError} /><Button type="button" size="sm" variant="outline" disabled={loading} onClick={() => void load()}>重新读取</Button></div> : null}
+      {items.length ? <div className="content-media-gallery">
+        {items.map(asset => <button type="button" key={asset.id} className="content-media-card" onClick={() => showAsset(asset)}
+          aria-label={`${canPublish && asset.reviewState === "PENDING" ? "审核" : "查看"}图片，${stateLabel(asset)}，${asset.width} × ${asset.height}`}>
+          <div className="content-media-card-preview"><ContentImage src={contentMediaUrl(asset.id)} alt="" lazy /></div>
+          <div className="content-media-card-info">
+            <Badge variant={asset.reviewState === "APPROVED" && asset.accessClass === "PUBLIC_DISPLAY" ? "success" : asset.reviewState === "PENDING" ? "warning" : "secondary"}>{stateLabel(asset)}</Badge>
+            <span className="text-xs tabular-nums text-muted-foreground">{asset.width} × {asset.height}</span>
+          </div>
+        </button>)}
+      </div> : !loading && !listError ? <div className="content-media-library-empty">
+        <ImageIcon size={24} aria-hidden="true" /><p className="font-medium">还没有图片</p>
+        <p className="text-sm text-muted-foreground">{canEdit ? "从本地上传第一张图片，审核通过后即可使用。" : "有权限的同事上传图片后，会显示在这里。"}</p>
+      </div> : null}
+      {loading ? <p className="text-sm text-muted-foreground" role="status">正在读取图片…</p> : null}
+      {page?.nextCursor ? <Button type="button" variant="outline" disabled={loading} onClick={() => void load(page.nextCursor ?? undefined)}>加载更多图片</Button> : null}
+    </section>
 
-  return (
-    <div className="content-media-workspace">
-      <section className="section-panel">
-        <div className="content-heading">
-          <div><h3 className="text-base font-semibold">运营素材</h3><p className="mt-1 text-sm text-muted-foreground">审核通过并公开后，才能用于封面、轮播或正文。</p></div>
-          <div className="content-fact-chips">{stateCounts.filter(row => row.count > 0).map(row => <Badge key={row.state} variant={row.state === "APPROVED" ? "success" : row.state === "PENDING" ? "warning" : "secondary"}>{STATE_LABELS[row.state]} {row.count}</Badge>)}</div>
+    <Dialog open={uploadOpen} onOpenChange={open => { if (!open && !committing.current) setUploadOpen(false); }}>
+      <DialogContent size="md" className="content-picture-picker-dialog" showCloseButton={!locked}>
+        <DialogHeader><DialogTitle>上传图片</DialogTitle><DialogDescription>上传到图片素材，审核通过并公开后就能在文章或用户站中使用。</DialogDescription></DialogHeader>
+        <div className="content-picture-picker-body space-y-3">
+          {adjusting && file ? <ContentImageAdjust source={file} onCancel={() => setAdjusting(false)} onApply={next => { setFile(next); setAdjusting(false); setActionError(undefined); }} />
+            : <ContentMediaFileField file={file} onChange={next => { setFile(next); setActionError(undefined); }} disabled={locked || !canEdit} onAdjust={() => setAdjusting(true)} />}
+          <StatusMessage error={actionError} />
         </div>
-        <StatusMessage error={error} success={success} className="mt-3" />
-        {canEdit ? <div className="content-media-upload">
-          <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" className="sr-only" tabIndex={-1} aria-hidden="true" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
-          <div className="content-media-pick">
-            <Button type="button" size="sm" variant="secondary" onClick={() => fileInputRef.current?.click()}><ImageUp size={14} aria-hidden="true" />选择图片</Button>
-            <span className="content-media-file" data-empty={!file} title={file?.name}>{file ? file.name : "JPEG/PNG/WebP · ≤10 MiB"}</span>
+        {!adjusting ? <DialogFooter><Button type="button" variant="ghost" disabled={locked} onClick={() => setUploadOpen(false)}>取消</Button>
+          <Button type="button" loading={uploading} disabled={!canEdit || !file || Boolean(file && contentMediaFileIssue(file))} onClick={() => void upload()}>{canPublish ? "上传并查看" : "上传等待审核"}</Button></DialogFooter> : null}
+      </DialogContent>
+    </Dialog>
+    <Dialog open={Boolean(selected)} onOpenChange={open => { if (!open && !committing.current) setSelected(null); }}>
+      <DialogContent size="md" className="content-picture-picker-dialog" showCloseButton={!locked}>
+        {selected ? <>
+          <DialogHeader><DialogTitle>{selected.reviewState === "PENDING" && canPublish ? "审核图片" : "图片详情"}</DialogTitle>
+            <DialogDescription>{stateLabel(selected)} · {selected.width} × {selected.height} · {contentMediaSize(selected.byteSize)}{selected.updatedAt ? ` · 更新于 ${contentTime(selected.updatedAt)}` : ""}</DialogDescription></DialogHeader>
+          <div className="content-picture-picker-body space-y-4">
+            <div className="content-file-preview"><ContentImage src={contentMediaUrl(selected.id)} alt="图片预览" /></div>
+            {selected.reviewReason ? <p className="text-sm text-muted-foreground">上次处理说明：{selected.reviewReason}</p> : null}
+            {action === "approve" || action === "makePublic" ? <p className="text-sm text-muted-foreground">公开后，同事可以在文章和用户站展示设置中选择这张图。</p> : null}
+            {changesPublic ? <p className="text-sm text-muted-foreground">使用这张图的文章或页面可能不再显示该图片。</p> : null}
+            {canPublish && reasonRequired ? <Field label="处理原因" hint="至少填写两个字。"><Textarea value={reason} maxLength={500} disabled={locked} onChange={event => setReason(event.target.value)} /></Field> : null}
+            <StatusMessage error={actionError} />
           </div>
-          <Button type="button" size="sm" loading={uploading} disabled={!file} onClick={() => void upload()}>上传并进入待审</Button>
-        </div> : <p className="mt-3 text-xs text-muted-foreground">当前账号没有素材编辑权限。</p>}
-        <div className="content-list-meta"><span>本页 {items.length} 条 · 更新时间倒序</span></div>
-        {page && items.length > 0 ? (
-          <div className="table-wrap">
-            <table className="data-table content-media-table">
-              <thead><tr><th>预览</th><th>尺寸</th><th>状态</th><th>更新时间</th>{showReason ? <th>原因</th> : null}<th /></tr></thead>
-              <tbody>
-                {items.map((asset) => (
-                  <tr key={asset.id}>
-                    <td><img src={`/api/bff/admin/content/media/${asset.id}/content`} alt={`素材 ${asset.id}`} className="content-media-thumb" loading="lazy" /></td>
-                    <td className="font-mono text-[11px]">{asset.width}×{asset.height} · {asset.byteSize}B</td>
-                    <td><Badge variant={asset.reviewState === "APPROVED" ? "success" : asset.reviewState === "PENDING" ? "warning" : "secondary"}>{STATE_LABELS[asset.reviewState]}</Badge><span className="content-item-sub">{asset.accessClass === "PUBLIC_DISPLAY" ? " · 公开可读" : " · 私有"}</span></td>
-                    <td className="text-[11px]">{formatDate(asset.updatedAt)}</td>
-                    {showReason ? <td className="max-w-xs text-[11px] text-muted-foreground">{asset.reviewReason ?? ""}</td> : null}
-                    <td><Button type="button" size="sm" variant="secondary" onClick={() => setSelected(asset)}>处理</Button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : <p className="text-xs text-muted-foreground py-8 text-center" role="status">{loading ? "加载中…" : "还没有素材；上传后在这里审核。"}</p>}
-        <div className="content-pager"><span /><Button type="button" size="sm" variant="secondary" disabled={!page?.nextCursor || loading} onClick={() => { if (page?.nextCursor) void load(page.nextCursor); }}>下一页</Button></div>
-      </section>
-
-      <Dialog open={Boolean(selected)} onOpenChange={open => { if (!open) setSelected(null); }}>
-        <DialogContent size="lg" className="content-media-review-dialog">
-          <DialogTitle>处理素材</DialogTitle>
-          <DialogDescription>{selected ? `${selected.id} · ${selected.mime} · ${selected.width}×${selected.height}` : ""}</DialogDescription>
-          {selected ? <div className="content-media-review-body">
-            <img src={`/api/bff/admin/content/media/${selected.id}/content`} alt="素材预览" className="content-media-review-preview" />
-            <div className="content-media-review-panel">
-              <div className="content-review-heading">
-                <h3>{STATE_LABELS[selected.reviewState]}</h3>
-                <div className="content-item-facts"><span>{selected.accessClass === "PUBLIC_DISPLAY" ? "公开可读" : "私有"}</span><span>·</span><span>{selected.width}×{selected.height}</span><span>·</span><span>{selected.byteSize}B</span></div>
-              </div>
-              <label className="content-settings-field"><span>处置说明（驳回/隔离或重新审核必填）</span><Input value={reason} onChange={(event) => setReason(event.target.value)} className="h-9 text-sm" disabled={loading || !canPublish} /></label>
-              {!canPublish ? <StatusMessage tone="warning" error="当前账号可以查看但不能审核或公开素材。" /> : null}
-              {canPublish ? <div className="content-review-actions">
-                {selected.reviewState !== "APPROVED" ? <>
-                  <p className="content-review-group-label">审核</p>
-                  <Button type="button" size="sm" className="h-9 w-full" loading={loading} onClick={() => void decide("APPROVE", "PUBLIC_DISPLAY")}>通过并公开</Button>
-                  <Button type="button" size="sm" variant="secondary" className="h-9 w-full" loading={loading} onClick={() => void decide("APPROVE", "PRIVATE_REVIEW")}>通过但保持私有</Button>
-                </> : null}
-                {selected.reviewState === "APPROVED" ? <>
-                  <p className="content-review-group-label">公开范围</p>
-                  {selected.accessClass === "PUBLIC_DISPLAY" ? <Button type="button" size="sm" variant="secondary" className="h-9 w-full" loading={loading} onClick={() => void changeVisibility("PRIVATE_REVIEW")}>撤销公开</Button> : <Button type="button" size="sm" className="h-9 w-full" loading={loading} onClick={() => void changeVisibility("PUBLIC_DISPLAY")}>恢复公开</Button>}
-                </> : null}
-                <p className="content-review-group-label">风险处置</p>
-                <div className="content-review-danger-grid">
-                  {selected.reviewState !== "REJECTED" ? <Button type="button" size="sm" variant="danger" className="h-9 w-full" loading={loading} onClick={() => void decide("REJECT", "PRIVATE_REVIEW")}>驳回</Button> : null}
-                  {selected.reviewState !== "QUARANTINED" ? <Button type="button" size="sm" variant="secondary" className="h-9 w-full" loading={loading} onClick={() => void decide("QUARANTINE", "PRIVATE_REVIEW")}>隔离</Button> : null}
-                </div>
-              </div> : null}
-            </div>
-          </div> : null}
-          <DialogFooter className="content-media-review-actions">
-            <Button type="button" size="sm" variant="ghost" onClick={() => setSelected(null)}>关闭</Button>
+          <DialogFooter>
+            {canPublish && options.length ? <DropdownMenu>
+              <DropdownMenuTrigger render={<Button type="button" variant="ghost" disabled={locked} className="sm:mr-auto"><MoreHorizontal size={16} aria-hidden="true" />其他操作</Button>} />
+              <DropdownMenuContent align="start">{options.map(option => <DropdownMenuItem key={option} onClick={() => setReviewAction(option)}>{actions[option]}</DropdownMenuItem>)}</DropdownMenuContent>
+            </DropdownMenu> : null}
+            <Button type="button" variant="ghost" disabled={locked} onClick={() => setSelected(null)}>关闭</Button>
+            {canPublish && action ? <Button type="button" variant={changesPublic || action === "reject" || action === "quarantine" ? "danger" : "default"} loading={writing}
+              disabled={uploading || Boolean(reasonRequired && [...reason.trim()].length < 2)} onClick={() => void decide()}>{actions[action]}</Button> : null}
           </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
+        </> : null}
+      </DialogContent>
+    </Dialog>
+  </div>;
 }

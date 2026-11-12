@@ -2,17 +2,21 @@
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
-import { formatOrderMoney, formatOrderTime as timeText, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderStatusFilter, type OrderSearchFilters, type PersonalRefundIntent, type PersonalRefundRead } from "@/lib/order-client";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { ArrowLeft, Check, CheckCircle2, CircleSlash, Clock3, Copy, Crown, Gamepad2, MessageCircle, RefreshCw, UserRound, WalletCards, XCircle } from "lucide-react";
+import { captureOrderSubject, formatOrderMoney, formatOrderTime as timeText, isOrderSubjectCurrent, orderApi, OrderRequestError, type Order, type OrderImProjection, type OrderParty, type OrderSettlement, type OrderStatusFilter, type OrderSearchFilters, type PersonalRefundIntent, type PersonalRefundRead, type SettlementOpening } from "@/lib/order-client";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { requestSupportDialog } from "@/components/support/support-dialog-request";
-import { orderFulfillmentSteps, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderSettlementStageLabel, orderUnitPriceText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, type OrderPaymentFacts, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
-import { OrderTradeActions, type OrderStageFacts } from "@/components/order/order-trade-actions";
-import { OrderAftersale } from "./order-aftersale";
+import { haffMillionsText, matchingResourceDiscount, formatYuanFromCents, orderMembershipText, orderFulfillmentSteps, orderFulfillmentStepStates, orderFulfillmentSummary, orderLineQuantityText, orderLinesTotalLabel, orderListingSourceLabel, orderRentalModeLabel, orderUnitPriceText, quantityText, unitLabel, orderAccountTitle, orderResourceLines, orderProgressView, paymentEntryOpen, type OrderPaymentFacts, type OrderProgressAction, type OrderProgressView } from "@/lib/order-display";
+import { formatReferenceYuan } from "@zzsh/ui/display-money";
+import { activeOpening, PaymentFactsProbe, stageFacts, type OrderStageFacts } from "@/components/order/order-trade-actions";
+import type { SettlementFocus } from "@/components/order/order-trade-actions";
+import { OrderActionDialog } from "@/components/order/order-action-dialog";
+import { OrderAftersaleDialog } from "@/components/order/order-aftersale-dialog";
+import { PaymentDialog } from "@/components/order/payment-dialog";
 import { PrestartTerminationPanel } from "@/components/order/prestart-termination-panel";
-import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, statusLabel } from "@/components/order/order-presentation";
+import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import { OrderAccountDossier } from "./order-account-dossier";
 import "./order.css";
 
@@ -26,27 +30,17 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
     tone: "warning", title: "订单已关闭，资金处理未确认", note: "原人工关闭没有自动完成结算或退款。请联系平台核对原付款与资金处理记录，勿将订单关闭理解为退款已到账。", actions: ["group"],
   };
   if (facts?.feeReconfirmationRequired) return { tone: "warning", title: "结算方案待重新核对", note: "原方案的包赔费计算口径需要更正，请联系客服重新生成方案。", actions: ["group"] };
-  if (facts?.phase === "DECISION_REJECTED") {
+  if (facts?.phase === "DECISION_REJECTED" && facts.viewerActionRequired) {
     return {
       tone: "warning",
       title: facts.rejectedBy && facts.rejectedBy !== party.toUpperCase() ? `第${facts.settlementVersionNo ?? "?"}版结算未达成一致` : `你已拒绝第${facts.settlementVersionNo ?? "?"}版结算`,
-      note: "拒绝后，当前方案不会生效。新方案生成后，请重新核对。",
+      note: "拒绝后这一版不会生效，请联系客服生成新的结算方案。",
       actions: ["group"],
     };
   }
-  if (facts?.phase === "DECISION_PENDING") {
-    return { tone: "warning", title: "待你确认结算", note: "请核对本次消耗、费用承担与责任归属；拒绝不等于确认。确认入口在下方结算区。", actions: [] };
-  }
-  if (facts?.phase === "INTAKE_PENDING") {
-    return { tone: "info", title: "结束申请待客服处理", note: "已提交期末数据，等待受权客服核实原因并复核；复核与双方确认完成后结算生效。", actions: [] };
-  }
-  if (facts?.phase === "DECISION_WAITING") {
-    return { tone: "info", title: "等待对方确认结算", note: "你已在这一版完成操作；金额或版本变化会生成新版本并要求重新确认。", actions: [] };
-  }
   if (order.status === "CANCELLED") {
-    if (order.cancelReason === "OWNER_DELISTED") return { tone: "warning", title: "号主已下架账号，订单已取消",
-      note: party === "renter" ? "请勿继续使用之前的付款码；如果已经扣款，请联系客服核对。" : "待付款订单已关闭；如租客仍通过旧付款码支付，请联系客服核对。",
-      actions: [party === "renter" ? "browse" : "manage"] };
+    // Unpaid cancellations have no refund consequence; the single next step lives in the progress card.
+    if (!order.paidAt) return null;
     return {
       tone: "info",
       title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : order.cancelReason === "MANUAL_CLOSE" ? "客服已手动结束本单" : "账号占用已解除",
@@ -61,27 +55,27 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
     return {
       tone: "warning",
       title: order.status === "COMPLETED" ? "结算明细暂时读不到" : "开租与结算明细暂时读不到",
-      note: "订单状态仍然有效，已展示的金额与时间不受影响；消耗、费用与退款要读到结算记录才能确认。",
+      note: "已展示的金额和时间不受影响，请重试或联系客服。",
       actions: ["retry", "group"],
     };
   }
   return null;
 }
 
-function AttentionBlock({ attention, party, orderId, onRetry }: { attention: Attention; party: OrderParty; orderId: string; onRetry: () => void }) {
+function AttentionBlock({ attention, onRetry, onGroups }: { attention: Attention; onRetry: () => void; onGroups: (trigger: HTMLElement) => void }) {
   if (!attention) return null;
-  return <section className={`order-attention is-${attention.tone}`} role="status">
-    <div className="order-attention-copy">
+  return <section className={`order-alert-band is-${attention.tone}`} role="status">
+    <div className="order-alert-copy">
       <h2>{attention.title}</h2>
       <p>{attention.note}</p>
     </div>
     {/* One cluster. Talking to the person who fulfils the order is the primary move; trying the read
         again is a link, not a second button competing with it. */}
-    <div className="order-attention-actions">
-      {attention.actions.includes("group") ? <button type="button" className="button secondary button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群列表</button> : null}
+    <div className="order-alert-actions">
+      {attention.actions.includes("group") ? <button type="button" className="button secondary button--sm" data-support-trigger onClick={(event) => onGroups(event.currentTarget)}><MessageCircle size={15} aria-hidden="true" />打开订单群列表</button> : null}
       {attention.actions.includes("browse") ? <Link href="/accounts" className="button secondary button--sm">浏览可租账号</Link> : null}
       {attention.actions.includes("manage") ? <Link href="/account?view=accounts" className="button secondary button--sm">管理上架账号</Link> : null}
-      {attention.actions.includes("retry") ? <button type="button" className="order-attention-link" onClick={onRetry}>重试读取</button> : null}
+      {attention.actions.includes("retry") ? <button type="button" className="order-alert-link" onClick={onRetry}>重试读取</button> : null}
     </div>
   </section>;
 }
@@ -97,7 +91,7 @@ const PROGRESS_ANCHORS: Partial<Record<OrderProgressAction["target"], string>> =
   refund: "order-refund-section",
 };
 
-function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backHref, onRefresh }: {
+function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backHref, onRefresh, onPay, onTrade, onAftersale, onGroups }: {
   view: OrderProgressView;
   party: OrderParty;
   orderId: string;
@@ -105,6 +99,10 @@ function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backH
   userId: string | null;
   backHref: string;
   onRefresh: () => void;
+  onPay?: () => void;
+  onTrade?: () => void;
+  onAftersale?: () => void;
+  onGroups?: (trigger: HTMLElement) => void;
 }) {
   const focusAnchor = (id: string, label: string) => {
     if (typeof document === "undefined") return;
@@ -141,6 +139,7 @@ function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backH
     try { node.focus?.({ preventScroll: true }); } catch { /* focus is best-effort */ }
   };
   const run = (action: OrderProgressAction, trigger?: HTMLElement | null) => {
+    if (action.target === "pay") { onPay?.(); return; }
     if (action.target === "refresh") { onRefresh(); return; }
     if (action.target === "support") {
       // A service consultation is not the order-group panel. Keep the order context so the
@@ -152,11 +151,20 @@ function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backH
       return;
     }
     if (action.target === "groups") {
-      window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }));
+      if (onGroups) onGroups(trigger ?? document.body);
+      else window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId } }));
       return;
     }
+    if (action.target === "trade" && onTrade) { onTrade(); return; }
     const anchor = PROGRESS_ANCHORS[action.target];
-    if (anchor) focusAnchor(anchor, action.label);
+    if (anchor) {
+      // A not-applicable refund read removes its section; never leave the primary action pointing at nothing.
+      if (action.target === "refund" && onAftersale && typeof document !== "undefined" && !document.getElementById(anchor)) {
+        onAftersale();
+        return;
+      }
+      focusAnchor(anchor, action.label);
+    }
   };
   const actionNode = (action: OrderProgressAction, primary: boolean) => {
     const icon = action.target === "support" || action.target === "groups" ? <MessageCircle size={15} aria-hidden="true" />
@@ -176,11 +184,8 @@ function OrderProgressCard({ view, party, orderId, orderDisplayNo, userId, backH
     <div className="order-progress-actions">
       {view.primary ? actionNode(view.primary, true) : null}
       {view.secondary.map(action => actionNode(action, false))}
+      {onAftersale ? <button type="button" className="button quiet button--sm" onClick={onAftersale}>售后记录</button> : null}
     </div>
-    <details className="order-progress-facts" open={view.pendingRead || view.tone === "unknown"}>
-      <summary>本页已确认的事实</summary>
-      <ul>{view.known.map(fact => <li key={fact}>{fact}</li>)}</ul>
-    </details>
   </section>;
 }
 
@@ -223,14 +228,13 @@ function FulfillmentStageBar({ order, party, facts }: { order: Order; party: Ord
     ? orderFulfillmentSummary(projection, { ending, showRefund: party === "renter" })
     : visible.status === "failed" ? "阶段未确认" : "阶段核对中…";
   const cancelledAfterOpening = Boolean(projection && projection.stage === "CANCELLED" && (projection.openingState === "CONFIRMED" || projection.rentalStartedAt));
-  const steps = projection ? orderFulfillmentStepStates(projection.stage, cancelledAfterOpening) : null;
-  const stepDefs = orderFulfillmentSteps(projection?.stage, cancelledAfterOpening);
+  const steps = projection ? orderFulfillmentStepStates(projection.stage, cancelledAfterOpening, Boolean(order.paidAt)) : null;
+  const stepDefs = orderFulfillmentSteps(projection?.stage, cancelledAfterOpening, Boolean(order.paidAt));
   const tone = !projection ? "unknown" : projection.stage === "SETTLED" ? "done" : projection.stage === "CANCELLED" ? "closed" : "active";
   return <section className="order-fulfillment-stage" data-stage={projection?.stage ?? "UNKNOWN"} data-tone={tone} aria-label="履约阶段">
     <div className="order-fulfillment-head">
       <span className="order-fulfillment-dot" aria-hidden="true" />
       <p className="order-fulfillment-summary" role="status">{summary}</p>
-      <button type="button" className="button quiet button--sm" data-support-trigger onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={15} aria-hidden="true" />打开订单群</button>
     </div>
     {steps ? <ol className="order-fulfillment-steps" aria-label="订单履约阶段">{stepDefs.map((step, index) => {
       const stepState = steps[index] ?? "unknown";
@@ -285,34 +289,246 @@ function CopyOrderNo({ value }: { value: string | null | undefined }) {
   return <button type="button" className="order-copy-button" onClick={() => void copy()} aria-label={`复制订单号 ${value}`}>{copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}{copied ? "已复制" : "复制"}</button>;
 }
 
-function OrderLines({ order, party }: { order: Order; party: OrderParty }) {
+type PriceReferenceLine = { itemId?: string; quantity?: string; costAmount?: string; unitPriceLabel?: string };
+
+function OrderLines({ order, party, opening, referenceLines, showTotal = true, originalAmounts = false }: { order: Order; party: OrderParty; opening?: SettlementOpening | null; referenceLines?: readonly PriceReferenceLine[] | null; showTotal?: boolean; originalAmounts?: boolean }) {
   const lines = order.quote?.lines ?? [];
   if (lines.length === 0) return <p className="order-muted">暂无可展示的费用明细，可稍后查看或联系客服。</p>;
   const total = party === "owner" ? order.quote?.ownerTotal : order.amounts?.rental;
+  const hasOpening = Boolean(opening?.lines.length);
+  const openingFor = (itemId?: string | null) => itemId ? opening?.lines.find((line) => line.itemId === itemId) : undefined;
+  const referenceFor = (itemId?: string | null) => itemId ? referenceLines?.find((line) => line.itemId === itemId) : undefined;
   return <>
     <div className="order-table-wrap">
-      <table><thead><tr><th scope="col">资源</th><th scope="col">数量</th><th scope="col">{party === "owner" ? "号主报价" : "金额"}</th></tr></thead>
+      <table><thead><tr><th scope="col">资源</th><th scope="col">{hasOpening ? "开租数量" : "数量"}</th><th scope="col">{party === "owner" ? "号主报价" : "金额"}</th></tr></thead>
         <tbody>{lines.map((line, index) => {
-          const unitPrice = orderUnitPriceText(party === "owner" ? line.ownerUnitAmount : line.buyerUnitAmount, line.unitQuantity, line.unit);
+          // Renter line amounts are the final allocated price. The public listing can supply the
+          // base unit price for comparison, but it is not used for any arithmetic here.
+          const referenceLine = originalAmounts ? referenceFor(line.itemId) : undefined;
+          const unitPrice = party === "owner"
+            ? orderUnitPriceText(line.ownerUnitAmount, line.unitQuantity, line.unit)
+            : line.unit === "HAFF_BASE" ? null : referenceLine?.unitPriceLabel ? `参考 ${referenceLine.unitPriceLabel}` : null;
+          const amount = party === "renter" && referenceLine?.costAmount ? formatReferenceYuan(referenceLine.costAmount) : null;
+          const openingQuantity = openingFor(line.itemId)?.quantity;
+          const quantity = openingQuantity !== undefined && openingQuantity !== null && openingQuantity !== ""
+            ? line.unit === "HAFF_BASE" ? haffMillionsText(openingQuantity) : quantityText(line.unit, openingQuantity)
+            : orderLineQuantityText(line);
           return <tr key={`${line.itemId ?? line.name ?? line.unit ?? "line"}-${index}`}>
             <td data-label="资源"><span>{line.name ?? unitLabel(line.unit) ?? "资源未记录"}</span>{unitPrice ? <small className="order-line-unit">{unitPrice}</small> : null}</td>
-            <td data-label="数量">{orderLineQuantityText(line)}</td>
-            <td data-label={party === "owner" ? "号主报价" : "金额"}>{formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
+            <td data-label={hasOpening ? "开租数量" : "数量"}>{quantity}</td>
+            <td data-label={party === "owner" ? "号主报价" : "金额"}>{amount ?? formatOrderMoney(party === "owner" ? line.ownerAmount : line.buyerAmount)}</td>
           </tr>;
         })}</tbody>
       </table>
     </div>
-    <p className="order-lines-total">{orderLinesTotalLabel(party)} <strong>{formatOrderMoney(total)}</strong></p>
-    {order.quote?.unitAmountsInformational ? <p className="order-lines-note">明细为下单时的费用记录，最终金额请查看结算明细。</p> : null}
+    {showTotal ? <p className="order-lines-total">{orderLinesTotalLabel(party)} <strong>{formatOrderMoney(total)}</strong></p> : null}
+    {party === "renter" ? <p className="order-lines-note">{originalAmounts ? "资源行金额为下单时原价；会员优惠在合计中一次性扣除。" : "资源行金额为下单时最终报价；如享会员优惠，已一次性计入合计，不逐项分摊。"}</p> : null}
+    {!originalAmounts && order.quote?.unitAmountsInformational ? <p className="order-lines-note">明细为下单时的费用记录，最终金额请查看结算明细。</p> : null}
   </>;
 }
 
-/** Each party sees its own quoted amounts; a missing owner total stays unknown instead of borrowing the renter's. */
-function linesSummary(order: Order, party: OrderParty): string {
-  const count = order.quote?.lines?.length ?? 0;
-  if (!count) return "明细未记录";
-  if (party === "owner") return order.quote?.ownerTotal ? `号主报价合计 ${formatOrderMoney(order.quote.ownerTotal)}` : "号主报价 · 合计未记录";
-  return `费用 ${count} 项 · ${orderLinesTotalLabel(party)} ${formatOrderMoney(order.amounts?.rental)}`;
+/** One money section: party-owned summary plus the resource lines and confirmed opening quantities. */
+function OrderAmountDetails({ order, party, refreshVersion = 0, onFacts }: { order: Order; party: OrderParty; refreshVersion?: number; onFacts?: (facts: OrderStageFacts | null, failed: boolean) => void }) {
+  const session = useUserSession();
+  const report = useRef(onFacts);
+  useEffect(() => { report.current = onFacts; }, [onFacts]);
+  const [state, setState] = useState<{ scope: string; status: "idle" | "loading" | "ready" | "unavailable" | "error"; data: OrderSettlement | null }>({ scope: "", status: "idle", data: null });
+  const [referenceLines, setReferenceLines] = useState<PriceReferenceLine[] | null>(null);
+  const scope = `${session.userId ?? ""}:${session.identityVersion}:${order.id}:${order.status}:${refreshVersion}`;
+  useEffect(() => {
+    if (order.source?.origin === "LEGACY" || (order.status !== "PAID" && order.status !== "COMPLETED")) {
+      setState({ scope, status: "idle", data: null });
+      report.current?.(null, false);
+      return;
+    }
+    const subject = captureOrderSubject(session.userId, session.identityVersion);
+    if (!subject) {
+      setState({ scope, status: "error", data: null });
+      report.current?.(null, true);
+      return;
+    }
+    const controller = new AbortController();
+    setState({ scope, status: "loading", data: null });
+    orderApi.settlement(subject, order.id, controller.signal).then((data) => {
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
+      setState({ scope, status: "ready", data });
+      report.current?.(stageFacts(data, activeOpening(data.openings), party), false);
+    }).catch((error: unknown) => {
+      if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
+      setState({ scope, status: error instanceof OrderRequestError && error.status === 404 ? "unavailable" : "error", data: null });
+      report.current?.(null, true);
+    });
+    return () => controller.abort();
+  }, [order.id, order.status, order.source?.origin, party, refreshVersion, scope, session, session.userId, session.identityVersion]);
+  useEffect(() => {
+    const expectedVersion = order.listingFacts?.versionId ?? null;
+    if (party !== "renter" || !order.accountId || !expectedVersion || order.source?.origin === "LEGACY") { setReferenceLines(null); return; }
+    const controller = new AbortController();
+    void fetch(`/api/supply/listings/${encodeURIComponent(order.accountId)}`, { credentials: "same-origin", cache: "no-store", signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((listing: { versionId?: unknown; quote?: { lines?: unknown } | null } | null) => {
+        if (controller.signal.aborted) return;
+        if (!listing || listing.versionId !== expectedVersion || !Array.isArray(listing.quote?.lines)) { setReferenceLines(null); return; }
+        setReferenceLines(listing.quote.lines.flatMap((raw) => {
+          if (!raw || typeof raw !== "object") return [];
+          const line = raw as { itemId?: unknown; quantity?: unknown; unit?: unknown; unitQuantity?: unknown; buyerUnitAmount?: { amount?: unknown }; buyerAmount?: { amount?: unknown } };
+          if (typeof line.itemId !== "string" || typeof line.quantity !== "string" || typeof line.buyerAmount?.amount !== "string") return [];
+          const unitPrice = formatReferenceYuan(line.buyerUnitAmount?.amount);
+          const unitLabel = typeof line.unitQuantity === "string" && typeof line.unit === "string" ? quantityText(line.unit, line.unitQuantity) : null;
+          return [{
+            itemId: line.itemId,
+            quantity: line.quantity,
+            costAmount: line.buyerAmount.amount,
+            ...(unitPrice ? { unitPriceLabel: unitLabel ? `${unitPrice} / ${unitLabel}` : unitPrice } : {}),
+          }];
+        }));
+      })
+      .catch(() => { if (!controller.signal.aborted) setReferenceLines(null); });
+    return () => controller.abort();
+  }, [order.accountId, order.listingFacts?.versionId, order.source?.origin, party]);
+  const visible = state.scope === scope ? state : { scope, status: "loading" as const, data: null };
+  const facts = visible.status === "ready" && visible.data ? stageFacts(visible.data, activeOpening(visible.data.openings), party) : null;
+  const opening = visible.status === "ready" && visible.data ? activeOpening(visible.data.openings) : null;
+  const priceDiscount = party === "renter" && referenceLines && (order.status !== "CANCELLED" || Boolean(order.paidAt)) && order.quote?.lines?.length
+    ? matchingResourceDiscount(order.quote.lines, order.quote.resourceTotal ?? order.amounts?.rental, referenceLines)
+    : null;
+  const membershipText = orderMembershipText(order.membership);
+  return <section className="order-detail-section order-amount-details" aria-label="订单金额明细">
+    <div className="order-amount-details-head">
+      <div className="order-amount-details-heading">
+        <h2 className="order-section-title">订单金额明细</h2>
+        {membershipText ? <span className="order-member-badge"><Crown size={13} aria-hidden="true" />{membershipText}</span> : null}
+      </div>
+      <span>{party === "owner" ? (facts?.phase === "POSTED" ? "结算净入账" : "预估收益") : order.status === "PENDING_PAYMENT" ? "本次应付" : order.status === "CANCELLED" && !order.paidAt ? "下单金额" : "实付金额"}</span>
+    </div>
+    <p className="order-amount-details-note">{party === "owner" ? (facts?.phase === "POSTED" ? "包赔费已按结算规则扣除。" : "预估收益，包赔费按结算规则扣除。") : order.status === "PENDING_PAYMENT" ? "含租金与租客押金，支付后金额以订单记录为准。" : order.status === "CANCELLED" && !order.paidAt ? "订单未支付，以下为下单时的金额记录。" : "退款到账以实际进度为准。"}</p>
+    <div className="order-amount-details-grid">
+      <AmountCard order={order} party={party} facts={facts} readFailed={visible.status === "error" || visible.status === "unavailable"} />
+      <div className="order-amount-lines order-lines">
+        <h3 className="order-amount-lines-title">{order.status === "PENDING_PAYMENT" ? "资源与费用" : "资源与开租数量"}</h3>
+        <OrderLines order={order} party={party} opening={opening} referenceLines={referenceLines} showTotal={!priceDiscount} originalAmounts={Boolean(priceDiscount)} />
+        {priceDiscount ? <dl className="order-price-calc" aria-label="价格计算">
+          <div><dt>资源原价小计</dt><dd><del>{priceDiscount.original}</del></dd></div>
+          <div className="is-discount"><dt>会员优惠</dt><dd>-{formatYuanFromCents(priceDiscount.reduction)}</dd></div>
+          <div className="is-final"><dt>折后资源合计</dt><dd>{priceDiscount.final}</dd></div>
+        </dl> : null}
+        {visible.status === "loading" ? <p className="order-muted" role="status">正在读取开租确认数量…</p> : null}
+        {visible.status === "error" || visible.status === "unavailable" ? <p className="order-inline-notice" role="status">开租确认数量暂时无法读取，资源费用仍可查看。</p> : null}
+      </div>
+    </div>
+  </section>;
+}
+
+function OrderActionCard({ order, facts, readFailed, onAction, onSupport, onCancel, onRefresh, onAftersale }: {
+  order: Order;
+  facts: OrderStageFacts | null;
+  readFailed: boolean;
+  onAction: (focus: SettlementFocus) => void;
+  onSupport: (trigger: HTMLElement) => void;
+  onCancel: () => void;
+  onRefresh: () => void;
+  onAftersale?: () => void;
+}) {
+  const serverStage = order.stage?.code ?? null;
+  const phase = facts?.phase ?? null;
+  const stage = serverStage ?? (readFailed || facts === null ? null : phase);
+  const opening = facts !== null && (!facts.rentalStarted || !facts.openingConfirmedAt)
+    && (serverStage === "OPENING_PENDING" || (!serverStage && (phase === "RENTING" || phase === null)));
+  let title = "核对订单进度";
+  let note = readFailed ? "开租与结算记录暂时无法读取，请重试或联系客服。" : "正在读取开租与结算记录。";
+  let owner = readFailed ? "平台" : "核对中";
+  let primary: { label: string; onClick?: (event: ReactMouseEvent<HTMLButtonElement>) => void; href?: string } | null = readFailed ? { label: "重试读取", onClick: onRefresh } : null;
+  let cancel = false;
+
+  if (stage === "OPENING_PENDING" || (serverStage === null && opening)) {
+    cancel = true;
+    if (facts && facts.openingVersionNo === null) {
+      title = "联系客服核对开租清单";
+      note = "付款已确认，但开租清单还没有读到。请刷新或联系客服。";
+      owner = "等待客服";
+      primary = { label: "联系客服", onClick: (event) => onSupport(event.currentTarget) };
+    } else if (facts && facts.myAck) {
+      const due = typeof facts.autoConfirmDueAt === "string" && Number.isFinite(Date.parse(facts.autoConfirmDueAt));
+      title = "等待对方确认期初清单";
+      note = due ? "你已确认，等待对方确认后开租。超过确认截止时间后按本单规则自动处理。" : "你已确认，等待对方确认后开租。本单没有记录自动确认截止时间，页面不会承诺系统会自动确认。";
+      owner = "等待对方";
+      primary = { label: "刷新进度", onClick: onRefresh };
+    } else {
+      title = "确认开租";
+      note = "核对本期期初库存后确认。";
+      owner = "由你处理";
+      primary = { label: "确认开租", onClick: () => onAction("opening") };
+    }
+  } else if (stage === "RENTING") {
+    title = "结束租用并结算";
+    note = "填写本次消耗，预览金额后再提交。";
+    owner = "由你处理";
+    primary = { label: "发起结束租用", onClick: () => onAction("settlement") };
+  } else if (stage === "INTAKE_PENDING") {
+    title = "等待客服核对结束申请";
+    note = "客服核对后会生成结算方案，请留意订单群消息。";
+    owner = "等待客服";
+    primary = { label: "查看结算进度", onClick: () => onAction("settlement") };
+  } else if (stage === "DECISION_PENDING") {
+    title = "待你确认结算";
+    note = "核对本版金额与责任后确认或拒绝。";
+    owner = "由你处理";
+    primary = { label: "确认结算", onClick: () => onAction("decision") };
+  } else if (stage === "DECISION_REJECTED") {
+    title = "结算未达成一致";
+    note = "请联系客服生成新的结算方案。";
+    owner = "等待客服";
+    primary = { label: "联系客服", onClick: (event) => onSupport(event.currentTarget) };
+  } else if (stage === "DECISION_WAITING") {
+    title = "等待对方确认结算";
+    note = "你已确认本版结算，无需重复提交。";
+    owner = "等待对方";
+    primary = { label: "查看结算", onClick: () => onAction("decision") };
+  } else if (stage === "POSTED") {
+    title = "订单已结算";
+    note = "退款与售后记录仍可查看，到账以实际记录为准。";
+    owner = "暂无待处理动作";
+    primary = { label: "查看退款与售后", onClick: () => {
+      const node = typeof document !== "undefined" ? document.getElementById("order-refund-section") : null;
+      if (node) node.scrollIntoView({ block: "start" });
+      else onAftersale?.();
+    } };
+  }
+
+  return <section className="order-progress-card order-action-card" data-tone={readFailed ? "unknown" : "active"} aria-label="订单操作">
+    <div className="order-progress-head">
+      <span className="order-progress-label">下一步</span>
+      <span className="order-progress-owner">{owner}</span>
+    </div>
+    <h2 className="order-progress-title">{title}</h2>
+    <p className="order-progress-note">{note}</p>
+    <div className="order-progress-actions">
+      {primary?.href ? <a className="button primary" href={primary.href}>{primary.label}</a> : primary ? <button type="button" className="button primary" onClick={primary.onClick}>{primary.label}</button> : null}
+      {cancel ? <button type="button" className="button quiet" onClick={onCancel}>取消订单</button> : null}
+      {onAftersale ? <button type="button" className="button quiet button--sm" onClick={onAftersale}>售后记录</button> : null}
+    </div>
+  </section>;
+}
+
+function OrderGroupCard({ order, party, onSupport, onGroups }: { order: Order; party: OrderParty; onSupport: (trigger: HTMLElement) => void; onGroups: (trigger: HTMLElement) => void }) {
+  const legacy = order.source?.origin === "LEGACY";
+  const assignment = order.fulfillmentAssignment;
+  const ready = assignment?.state === "ASSIGNED" && assignment.teamReady === true;
+  const waiting = assignment?.state === "WAITING";
+  const copy = legacy
+    ? "本单来自旧平台，不会自动建群，请联系客服。"
+    : ready
+      ? "订单群已就绪。"
+      : waiting
+        ? "等待客服接入并建立订单群。"
+        : "客服接入后可在这里进入订单群。";
+  return <section className="order-side-card order-group-card" aria-label="订单群与客服">
+    <h2 className="order-section-title">订单群</h2>
+    <p className="order-contact-copy"><MessageCircle size={16} aria-hidden="true" />{copy}</p>
+    {legacy || !ready
+      ? <button type="button" className="button secondary" onClick={(event) => onSupport(event.currentTarget)}>联系客服</button>
+      : <button type="button" className="button primary" onClick={(event) => onGroups(event.currentTarget)}>打开订单群</button>}
+  </section>;
 }
 
 /**
@@ -355,7 +571,6 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
     text: formatOrderMoney(amounts?.totalDue),
   };
   return <section className="order-side-card order-amount-block">
-    <h2 className="order-section-title">我的订单费用</h2>
     {lead ? <><strong className="order-amount-total">{lead.text}</strong><p className="order-amount-label">{lead.label}</p></>
       : <><strong className="order-amount-total is-unknown">{readFailed ? "结算金额暂时无法读取" : facts ? "暂无可用结算金额" : "正在读取结算金额"}</strong><p className="order-amount-label">下单时的费用记录仍可查看</p></>}
     {posted || settledUnread ? <dl className="order-facts order-amount-rows">
@@ -365,35 +580,10 @@ function AmountCard({ order, party, facts, readFailed }: { order: Order; party: 
       <div><dt>{paid && !closed ? "租赁预付" : "租赁费用"}</dt><dd>{formatOrderMoney(amounts?.rental)}</dd></div>
       <div><dt>租客押金</dt><dd>{formatOrderMoney(amounts?.deposit)}</dd></div>
     </dl>
-    {closed ? <p className="order-muted">{order.cancelReason === "PRESTART_TERMINATED" && paid ? "退款进度请查看本页。"
-      : order.cancelReason === "MANUAL_CLOSE" && paid ? "退款进度请联系客服核对。"
+    {closed ? <p className="order-muted">{!paid ? "订单未支付，这是下单时的金额。"
+      : order.cancelReason === "PRESTART_TERMINATED" ? "退款进度请查看本页。"
+      : order.cancelReason === "MANUAL_CLOSE" ? "退款进度请联系客服核对。"
       : "这是下单时的金额，实际扣费和退款请查看订单进度。"}</p> : null}
-  </section>;
-}
-
-function ContactCard({ order, onChanged, quiet }: { order: Order; onChanged: () => void; quiet: boolean }) {
-  if (!order.fulfillmentAssignment) return null;
-  const value = order.fulfillmentAssignment;
-  const ended = order.status === "COMPLETED" || order.status === "CANCELLED" || order.readOnly === true;
-  const copy = value.state === "WAITING"
-    ? value.waitingReason === "NO_ELIGIBLE_STAFF" ? "当前暂无可用客服，正在等待平台调度。" : "等待客服分配；分配与建群都不等于开租。"
-    : value.state === "ASSIGNED" && value.teamReady
-      ? ended
-        ? order.cancelReason === "PRESTART_TERMINATED"
-          ? "本单未开租终止；退款处理期间订单群仍可沟通，窗口以群内提示为准。"
-          : "本单已结束，沟通权限以订单群当前提示为准；如需进一步核对请联系客服。"
-        : "订单群已就绪，可在订单群中与客服、对方核对交付事项。"
-    : value.state === "ASSIGNED" ? "客服已分配，订单群准备中。" : "履约状态未记录。";
-  return <section className="order-side-card">
-    <h2 className="order-section-title">履约与沟通</h2>
-    <p className="order-contact-copy"><MessageCircle size={16} aria-hidden="true" />{copy}</p>
-    {value.state === "ASSIGNED" ? <dl className="order-facts order-contact-facts">
-      <div><dt>客服分配</dt><dd>{value.assignedAt ? timeText(value.assignedAt, { timeZoneName: false }) : "时间未记录"}</dd></div>
-      <div><dt>订单群</dt><dd>{value.teamReady ? "已就绪" : value.teamState ? "尚未就绪" : "状态未记录"}</dd></div>
-    </dl> : null}
-    {quiet ? null : <div className="order-contact-actions">
-      <button type="button" className="button quiet" onClick={onChanged}><RefreshCw size={15} aria-hidden="true" />刷新订单</button>
-    </div>}
   </section>;
 }
 
@@ -472,16 +662,15 @@ function OrderOwnerRefundSummary({ order }: { order: Order }) {
   }
   const read = visible.read;
   if (!read || read.progress === "NOT_APPLICABLE") return null;
-  const open = ["PROCESSING", "NEEDS_REVIEW", "UNKNOWN"].includes(read.progress);
   return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-progress={read.progress}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
-    <details className="order-secondary-details order-refund-details" open={open}>
-      <summary><strong>{read.label}</strong><span>{read.note}</span></summary>
+    <div className="order-refund-details">
+      <div className="order-refund-summary"><strong>{read.label}</strong><span>{read.note}</span></div>
       <div className="order-refund-detail-content">
-        <p className="order-muted">订单主状态仍以页面顶部为准。本摘要不展示租客收款资料。</p>
+        <p className="order-muted">订单状态以页面顶部为准；此处不展示租客收款资料。</p>
         {read.openIntentCount > 0 ? <p className="order-muted">进行中的退款处理记录：{read.openIntentCount} 笔</p> : null}
       </div>
-    </details>
+    </div>
   </section>;
 }
 
@@ -523,8 +712,6 @@ function OrderRefundSection({ order }: { order: Order }) {
   const responsibility = read.responsibility;
   const prestart = read.prestartRefund ?? read.cancellationRefund;
   const needsReview = read.intents.some(intent => intent.requiresReview);
-  const attentionRequired = prestart ? ["UNKNOWN", "FAILED"].includes(prestart.state)
-    : needsReview || ["UNKNOWN", "REVIEW_REQUIRED", "TRUNCATED", "CONFLICT"].includes(read.outcome);
   const incomplete = read.intentsTruncated || !read.coverage.intentsComplete || responsibility.state === "POSTED" && !responsibility.totalsComplete;
   const simulated = read.outcome === "FULLY_CONSUMED" && !incomplete && read.intents.length > 0
     && read.intents.every(intent => intent.source === "LOCAL_CONTROLLED" && intent.state === "SUCCEEDED" && intent.budgetDisposition === "CONSUMED");
@@ -541,8 +728,8 @@ function OrderRefundSection({ order }: { order: Order }) {
     : channelSucceeded ? { label: "退款成功", note: "渠道已记录退款成功，到账时间以收款记录为准。" } : refundOutcomeCopy[read.outcome]);
   return <section className="order-detail-section order-refund-block" id="order-refund-section" aria-label="退款进度" data-outcome={prestart?.state ?? read.outcome}>
     <div className="order-refund-heading"><h2 className="order-section-title">退款进度</h2>{refresh}</div>
-    <details className="order-secondary-details order-refund-details" open={attentionRequired}>
-      <summary><strong>{outcome.label}</strong><span>{outcome.note}</span></summary>
+    <div className="order-refund-details">
+      <div className="order-refund-summary"><strong>{outcome.label}</strong><span>{outcome.note}</span></div>
       <div className="order-refund-detail-content">
         {incomplete && !prestart ? <p className="order-inline-notice" role="status">部分退款信息仍在核对，当前记录可能不完整。</p> : null}
         {prestart?.amountCents ? <dl className="order-facts order-refund-amounts"><div><dt>{prestart.state === "SUCCEEDED" ? "退款金额" : "应退金额"}</dt><dd>{refundMoney(prestart.amountCents)}</dd></div></dl> : null}
@@ -554,7 +741,7 @@ function OrderRefundSection({ order }: { order: Order }) {
         {read.intents.length ? <section aria-label="退款申请记录"><div className="order-refund-intents-heading"><h3>退款申请</h3><span>{read.intentsTruncated || !read.coverage.intentsComplete ? "部分记录未记录" : `${read.returnedIntentCount} 笔`}</span></div><ul className="order-refund-intents">{read.intents.map(intent => <RefundIntentCard key={intent.intentId} intent={intent} conflict={read.outcome === "CONFLICT"} />)}</ul></section> : null}
         <p className="order-muted">到账情况请以收款记录为准。</p>
       </div>
-    </details>
+    </div>
   </section>;
 }
 
@@ -577,7 +764,7 @@ function OrderEntitlements({ order }: { order: Order }) {
   </section>;
 }
 
-export function OrderDetail({ party, status, accountId, orderId, filters, state, onRetry, onLogin, onChanged }: {
+export function OrderDetail({ party, status, accountId, orderId, filters, state, onRetry, onLogin, onChanged, payRequested = false }: {
   party: OrderParty;
   status: OrderStatusFilter;
   filters?: OrderSearchFilters;
@@ -587,6 +774,7 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   onRetry: () => void;
   onLogin: () => void;
   onChanged: () => void;
+  payRequested?: boolean;
 }) {
   const backHref = orderUrl(party, status, accountId, undefined, undefined, filters);
   const title = party === "renter" ? "租入订单" : "出租订单";
@@ -594,9 +782,43 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   const readScope = `${session.status === "authenticated" ? session.userId : ""}:${party}:${orderId}`;
   const [read, setRead] = useState<{ scope: string; facts: OrderStageFacts | null; failed: boolean }>({ scope: "", facts: null, failed: false });
   const [payment, setPayment] = useState<{ scope: string; facts: OrderPaymentFacts | null }>({ scope: "", facts: null });
+  const [payOpen, setPayOpen] = useState(false);
+  const [actionFocus, setActionFocus] = useState<SettlementFocus | null>(null);
+  const [dataVersion, setDataVersion] = useState(0);
+  const [aftersaleOpen, setAftersaleOpen] = useState(false);
+  const autoPay = useRef<string | null>(null);
   const facts = read.scope === readScope ? read.facts : null;
   const readFailed = read.scope === readScope && read.failed;
   const paymentFacts = payment.scope === readScope ? payment.facts : null;
+  useEffect(() => {
+    if (!payRequested) { autoPay.current = null; return; }
+    if (autoPay.current === orderId) return;
+    const current = state.status === "ready" ? state.order : null;
+    if (current?.id === orderId && current.status === "PENDING_PAYMENT" && paymentEntryOpen(current)) {
+      autoPay.current = orderId;
+      setPayOpen(true);
+    }
+  }, [orderId, payRequested, state]);
+  const openPay = useCallback(() => {
+    setPayOpen(true);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.set("pay", "1");
+      window.history.replaceState(null, "", url.toString());
+    }
+  }, []);
+  const closePay = useCallback(() => {
+    autoPay.current = orderId;
+    setPayOpen(false);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("pay");
+      window.history.replaceState(null, "", url.toString());
+    }
+  }, [orderId]);
+  const reportPayment = useCallback((next: OrderPaymentFacts | null) => setPayment({ scope: readScope, facts: next }), [readScope]);
+  const reportStage = useCallback((next: OrderStageFacts | null, failed: boolean) => setRead({ scope: readScope, facts: next, failed }), [readScope]);
+  const refreshDetail = useCallback(() => { setDataVersion((value) => value + 1); onChanged(); }, [onChanged]);
   const back = <Link className="order-detail-back" href={backHref} scroll={false}><ArrowLeft size={16} aria-hidden="true" />返回{title}</Link>;
   if (state.status === "loading") return <section className="order-detail-view" data-testid="order-detail-loading" aria-busy="true" role="status"><div className="order-detail-loading account-module-card"><span /><span /><span /></div></section>;
   if (state.status === "error" && state.error) return <section className="order-detail-view">{back}<OrderError error={state.error} first={false} onRetry={onRetry} onLogin={onLogin} label="订单详情暂时无法读取" /></section>;
@@ -608,54 +830,77 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
   }
   const modeLabel = orderRentalModeLabel(order);
   const sourceLabel = orderListingSourceLabel(order);
-  const stageLabel = orderSettlementStageLabel(order);
   const attention = attentionFor(order, facts, readFailed, party);
   const progress = orderProgressView({ order, party, facts, readFailed, payment: paymentFacts });
+  const openSupport = (trigger: HTMLElement) => requestSupportDialog("SERVICE", trigger,
+    session.status === "authenticated" && session.userId
+      ? { userId: session.userId, subjectRef: `order:${order.id}`, recordId: order.id, draftText: `订单 ${order.displayNo ?? order.id}` }
+      : undefined);
+  const openGroups = (trigger: HTMLElement) => {
+    window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }));
+    // If the support host cannot open the group (e.g. archived beyond the window), fall back to service.
+    requestAnimationFrame(() => {
+      if (session.status === "loading" || session.status === "error") return;
+      const opened = document.querySelector('.support-dialog-content[data-state="open"], [data-auth-dialog][data-state="open"]');
+      if (!opened) openSupport(trigger);
+    });
+  };
+  const openCancel = () => {
+    const section = document.getElementById("order-cancel-request");
+    const details = section?.querySelector("details");
+    if (details) details.open = true;
+    const reduced = typeof window !== "undefined" && typeof window.matchMedia === "function"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    section?.scrollIntoView?.({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    section?.querySelector<HTMLElement>("select, button")?.focus({ preventScroll: true });
+  };
+  const canCancelBeforeOpening = order.status === "PAID"
+    && (order.stage?.code === "OPENING_PENDING" || (order.stage?.code === undefined && facts?.rentalStarted === false));
+  const aftersaleAvailable = !order.readOnly && order.source?.origin !== "LEGACY"
+    && (order.status === "COMPLETED" || order.stage?.code === "POSTED");
+  const showStageBar = order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT";
   return <section className="order-detail-view" data-testid="order-detail">
     {back}
     {/* Identity band: the account is the subject, the order number identifies the transaction, and the
-        status pill is stated once here and nowhere else. */}
+        lifecycle status is stated once here and nowhere else. */}
     <header className="order-detail-hero">
       <div className="order-detail-hero-copy">
-        <h1 className="order-detail-title">{orderAccountTitle(order)}</h1>
-        <p className="order-detail-meta">
+        <div className="order-detail-title-row">
+          <h1 className="order-detail-title">{orderAccountTitle(order)}</h1>
+          <OrderStatusBadge order={order} />
+        </div>
+        <div className="order-detail-identity">
           {order.accountDisplayNo ? <span className="order-detail-account-no">账号 {order.accountDisplayNo}</span> : null}
-          {order.accountId ? <Link className="account-inline-link" href={party === "owner" ? `/account?view=accounts&accountId=${encodeURIComponent(order.accountId)}` : `/accounts/${encodeURIComponent(order.accountId)}`} scroll={false}>{party === "owner" ? "查看本人账号" : "查看当前公开资料"}</Link> : null}
           <span className="order-detail-no">订单 {order.displayNo ?? "未记录"}<CopyOrderNo value={order.displayNo} /></span>
-          {party === "owner" ? <span>租客：{order.renterName ?? "暂不显示"}</span> : null}
+          {order.accountId ? <Link className="order-detail-public-link" href={party === "owner" ? `/account?view=accounts&accountId=${encodeURIComponent(order.accountId)}` : `/accounts/${encodeURIComponent(order.accountId)}?fromOrder=${encodeURIComponent(order.id)}`} scroll={false}>{party === "owner" ? "查看本人账号" : "查看当前公开资料"}</Link> : null}
+        </div>
+        <div className="order-detail-context">
           <span>下单 {timeText(order.createdAt, { timeZoneName: false })}</span>
           <span>{orderTermLabel(order)}</span>
-          {!order.listingFacts && order.listingFactsUnknownReason ? <span>账号资料未确认</span> : null}
           {modeLabel ? <span className="order-detail-mode" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
-          {sourceLabel ? <span className="order-source-note">{sourceLabel}</span> : null}
-        </p>
-        <div className="order-detail-status">
-          <OrderStatusBadge order={order} />
-          {stageLabel ? <span className={`order-stage-label${order.stage?.viewerActionRequired ? " is-action" : ""}`}>{stageLabel}</span> : null}
+          {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-detail-source-note">账号资料未确认</span> : null}
+          {sourceLabel ? <span className="order-detail-source-note">{sourceLabel}</span> : null}
         </div>
       </div>
     </header>
-    <OrderProgressCard view={progress} party={party} orderId={order.id} orderDisplayNo={order.displayNo ?? null} userId={session.status === "authenticated" ? session.userId : null} backHref={backHref} onRefresh={onChanged} />
-    {order.source?.origin !== "LEGACY" && !order.readOnly && order.status !== "PENDING_PAYMENT" ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
+    {showStageBar ? <FulfillmentStageBar order={order} party={party} facts={facts} /> : null}
     <BusinessUpdateNotices surface="orders" />
-    <AttentionBlock attention={attention} party={party} orderId={order.id} onRetry={onChanged} />
-    <div className="order-detail-overview">
-      <AmountCard order={order} party={party} facts={facts} readFailed={readFailed} />
-      <ContactCard order={order} onChanged={onChanged} quiet={Boolean(attention)} />
+    {attention ? <AttentionBlock attention={attention} onRetry={refreshDetail} onGroups={openGroups} /> : null}
+    <div className="order-detail-overview order-detail-actions">
+      {order.status === "PAID"
+        ? <OrderActionCard order={order} facts={facts} readFailed={readFailed} onAction={setActionFocus} onSupport={openSupport} onCancel={openCancel} onRefresh={refreshDetail} onAftersale={aftersaleAvailable ? () => setAftersaleOpen(true) : undefined} />
+        : <>
+          {order.status === "PENDING_PAYMENT" ? <PaymentFactsProbe order={order} onFacts={reportPayment} /> : null}
+          <OrderProgressCard view={progress} party={party} orderId={order.id} orderDisplayNo={order.displayNo ?? null} userId={session.status === "authenticated" ? session.userId : null} backHref={backHref} onRefresh={refreshDetail} onPay={openPay} onTrade={openPay} onAftersale={aftersaleAvailable ? () => setAftersaleOpen(true) : undefined} onGroups={openGroups} />
+        </>}
+      {order.status !== "PENDING_PAYMENT" ? <OrderGroupCard order={order} party={party} onSupport={openSupport} onGroups={openGroups} /> : null}
     </div>
+    <OrderAmountDetails order={order} party={party} refreshVersion={dataVersion} onFacts={reportStage} />
     <div className="order-detail-body" id="order-detail-body" tabIndex={-1}>
       <div className="order-detail-main">
-        {order.source?.origin!=="LEGACY"&&order.stage?.code==="POSTED"?<OrderAftersale key={`aftersale:${order.id}`} orderId={order.id} orderDisplayNo={order.displayNo??null}/>:null}
-        {order.status !== "CANCELLED" ? <OrderTradeActions order={order} party={party} onChanged={onChanged} onStageFacts={(next, failed) => setRead({ scope: readScope, facts: next, failed })} onPaymentFacts={(next) => setPayment({ scope: readScope, facts: next })} /> : null}
-        <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/>
-        {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
+        {canCancelBeforeOpening || order.status === "CANCELLED" ? <PrestartTerminationPanel key={`prestart:${order.id}:${order.status}`} order={order} party={party} onChanged={onChanged}/> : null}
+        {party === "renter" && order.source?.origin !== "LEGACY" && !order.readOnly && (order.status === "PAID" || order.status === "COMPLETED" || (order.status === "CANCELLED" && Boolean(order.paidAt))) ? <OrderRefundSection key={`${order.id}:${order.status}:${facts?.phase ?? "NONE"}`} order={order} /> : null}
         {party === "owner" && order.source?.origin !== "LEGACY" && !order.readOnly && (order.status === "CANCELLED" || order.status === "COMPLETED") ? <OrderOwnerRefundSummary key={`owner-refund:${order.id}:${order.status}`} order={order} /> : null}
-        <section className="order-detail-section order-lines">
-          <details open={order.status === "PENDING_PAYMENT"}>
-            <summary><h2 className="order-section-title">下单时费用明细</h2><span className="order-lines-summary">{linesSummary(order, party)}</span></summary>
-            <OrderLines order={order} party={party} />
-          </details>
-        </section>
         <OrderAccountDossier
           accountId={order.accountId}
           accountDisplayNo={order.accountDisplayNo}
@@ -664,8 +909,35 @@ export function OrderDetail({ party, status, accountId, orderId, filters, state,
           orderResources={orderResourceLines(order)}
         />
         <OrderEntitlements order={order} />
-        <OrderTimeline order={order} facts={facts} party={party} />
+        <section className="order-detail-section order-history-details" id="order-history">
+          <details className="order-secondary-details">
+            <summary><h2 className="order-section-title">订单进度详情</h2><span>下单、支付、开租与结算记录</span></summary>
+            <OrderTimeline order={order} facts={facts} party={party} />
+          </details>
+        </section>
       </div>
     </div>
+    <OrderActionDialog
+      order={order}
+      party={party}
+      focus={actionFocus ?? "settlement"}
+      open={actionFocus !== null}
+      onOpenChange={(next) => { if (!next) setActionFocus(null); }}
+      onChanged={refreshDetail}
+    />
+    <OrderAftersaleDialog
+      orderId={order.id}
+      orderDisplayNo={order.displayNo ?? null}
+      open={aftersaleOpen}
+      onOpenChange={setAftersaleOpen}
+    />
+    <PaymentDialog
+      order={order}
+      party={party}
+      open={payOpen}
+      onOpenChange={(next) => { if (next) openPay(); else closePay(); }}
+      onChanged={refreshDetail}
+      onPaymentFacts={reportPayment}
+    />
   </section>;
 }

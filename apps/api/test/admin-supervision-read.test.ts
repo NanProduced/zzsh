@@ -1176,7 +1176,7 @@ test("the supervision detail reads one public projection for the viewed, current
 
 test("a DETAIL memo cannot satisfy a RENTABLE or strict public read", async () => {
     let memoReads = 0;
-    const detailOnly = { availability: "OFFLINE", canCreateOrder: false };
+    const detailOnly = { id: detailAccount.id, versionId: "version-offline", media: [], availability: "OFFLINE", canCreateOrder: false };
     const prefetch = { version: null, hasPublication: true, publicListing: async () => { memoReads++; return detailOnly; } };
     const client = { query: async () => ({ rows: [], rowCount: 0 }) } as never;
     const gate: SupplyGateReader = async () => ({ publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: null });

@@ -17,6 +17,8 @@ import {
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { handleContentAdminRoute } from "../content/content-routes";
+import { handleDocsAdminRoute } from "../docs/docs-routes";
+import { DOCS_IMAGES_DISABLED, type DocsImageFeature } from "../docs/docs-images";
 import { handleProfileAvatarAdminReviewRoute, handleProfileAvatarAdminSelfRoute } from "../profile/profile-avatar-routes";
 import { handleSystemConfiguration } from "../system/system-configuration-routes";
 import { handleLegalAdminRoute } from "../legal/legal-routes";
@@ -63,6 +65,7 @@ export type AdminBffOptions = {
   distributionManagement?: DistributionManagementResource;
   distributionEarnings?: DistributionEarningStore;
   supply: SupplyRuntimeOptions;
+  docsImages?: DocsImageFeature;
   order: OrderRuntimeOptions;
   yunxin?: YunxinRouteOptions;
 };
@@ -205,6 +208,10 @@ function requestHeaders(request: NodeRequest, requestId: string, adminOrigin: st
   // 因此拿不到命令身份。显式非法值必须拒绝，不能丢弃后作为无key命令执行。
   const commandId = adminSecurityCommandId(request.headers);
   if (commandId) headers.set("idempotency-key", commandId);
+  // Strict IM writes/token issuance are bound to the tab that owns the server
+  // connection slot; the API validates it against the authenticated session.
+  const connectionId = headerValue(request.headers["x-zzsh-connection-id"]);
+  if (connectionId) headers.set("x-zzsh-connection-id", connectionId);
   return headers;
 }
 
@@ -612,8 +619,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   if (path === "/legal-documents" || path.startsWith("/legal-documents/")) {
     const draft = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+$/;
-    const seal = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/seal$/;
-    if (!(method === "GET" && path === "/legal-documents") && !(method === "POST" && (path === "/legal-documents/drafts" || seal.test(path))) && !(method === "PUT" && draft.test(path))) {
+    // P3a：直接封存入口下线，改为差异只读、退回草稿与「固定文书发布」审批提交。
+    const diff = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/diff$/;
+    const back = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/return$/;
+    const allowed = method === "GET" && (path === "/legal-documents" || diff.test(path))
+      || method === "POST" && (path === "/legal-documents/drafts" || path === "/legal-documents/fixed-document-submissions" || back.test(path))
+      || method === "PUT" && draft.test(path);
+    if (!allowed) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return;
     }
     const targetPath = `/api/v1/admin${path}${requestQuery(request)}`;
@@ -626,12 +638,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm") {
+  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm"
+    || path === "/system/account-image-watermark" || path === "/system/account-image-watermark/preview") {
     await handleSystemConfiguration(request, response, options.supply);
     return;
   }
   if (path === "/content" || path.startsWith("/content/")) {
-    if (method !== "GET" && method !== "POST" && method !== "PUT") {
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }
@@ -641,6 +654,23 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
       await handleContentAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  if (path === "/docs" || path.startsWith("/docs/")) {
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/docs${path.slice("/docs".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleDocsAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, { ...options.supply, docsImages: options.docsImages ?? DOCS_IMAGES_DISABLED });
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
@@ -685,7 +715,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/yunxin-conversations" || path === "/im/my-support-statistics"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
     || path === "/im/message-access" || imImage || imMedia || imReadSub || imLegacyOrder;
-  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;
+  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead
+    || path === "/im/presence/heartbeat" || path === "/im/presence/connect" || path === "/im/presence/release" || path === "/im/presence/connection" || path === "/im/presence/locked-heartbeat" || imAuditTakeover;
   const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings";
   const imMethodAllowed = path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings"
     ? method === "GET" || method === "PUT"

@@ -19,6 +19,7 @@ import {
 } from "./admin-authorization";
 import { assertNoNewBossOnlyPersonalAllows, assertNoNewBossOnlyRoleGrants, isBossOnlyPermission } from "./admin-role-presets";
 import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
+import { reconcileSupportPresenceForAdmin } from "../im/support-presence-session";
 import { recordAudit, setAuditContext, SecurityApiError, withTransaction } from "./security-core";
 import {
   ADMIN_GAME_SCOPE_MODE,
@@ -545,6 +546,7 @@ export async function assignAdministratorAccess(
     const proposed = await computeProposedPermissions(client, grants);
     assertDelegable(actor, union(proposed, grants.denyPermissions));
     await replaceGrants(client, target.id, grants);
+    await reconcileSupportPresenceForAdmin(client, target.id);
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
@@ -727,6 +729,13 @@ export async function updateRole(
         WHERE "id" = $4`,
       [nextName, nextDescription, nextStatus, current.id],
     );
+    if (permissionCodes !== undefined || nextStatus !== current.status) {
+      const affected = await client.query<{ adminUserId: string }>(
+        `SELECT "admin_user_id" AS "adminUserId" FROM "zzsh_iam"."admin_user_role" WHERE "role_id" = $1 ORDER BY "admin_user_id"`,
+        [current.id],
+      );
+      for (const row of affected.rows) await reconcileSupportPresenceForAdmin(client, row.adminUserId);
+    }
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,

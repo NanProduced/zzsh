@@ -1,0 +1,324 @@
+{
+  "key": "protection-coverage",
+  "kind": "help",
+  "file": "help/protection-coverage.json",
+  "meta": {
+    "id": "S02",
+    "slug": "protection-coverage",
+    "title": "包赔保障什么，费用由谁承担？",
+    "summary": "包赔是可选保障，覆盖本次租赁结束后 10 年内由本次租赁导致的封禁等约定损失；费率 8%，承担方按结算责任确定。",
+    "category": "after-sale",
+    "audience": [
+      "renter",
+      "owner"
+    ],
+    "keywords": [
+      "包赔",
+      "保障",
+      "赔付",
+      "封禁赔偿",
+      "8%",
+      "保险费"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "fees-early-end",
+      "fees-settlement",
+      "issue-during-rental"
+    ],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "scope": "content-保障范围",
+    "fee": "content-费用与承担方"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "保障范围",
+        "children": [
+          {
+            "text": "保障范围"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "包赔是上架时可选的保障。保障范围为本次租赁结束后 10 年内、由本次租赁导致的封禁等约定损失。实际赔付由客服与号主协商、运营审核处理，应赔金额、入账与实际付款分别记录。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "费用与承担方",
+        "children": [
+          {
+            "text": "费用与承担方"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "包赔费率为 8%，基数为号主侧毛金额，不含押金、保证金、平台价差、提前补足和赔款。承担方按结算责任确定："
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "children": [
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "结算情形"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "计费基数"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "承担方"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "正常结算"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "实耗哈夫币 + 实耗物品"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "号主"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "租客自愿提前（非号主或账号原因）"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "全量哈夫币 + 全量物品"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "租客"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "号主要求提前或账号原因无法继续"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "原则上按实耗"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "号主"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "未正式开租即取消"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "不计包赔费"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "—"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "说明",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "上架页面展示的是预估说明，不是扣费凭证；实际费用只在结算生效时计提一次，你的订单以下单时接受的包赔条款版本为准。"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

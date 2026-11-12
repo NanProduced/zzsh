@@ -1484,7 +1484,12 @@ html[data-theme="dark"] .account-price-help {
 .account-quote .rental-confirm-actions {
   gap: 8px;
   margin: 0;
+  flex-direction: column;
+  align-items: stretch;
 }
+.account-quote .rental-confirm-actions .button.quiet { align-self: center; }
+.account-quote .rental-confirm--quote { gap: 12px; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--quote-rule, var(--color-border-subtle)); }
+.account-quote .rental-confirm-consent { padding: 11px 12px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-card); }
 .account-quote .rental-confirm-primary-action {
   flex: 1 1 100%;
   min-width: 0;
@@ -1556,6 +1561,23 @@ html[data-theme="dark"] .account-price-help {
   margin-top: 14px;
   font-size: 14px;
 }
+/* The viewer arrived from their own order: keep the return path and the reason the account is locked. */
+.account-order-return { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px 14px; margin-bottom: 14px; border: 1px solid var(--color-border-subtle); border-radius: 10px; background: var(--color-bg-card); color: var(--color-text-secondary); font-size: 12.5px; line-height: 1.5; }
+.account-order-return a { display: inline-flex; align-items: center; gap: 5px; color: var(--color-accent-brand-ink); font-weight: 650; text-decoration: none; }
+.account-order-return a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.account-order-return a:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; border-radius: 3px; }
+.account-active-order-panel .account-quote-banner-tag { color: var(--color-accent-brand-ink); }
+/* The viewer's own locked order is a recovery state, not a dead end. */
+.account-pending-panel .account-quote-content { display: grid; gap: 12px; padding: 18px 20px 20px; }
+.account-pending-status { padding: 30px 20px; color: var(--color-text-secondary); font-size: 13px; text-align: center; }
+.account-pending-order-title { margin: 0; color: var(--color-text-primary); font-size: 15px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+.account-pending-facts { display: grid; gap: 0; margin: 0; }
+.account-pending-facts > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.account-pending-facts > div:last-child { border-bottom: 0; }
+.account-pending-facts dt { color: var(--color-text-secondary); font-size: 12.5px; }
+.account-pending-facts dd { margin: 0; color: var(--color-text-primary); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
+.account-pending-pay { width: 100%; min-height: 46px; display: flex; justify-content: center; }
+.account-pending-panel .button.quiet { justify-self: center; }
 
 /* --------------------------------------------------------------------------
    Penalty Dialog Modal
@@ -1899,6 +1921,21 @@ html[data-theme="dark"] .account-price-help {
   line-height: 1.65;
   color: var(--color-text-secondary);
 }
+.rental-terms-dialog-copy {
+  margin: 0 0 14px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.rental-terms-dialog-copy svg { vertical-align: -2px; margin-right: 4px; }
+.rental-terms-dialog-agreement {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border-subtle);
+}
+.rental-terms-dialog-agreement h3 { margin: 0; color: var(--color-text-primary); font-size: 14px; }
+.rental-terms-dialog--terms .rental-terms-dialog-footer { justify-content: flex-end; }
 .rental-terms-dialog-footer {
   display: flex;
   flex-shrink: 0;

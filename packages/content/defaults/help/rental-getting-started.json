@@ -1,0 +1,52 @@
+{
+  "key": "rental-getting-started",
+  "kind": "help",
+  "file": "help/rental-getting-started.json",
+  "meta": {
+    "id": "R01",
+    "slug": "rental-getting-started",
+    "title": "第一次租号，从哪里开始？",
+    "summary": "了解选号、下单、交付与开始租用的流程。",
+    "category": "rental",
+    "audience": ["renter"],
+    "keywords": ["租号", "怎么租", "流程", "下单", "支付", "客服", "开始租用", "租号流程", "新人"],
+    "updatedAt": "2026-10-06",
+    "related": ["rental-check-before-order", "rental-confirm-and-return"],
+    "contactCta": false,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "steps": "content-租号的基本流程",
+    "after-payment": "content-支付之后会发生什么",
+    "notes": "content-需要知道的边界",
+    "next": "content-下一步"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "租号的基本流程", "children": [{ "text": "租号的基本流程" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 1, "children": [{ "text": "浏览并选择账号：浏览账号详情，核对资源与费用。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 2, "children": [{ "text": "核对订单并支付：确认本次报价、费用明细与租赁条件。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 3, "children": [{ "text": "等待客服协助交付：支付后留意订单状态和客服消息。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 4, "children": [{ "text": "确认交付，开始租用：按订单提示完成双方确认。" }] },
+      { "type": "h2", "id": "支付之后会发生什么", "children": [{ "text": "支付之后会发生什么" }] },
+      { "type": "p", "children": [{ "text": "平台按订单流程安排客服协助交付。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "付款成功不等于开始计时，以订单中的交付确认状态为准。" }] }
+        ]
+      },
+      { "type": "h2", "id": "需要知道的边界", "children": [{ "text": "需要知道的边界" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "实际费用与条件以订单页面为准。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "市场默认只列当前可租账号。已租、待付款占用或普通下架的账号，可以用完整编号、原详情链接或收藏查看仍获准公开的资料，但不能重复下单。普通下架显示“已下架”；封禁、归档或撤回公开的资料不会因此被公开。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "遇到问题，通过订单群联系平台客服。" }] },
+      { "type": "h2", "id": "下一步", "children": [{ "text": "下一步" }] },
+      { "type": "p", "children": [{ "text": "下单前建议核对账号信息并阅读须知，起租时核对期初清单。" }] }
+    ]
+  }
+}

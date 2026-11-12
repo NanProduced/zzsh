@@ -8,6 +8,7 @@ type Props = {
   mediaUrls?: Record<string, string>;
   imageUrls?: Record<string, string>;
   anchorPrefix?: string;
+  showTableOfContents?: boolean;
 };
 
 function marksStyle(node: PlateNode): CSSProperties | undefined {
@@ -16,7 +17,8 @@ function marksStyle(node: PlateNode): CSSProperties | undefined {
   for (const key of ["color", "backgroundColor"] as const) {
     const token = node[key];
     if (typeof token === "string" && COLOR_TOKENS.has(token)) {
-      style[key === "color" ? "color" : "backgroundColor"] = `var(--plate-${token})`;
+      style[key === "color" ? "color" : "backgroundColor"] = key === "color"
+        ? `var(--plate-${token})` : `var(--plate-highlight-${token}, var(--plate-${token}))`;
       any = true;
     }
   }
@@ -79,7 +81,8 @@ function Block({ node, id, urls, anchorPrefix }: { node: PlateNode; id: string; 
         );
       }
       if (listType === "disc" || listType === "decimal") {
-        return <li data-indent={node.indent ?? 1}>{content}</li>;
+        const value = listType === "decimal" && typeof node.listStart === "number" && Number.isSafeInteger(node.listStart) && node.listStart > 0 ? node.listStart : undefined;
+        return <li data-indent={node.indent ?? 1} value={value}>{content}</li>;
       }
       return <Tag id={anchor}>{content}</Tag>;
     }
@@ -91,7 +94,10 @@ function Block({ node, id, urls, anchorPrefix }: { node: PlateNode; id: string; 
       const key = typeof node.imageId === "string" ? node.imageId : typeof node.mediaId === "string" ? node.mediaId : "";
       const src = urls[key];
       const alt = typeof node.alt === "string" ? node.alt : "";
-      return src ? <img src={src} alt={alt} loading="lazy" /> : <span className="plate-image-missing">{alt || "图片不可用"}</span>;
+      const image = src ? <img src={src} alt={alt} loading="lazy" /> : <span className="plate-image-missing">{alt || "图片不可用"}</span>;
+      return typeof node.caption === "string" && node.caption ? (
+        <figure className="plate-image-figure">{image}<figcaption className="plate-image-caption">{node.caption}</figcaption></figure>
+      ) : image;
     }
     case "code_block":
       return (
@@ -159,9 +165,9 @@ function blocks(nodes: PlateNode[], keyBase: string, urls: Record<string, string
   return out;
 }
 
-export function PlateDocument({ document, mediaUrls, imageUrls, anchorPrefix = "content-" }: Props): ReactElement {
+export function PlateDocument({ document, mediaUrls, imageUrls, anchorPrefix = "content-", showTableOfContents = true }: Props): ReactElement {
   const urls = { ...mediaUrls, ...imageUrls };
-  const toc = extractPlate(document).toc;
+  const toc = showTableOfContents ? extractPlate(document).toc : [];
   return (
     <div className="plate-document">
       {toc.length > 0 && (

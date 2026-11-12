@@ -228,7 +228,7 @@ function stageCollapsedText(info:OrderTeamAccess):string{
     : (Number.isFinite(until)&&Number.isFinite(now)&&now<until);
   if(allowed)return info.sendUntil?`结算完成 · 可沟通至 ${serverTimeLabel(info.sendUntil)}`:"结算完成 · 可沟通";
   return info.sendUntil||typeof info.terminalSendAllowed==="boolean"
-    ? "结算完成 · 已超过 72 小时 · 仅可查看"
+    ? "结算完成 · 已超过 72 小时 · 订单群仅可查看历史消息"
     : "结算完成";
 }
 /** Compact timeline. Collapsed it is one line; the steps stay available without becoming a dashboard. */

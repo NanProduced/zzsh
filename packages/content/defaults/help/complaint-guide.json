@@ -1,0 +1,118 @@
+{
+  "key": "complaint-guide",
+  "kind": "help",
+  "file": "help/complaint-guide.json",
+  "meta": {
+    "id": "S03",
+    "slug": "complaint-guide",
+    "title": "怎样投诉，应该保存哪些证据？",
+    "summary": "通过常驻「投诉建议」入口提交，投诉由有权限的上级处理，不会交回被投诉客服本人；提前保存订单与群内证据。",
+    "category": "after-sale",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "投诉",
+      "举报",
+      "证据",
+      "申诉",
+      "客服投诉"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "issue-during-rental",
+      "anti-fraud-guide"
+    ],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "how": "content-投诉入口与处理",
+    "evidence": "content-建议保存的证据"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "投诉入口与处理",
+        "children": [
+          {
+            "text": "投诉入口与处理"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "使用页面常驻工具栏的「投诉建议」入口提交投诉。投诉会交给有相应权限的上级处理，不会交回被投诉的客服本人。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "建议保存的证据",
+        "children": [
+          {
+            "text": "建议保存的证据"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "订单编号与相关时间点。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "订单群内的聊天记录截图，尤其是对方承诺与实际结果的对比。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "涉及金额的，保留金额、支付与退款状态截图。"
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "说明",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "重要约定请在订单群内以文字确认，口头承诺难以核实。"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

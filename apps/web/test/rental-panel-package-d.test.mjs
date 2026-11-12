@@ -30,6 +30,7 @@ function loadComponent(relativePath, session, extra) {
     if (extra && Object.hasOwn(extra, name)) return extra[name];
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
+    if (name === "@/components/ui/alert-dialog") return { ConfirmAlertDialog: ({ open, title, description, onConfirm, confirmLabel, busy }) => open ? React.createElement("div", { role: "alertdialog" }, title, description, React.createElement("button", { type: "button", disabled: busy, onClick: onConfirm }, confirmLabel)) : null };
     if (name === "@/lib/listing-view") return requireFromTree(path.join(tree, "apps/web/src/lib/listing-view.ts"));
     if (name === "@/lib/supply-client") return { supplyApi: { fullPayoutTerms: async () => ({}), publishingOptions: async () => ({ releaseId: "r1", agreement: { id: "agreement", title: "离线测试协议", body: "合成内容", digest: "offline" } }) } };
     if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
@@ -38,6 +39,7 @@ function loadComponent(relativePath, session, extra) {
     if (name === "@/components/session/identity-reset") return requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
     if (name === "@/components/order/order-trade-actions") return loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session);
     if (name === "./rental-price-summary") return loadComponent("apps/web/src/components/order/rental-price-summary.tsx", session);
+    if (name === "./payment-dialog" || name === "@/components/order/payment-dialog") return { PaymentDialog: ({ open }) => open ? React.createElement("div", { "data-testid": "payment-dialog" }, "payment-dialog-open") : null };
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (name.endsWith(".css")) return {};
     return requireFromTree(name);

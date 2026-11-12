@@ -1,13 +1,32 @@
-import { formatOrderMoney, formatOrderTime } from "./order-client.ts";
+import { formatOrderMoney, formatOrderTime, orderUrl } from "./order-client.ts";
 import { formatReferenceYuan } from "@zzsh/ui/display-money";
 export { formatReferenceYuan } from "@zzsh/ui/display-money";
-import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, PersonalRentalQuote, SettlementLine, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
+import type { Order, OrderImProjection, OrderImStage, OrderLine, OrderParty, OrderSearchFilters, OrderStatusFilter, PersonalRentalQuote, SettlementLine, SettlementOpening, SettlementPosting, SettlementPreview, SettlementVersion } from "./order-client";
 
 export function paymentObservation(payment: { disposition: string } | null): string {
   if (!payment) return "暂未查到付款记录";
   const status = payment.disposition === "APPLIED" ? "已记入订单" : payment.disposition === "REVIEW_REQUIRED" ? "需要人工核对" : "状态未记录";
   return `已有付款记录（${status}）`;
 }
+
+/** The detail route plus an explicit payment intent; never a new order or a new payment request. */
+export function orderPaymentUrl(party: OrderParty, status: OrderStatusFilter, accountId: string | undefined, orderId: string, source?: "NATIVE" | "LEGACY", filters?: OrderSearchFilters): string {
+  const base = orderUrl(party, status, accountId, orderId, source, filters);
+  return `${base}${base.includes("?") ? "&" : "?"}pay=1`;
+}
+
+/** Countdown text for the server-owned hold deadline. Unknown or elapsed time never becomes a new fact. */
+export function formatPaymentCountdown(remainingMs: number): string | null {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return null;
+  const totalSeconds = Math.floor(remainingMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 
 export function settlementPreviewProblem(reasons: string[] | undefined): string {
   const labels: Record<string, string> = {
@@ -58,6 +77,11 @@ export const ORDER_CANCELLED_PRESTART_STEPS = [
   { key: "CANCELLED", label: "已取消" },
 ] as const;
 
+export const ORDER_CANCELLED_UNPAID_STEPS = [
+  { key: "PAID", label: "未付款" },
+  { key: "CANCELLED", label: "已取消" },
+] as const;
+
 export const ORDER_CANCELLED_STARTED_STEPS = [
   { key: "PAID", label: "已付款" },
   { key: "OPENING", label: "开租确认" },
@@ -80,17 +104,19 @@ export function orderFulfillmentStepIndex(stage: OrderImStage | null | undefined
   }
 }
 
-/** Cancelled orders keep the path they reached, then end on a red terminal step. */
-export function orderFulfillmentSteps(stage: OrderImStage | null | undefined, cancelledAfterOpening = false) {
+/** Cancelled orders keep the path they reached, then end on a red terminal step. An unpaid
+ * cancellation never marks a payment step as done. */
+export function orderFulfillmentSteps(stage: OrderImStage | null | undefined, cancelledAfterOpening = false, paid = true) {
   if (stage !== "CANCELLED") return ORDER_FULFILLMENT_STEPS;
+  if (!paid) return ORDER_CANCELLED_UNPAID_STEPS;
   return cancelledAfterOpening ? ORDER_CANCELLED_STARTED_STEPS : ORDER_CANCELLED_PRESTART_STEPS;
 }
 
 /** A missing projection leaves every step unknown; it never marks progress from the order status. */
-export function orderFulfillmentStepStates(stage: OrderImStage | null | undefined, cancelledAfterOpening = false): OrderFulfillmentStepState[] {
-  const steps = orderFulfillmentSteps(stage, cancelledAfterOpening);
+export function orderFulfillmentStepStates(stage: OrderImStage | null | undefined, cancelledAfterOpening = false, paid = true): OrderFulfillmentStepState[] {
+  const steps = orderFulfillmentSteps(stage, cancelledAfterOpening, paid);
   if (stage === "CANCELLED") {
-    return steps.map((step) => step.key === "CANCELLED" ? "cancelled" : step.key === "OPENING" && !cancelledAfterOpening ? "skipped" : "done");
+    return steps.map((step) => step.key === "CANCELLED" ? "cancelled" : step.key === "OPENING" && !cancelledAfterOpening ? "skipped" : step.key === "PAID" && !paid ? "skipped" : "done");
   }
   const current = orderFulfillmentStepIndex(stage);
   if (current < 0) return steps.map(() => "unknown");
@@ -104,11 +130,11 @@ export function orderFulfillmentStepStates(stage: OrderImStage | null | undefine
 export type OrderFulfillmentEnding = "PENDING" | "WAITING" | "SERVICE" | "REJECTED" | null;
 
 function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: number): string {
-  if (!sendUntil) return "仅可查看";
+  if (!sendUntil) return "订单群仅可查看历史消息";
   const until = new Date(sendUntil).getTime();
-  if (!Number.isFinite(until)) return "仅可查看";
-  if (now >= until) return "已超过 72 小时 · 仅可查看";
-  return canSend ? `可沟通至 ${formatOrderTime(sendUntil, { timeZoneName: false })}` : "仅可查看";
+  if (!Number.isFinite(until)) return "订单群仅可查看历史消息";
+  if (now >= until) return "已超过 72 小时 · 订单群仅可查看历史消息";
+  return canSend ? `可沟通至 ${formatOrderTime(sendUntil, { timeZoneName: false })}` : "订单群仅可查看历史消息";
 }
 
 /**
@@ -191,22 +217,45 @@ export function orderLinesTotalLabel(party: OrderParty): string {
   return party === "owner" ? "号主报价合计" : "资源合计（不含押金）";
 }
 
+const MEMBERSHIP_TIER_LABELS: Record<string, string> = {
+  STANDARD: "普通会员",
+  SILVER: "银卡会员",
+  GOLD: "金卡会员",
+  PLATINUM: "铂金会员",
+  DIAMOND: "钻石会员",
+  BLACK_GOLD: "黑金会员·终身",
+  VIP: "VIP会员",
+  SVIP: "SVIP会员",
+  DISCOUNT_USER: "折扣会员",
+};
+
+export function membershipTierLabel(tier: string | null | undefined): string | null {
+  return tier ? MEMBERSHIP_TIER_LABELS[tier] ?? null : null;
+}
+
+/** Aggregate membership ratio as a Chinese discount, e.g. 0.98000000 -> "9.8折". */
+export function membershipDiscountLabel(ratio: string | null | undefined): string | null {
+  if (!ratio || !/^(0\.\d{1,8}|1(?:\.0{1,8})?)$/.test(ratio)) return null;
+  const value = Number(ratio);
+  if (!Number.isFinite(value) || value <= 0 || value >= 1) return null;
+  const zhe = Math.round(value * 1000) / 100;
+  return `${Number.isInteger(zhe) ? zhe.toFixed(0) : zhe.toFixed(1)}折`;
+}
+
+export function orderMembershipText(membership: { tier: string; payableRatio?: string | null } | null | undefined): string | null {
+  const tier = membershipTierLabel(membership?.tier);
+  if (!tier) return null;
+  const discount = membershipDiscountLabel(membership?.payableRatio);
+  return discount ? `${tier} · ${discount}` : tier;
+}
+
 export function personalMembershipLabel(quote: {
   membershipBenefits?: { schema?: string; effectiveTier?: string } | null;
   customerTier?: string | null;
 }): string {
   const b = quote.membershipBenefits;
   if (b?.schema === "membership-benefits-v1" && b.effectiveTier)
-    return (
-      {
-        STANDARD: "普通会员",
-        SILVER: "银卡会员",
-        GOLD: "金卡会员",
-        PLATINUM: "铂金会员",
-        DIAMOND: "钻石会员",
-        BLACK_GOLD: "黑金会员·终身",
-      } as Record<string, string>
-    )[b.effectiveTier] ?? "会员权益未记录";
+    return membershipTierLabel(b.effectiveTier) ?? "会员权益未记录";
   return quote.customerTier ? "既有确认方案" : "会员权益未记录";
 }
 export function personalBenefitSources(quote: {
@@ -549,7 +598,7 @@ export function cancelEntryOpen(order: Order): boolean {
  * that were actually read and never infers success, delivery, settling or bank arrival.
  */
 export type OrderProgressOwner = "你" | "对方" | "客服" | "系统" | "平台" | "暂无";
-export type OrderProgressTarget = "trade" | "legacy" | "refund" | "support" | "groups" | "refresh" | "browse" | "manage" | "list";
+export type OrderProgressTarget = "trade" | "pay" | "legacy" | "refund" | "support" | "groups" | "refresh" | "browse" | "manage" | "list";
 export type OrderProgressAction = { label: string; target: OrderProgressTarget; href?: string };
 export type OrderProgressView = {
   tone: "active" | "waiting" | "warning" | "done" | "unknown";
@@ -592,7 +641,7 @@ export type OrderPaymentFacts = {
 };
 
 type ProgressOrder = Pick<Order,
-  "status" | "readOnly" | "source" | "paymentOpen" | "expiredAwaitingCancel" | "cancelReason" | "fundsResolution" | "viewerParty">;
+  "status" | "readOnly" | "source" | "paymentOpen" | "expiredAwaitingCancel" | "cancelReason" | "fundsResolution" | "viewerParty" | "paidAt">;
 
 /** A support consultation, not the order-group panel: the two are different capabilities. */
 const progressSupport: OrderProgressAction = { label: "联系客服", target: "support" };
@@ -671,10 +720,10 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     if (unknownPayment) {
       return { ...base, tone: "unknown", title: "支付结果正在确认", owner: "平台",
         note: pay?.originalRequestPending
-          ? "本地保留了一笔待核对的原支付申请。请先查询原请求，不要重复付款；是否扣款以渠道和平台记录为准。"
+          ? "有一笔支付结果还没确认，请先查询上次支付，不要重复付款。"
           : pay?.readFailed
-            ? "本页暂时读不到这笔订单的渠道支付状态。已读到的订单事实保持有效；支付结果正在确认，不要重复付款，可重试读取、按原请求查询回执或联系客服核对。模拟付款记录不代表渠道扣款。"
-            : "本单已有一笔支付请求的结果尚未确认，或需要平台人工核对。支付结果正在确认，页面不会把它写成支付成功，也不引导重复付款；请在支付区按原请求查询回执，或联系客服核对。",
+            ? "支付状态暂时读不到，请重试或联系客服；不要重复付款。"
+            : "本单已有一笔支付结果尚未确认，请先查询上次支付结果；不要重复付款。",
         primary: pay?.originalRequestPending ? { label: "查询原支付请求", target: "trade" }
           : { label: pay?.readFailed ? "重试读取" : "查询原支付请求", target: pay?.readFailed ? "refresh" : "trade" },
         secondary: [progressSupport, progressRefresh], pendingRead: true,
@@ -682,11 +731,11 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     }
     if (party === "renter" && (order.paymentOpen ?? true)) {
       return { ...base, tone: "active", title: "完成支付", owner: "你",
-        note: "请在本页支付区选择服务端当前开放的方式完成付款；结果未确认时查询原请求，不要重复提交。付款接纳不等于交付、建群或开租，模拟付款记录也不代表渠道扣款。",
-        primary: { label: "去支付", target: "trade" }, secondary: [progressSupport] };
+        note: "在支付弹窗完成付款。付款后客服会协助确认开租；支付结果未确认时不要重复付款。",
+        primary: { label: "去支付", target: "pay" }, secondary: [progressSupport] };
     }
     return { ...base, tone: "waiting", title: "等待租客支付", owner: "对方",
-      note: "本单尚未付款，号主不能代付或代为接单。租客完成支付后，双方再按冻结报价核对开租清单。",
+      note: "等待租客付款；付款后按订单报价核对开租清单。",
       primary: progressRefresh, secondary: [progressSupport] };
   }
 
@@ -695,12 +744,16 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
       note: party === "renter" ? "请勿继续使用之前的付款码；如果已经扣款，请联系客服核对。" : "待付款订单已关闭；如租客仍通过旧付款码支付，请联系客服核对。",
       primary: progressSupport, secondary: [progressRefresh] };
     const prestart = order.cancelReason === "PRESTART_TERMINATED";
-    // The existing attention band already owns the one role-specific "browse/manage" next step;
-    // repeating it here would give a cancelled order two competing primary exits.
+    // An unpaid cancellation never exposes a refund entry: nothing was captured.
+    if (!order.paidAt) {
+      return { ...base, tone: "done", title: "订单已取消", owner: "暂无",
+        note: "本单未支付，订单已结束，不会产生退款。账号占用已解除。",
+        primary: party === "renter" ? progressBrowse : progressManage, secondary: [progressSupport] };
+    }
     return { ...base, tone: "done", title: "查看退款进度", owner: "暂无",
       note: prestart
-        ? "本单未开租终止，账号占用已解除。退款处理进度看下方退款记录；本地受理与核销都不等于渠道退款到账，售后与客服入口仍可使用。"
-        : "订单已结束，本页不再提供开租或结算操作。可按实际可用性查看退款进度、提交售后记录或联系客服；取消或过账都不代表渠道退款已到账，本单账号不会因完单而再次上架。",
+        ? "本单未开租终止，账号占用已解除。退款进度见下方记录，到账以退款记录为准。"
+        : "订单已结束，本页不再提供开租或结算操作。退款、售后和客服入口仍可使用；到账以退款记录为准。",
       primary: progressRefund, secondary: [progressSupport, progressRefresh] };
   }
 
@@ -710,19 +763,19 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     // unknown instead of guessing which record won.
     if (terminal && facts && facts.phase !== "POSTED") {
       return { ...base, tone: "unknown", title: "查看退款与售后", owner: "平台",
-        note: "订单主状态已完成，但本次结算读取尚未给出已过账结论。已读到的订单事实保持有效；本页不再提供开租或结算操作，可按实际权限查看退款进度、提交售后记录或联系客服。",
+        note: "订单已完成，但结算记录还没有读到最终结果。已展示的信息仍然有效；本页不再提供开租或结算操作，退款与售后仍可查看。",
         primary: progressRefund, secondary: [progressSupport, progressRefresh], pendingRead: true,
-        known: [...known, "结算阶段与订单主状态不一致，未确认的事项保持未知"] };
+        known: [...known, "结算阶段与订单状态不一致，未确认的事项保持未知"] };
     }
     if (readFailed && !facts) {
       return { ...base, tone: "unknown", title: "核对当前进度", owner: "平台",
-        note: "本页暂时读不到开租与结算记录。已展示的订单金额与时间仍然有效；消耗、费用及退款没有读到就保持未知，不显示为成功或到账。可重试读取或联系客服。",
+        note: "开租与结算记录暂时读不到；已展示的金额和时间不受影响。请重试或联系客服。",
         primary: progressRetry, secondary: [progressSupport], pendingRead: true,
         known: [...known, "本次开租与结算读取未成功，未确认的事项保持未知"] };
     }
     if (!facts) {
       return { ...base, tone: "unknown", title: "正在核对当前进度", owner: "平台",
-        note: "页面正在按服务端记录核对开租与结算进度，暂时不展示阶段结论；已读到的订单事实保持有效。",
+        note: "正在核对订单进度，请稍候。",
         primary: progressRefresh, secondary: [progressSupport], pendingRead: true };
     }
     // The server can explicitly mark the stage unverifiable. Never turn that into a confident
@@ -740,22 +793,22 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
     }
     if (facts.phase === "POSTED") {
       return { ...base, tone: "done", title: "查看退款与售后", owner: "暂无",
-        note: "结算已过账。应退金额、平台退款处理状态与渠道到账是三件独立的事，页面不会把过账写成已到账。可按实际权限查看退款进度、提交售后记录或联系客服；本单账号不会再次上架。",
+        note: "结算已完成。退款到账以退款记录为准；售后和客服入口仍可使用。",
         primary: progressRefund, secondary: [progressSupport], terminal: true, noNewTransaction: true };
     }
     if (facts.phase === "DECISION_REJECTED") {
       return { ...base, tone: "warning", title: "等待新的结算方案", owner: "客服",
-        note: "这一版结算未达成一致，拒绝不会使它生效。请等待客服按新的期末数据或人工调整生成新版本后再核对；期间不需要重复确认。",
+        note: "这一版结算未达成一致。请等待客服生成新版本后再核对，期间无需重复确认。",
         primary: progressSupport, secondary: [progressRefresh, progressRefund] };
     }
     if (facts.phase === "INTAKE_PENDING") {
       return { ...base, tone: "waiting", title: "等待客服复核结束申请", owner: "客服",
-        note: "期末数据已提交，等待受权客服核实原因并复核；复核与双方确认完成后结算才生效。当前没有需要你提交的写操作。",
+        note: "结束申请已提交，等待客服核对并生成结算方案。",
         primary: progressRefresh, secondary: [progressSupport] };
     }
     if (facts.phase === "DECISION_PENDING") {
       return { ...base, tone: "active", title: "核对并确认本版结算", owner: "你",
-        note: "请在本页结算区核对本次消耗、费用承担与责任归属；金额由服务端预览与版本给出。拒绝与确认是不同结果，拒绝不会使这一版生效。",
+        note: "请核对本次消耗、费用承担与责任归属后确认或拒绝。",
         primary: { label: "确认结算", target: "trade" }, secondary: [progressSupport] };
     }
     if (facts.phase === "DECISION_WAITING") {
@@ -768,14 +821,14 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
       if (facts.openingVersionNo === null) {
         const generationPending = facts.openingGenerationState === "REVIEW_REQUIRED" || facts.openingGenerationRecoveryRequired;
         return { ...base, tone: "warning", title: "联系客服核对开租清单", owner: "客服",
-          note: "付款已接纳，但本单尚未读到自动生成的开租清单。资料不足或生成待核对时由客服办理；订单群准备好不等于已经开租，页面不会自动生成清单或交付。请刷新或联系客服。",
+          note: "付款已确认，但开租清单还没有读到。请刷新或联系客服。",
           primary: progressSupport, secondary: [progressOrderGroups, progressRefresh],
           known: [...known, generationPending ? "服务端记录：开租清单生成待客服核对" : "本次结算读取没有返回开租清单"] };
       }
       const due = typeof facts.autoConfirmDueAt === "string" && Number.isFinite(Date.parse(facts.autoConfirmDueAt)) ? facts.autoConfirmDueAt : null;
       if (!facts.myAck) {
         return { ...base, tone: "active", title: "确认期初清单并开租", owner: "你",
-          note: `期初数量取自本单冻结报价，双方各自确认同一版本；确认来源会区分本人、客服代操作与系统自动确认，截止时间取本单冻结值。${due ? "" : "本单未记录自动确认截止时间，页面不会承诺系统自动确认。"}付款、建群与沟通都不等于已开租。`,
+          note: "核对期初数量后确认开租。付款和建群不等于已开租。",
           primary: { label: "确认期初并开租", target: "trade" }, secondary: [progressSupport],
           known: due ? [...known, `本单冻结的自动确认截止时间：${formatOrderTime(due)}`] : [...known, "本单未记录自动确认截止时间"] };
       }
@@ -787,7 +840,7 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
         known: due ? [...known, `本单冻结的自动确认截止时间：${formatOrderTime(due)}`] : [...known, "本单未记录自动确认截止时间"] };
     }
     return { ...base, tone: "active", title: "发起结束租用并核对消耗", owner: "你",
-      note: "按实际消耗或期末剩余填写后，先由服务端预览金额，再提交结算；最终金额不在浏览器计算。消耗偏低属于提前结束时，需客服复核并按新方案确认。",
+      note: "按实际消耗填写，预览金额后提交；提前结束需客服复核。",
       primary: { label: "发起结束租用", target: "trade" }, secondary: [progressSupport] };
   }
 
@@ -905,6 +958,15 @@ export function unitHint(name: string, unit: string | null | undefined): string 
 
 export function groupedInteger(value: string): string {
   return value.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** Haff quantities are stored in base units; the product shows the exact M quantity only. */
+export function haffMillionsText(quantity: string | null | undefined): string {
+  if (quantity === null || quantity === undefined || quantity === "" || !/^\d+$/.test(quantity)) return quantity ?? "未记录";
+  const value = BigInt(quantity);
+  const whole = value / 1_000_000n;
+  const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return `${groupedInteger(whole.toString())}${fraction ? `.${fraction}` : ""} M`;
 }
 
 /** HAFF quantities are base units; show the exact integer plus the exact M helper. */

@@ -6,19 +6,28 @@ import { readAdminContext } from "../auth/auth-security";
 import { ADMIN_PERMISSION, hasPermission, requirePermission } from "../auth/admin-authorization";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
-import { decodeId, requireAdminAccess, requireOrigin, safely } from "../supply/supply-routes";
+import { decodeId, requireAdminAccess, requireOrigin, runIdempotentWrite, safely } from "../supply/supply-routes";
 import { bodyOf, ensureOnlyFields, invalid, notFound, sendJson, type SupplyNodeRequest, type SupplyNodeResponse } from "../supply/supply-util";
 import {
   createLegalDraft,
+  FIXED_DOC_TYPES,
   listLegalDocuments,
   readLegalDocumentById,
-  parseLegalDocType,
+  parseFixedDocType,
   readCurrentLegalDocument,
   readCurrentPlatformDocuments,
-  sealLegalDocument,
+  returnLegalDocumentToDraft,
   updateLegalDraft,
   type LegalDocType,
 } from "./legal-documents";
+import {
+  FIXED_DOCUMENT_PUBLISH_PERMISSION,
+  FIXED_DOCUMENT_SUBMIT_PERMISSION,
+  blockChangeCounts,
+  diffDocumentBlocks,
+  submitFixedDocumentPublish,
+} from "./fixed-document-publish";
+import { fixedDocumentPlainText } from "./fixed-document-projection";
 
 type Options = AuthSecurityOptions;
 type Response = SupplyNodeResponse & { send?: (body: Buffer | string) => void };
@@ -43,6 +52,7 @@ async function handlePublic(request: SupplyNodeRequest, response: Response, opti
     sendJson(response, 200, result, requestId, "public, max-age=0, must-revalidate");
     return;
   }
+  // 提前结算告知只进订单快照，不在公开文书路由暴露。
   const docType = DOC_ROUTES.get(path.slice(1));
   if (!docType) throw notFound();
   const version = new URL(request.originalUrl ?? request.url ?? "/", "http://local").searchParams.get("version") ?? undefined;
@@ -71,6 +81,11 @@ async function writeAudit(client: PoolClient, actorId: string, sessionId: string
   });
 }
 
+function canReadLegal(access: Awaited<ReturnType<typeof requireAdminAccess>>): boolean {
+  return [ADMIN_PERMISSION.contentPlatformRead, ADMIN_PERMISSION.contentPlatformEdit, ADMIN_PERMISSION.contentPlatformPublish,
+    FIXED_DOCUMENT_SUBMIT_PERMISSION, FIXED_DOCUMENT_PUBLISH_PERMISSION].some(permission => hasPermission(access, permission));
+}
+
 export async function handleLegalAdminRoute(request: SupplyNodeRequest, response: Response, options: Options): Promise<void> {
   const requestId = ensureApiV1RequestId(request);
   response.setHeader("X-Request-Id", requestId);
@@ -81,58 +96,107 @@ export async function handleLegalAdminRoute(request: SupplyNodeRequest, response
   const path = requestPath(request, "/api/v1/admin/legal-documents").path;
 
   if (method === "GET" && path === "/") {
-    const docType = new URL(request.url ?? "/", "http://local").searchParams.get("docType");
+    const requestedType = new URL(request.url ?? "/", "http://local").searchParams.get("docType");
+    const docType = requestedType ? parseFixedDocType(requestedType) : undefined;
     const result = await withTransaction(options.pool, async client => {
       const access = await requireAdminAccess(client, actor.id);
-      if (![ADMIN_PERMISSION.contentPlatformRead, ADMIN_PERMISSION.contentPlatformEdit, ADMIN_PERMISSION.contentPlatformPublish].some(permission => hasPermission(access, permission))) {
-        requirePermission(access, ADMIN_PERMISSION.contentPlatformRead);
-      }
-      return listLegalDocuments(client, docType ? parseLegalDocType(docType) : undefined);
+      if (!canReadLegal(access)) requirePermission(access, ADMIN_PERMISSION.contentPlatformRead);
+      const versions = await listLegalDocuments(client, docType);
+      const current = await Promise.all((docType ? [docType] : FIXED_DOC_TYPES).map(type => readCurrentLegalDocument(client, type)));
+      return { versions, current: current.filter(version => version !== null) };
     });
-    sendJson(response, 200, { versions: result }, requestId);
+    sendJson(response, 200, result, requestId);
     return;
   }
   if (method === "POST" && path === "/drafts") {
     const body = bodyOf(request);
-    const result = await withTransaction(options.pool, async client => {
-      const access = await requireAdminAccess(client, actor.id);
-      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
-      const draft = await createLegalDraft(client, actor.id, body);
-      await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.draft.create", draft.id, null, draft);
-      return draft;
-    });
-    sendJson(response, 200, result, requestId);
+    await runIdempotentWrite(
+      options, request, response, requestId,
+      { principalId: actor.id, operation: "legal.document.draft.create" },
+      { realm: "admin", id: actor.id, sessionId: actor.sessionId }, body,
+      async client => { requirePermission(await requireAdminAccess(client, actor.id), ADMIN_PERMISSION.contentPlatformEdit); },
+      async client => {
+        const draft = await createLegalDraft(client, actor.id, body);
+        await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.draft.create", draft.id, null, draft);
+        return { status: 200, body: draft };
+      },
+    );
     return;
   }
   const update = /^\/drafts\/([^/]+)$/.exec(path);
   if (method === "PUT" && update) {
     const id = decodeId(update[1]!);
     const body = bodyOf(request);
+    await runIdempotentWrite(
+      options, request, response, requestId,
+      { principalId: actor.id, operation: "legal.document.draft.update", resourceId: id },
+      { realm: "admin", id: actor.id, sessionId: actor.sessionId }, body,
+      async client => { requirePermission(await requireAdminAccess(client, actor.id), ADMIN_PERMISSION.contentPlatformEdit); },
+      async client => {
+        const before = await snapshot(client, id);
+        const draft = await updateLegalDraft(client, id, body);
+        await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.draft.update", id, before, draft);
+        return { status: 200, body: draft };
+      },
+    );
+    return;
+  }
+  // 用户端预览与线上差异：只读，按块比对纯文字，不改任何存储正文。
+  const diff = /^\/drafts\/([^/]+)\/diff$/.exec(path);
+  if (method === "GET" && diff) {
+    const id = decodeId(diff[1]!);
     const result = await withTransaction(options.pool, async client => {
       const access = await requireAdminAccess(client, actor.id);
-      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
-      const before = await snapshot(client, id);
-      const draft = await updateLegalDraft(client, id, body);
-      await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.draft.update", id, before, draft);
-      return draft;
+      if (!canReadLegal(access)) requirePermission(access, ADMIN_PERMISSION.contentPlatformRead);
+      const draft = await readLegalDocumentById(client, id);
+      if (!draft) throw notFound();
+      const current = await readCurrentLegalDocument(client, draft.docType);
+      const blocks = diffDocumentBlocks(current ? fixedDocumentPlainText(current) : "", fixedDocumentPlainText(draft));
+      return { draft, current, blocks, changes: blockChangeCounts(blocks) };
     });
     sendJson(response, 200, result, requestId);
     return;
   }
-  const seal = /^\/drafts\/([^/]+)\/seal$/.exec(path);
-  if (method === "POST" && seal) {
-    const id = decodeId(seal[1]!);
+  // 审批被驳回 / 撤回后退回草稿；仍在处理中的申请不能退回。
+  const back = /^\/drafts\/([^/]+)\/return$/.exec(path);
+  if (method === "POST" && back) {
+    const id = decodeId(back[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["expectedRevision"]);
-    const result = await withTransaction(options.pool, async client => {
-      const access = await requireAdminAccess(client, actor.id);
-      requirePermission(access, ADMIN_PERMISSION.contentPlatformPublish);
-      const before = await snapshot(client, id);
-      const sealed = await sealLegalDocument(client, actor.id, id, body.expectedRevision);
-      await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.seal", id, before, sealed);
-      return sealed;
-    });
-    sendJson(response, 200, result, requestId);
+    ensureOnlyFields(body, []);
+    await runIdempotentWrite(
+      options, request, response, requestId,
+      { principalId: actor.id, operation: "legal.document.return", resourceId: id },
+      { realm: "admin", id: actor.id, sessionId: actor.sessionId }, body,
+      async client => { requirePermission(await requireAdminAccess(client, actor.id), FIXED_DOCUMENT_SUBMIT_PERMISSION); },
+      async client => {
+        const before = await snapshot(client, id);
+        const draft = await returnLegalDocumentToDraft(client, id);
+        await writeAudit(client, actor.id, actor.sessionId, requestId, "legal.document.return", id, before, draft);
+        return { status: 200, body: draft };
+      },
+    );
+    return;
+  }
+  // 提交「固定文书发布」审批：同一事务重核冻结事实、建真实申请、法律文书草稿置 PENDING。
+  // 生效只能由审批中心决定事务内的执行器完成，这里不写任何决定或执行回执。
+  if (method === "POST" && path === "/fixed-document-submissions") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["items", "reason"]);
+    await runIdempotentWrite(
+      options, request, response, requestId,
+      { principalId: actor.id, operation: "content.fixed_document.submit" },
+      { realm: "admin", id: actor.id, sessionId: actor.sessionId },
+      body,
+      async client => {
+        const access = await requireAdminAccess(client, actor.id);
+        requirePermission(access, FIXED_DOCUMENT_SUBMIT_PERMISSION);
+        requirePermission(access, ADMIN_PERMISSION.approvalRequestCreate);
+      },
+      async client => {
+        const submission = await submitFixedDocumentPublish(client, actor, { payload: { items: body.items }, reason: body.reason as string }, requestId);
+        return { status: 200, body: submission };
+      },
+    );
     return;
   }
   throw notFound();

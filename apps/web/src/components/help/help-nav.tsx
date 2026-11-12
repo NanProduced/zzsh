@@ -4,20 +4,22 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
+  BookOpen,
   Coins,
+  Folder,
   Headphones,
   KeyRound,
   ListTree,
   Megaphone,
   ScrollText,
+  Shield,
   Store,
   Ticket,
   X,
   ChevronRight,
   type LucideIcon,
 } from "lucide-react";
-import type { AnyHelpCategoryId } from "@/content/help/types";
-import type { HelpNavCategory, HelpNavData } from "./nav-data";
+import { flattenHelpNavArticles, type HelpNavData, type HelpNavEntry } from "./nav-data";
 import "./help.css";
 
 const categoryIcons: Record<string, LucideIcon> = {
@@ -28,75 +30,51 @@ const categoryIcons: Record<string, LucideIcon> = {
   "after-sale": Headphones,
   membership: Megaphone,
   agreement: ScrollText,
+  book: BookOpen,
+  folder: Folder,
+  shield: Shield,
 };
+
+export function helpFolderIcon(iconKey: string | null, fallback: string) {
+  const key = iconKey ?? fallback;
+  return Object.hasOwn(categoryIcons, key) ? categoryIcons[key]! : Folder;
+}
 
 type NavProps = {
   data: HelpNavData;
-  activeCategory?: AnyHelpCategoryId;
   activeSlug?: string;
   /** 点击文章链接后回调（移动端抽屉用于关闭） */
   onNavigate?: () => void;
 };
 
-function NavGroup({ group, activeCategory, activeSlug, onNavigate }: { group: HelpNavCategory; activeCategory?: AnyHelpCategoryId; activeSlug?: string; onNavigate?: () => void }) {
-  const Icon = categoryIcons[group.id] ?? ListTree;
-  const isCurrentCategory = activeCategory === group.id;
-  // 文章列表仅在具体文章页展开；分类页仅展示分类层级，避免与正文文章列表重复
-  const shouldExpandArticles = Boolean(activeSlug) && isCurrentCategory;
-  const targetHref = group.articles[0] ? `/help/${group.articles[0].slug}` : `/help?category=${group.id}`;
+function NavEntry({ entry, activeSlug, onNavigate, nested = false }: Omit<NavProps, "data"> & { entry: HelpNavEntry; nested?: boolean }) {
+  if (entry.kind === "ARTICLE") {
+    return <li><Link className="help-nav-article-link" href={`/help/${entry.slug}`} aria-current={activeSlug === entry.slug ? "page" : undefined} onClick={onNavigate}>{entry.title}</Link></li>;
+  }
+  const Icon = nested ? Folder : helpFolderIcon(entry.iconKey, entry.id);
+  const articles = flattenHelpNavArticles({ entries: entry.children });
+  const expanded = articles.some(article => article.slug === activeSlug);
   return (
-    <li className="help-nav-category">
-      <Link
-        className="help-nav-category-link"
-        href={targetHref}
-        aria-current={isCurrentCategory && !activeSlug ? "page" : undefined}
-        aria-expanded={group.articles.length > 0 ? shouldExpandArticles : undefined}
-        onClick={onNavigate}
-      >
-        <Icon size={17} className="help-nav-icon" aria-hidden="true" />
-        <span>{group.label}</span>
-        {group.articles.length > 0 ? (
-          <ChevronRight
-            size={14}
-            className="help-nav-chevron"
-            aria-hidden="true"
-            style={shouldExpandArticles ? { transform: "rotate(90deg)" } : undefined}
-          />
-        ) : null}
-      </Link>
-      {shouldExpandArticles && group.articles.length > 0 ? (
+    <li>
+      <details className="help-nav-category" key={activeSlug} open={expanded}>
+        <summary className="help-nav-category-link">
+          <Icon size={16} className="help-nav-icon" aria-hidden="true" />
+          <span>{entry.title}</span>
+          <ChevronRight size={14} className="help-nav-chevron" aria-hidden="true" />
+        </summary>
         <ul className="help-nav-articles">
-          {group.articles.map((article) => (
-            <li key={article.slug}>
-              <Link
-                className="help-nav-article-link"
-                href={`/help/${article.slug}`}
-                aria-current={activeSlug === article.slug ? "page" : undefined}
-                onClick={onNavigate}
-              >
-                {article.title}
-              </Link>
-            </li>
-          ))}
+          {entry.children.map(child => <NavEntry key={child.id} entry={child} activeSlug={activeSlug} onNavigate={onNavigate} nested />)}
         </ul>
-      ) : null}
+      </details>
     </li>
   );
 }
 
-export function HelpNavTree({ data, activeCategory, activeSlug, onNavigate }: NavProps) {
+export function HelpNavTree({ data, activeSlug, onNavigate }: NavProps) {
   return (
     <nav aria-label="帮助目录">
       <ul className="help-nav-list">
-        {data.categories.filter(group => group.articles.length > 0).map((group) => (
-          <NavGroup key={group.id} group={group} activeCategory={activeCategory} activeSlug={activeSlug} onNavigate={onNavigate} />
-        ))}
-      </ul>
-      {data.aux.some(group => group.articles.length > 0) ? <hr className="help-nav-divider" /> : null}
-      <ul className="help-nav-list">
-        {data.aux.filter(group => group.articles.length > 0).map((group) => (
-          <NavGroup key={group.id} group={group} activeCategory={activeCategory} activeSlug={activeSlug} onNavigate={onNavigate} />
-        ))}
+        {data.entries.map(entry => <NavEntry key={entry.id} entry={entry} activeSlug={activeSlug} onNavigate={onNavigate} />)}
       </ul>
     </nav>
   );

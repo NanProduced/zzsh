@@ -1,0 +1,45 @@
+{
+  "key": "RENTAL_FEES",
+  "kind": "notice",
+  "file": "notices/RENTAL_FEES.json",
+  "meta": {
+    "title": "报价费用说明",
+    "sections": [
+      {
+        "id": "help",
+        "title": "费用说明",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "物资先预付，最终按实际消耗和适用条款结算。公开参考费用不能替代个人报价，会员价格与实际租客押金由服务端核定。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "help",
+        "children": [
+          {
+            "text": "费用说明",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "物资先预付，最终按实际消耗和适用条款结算。公开参考费用不能替代个人报价，会员价格与实际租客押金由服务端核定。"
+          }
+        ]
+      }
+    ]
+  }
+}

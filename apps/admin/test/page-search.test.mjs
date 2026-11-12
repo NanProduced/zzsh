@@ -81,7 +81,12 @@ test("page search only lists implemented pages in the current permission set", (
     "/supply/rules?section=items",
     "/supply/rules?section=skin",
     "/supply/gunsmith",
-    "/content",
+    "/content/help",
+    "/content/updates",
+    "/content/legal",
+    "/content/pages",
+    "/content/media",
+    "/docs",
     "/orders",
     "/avatar-reviews",
     "/membership-growth",
@@ -287,7 +292,10 @@ test("aliases, pinyin initials, and multi-token AND matching work accurately", (
   assert.deepEqual(filterSearchablePages(boss, "定价").map((p) => p.path), ["/supply/rules?section=pricing"]);
   assert.deepEqual(filterSearchablePages(boss, "价目").map((p) => p.path), ["/supply/rules?section=items", "/supply/rules?section=overview"]);
   assert.deepEqual(filterSearchablePages(boss, "图片审核").map((p) => p.path), ["/supply/media"]);
-  assert.deepEqual(filterSearchablePages(boss, "素材").map((p) => p.path), ["/supply/media"]);
+  assert.deepEqual(filterSearchablePages(boss, "素材").map((p) => p.path), ["/supply/media", "/content/media"]);
+  assert.deepEqual(filterSearchablePages(boss, "素材库").map((p) => p.path), ["/content/media"]);
+  assert.deepEqual(filterSearchablePages(boss, "展示位").map((p) => p.path), ["/content/pages"]);
+  assert.deepEqual(filterSearchablePages(boss, "固定文书").map((p) => p.path), ["/content/legal"]);
   assert.deepEqual(filterSearchablePages(boss, "外观").map((p) => p.path), ["/settings"]);
   assert.deepEqual(filterSearchablePages(boss, "偏好").map((p) => p.path), ["/settings"]);
   assert.deepEqual(filterSearchablePages(boss, "待办").map((p) => p.path), ["/approvals"]);

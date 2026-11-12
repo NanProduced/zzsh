@@ -21,7 +21,8 @@ function fixture(rows: unknown[], present: unknown = true) {
     query: async (sql: string) => { queries.push(sql); return { rows: sql.includes("to_regclass") ? [{ present }] : rows }; },
     connect: async () => { aclConnections++; throw new Error("ACL_CONNECTION_REACHED"); },
   };
-  const exports: Record<string, any> = {}, native = createRequire(runnerPath);
+  const exports: Record<string, any> = {};
+  const native = createRequire(resolve("dist/src/database/business-migrations.js"));
   const require = (id: string) => id === "drizzle-orm/node-postgres" ? { drizzle: () => pool }
     : id === "drizzle-orm/node-postgres/migrator" ? { migrate: async () => { ddlCalls++; } }
     : id === "./business-migration-compat" ? { matchesKnown0155LineEndings } : native(id);

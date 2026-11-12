@@ -22,7 +22,7 @@ type AuthIntent = {
   onSuccess?: AuthCallback;
 };
 type AuthOpenOptions = { inviteCode?: string; replace?: boolean };
-type AuthOverlayApi = { open: (next?: string, onSuccess?: AuthCallback, options?: AuthOpenOptions) => void };
+type AuthOverlayApi = { open: (next?: string, onSuccess?: AuthCallback, options?: AuthOpenOptions) => void; isOpen: boolean };
 const AuthOverlayContext = createContext<AuthOverlayApi | null>(null);
 
 export function useAuthOverlay(): AuthOverlayApi {
@@ -311,7 +311,7 @@ export function AuthOverlayProvider({ children }: { children: ReactNode }) {
     void finish();
   }, [finish, open, session.status]);
 
-  return <AuthOverlayContext.Provider value={{ open: openAuth }}>
+  return <AuthOverlayContext.Provider value={{ open: openAuth, isOpen: open }}>
     <Suspense fallback={null}><AuthRouteObserver onChange={setRoute} /></Suspense>
     {children}
     {/* Protected pages own their recovery state; public-page entry failures stay next to navigation. */}

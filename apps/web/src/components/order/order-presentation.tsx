@@ -59,8 +59,8 @@ export function statusTone(order: Order): string {
   return "unknown";
 }
 
-export function OrderStatusBadge({ order }: { order: Order }) {
-  return <span className="order-status" data-state={statusTone(order)}>{statusLabel(order)}</span>;
+export function OrderStatusBadge({ order, label }: { order: Order; label?: string }) {
+  return <span className="order-status" data-state={statusTone(order)}>{label ?? statusLabel(order)}</span>;
 }
 
 /** Agreed rental term; never converted into an elapsed/remaining countdown. */

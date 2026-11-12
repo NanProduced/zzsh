@@ -1,6 +1,8 @@
-import { useState, forwardRef, type InputHTMLAttributes, type ButtonHTMLAttributes } from "react";
+import { useEffect, useState, forwardRef, type InputHTMLAttributes, type ButtonHTMLAttributes } from "react";
 import { AlertCircle, CheckCircle2, CheckIcon, Info, LaptopIcon, MoonIcon, SunIcon, TriangleAlert } from "lucide-react";
 import { Icons } from "./icons";
+import { createPortal } from "react-dom";
+import { workspacePortalContainer } from "../lib/workspace-portal";
 import { Alert, AlertDescription } from "./ui/alert";
 
 /**
@@ -33,6 +35,26 @@ export function StatusMessage({
       <Icon aria-hidden="true" />
       <AlertDescription className="text-foreground/85">{error || success}</AlertDescription>
     </Alert>
+  );
+}
+
+export function FloatingStatusMessage(props: Pick<Parameters<typeof StatusMessage>[0], "error" | "success" | "tone">) {
+  const message = props.error || props.success;
+  return message ? <TimedStatusMessage key={`${props.tone ?? ""}:${props.error ? "error" : "success"}:${message}`} {...props} /> : null;
+}
+
+function TimedStatusMessage(props: Pick<Parameters<typeof StatusMessage>[0], "error" | "success" | "tone">) {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setVisible(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, []);
+  if (!visible || typeof document === "undefined") return null;
+  return createPortal(
+    <div data-slot="floating-status" className="pointer-events-none fixed right-4 bottom-4 z-[80] w-[calc(100%-2rem)] max-w-sm">
+      <StatusMessage {...props} className="bg-popover break-words shadow-md" />
+    </div>,
+    workspacePortalContainer() ?? document.body,
   );
 }
 

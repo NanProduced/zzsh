@@ -1,0 +1,157 @@
+{
+  "key": "RENTAL_PROCESS",
+  "kind": "notice",
+  "file": "notices/RENTAL_PROCESS.json",
+  "meta": {
+    "title": "租赁流程",
+    "sections": [
+      {
+        "id": "review",
+        "title": "核对资料与费用",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "查看公开属性、资源库存和本人的适用报价。"
+          }
+        ]
+      },
+      {
+        "id": "order",
+        "title": "确认并创建订单",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "阅读本次适用条款，按页面提示确认订单与支付。"
+          }
+        ]
+      },
+      {
+        "id": "delivery",
+        "title": "客服协助交付",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "付款后留意订单状态和站内消息，由真人客服协助履约。"
+          }
+        ]
+      },
+      {
+        "id": "opening",
+        "title": "确认交付后开租",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "核对同一版期初清单并完成双方确认，付款不等于已经开租。"
+          }
+        ]
+      },
+      {
+        "id": "settlement",
+        "title": "按实际消耗结算",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "归还时按订单流程核对消耗与结算；退款应付与实际到账分别记录。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "review",
+        "children": [
+          {
+            "text": "核对资料与费用",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "查看公开属性、资源库存和本人的适用报价。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "order",
+        "children": [
+          {
+            "text": "确认并创建订单",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "阅读本次适用条款，按页面提示确认订单与支付。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "delivery",
+        "children": [
+          {
+            "text": "客服协助交付",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "付款后留意订单状态和站内消息，由真人客服协助履约。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "opening",
+        "children": [
+          {
+            "text": "确认交付后开租",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "核对同一版期初清单并完成双方确认，付款不等于已经开租。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "settlement",
+        "children": [
+          {
+            "text": "按实际消耗结算",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "归还时按订单流程核对消耗与结算；退款应付与实际到账分别记录。"
+          }
+        ]
+      }
+    ]
+  }
+}

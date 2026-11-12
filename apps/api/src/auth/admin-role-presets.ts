@@ -43,6 +43,13 @@ export const SUPPORT_PRESET_COMPENSATION_ADDITIONS = [P.orderCompensationRequest
 export const OPS_PRESET_COMPENSATION_ADDITIONS = [P.orderCompensationRequest, P.orderCompensationApprove] as const;
 
 /**
+ * 内部文档库（P1a，迁移 0199 追加）。客服可读可评论；运营另可管理。
+ * Boss 走 is_boss 旁路，manage 可下放、不进 BOSS_ONLY_PERMISSIONS。
+ */
+export const SUPPORT_PRESET_DOCS_ADDITIONS = [P.docsInternalRead, P.docsInternalComment] as const;
+export const OPS_PRESET_DOCS_ADDITIONS = [P.docsInternalRead, P.docsInternalComment, P.docsInternalManage] as const;
+
+/**
  * 迁移 0118 追加到 role_preset_ops 的能力（Owner 2026-10-31）。护栏在服务端：
  * 非 Boss 永远不能以 Boss 账号或自己为目标；创建仍受 assertDelegable 约束且
  * 需另持 admin.permission.grant（仍仅 Boss）才能附带授权。
@@ -124,8 +131,8 @@ export const OPS_PRESET_PERMISSIONS = [
 ] as const;
 
 export const ROLE_PRESET_GRANTS = {
-  role_preset_support: [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS, ...SUPPORT_PRESET_COMPENSATION_ADDITIONS],
-  role_preset_ops: [...OPS_PRESET_PERMISSIONS, ...OPS_PRESET_COMPENSATION_ADDITIONS],
+  role_preset_support: [...SUPPORT_PRESET_PERMISSIONS, ...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS, ...SUPPORT_PRESET_COMPENSATION_ADDITIONS, ...SUPPORT_PRESET_DOCS_ADDITIONS],
+  role_preset_ops: [...OPS_PRESET_PERMISSIONS, ...OPS_PRESET_COMPENSATION_ADDITIONS, ...OPS_PRESET_DOCS_ADDITIONS],
 } as const;
 /**
  * 只留 Boss 的能力不能通过角色授予（Boss 自己也不行）。只拦新增，

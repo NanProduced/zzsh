@@ -1,0 +1,157 @@
+{
+  "key": "PUBLISH_NOTICE",
+  "kind": "notice",
+  "file": "notices/PUBLISH_NOTICE.json",
+  "meta": {
+    "title": "出租上架须知",
+    "sections": [
+      {
+        "id": "face",
+        "title": "绑定人脸须为号主本人",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "解除人脸验证需准备双设备：两部手机，或手机与电脑。"
+          }
+        ]
+      },
+      {
+        "id": "withdrawal",
+        "title": "核对提现条件",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "可用渠道和办理条件以钱包的当前状态为准。"
+          }
+        ]
+      },
+      {
+        "id": "inventory",
+        "title": "如实申报资料与库存",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "申报可出租的全量库存，留空与 0 含义不同。物品名称和计量单位以当前目录与表单为准；有封禁记录时按要求提供对应资料。"
+          }
+        ]
+      },
+      {
+        "id": "quote",
+        "title": "核对报价、租期与收入",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "租期和金额由平台按本次规则计算；修改资料或规则变化后需要重新核价。预计收入不代表最终净到账，押金不计入收入。"
+          }
+        ]
+      },
+      {
+        "id": "protection",
+        "title": "确认上号配合与赔付方案",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "请填写实际可协助上号的时间。包赔费用、押金要求和保障条件以本次有效报价及条款为准；阅读须知不代表接受本次报价。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "face",
+        "children": [
+          {
+            "text": "绑定人脸须为号主本人",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "解除人脸验证需准备双设备：两部手机，或手机与电脑。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "withdrawal",
+        "children": [
+          {
+            "text": "核对提现条件",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "可用渠道和办理条件以钱包的当前状态为准。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "inventory",
+        "children": [
+          {
+            "text": "如实申报资料与库存",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "申报可出租的全量库存，留空与 0 含义不同。物品名称和计量单位以当前目录与表单为准；有封禁记录时按要求提供对应资料。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "quote",
+        "children": [
+          {
+            "text": "核对报价、租期与收入",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "租期和金额由平台按本次规则计算；修改资料或规则变化后需要重新核价。预计收入不代表最终净到账，押金不计入收入。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "id": "protection",
+        "children": [
+          {
+            "text": "确认上号配合与赔付方案",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "请填写实际可协助上号的时间。包赔费用、押金要求和保障条件以本次有效报价及条款为准；阅读须知不代表接受本次报价。"
+          }
+        ]
+      }
+    ]
+  }
+}

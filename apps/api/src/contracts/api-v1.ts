@@ -61,6 +61,7 @@ export const API_V1_ERROR_CODES = {
   CONFLICT: "CONFLICT",
   RATE_LIMITED: "RATE_LIMITED",
   IM_UNAVAILABLE: "IM_UNAVAILABLE",
+  IMAGES_DISABLED: "IMAGES_DISABLED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
 } as const;
 
@@ -72,7 +73,14 @@ export type ApiV1ErrorDetailCode =
   | "INVALID_BODY"
   | "REQUIRED_FIELD"
   | "INVALID_FIELD"
-  | "UNKNOWN_FIELD";
+  | "UNKNOWN_FIELD"
+  | "DOC_DELETED"
+  | "DOC_PURGED"
+  | "MOVE_INVALID"
+  | "PLATE_INVALID"
+  | "PLACEHOLDER_FOUND"
+  | "MEDIA_NOT_ALLOWED"
+  | "SLUG_RETIRED";
 
 export type ApiV1ErrorDetail = {
   path: string;
@@ -93,7 +101,7 @@ export class ApiV1ErrorDetailDto {
   path!: string;
 
   @ApiProperty({
-    enum: ["INVALID_BODY", "REQUIRED_FIELD", "INVALID_FIELD", "UNKNOWN_FIELD"],
+    enum: ["INVALID_BODY", "REQUIRED_FIELD", "INVALID_FIELD", "UNKNOWN_FIELD", "DOC_DELETED", "DOC_PURGED", "MOVE_INVALID", "PLATE_INVALID", "PLACEHOLDER_FOUND", "MEDIA_NOT_ALLOWED", "SLUG_RETIRED"],
     example: "INVALID_FIELD",
   })
   code!: ApiV1ErrorDetailCode;

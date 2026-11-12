@@ -1,0 +1,45 @@
+{
+  "key": "PUBLISH_SAFE_BOX",
+  "kind": "notice",
+  "file": "notices/PUBLISH_SAFE_BOX.json",
+  "meta": {
+    "title": "安全箱档位",
+    "sections": [
+      {
+        "id": "help",
+        "title": "填写说明",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "填写当前赛季永久安全箱容量，不包含临时体验卡；体验卡数量在库存区填写。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "help",
+        "children": [
+          {
+            "text": "填写说明",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "填写当前赛季永久安全箱容量，不包含临时体验卡；体验卡数量在库存区填写。"
+          }
+        ]
+      }
+    ]
+  }
+}

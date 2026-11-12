@@ -10,6 +10,7 @@ import {
   ComboboxGroup,
   ComboboxGroupLabel,
   ComboboxItem,
+  ComboboxList,
   ComboboxPopover,
   ComboboxProvider,
   ComboboxRow,
@@ -27,6 +28,7 @@ import { cva } from 'class-variance-authority';
 import { useComposedRef, useEditorRef } from 'platejs/react';
 
 import { cn } from '@/lib/utils';
+import { workspacePortalContainer } from '@/lib/workspace-portal';
 
 type FilterFn = (
   item: { value: string; group?: string; keywords?: string[]; label?: string },
@@ -38,6 +40,7 @@ type InlineComboboxContextValue = {
   inputProps: UseComboboxInputResult['props'];
   inputRef: React.RefObject<HTMLInputElement | null>;
   removeInput: UseComboboxInputResult['removeInput'];
+  cancelInput: UseComboboxInputResult['cancelInput'];
   showTrigger: boolean;
   trigger: string;
   setHasEmpty: (hasEmpty: boolean) => void;
@@ -140,7 +143,7 @@ const InlineCombobox = ({
     };
   }, [editor, element]);
 
-  const { props: inputProps, removeInput } = useComboboxInput({
+  const { props: inputProps, removeInput, cancelInput } = useComboboxInput({
     cancelInputOnBlur: true,
     cursorState,
     autoFocus: isCreator,
@@ -168,6 +171,7 @@ const InlineCombobox = ({
       inputProps,
       inputRef,
       removeInput,
+      cancelInput,
       setHasEmpty,
       showTrigger,
       trigger,
@@ -179,14 +183,12 @@ const InlineCombobox = ({
       inputRef,
       inputProps,
       removeInput,
+      cancelInput,
       setHasEmpty,
     ]
   );
 
-  const store = useComboboxStore({
-    // open: ,
-    setValue: (newValue) => React.startTransition(() => setValue(newValue)),
-  });
+  const store = useComboboxStore({ setValue });
 
   const items = store.useState('items');
 
@@ -219,9 +221,10 @@ const InlineCombobox = ({
 
 const InlineComboboxInput = ({
   className,
+  placeholder,
   ref: propRef,
   ...props
-}: React.HTMLAttributes<HTMLInputElement> & {
+}: React.InputHTMLAttributes<HTMLInputElement> & {
   ref?: React.RefObject<HTMLInputElement | null>;
 }) => {
   const {
@@ -252,7 +255,7 @@ const InlineComboboxInput = ({
           className="invisible overflow-hidden text-nowrap"
           aria-hidden="true"
         >
-          {value || '\u200B'}
+          {value || placeholder || '\u200B'}
         </span>
 
         <Combobox
@@ -262,6 +265,7 @@ const InlineComboboxInput = ({
             className
           )}
           value={value}
+          placeholder={placeholder}
           autoSelect
           {...inputProps}
           {...props}
@@ -274,11 +278,12 @@ const InlineComboboxInput = ({
 InlineComboboxInput.displayName = 'InlineComboboxInput';
 
 const InlineComboboxContent: typeof ComboboxPopover = ({
+  children,
   className,
   ...props
 }) => {
-  // Portal prevents CSS from leaking into popover
   const store = useComboboxContext();
+  const { cancelInput } = React.useContext(InlineComboboxContext);
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (!store) return;
@@ -300,15 +305,20 @@ const InlineComboboxContent: typeof ComboboxPopover = ({
   }
 
   return (
-    <Portal>
+    <Portal portalElement={workspacePortalContainer()}>
       <ComboboxPopover
-        className={cn(
-          'scrollbar-hide z-[500] max-h-[288px] w-[300px] overflow-y-auto rounded-md bg-popover shadow-md',
-          className
-        )}
+        className={cn('plate-overlay z-[500]', className)}
+        role="presentation"
         onKeyDownCapture={handleKeyDown}
         {...props}
-      />
+      >
+        <ComboboxList className="plate-slash-list">{children}</ComboboxList>
+        <button type="button" className="plate-slash-dismiss" tabIndex={-1}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => cancelInput('manual', true)}>
+          <span>关闭菜单</span><kbd>esc</kbd>
+        </button>
+      </ComboboxPopover>
     </Portal>
   );
 };
@@ -322,7 +332,7 @@ const comboboxItemVariants = cva(
     variants: {
       interactive: {
         false: '',
-        true: 'cursor-pointer transition-colors hover:bg-accent hover:text-accent-foreground data-[active-item=true]:bg-accent data-[active-item=true]:text-accent-foreground',
+        true: 'cursor-pointer transition-colors data-[active-item=true]:bg-accent data-[active-item=true]:text-accent-foreground',
       },
     },
   }
@@ -362,6 +372,7 @@ const InlineComboboxItem = ({
 
   return (
     <ComboboxItem
+      focusOnHover
       className={cn(comboboxItemVariants(), className)}
       onClick={(event) => {
         removeInput(focusEditor);

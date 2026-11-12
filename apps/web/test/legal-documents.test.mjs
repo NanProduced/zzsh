@@ -22,6 +22,8 @@ function loadPage(reading) {
     if (name === "@/components/brand/brand-logo") return { BrandLogo: () => null };
     if (name === "@/content/legal/documents") return { getLegalDocument, getLegalDocumentSibling: (doc) => legalDocuments.find((record) => record.doc !== doc), isLegalDocId, listLegalDocuments };
     if (name === "@/lib/legal-server") return { readLegalDocument: async (doc, version) => reading(doc, version) };
+    if (name === "@zzsh/ui/plate-document.css") return {};
+    if (name === "@zzsh/ui/plate-document") return { PlateDocument: ({ document }) => React.createElement("h2", null, document.value[0].children[0].text) };
     return require(name);
   }, exports);
   return exports;
@@ -116,4 +118,17 @@ test("unknown and prototype doc ids go through notFound", async () => {
     await assert.rejects(() => page.default({ params: Promise.resolve({ doc }) }), (error) => error.status === 404, doc);
     await assert.rejects(() => page.generateMetadata({ params: Promise.resolve({ doc }) }), (error) => error.status === 404, doc);
   }
+});
+
+test("published Plate body is used for both current and pinned legal documents", async () => {
+  const page = loadPage((doc, version) => {
+    assert.equal(doc, "terms");
+    assert.equal(version, "legal_terms_1");
+    return { ...publishedTerms, document: { ...publishedTerms.document, bodyFormat: "plate",
+      bodyDocument: { format: "plate", schemaVersion: 1, preset: "legal", value: [{ type: "h2", children: [{ text: "服务范围" }] }] } } };
+  });
+  const element = await page.default({ params: Promise.resolve({ doc: "terms" }), searchParams: Promise.resolve({ version: "legal_terms_1" }) });
+  const html = renderToStaticMarkup(element);
+  assert.match(html, /<h2>服务范围<\/h2>/);
+  assert.doesNotMatch(html, /正式条款正文段落/);
 });

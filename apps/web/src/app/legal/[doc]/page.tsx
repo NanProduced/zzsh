@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { PlateDocument } from "@zzsh/ui/plate-document";
+import "@zzsh/ui/plate-document.css";
 import { notFound } from "next/navigation";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { getLegalDocument, getLegalDocumentSibling, isLegalDocId, listLegalDocuments } from "@/content/legal/documents";
@@ -45,11 +47,13 @@ export default async function LegalDocPage({ params, searchParams }: { params: P
       <Link href="/" className="auth-page-back">返回门户首页</Link>
     </header>
     <main className="auth-page-main">
-      <section className="auth-page-card" aria-labelledby="legal-doc-title">
+      <section className="auth-page-card legal-doc-card" aria-labelledby="legal-doc-title">
         <h1 id="legal-doc-title" className="auth-page-title">《{published?.title ?? entry.title}》</h1>
         {published ? <>
           <p className="legal-doc-meta">版本 {published.id} · 于 {published.effectiveAt} 生效</p>
-          <PublishedBody body={published.body} />
+          {published.bodyFormat === "plate" && published.bodyDocument
+            ? <PlateDocument document={published.bodyDocument} />
+            : <PublishedBody body={published.body} />}
         </> : reading.state === "UNAVAILABLE" ? (
           <div className="auth-unavailable" role="status">
             <p>协议正文暂时无法读取，请稍后重试。</p>

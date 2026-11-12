@@ -1,0 +1,41 @@
+{
+  "key": "publish-prepare",
+  "kind": "help",
+  "file": "help/publish-prepare.json",
+  "meta": {
+    "id": "P01",
+    "slug": "publish-prepare",
+    "title": "上架前需要准备什么？",
+    "summary": "盘点全量库存、准备展示图与公示材料、了解押金与保证金要求，并先做好游戏账号的安全设置。",
+    "category": "publish",
+    "audience": ["owner"],
+    "keywords": ["上架", "出租", "发布", "准备", "库存", "截图", "凭证", "押金", "保证金", "封禁"],
+    "updatedAt": "2026-10-06",
+    "related": ["publish-pricing-modes", "publish-account-safety", "fees-overview"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "inventory": "content-盘点账号资源",
+    "media": "content-准备展示与公示图片",
+    "deposit": "content-了解押金与保证金",
+    "submit": "content-提交前你会看到什么"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "盘点账号资源", "children": [{ "text": "盘点账号资源" }] },
+      { "type": "p", "children": [{ "text": "哈夫币与指定物资按账号现有全量库存申报，不是预计会被使用的数量；皮肤按分类选择申报；安全箱、体力、负重等信息会影响计价。申报数量是结算期初核对的基础，请如实填写。" }] },
+      { "type": "h2", "id": "准备展示与公示图片", "children": [{ "text": "准备展示与公示图片" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "账号展示图：用于公开详情页向租客展示账号，通过技术校验后才会展示。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "处罚公示图：按平台要求提供，用于向租客公示，不要把应公示的内容当作仅内部可见材料处理。" }] },
+      { "type": "p", "children": [{ "text": "上架备注对租客公开可见；账号历史封禁等情况按平台要求如实申报并公示，隐瞒会影响后续纠纷处理。" }] },
+      { "type": "h2", "id": "了解押金与保证金", "children": [{ "text": "了解押金与保证金" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "账号基础押金由号主设定，平台提供推荐值与上限；选择包赔保障的账号基础押金最低为 300 元。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "号主保证金按出租账号逐个核定，不能用其他账号的缴款证明本账号资格。" }] },
+      { "type": "h2", "id": "提交前你会看到什么", "children": [{ "text": "提交前你会看到什么" }] },
+      { "type": "p", "children": [{ "text": "提交前会看到本次报价与对应的规则条款，核对并同意后上架；核价、资格与图片技术校验都通过后直接发布，不需要等待人工预审。报价、规则版本与内容摘要在确认时冻结，之后修改资料需要重新报价确认。" }] }
+    ]
+  }
+}

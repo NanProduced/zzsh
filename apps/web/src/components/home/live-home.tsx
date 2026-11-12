@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { PortalHome } from "@/components/portal-home";
+import { HomeAnnouncement } from "@/components/content/home-announcement";
 import type { AccountCardData } from "@/components/delta/account-card";
 import type { SupplyState } from "@/components/delta/delta-section";
 import { collectFastAccounts, HOME_FAST_DISPLAY_LIMIT, HOME_FAST_MAX_PAGES, HOME_FAST_PAGE_LIMIT } from "@/lib/home-fast-accounts";
@@ -86,5 +87,5 @@ export function LiveHome() {
   useEffect(() => {
     void load();
   }, [load]);
-  return <PortalHome accounts={supply.accounts} historicalAccounts={supply.historicalAccounts} supplyState={supply.state} supplyMayHaveMore={supply.supplyMayHaveMore} fastEnabled={supply.fastEnabled} stats={activity.stats} deals={activity.deals} onRetrySupply={() => void load()} />;
+  return <><PortalHome accounts={supply.accounts} historicalAccounts={supply.historicalAccounts} supplyState={supply.state} supplyMayHaveMore={supply.supplyMayHaveMore} fastEnabled={supply.fastEnabled} stats={activity.stats} deals={activity.deals} onRetrySupply={() => void load()} /><HomeAnnouncement /></>;
 }

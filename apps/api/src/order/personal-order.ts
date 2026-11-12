@@ -7,7 +7,7 @@ import { ensureOnlyFields, invalid } from "../supply/supply-util";
 import type { PublishingAccount, ListingVersion } from "../supply/publishing";
 import { parseFullPayoutTermsAcceptance, type FullPayoutTermsAcceptance } from "../supply/full-payout-terms";
 import { assertFinalConfirmationFunding } from "../supply/funding-authority";
-import { newEarlySettlementDisclosure, parseLegalAcceptanceRef, recordDocumentAcceptance, sameAcceptanceRef, type LegalAcceptanceRef } from "../legal/legal-documents";
+import { parseLegalAcceptanceRef, readCurrentEarlySettlementDisclosure, recordDocumentAcceptance, sameAcceptanceRef, type LegalAcceptanceRef } from "../legal/legal-documents";
 
 export const PERSONAL_ORDER_OPERATION="order.reservation.create.v2";
 export function personalOrderInput(body:Record<string,unknown>):{confirmationToken:string;fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance;agreementAcceptance?:LegalAcceptanceRef} {
@@ -33,10 +33,6 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
   const version=(await client.query<ListingVersion>(`SELECT * FROM zzsh_supply.listing_version WHERE id=$1`,[input.versionId])).rows[0]!;
   const {quote,...remainder}=verified.snapshot;
   const {settlementPricing,...personal}=remainder as typeof remainder & {settlementPricing?:unknown};
-  const snapshot={...quote,quoteKind:"ORDER_CONFIRMATION" as const,orderSnapshotSchema:1,confirmationId:verified.claims.confirmationId,confirmationDigest:verified.claims.quoteDigest,confirmationExpiresAt:verified.claims.expiresAt,listingHash:verified.claims.listingHash,personal,
-    ...(settlementPricing===undefined?{}:{settlementPricing}),
-    ...(agreementAcceptance ? { agreementAcceptanceSchema: 1, agreementAcceptance, earlySettlementDisclosure: newEarlySettlementDisclosure() } : {}),
-    ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {})};
   const insertNow=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
   verifyConfirmation(token,authenticated,insertNow,options.key);
   if (personal.schema !== "personal-quote-v1" && personal.accountId && personal.ownerUserId) {
@@ -47,6 +43,14 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
   if (agreementAcceptance && !sameAcceptanceRef(agreementAcceptance, personal.ruleRefs.agreementVersionId, personal.ruleRefs.agreementDigest)) {
     throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Agreement changed; confirm again");
   }
+  const earlySettlementDisclosure = agreementAcceptance ? await readCurrentEarlySettlementDisclosure(client) : null;
+  if (agreementAcceptance && !earlySettlementDisclosure) {
+    throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", "提前结算告知暂不可用，请稍后重试");
+  }
+  const snapshot={...quote,quoteKind:"ORDER_CONFIRMATION" as const,orderSnapshotSchema:1,confirmationId:verified.claims.confirmationId,confirmationDigest:verified.claims.quoteDigest,confirmationExpiresAt:verified.claims.expiresAt,listingHash:verified.claims.listingHash,personal,
+    ...(settlementPricing===undefined?{}:{settlementPricing}),
+    ...(earlySettlementDisclosure ? { agreementAcceptanceSchema: 1, agreementAcceptance, earlySettlementDisclosure } : {}),
+    ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {})};
   try {
     const created=await insertReservationSnapshot(client,{context,account,version,snapshot,holdSeconds:options.holdSeconds!,requestId,confirmationId:verified.claims.confirmationId});
     const orderId=(created.body as {order?:{id?:unknown}}).order?.id;

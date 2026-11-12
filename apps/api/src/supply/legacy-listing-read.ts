@@ -1,5 +1,6 @@
 import { recordedListingFeeDisplay } from "./tenant-price-projection";
 import type { PoolClient } from "pg";
+import type { PublicListingProjection } from "./legacy-path-projection";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "./content-hash";
@@ -378,7 +379,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
     quote:null,historicalQuote:{haffRent:amount(snapshot.haffRentYuan),goods:amount(snapshot.goodsYuan),deposit:amount(snapshot.depositYuan),termDays:snapshot.termDays},
     inventory:resources.map(x=>({itemId:x.id,quantity:x.quantity,unit:x.unit})),
     presentation:{items:resources.map(({quantity,...x})=>x),skins:skins.map(projectLegacyDeclaredSkin),...(skinsWithheld>0?{skinsWithheld}:{}),entitlements:[]},
-    media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null};
+    media:media.map(m=>({assetId:m.assetId,position:m.position,url:`/api/v1/supply/listings/${r.id}/media/${m.assetId}`})),publishedAt:null} satisfies PublicListingProjection;
 }
 
 /** Legacy read mode reuses the public v2 filter contract; only the public presentation differs. */
@@ -450,7 +451,7 @@ export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2
   const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"LEGACY_READ_ONLY",...(admission?{admission:legacyAdmissionRevision(admission)}:{}),q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:"legacy-read-only"};
   const after=q.cursor?decodeListingCursor(q.cursor,binding,key):null;
   const sql=buildLegacyListingCandidates(q,after,admission),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
-  const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;
+  const items:PublicListingProjection[]=[];let last:ListingPosition|null=null,scanned=0;
   for(const row of rows){if(items.length===q.limit)break;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;try{items.push(await readLegacyListing(client,row.id,admission));}catch(error){if((error as {status?:number}).status!==404)throw error;}}
   const more=scanned<rows.length||rows.length===200;
   return {queryVersion:2,items,nextCursor:more&&last?encodeListingCursor(last,binding,key):null,sort:q.sort,direction:q.direction,sortLabel:revisions.sortLabel,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:null,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};

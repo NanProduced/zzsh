@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   ImClientLifecycle,
   ImLifecycleSupersededError,
+  markImDisposeFailure,
 } from "../src/lib/im-client-lifecycle.ts";
 
 function deferred() {
@@ -89,15 +90,54 @@ test("disposes a late client when its opening generation is superseded", async (
 
   const opening = lifecycle.open("late-client");
   await new Promise((resolve) => setImmediate(resolve));
-  const current = await lifecycle.open("current-client");
+  const currentOpening = lifecycle.open("current-client");
   gate.resolve();
 
   await assert.rejects(opening, (error) => error instanceof ImLifecycleSupersededError);
+  const current = await currentOpening;
   assert.deepEqual(disposed, ["late-client"]);
   assert.equal(current.identity, "current-client");
   assert.equal(lifecycle.getSnapshot().identity, "current-client");
   await lifecycle.close();
   assert.deepEqual(disposed, ["late-client", "current-client"]);
+});
+
+test("close cancels an in-flight open and waits for its real disposal", async () => {
+  const login = deferred();
+  const disposed = [];
+  let cancelled = false;
+  const lifecycle = new ImClientLifecycle((context) => {
+    const handle = {
+      client: { identity: context.identity },
+      dispose: () => { disposed.push("dispose"); },
+    };
+    context.onCancel?.(() => {
+      cancelled = true;
+      handle.dispose();
+      login.reject(new ImLifecycleSupersededError());
+    });
+    return login.promise.then(() => handle);
+  });
+  const opening = lifecycle.open("slow-login");
+  await new Promise((resolve) => setImmediate(resolve));
+  await lifecycle.close();
+  assert.equal(cancelled, true, "close must cancel the pending SDK login");
+  assert.deepEqual(disposed, ["dispose"], "close must wait until the pending login has been disposed");
+  await assert.rejects(opening, (error) => error instanceof ImLifecycleSupersededError);
+});
+
+test("close rejects when disposal fails and never reports an unproven handoff", async () => {
+  let rejectPending;
+  const lifecycle = new ImClientLifecycle((context) => {
+    context.onCancel?.(() => {});
+    return new Promise((_, reject) => { rejectPending = reject; });
+  });
+  const opening = lifecycle.open("cleanup-fails");
+  await new Promise((resolve) => setImmediate(resolve));
+  const closing = lifecycle.close();
+  rejectPending(markImDisposeFailure(new Error("synthetic dispose failure")));
+  await assert.rejects(opening, /synthetic dispose failure/);
+  await assert.rejects(closing, /synthetic dispose failure/);
 });
 
 test("leaves no active client after factory failure and permits a clean retry", async () => {

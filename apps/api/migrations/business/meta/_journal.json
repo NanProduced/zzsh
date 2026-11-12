@@ -1380,6 +1380,90 @@
       "when": 1794335180087,
       "tag": "0196_owner_payout_fee",
       "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1794335180088,
+      "tag": "0197_support_presence_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1794456000000,
+      "tag": "0198_account_oss_media",
+      "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1794456000001,
+      "tag": "0199_account_image_cdn",
+      "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1794456000002,
+      "tag": "0200_legacy_account_image_cdn",
+      "breakpoints": true
+    },
+    {
+      "idx": 201,
+      "version": "7",
+      "when": 1794456000003,
+      "tag": "0201_docs_library",
+      "breakpoints": true
+    },
+    {
+      "idx": 202,
+      "version": "7",
+      "when": 1794456000004,
+      "tag": "0202_docs_permission_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1794456000005,
+      "tag": "0203_docs_role_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1794456000006,
+      "tag": "0204_help_tree",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1794456000007,
+      "tag": "0205_docs_discussions",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1794456000008,
+      "tag": "0206_legal_fixed_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1794456000009,
+      "tag": "0207_help_tree_completion",
+      "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1794456000010,
+      "tag": "0208_help_guide_draft_discard",
+      "breakpoints": true
     }
   ]
 }

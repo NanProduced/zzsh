@@ -6,10 +6,10 @@ import { createApp } from "../src/app";
 import { withTransaction } from "../src/auth/security-core";
 import { createControlledPaymentSource, confirmOrderPayment, orderDispatchLockKey } from "../src/order/payment-confirmation";
 import { dispatchPaidOrders, assignWaitingOrders, OrderDispatchLifecycle } from "../src/im/order-dispatch";
-import { lockSupportMutation, readEligibleSupport, reserveSupportCandidate } from "../src/im/support-dispatch";
-import { clearSupportPresenceForSession } from "../src/im/support-presence-session";
+import { lockSupportMutation, readEligibleSupport, reapSupportPresenceSessions, reserveSupportCandidate } from "../src/im/support-dispatch";
+import { endSupportPresenceForAuthSession, markSupportPresenceLockedForSession } from "../src/im/support-presence-session";
 import { createOrResumeUserConsultation, claimConsultation, closeConsultation, transferConsultation, reconcileMessageScopes,
-  readOwnPresence, updateOwnPresence, MessageScopeRecoveryLifecycle, supportManagerIdentityKey } from "../src/im/consultation";
+  heartbeatLockedOwnPresence, heartbeatOwnPresence, readOwnPresence, updateOwnPresence, MessageScopeRecoveryLifecycle, supportManagerIdentityKey } from "../src/im/consultation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey } from "../src/im/identity-lifecycle";
 import { FakeSupportScopeProvider, seedAdmin, seedUser, seedIdentity, adminContext, userContext } from "./im-test-fixtures";
 import type { runPaymentAcceptance } from "./order-payment-im-postgres.test";
@@ -22,6 +22,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
   const appId = `dispatch_${run}`;
   const a = `disp_a_${run}`, b = `disp_b_${run}`;
   const contextA = adminContext(a, `${a}_session`), contextB = adminContext(b, `${b}_session`);
+  const connectionA = "conn_a", connectionB = "conn_b", connectionNew = "conn_new";
   const key = (kind: "USER" | "ADMIN", id: string, app = appId): ImIdentityKey => ({ provider: "yunxin", appId: app, realm: kind === "ADMIN" ? "admin" : "user", kind, platformSubjectId: id });
   const provider = new FakeSupportScopeProvider();
   const managerKey = supportManagerIdentityKey(appId);
@@ -40,7 +41,9 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
   const presence = async (id: string, availability: "AVAILABLE" | "OFF_DUTY" | "PAUSED" = "AVAILABLE", wake?: () => void) => {
     const ctx = id === a ? contextA : contextB;
     const version = (await readOwnPresence(options, ctx)).version;
-    return updateOwnPresence({ ...options, wakeDispatch: wake }, ctx, { version, availability, connectionState: "CONNECTED" }, `req_${randomUUID()}`);
+    return updateOwnPresence({ ...options, wakeDispatch: wake }, ctx, {
+      version, availability, connectionState: "CONNECTED", connectionId: id === a ? connectionA : connectionB,
+    }, `req_${randomUUID()}`);
   };
   await presence(a); await presence(b, "OFF_DUTY");
   let gameId = "";
@@ -127,8 +130,8 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       const variants = [
         `UPDATE zzsh_iam.im_support_presence SET availability='OFF_DUTY' WHERE admin_user_id=$1`,
         `UPDATE zzsh_iam.im_support_presence SET availability='PAUSED' WHERE admin_user_id=$1`,
-        `UPDATE zzsh_iam.im_support_presence SET connection_state='DISCONNECTED' WHERE admin_user_id=$1`,
-        `UPDATE zzsh_iam.im_support_presence SET last_connected_at=clock_timestamp()-interval '3 minutes' WHERE admin_user_id=$1`,
+        `UPDATE zzsh_iam.im_support_presence SET connection_state='KICKED' WHERE admin_user_id=$1`,
+        `UPDATE zzsh_iam.im_support_presence SET last_confirmed_at=clock_timestamp()-interval '3 minutes' WHERE admin_user_id=$1`,
         `UPDATE zzsh_iam.admin_security SET status='FROZEN' WHERE admin_user_id=$1`,
         `UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.read'`,
         `UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code='im.support.accept'`,
@@ -209,40 +212,54 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       }
     });
 
-    await t.test("D04b locked auth session is non-dispatchable; lock clears only its own presence", async () => {
+    await t.test("D04b disconnect grace, lock preservation and takeover timing", async () => {
+      const dispatchable = async () => withTransaction(pool, async (c) => {
+        const locked = await lockSupportMutation(c, appId);
+        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
+      });
+      const openIntervals = async () => (await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM zzsh_iam.im_support_presence_session WHERE app_id=$1 AND admin_user_id=$2 AND ended_at IS NULL`,
+        [appId, a],
+      )).rows[0]!.n;
       await presence(a); await presence(b, "OFF_DUTY");
-      const reconnectVersion = (await readOwnPresence(options, contextA)).version;
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "RECONNECTING", version: reconnectVersion }, `req_${run}_reconnect`);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), [], "a reconnecting agent is removed from dispatch immediately");
-      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.im_support_presence_session WHERE app_id=$1 AND admin_user_id=$2 AND ended_at IS NULL`, [appId, a])).rows[0].n, 1,
-        "a short reconnect keeps the reception interval open");
-      const reconnectedVersion = (await readOwnPresence(options, contextA)).version;
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: reconnectedVersion }, `req_${run}_reconnected`);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), [a], "a recovered agent is dispatchable again");
+      let heartbeatRevision = (await readOwnPresence(options, contextA)).stateRevision;
 
-      const owner = (await pool.query(`SELECT "auth_session_id" AS "sessionId" FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0];
-      assert.equal(owner.sessionId, contextA.sessionId, "presence is owned by the writing auth session");
+      const disconnected = await heartbeatOwnPresence(options, contextA, "DISCONNECTED", heartbeatRevision, "conn_a");
+      assert.equal(disconnected.ok, true);
+      assert.equal(disconnected.dispatchable, true, "a short disconnect stays dispatchable in the grace window");
+      assert.ok(disconnected.disconnectedSince);
+      assert.equal(await openIntervals(), 1, "disconnect never ends the reception interval");
+      assert.deepEqual(await dispatchable(), [a]);
 
-      // The session gate is checked in dispatch, not only by a later rejected client request.
+      await pool.query(`UPDATE zzsh_iam.im_support_presence
+        SET last_confirmed_at=clock_timestamp()-interval '3 minutes', disconnected_since=clock_timestamp()-interval '3 minutes'
+        WHERE app_id=$1 AND admin_user_id=$2`, [appId, a]);
+      assert.deepEqual(await dispatchable(), [], "2-30 minutes pauses new dispatch but keeps the interval open");
+      assert.equal(await openIntervals(), 1);
+
+      heartbeatRevision = disconnected.stateRevision;
+      const reconnected = await heartbeatOwnPresence(options, contextA, "CONNECTED", heartbeatRevision, "conn_a");
+      assert.equal(reconnected.dispatchable, true);
+      assert.equal(reconnected.disconnectedSince, null, "a confirmed heartbeat clears the first disconnect time");
+      assert.deepEqual(await dispatchable(), [a]);
+
+      // PIN lock: session ownership and the interval stay, dispatch stops immediately.
       await pool.query(`UPDATE zzsh_auth_admin."session" SET locked=true WHERE id=$1`, [contextA.sessionId]);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), [], "a locked session cannot be dispatched even while its presence row still says CONNECTED");
+      assert.deepEqual(await dispatchable(), [], "a locked session cannot receive work");
+      const locked = await withTransaction(pool, (c) => markSupportPresenceLockedForSession(c, a, contextA.sessionId));
+      assert.equal(locked.presence, true);
+      const afterLock = (await pool.query(`SELECT availability, connection_state AS "connectionState",
+        "auth_session_id" AS "sessionId", "dispatch_paused" AS "dispatchPaused"
+        FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0];
+      assert.deepEqual(afterLock, {
+        availability: "AVAILABLE", connectionState: "DISCONNECTED", sessionId: contextA.sessionId, dispatchPaused: true,
+      }, "lock pauses dispatch without clearing reception ownership");
+      assert.equal(await openIntervals(), 1, "lock keeps the reception interval open");
+      const liveness = await heartbeatLockedOwnPresence(options, { ...contextA, sessionLocked: true });
+      assert.equal(liveness.ok, true, "locked-page liveness extends trusted time");
 
-      const cleared = await withTransaction(pool, (c) => clearSupportPresenceForSession(c, a, contextA.sessionId));
-      assert.equal(cleared.presence, true);
-      const afterLock = (await pool.query(`SELECT availability, connection_state AS "connectionState" FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0];
-      assert.deepEqual(afterLock, { availability: "OFF_DUTY", connectionState: "DISCONNECTED" });
-      assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.im_support_presence_session WHERE app_id=$1 AND admin_user_id=$2 AND ended_at IS NULL`, [appId, a])).rows[0].n, 0);
-
-      // A late lock callback from the old session must not clear a newer session's presence.
+      // Unlock and take over from a second auth session. The takeover may start at
+      // CONNECTING; dispatch remains paused until the first CONNECTED heartbeat.
       await pool.query(`UPDATE zzsh_auth_admin."session" SET locked=false WHERE id=$1`, [contextA.sessionId]);
       const newSessionId = `${a}_session_2`;
       await pool.query(`INSERT INTO zzsh_auth_admin."session" ("id","expiresAt","token","createdAt","updatedAt","userId")
@@ -250,56 +267,65 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         [newSessionId, `ensure_session_${run}_2`, a]);
       const contextNew = adminContext(a, newSessionId);
       const beforeNew = (await readOwnPresence(options, contextNew)).version;
-      await updateOwnPresence(options, contextNew, { availability: "AVAILABLE", connectionState: "CONNECTED", version: beforeNew, takeover: true }, `req_${run}_new_session`);
-      assert.deepEqual(await withTransaction(pool, (c) => clearSupportPresenceForSession(c, a, contextA.sessionId)), { presence: false, sessions: 0 });
-      assert.equal((await pool.query(`SELECT availability FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0].availability, "AVAILABLE");
-      const current = (await readOwnPresence(options, contextNew)).version;
-      // The real pause payload is OFF_DUTY + CONNECTED; it must not steal ownership
-      // even when the stale window has read the current version.
-      await assert.rejects(
-        updateOwnPresence(options, contextA, { availability: "OFF_DUTY", connectionState: "CONNECTED", version: current }, `req_${run}_old_session_pause`),
-        /owned by another session/,
-      );
-      await assert.rejects(
-        updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: current }, `req_${run}_old_session_sync`),
-        /owned by another session/,
-      );
-      assert.equal((await pool.query(`SELECT availability, "auth_session_id" AS "sessionId" FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0].sessionId, contextNew.sessionId);
-      const oldTakeover = await updateOwnPresence(options, contextA, {
-        availability: "AVAILABLE", connectionState: "CONNECTED", version: current, takeover: true,
-      }, `req_${run}_old_session_takeover`);
-      assert.equal((await readOwnPresence(options, contextNew)).ownedByAnotherSession, true);
-      await assert.rejects(
-        updateOwnPresence(options, contextNew, { availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version }, `req_${run}_new_session_sync_after_old_takeover`),
-        /owned by another session/,
-      );
-      await updateOwnPresence(options, contextNew, {
-        availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version, takeover: true,
-      }, `req_${run}_new_session_takeover_back`);
+      const takeover = await updateOwnPresence(options, contextNew, {
+        availability: "AVAILABLE", connectionState: "CONNECTING", version: beforeNew, takeover: true, connectionId: connectionNew,
+      }, `req_${run}_new_session`);
+      assert.equal(takeover.dispatchPaused, true);
+      assert.equal(await openIntervals(), 1, "takeover closes the old interval and opens exactly one new interval");
+      const oldReason = (await pool.query<{ endReason: string }>(
+        `SELECT "end_reason" AS "endReason" FROM zzsh_iam.im_support_presence_session
+          WHERE app_id=$1 AND admin_user_id=$2 AND end_reason IS NOT NULL ORDER BY ended_at DESC LIMIT 1`, [appId, a],
+      )).rows[0]?.endReason;
+      assert.equal(oldReason, "TAKEN_OVER");
+      assert.deepEqual(await dispatchable(), [], "takeover is not dispatchable before the new NIM connection is confirmed");
+      const oldBeat = await heartbeatOwnPresence(options, contextA, "DISCONNECTED", (await readOwnPresence(options, contextA)).stateRevision, "conn_a");
+      assert.equal(oldBeat.ok, false);
+      assert.equal(oldBeat.reason, "OTHER_WINDOW");
+      const newBeat = await heartbeatOwnPresence(options, contextNew, "CONNECTED", takeover.stateRevision, "conn_new");
+      assert.equal(newBeat.dispatchable, true);
+      assert.deepEqual(await dispatchable(), [a]);
 
-      // Stale presence recovers only after a fresh write from the owning session.
-      await pool.query(`UPDATE zzsh_iam.im_support_presence SET last_connected_at=clock_timestamp()-interval '3 minutes' WHERE app_id=$1 AND admin_user_id=$2`, [appId, a]);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), []);
-      const freshVersion = (await readOwnPresence(options, contextNew)).version;
-      await updateOwnPresence(options, contextNew, { availability: "AVAILABLE", connectionState: "CONNECTED", version: freshVersion }, `req_${run}_fresh`);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), [a], "fresh presence from a live session is dispatchable again");
+      // A late lock callback from the old session must not touch the new owner.
+      assert.deepEqual(await withTransaction(pool, (c) => markSupportPresenceLockedForSession(c, a, contextA.sessionId)), { presence: false });
+      assert.equal((await pool.query(`SELECT "auth_session_id" AS "sessionId" FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0].sessionId, contextNew.sessionId);
 
-      // Logout deletes the auth session; dispatch must stop without waiting for presence cleanup.
+      // Logout ends reception at the server receipt time without touching another owner.
       await pool.query(`DELETE FROM zzsh_auth_admin."session" WHERE id=$1`, [newSessionId]);
-      assert.deepEqual(await withTransaction(pool, async (c) => {
-        const locked = await lockSupportMutation(c, appId);
-        return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
-      }), [], "deleted auth session is not dispatchable");
+      const endedAt = new Date();
+      const loggedOut = await withTransaction(pool, (c) => endSupportPresenceForAuthSession(c, newSessionId, "LOGOUT", endedAt));
+      assert.deepEqual(loggedOut, { presence: true, sessions: 1 });
+      const afterLogout = (await pool.query(`SELECT availability, "auth_session_id" AS "sessionId" FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0];
+      assert.deepEqual(afterLogout, { availability: "OFF_DUTY", sessionId: null });
+      assert.equal(await openIntervals(), 0);
+      assert.equal((await pool.query(`SELECT "end_reason" AS "endReason" FROM zzsh_iam.im_support_presence_session WHERE app_id=$1 AND admin_user_id=$2 ORDER BY ended_at DESC LIMIT 1`, [appId, a])).rows[0].endReason, "LOGOUT");
 
       const restoreVersion = (await readOwnPresence(options, contextA)).version;
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true }, `req_${run}_restore_a`);
+      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true, connectionId: connectionA }, `req_${run}_restore_a`);
       await presence(b);
+    });
+
+    await t.test("D04b2 thirty-minute lost sweep truncates at the last confirmed liveness", async () => {
+      await presence(a);
+      const endedAt = new Date(Date.now() - 31 * 60_000);
+      await migrationPool.query(`UPDATE zzsh_iam.im_support_presence_session
+        SET started_at=$3, last_heartbeat_at=$3 WHERE app_id=$1 AND admin_user_id=$2 AND ended_at IS NULL`,
+        [appId, a, new Date(Date.now() - 40 * 60_000)]);
+      await pool.query(`UPDATE zzsh_iam.im_support_presence
+        SET last_confirmed_at=$3, disconnected_since=$3
+        WHERE app_id=$1 AND admin_user_id=$2`, [appId, a, endedAt]);
+      const reaped = await withTransaction(pool, (c) => reapSupportPresenceSessions(c, appId));
+      assert.equal(reaped.sessions >= 1, true);
+      const session = (await pool.query<{ endedAt: Date; endReason: string; metricVersion: number }>(
+        `SELECT "ended_at" AS "endedAt", "end_reason" AS "endReason", "metric_version" AS "metricVersion"
+           FROM zzsh_iam.im_support_presence_session WHERE app_id=$1 AND admin_user_id=$2 ORDER BY ended_at DESC LIMIT 1`,
+        [appId, a],
+      )).rows[0]!;
+      assert.equal(session.endReason, "LOST");
+      assert.equal(session.metricVersion, 2);
+      assert.ok(Math.abs(new Date(session.endedAt).getTime() - endedAt.getTime()) < 1_000, "LOST uses last_confirmed_at, not the tick time");
+      const presenceRow = (await pool.query(`SELECT availability FROM zzsh_iam.im_support_presence WHERE app_id=$1 AND admin_user_id=$2`, [appId, a])).rows[0];
+      assert.equal(presenceRow.availability, "OFF_DUTY");
+      await presence(a);
     });
 
     await t.test("D04c a takeover during lock cleanup leaves the new reception interval open", async () => {
@@ -314,16 +340,16 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       try {
         await locker.query("BEGIN");
         // The new session takes ownership but has not committed yet; the old
-        // lock cleanup will wait on this same presence row.
+        // session cleanup will wait on this same presence row.
         await locker.query(`UPDATE zzsh_iam.im_support_presence
           SET "auth_session_id"=$3, "version"="version"+1, "updated_at"=clock_timestamp()
           WHERE "app_id"=$1 AND "admin_user_id"=$2`, [appId, a, newSessionId]);
         await cleaner.query("BEGIN");
-        clear = clearSupportPresenceForSession(cleaner, a, contextA.sessionId);
+        clear = endSupportPresenceForAuthSession(cleaner, contextA.sessionId, "REVOKED", new Date());
         let waiting = 0;
         for (let attempt = 0; attempt < 200; attempt += 1) {
           waiting = (await ownerPool.query<{ n: number }>(`SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WITH updated AS%'`)).rows[0]?.n ?? 0;
+            WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%WITH owned AS%'`)).rows[0]?.n ?? 0;
           if (waiting > 0) break;
           await new Promise((resolve) => setTimeout(resolve, 10));
         }
@@ -346,7 +372,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         await pool.query(`DELETE FROM zzsh_auth_admin."session" WHERE id=$1`, [newSessionId]).catch(() => undefined);
       }
       const restoreVersion = (await readOwnPresence(options, contextA)).version;
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true }, `req_${run}_restore_after_race`);
+      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true, connectionId: connectionA }, `req_${run}_restore_after_race`);
       await presence(b);
     });
 
@@ -362,11 +388,11 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       }), [], "an unbound pre-0184 AVAILABLE row is not dispatchable");
       const unboundVersion = Number((await pool.query(`SELECT "version" FROM zzsh_iam.im_support_presence WHERE "app_id"=$1 AND "admin_user_id"=$2`, [appId, a])).rows[0].version);
       await assert.rejects(
-        updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: unboundVersion }, `req_${run}_unbound_sync`),
+        updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: unboundVersion, connectionId: connectionA }, `req_${run}_unbound_sync`),
         /unbound|explicit start/i,
       );
       assert.equal((await pool.query(`SELECT "auth_session_id" AS "sessionId" FROM zzsh_iam.im_support_presence WHERE "app_id"=$1 AND "admin_user_id"=$2`, [appId, a])).rows[0].sessionId, null);
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: unboundVersion, takeover: true }, `req_${run}_unbound_start`);
+      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: unboundVersion, takeover: true, connectionId: connectionA }, `req_${run}_unbound_start`);
       assert.deepEqual(await withTransaction(pool, async (c) => {
         const locked = await lockSupportMutation(c, appId);
         return (await readEligibleSupport(c, appId, locked)).map((row) => row.adminUserId);
@@ -376,12 +402,12 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       await pool.query(`DELETE FROM zzsh_iam.im_support_presence WHERE "app_id"=$1 AND "admin_user_id"=$2`, [appId, a]);
       await pool.query(`UPDATE zzsh_auth_admin."session" SET locked=true WHERE id=$1`, [contextA.sessionId]);
       await assert.rejects(
-        updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: 0, takeover: true }, `req_${run}_locked_insert`),
+        updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: 0, takeover: true, connectionId: connectionA }, `req_${run}_locked_insert`),
         /locked|not available/i,
       );
       assert.equal((await pool.query(`SELECT count(*)::int AS n FROM zzsh_iam.im_support_presence WHERE "app_id"=$1 AND "admin_user_id"=$2`, [appId, a])).rows[0].n, 0);
       await pool.query(`UPDATE zzsh_auth_admin."session" SET locked=false WHERE id=$1`, [contextA.sessionId]);
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: 0, takeover: true }, `req_${run}_restore_insert`);
+      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: 0, takeover: true, connectionId: connectionA }, `req_${run}_restore_insert`);
       await presence(b);
     });
 
@@ -393,7 +419,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         [newSessionId, `ensure_session_${run}_lockrace2`, a]);
       const contextNew = adminContext(a, newSessionId);
       const beforeNew = (await readOwnPresence(options, contextNew)).version;
-      await updateOwnPresence(options, contextNew, { availability: "AVAILABLE", connectionState: "CONNECTED", version: beforeNew, takeover: true }, `req_${run}_lockrace_new_owner`);
+      await updateOwnPresence(options, contextNew, { availability: "AVAILABLE", connectionState: "CONNECTED", version: beforeNew, takeover: true, connectionId: connectionNew }, `req_${run}_lockrace_new_owner`);
       const contenderVersion = (await readOwnPresence(options, contextA)).version;
 
       const locker = await pool.connect();
@@ -404,7 +430,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         // then blocks on the dedicated FOR UPDATE in updateOwnPresence.
         await locker.query(`SELECT "id" FROM zzsh_auth_admin."session" WHERE "id"=$1 FOR UPDATE`, [contextA.sessionId]);
         takeover = updateOwnPresence(options, contextA, {
-          availability: "AVAILABLE", connectionState: "CONNECTED", version: contenderVersion, takeover: true,
+          availability: "AVAILABLE", connectionState: "CONNECTED", version: contenderVersion, takeover: true, connectionId: connectionA,
         }, `req_${run}_lockrace_takeover`).then(() => ({ ok: true as const }), (error) => ({ ok: false as const, error }));
         let waiting = 0;
         for (let attempt = 0; attempt < 200; attempt += 1) {
@@ -416,7 +442,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         }
         assert.ok(waiting > 0, "the takeover waits on the session row lock");
         await locker.query(`UPDATE zzsh_auth_admin."session" SET "locked"=true WHERE "id"=$1`, [contextA.sessionId]);
-        assert.deepEqual(await clearSupportPresenceForSession(locker, a, contextA.sessionId), { presence: false, sessions: 0 });
+        assert.deepEqual(await markSupportPresenceLockedForSession(locker, a, contextA.sessionId), { presence: false });
         await locker.query("COMMIT");
         const result = await takeover;
         assert.equal(result.ok, false, "the takeover must not commit after the same session was locked");
@@ -430,7 +456,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
         await pool.query(`DELETE FROM zzsh_auth_admin."session" WHERE id=$1`, [newSessionId]).catch(() => undefined);
       }
       const restoreVersion = (await readOwnPresence(options, contextA)).version;
-      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true }, `req_${run}_restore_after_lockrace`);
+      await updateOwnPresence(options, contextA, { availability: "AVAILABLE", connectionState: "CONNECTED", version: restoreVersion, takeover: true, connectionId: connectionA }, `req_${run}_restore_after_lockrace`);
       await presence(b);
     });
 
@@ -444,7 +470,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       assert.equal((await group(items[10]!.orderId)).provision_state,"WAITING");
       assert.equal((await stats(a)).last_consultation_assigned_at,beforeA.last_consultation_assigned_at);
       assert.equal((await stats(b)).last_consultation_assigned_at,beforeB.last_consultation_assigned_at);
-      const claimed=await claimConsultation(options,contextA,waiting.consultation.id,`req_${run}_claim`);
+      const claimed=await claimConsultation(options,contextA,waiting.consultation.id,`req_${run}_claim`,undefined,connectionA);
       assert.equal(claimed.consultation.assignedAdmin?.id,a);
       assert.equal((await group(items[10]!.orderId)).provision_state,"ASSIGNED");
       const beforeTransfer=await paid("指定转交仍订单优先");
@@ -456,7 +482,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       const other=`${appId}_other`;
       const otherOrder=await paid("跨App",other);
       await seedIdentity(pool,key("ADMIN",a,other),run);
-      await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),$3)`,[other,a,contextA.sessionId]);
+      await pool.query(`INSERT INTO zzsh_iam.im_support_presence(app_id,admin_user_id,availability,connection_state,last_connected_at,last_confirmed_at,auth_session_id) VALUES($1,$2,'AVAILABLE','CONNECTED',clock_timestamp(),clock_timestamp(),$3)`,[other,a,contextA.sessionId]);
       const blocker=await pool.connect();
       try {await blocker.query("BEGIN");await lockSupportMutation(blocker,appId);
         assert.deepEqual((await dispatchPaidOrders(pool,other)).assigned,[otherOrder.orderId]);
@@ -512,7 +538,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
           {state:"CLOSED",message_scope_state:"PENDING",message_scope_id:null},"local-only close does not claim a remote revocation");
         assert.equal((await stats(a)).version,oldVersion);
         await presence(a);
-        await assert.rejects(updateOwnPresence(options,contextA,{availability:"OFF_DUTY",connectionState:"DISCONNECTED",version:Number(oldVersion)},`req_${run}_stale`),/stale/);
+        await assert.rejects(updateOwnPresence(options,contextA,{availability:"OFF_DUTY",connectionState:"DISCONNECTED",version:Number(oldVersion),connectionId:connectionA},`req_${run}_stale`),/stale/);
       } finally {releaseRemote.resolve();managerReady=true;await gate.query("ROLLBACK");gate.release();if(operation)await operation.catch(()=>undefined);await small.end();}
     });
 
@@ -572,7 +598,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
           const locked=await lockSupportMutation(c,raceApp);
           assert.deepEqual(locked.ids,[]);
           const ctx=adminContext(id,`${id}_s`);
-          const online=await updateOwnPresence({pool,appId:raceApp},ctx,{availability:"AVAILABLE",connectionState:"CONNECTED",version:0},`req_${id}`);
+          const online=await updateOwnPresence({pool,appId:raceApp},ctx,{availability:"AVAILABLE",connectionState:"CONNECTED",version:0,connectionId:`conn_${id}`},`req_${id}`);
           const staff=await readEligibleSupport(c,raceApp,locked);
           assert.deepEqual(staff,[],"first presence after locking is not part of this transaction's candidates");
           await withTransaction(pool,async(writer)=>{
@@ -580,7 +606,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
             if(change==="read"||change==="accept") await writer.query(`UPDATE zzsh_iam.admin_user_permission SET effect='DENY' WHERE admin_user_id=$1 AND permission_code=$2`,[id,`im.support.${change}`]);
             if(change==="freeze") await writer.query(`UPDATE zzsh_iam.admin_security SET status='FROZEN' WHERE admin_user_id=$1`,[id]);
           });
-          if(change==="offline") await updateOwnPresence({pool,appId:raceApp},ctx,{availability:"OFF_DUTY",connectionState:"DISCONNECTED",version:online.version},`req_off_${id}`);
+          if(change==="offline") await updateOwnPresence({pool,appId:raceApp},ctx,{availability:"OFF_DUTY",connectionState:"DISCONNECTED",version:online.version,connectionId:`conn_${id}`},`req_off_${id}`);
           assert.deepEqual((await assignWaitingOrders(c,raceApp,staff)).assigned,[]);
           assert.equal(await reserveSupportCandidate(c,raceApp,"SERVICE",staff),null);
           await c.query("COMMIT");
@@ -599,7 +625,7 @@ export async function runDispatchAcceptance(t: TestContext, o: Parameters<typeof
       const connect=scoped.connect.bind(scoped);let inserted=false;
       scoped.connect=(async()=>{const c=await connect();const query=c.query.bind(c);
         c.query=(async(sql:string,params:unknown[])=>{
-          if(!inserted&&sql.includes('SELECT p.admin_user_id AS')){inserted=true;await updateOwnPresence({pool,appId:raceApp},adminContext(id,`${id}_s`),{availability:"AVAILABLE",connectionState:"CONNECTED",version:0},`req_${id}`);}
+          if(!inserted&&sql.includes('SELECT p.admin_user_id AS')){inserted=true;await updateOwnPresence({pool,appId:raceApp},adminContext(id,`${id}_s`),{availability:"AVAILABLE",connectionState:"CONNECTED",version:0,connectionId:`conn_${id}`},`req_${id}`);}
           return query(sql,params);
         }) as typeof c.query;return c;}) as typeof scoped.connect;
       try {
