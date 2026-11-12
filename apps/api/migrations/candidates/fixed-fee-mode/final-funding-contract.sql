@@ -1,12 +1,15 @@
--- Candidate only: preserve 0078 final-funding checks and extend them to validated v5 orders.
+-- Candidate only: after 0212, bind new orders to the original publication guarantee and funding terms.
 -- Install only together with the v5 order guard and explicit runtime ACL verification.
+-- Refuse installation before the account line's immutable publication snapshot exists.
+SELECT credit_guarantee_waived,credit_guarantee_waived_revision FROM zzsh_supply.listing_publication LIMIT 0;
+--> statement-breakpoint
 CREATE OR REPLACE FUNCTION zzsh_order.guard_supply_final_funding() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   personal jsonb;
   binding record;
   proof record;
   terms record;
-  credit record;
+  credit_revision text;
   requirement record;
   last_payment text;
   confirmed numeric;
@@ -23,12 +26,15 @@ BEGIN
   personal:=NEW.quote_snapshot->'personal';
   IF personal->>'schema' NOT IN ('personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5','personal-quote-v6') THEN RETURN NEW; END IF;
   SELECT a.game_id,p.id AS price_id,p.funding_policy AS policy,v.payload,
-    p.full_payout_terms_version_id,p.full_payout_terms_digest,p.full_payout_disclosure_version INTO binding
+    p.full_payout_terms_version_id,p.full_payout_terms_digest,p.full_payout_disclosure_version,
+    pub.id AS publication_id,pub.credit_guarantee_waived,pub.credit_guarantee_waived_revision::text AS waiver_revision INTO binding
     FROM zzsh_supply.rental_account a
     JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id=NEW.rule_release_id
     JOIN zzsh_supply.rule_release r ON r.id=NEW.rule_release_id
     JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.status='SEALED'
     JOIN zzsh_supply.listing_version v ON v.id=NEW.listing_version_id AND v.account_id=a.id
+    LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id
+      AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id AND pub.rule_release_id=r.id AND pub.content_hash=v.content_hash
    WHERE a.id=NEW.account_id AND a.owner_user_id=NEW.owner_user_id
      AND p.id=personal#>>'{ruleRefs,priceVersionId}' AND p.funding_policy->>'policyVersion'=personal#>>'{funding,version}';
   IF NOT FOUND THEN RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001'; END IF;
@@ -49,8 +55,8 @@ BEGIN
   END IF;
   reference:=personal#>>'{guarantee,reference}';
   IF reference ~ '^credit-guarantee-v1:[0-9a-f]{64}$' THEN
-    SELECT score,revision::text INTO credit FROM zzsh_credit.user_credit_state WHERE user_id=NEW.owner_user_id FOR SHARE;
-    IF NOT FOUND OR binding.payload#>>'{quoteValues,resourceTotal,currency}' IS DISTINCT FROM 'CNY'
+    PERFORM 1 FROM zzsh_credit.user_credit_state WHERE user_id=NEW.owner_user_id FOR SHARE;
+    IF NOT FOUND OR binding.publication_id IS NULL OR binding.payload#>>'{quoteValues,resourceTotal,currency}' IS DISTINCT FROM 'CNY'
       OR binding.payload#>>'{quoteValues,resourceTotal,unit}' IS DISTINCT FROM 'yuan'
       OR binding.payload#>>'{quoteValues,resourceTotal,scale}' IS DISTINCT FROM '2'
       OR COALESCE(binding.payload#>>'{quoteValues,resourceTotal,amount}','') !~ '^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$'
@@ -60,13 +66,25 @@ BEGIN
         AND binding.payload#>>'{quoteValues,pricingInputs,compatibility,customerTier}' IS DISTINCT FROM 'STANDARD') THEN
       RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001';
     END IF;
-    SELECT id,required_cents::text,updated_at::text INTO requirement FROM zzsh_order.owner_guarantee_requirement
+    IF EXISTS (SELECT 1 FROM zzsh_order.owner_guarantee_requirement previous
+      JOIN zzsh_order.owner_guarantee_payment paid ON paid.requirement_id=previous.id AND paid.owner_user_id=previous.owner_user_id
+      WHERE previous.account_id=NEW.account_id AND previous.owner_user_id=NEW.owner_user_id
+        AND (previous.price_version_id IS DISTINCT FROM binding.price_id OR previous.listing_version_id IS DISTINCT FROM NEW.listing_version_id)
+        AND paid.status<>'FAILED' AND NOT EXISTS (SELECT 1 FROM zzsh_order.owner_guarantee_refund f
+          JOIN zzsh_order.finance_event e ON e.id=f.finance_event_id
+          JOIN zzsh_order.finance_economic_root root ON root.id=e.economic_root_id
+          JOIN zzsh_order.settlement_ledger_entry cash ON cash.id=f.ledger_entry_ref AND cash.finance_event_id=e.id
+          WHERE f.payment_id=paid.id AND f.status='SUCCEEDED' AND f.provider_request_state='SUCCEEDED'
+            AND f.amount_cents=COALESCE(paid.observed_amount_cents,paid.amount_cents)
+            AND e.kind='GUARANTEE_REFUND' AND e.subject_user_id=previous.owner_user_id
+            AND root.source_kind='NATIVE_GUARANTEE' AND root.source_entity='owner_guarantee_refund' AND root.source_id=f.id
+            AND root.subject_user_id=previous.owner_user_id AND root.source_digest=f.source_digest
+            AND cash.account_code='GUARANTEE_CASH' AND cash.debit_cents=0 AND cash.credit_cents=f.amount_cents)
+    ) THEN RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001'; END IF;
+    SELECT id,status,score_snapshot,required_cents::text,updated_at::text INTO requirement FROM zzsh_order.owner_guarantee_requirement
       WHERE account_id=NEW.account_id AND owner_user_id=NEW.owner_user_id AND price_version_id=binding.price_id
         AND listing_version_id IS NOT DISTINCT FROM NEW.listing_version_id ORDER BY created_at DESC,id DESC LIMIT 1 FOR SHARE;
-    IF NOT FOUND THEN
-      IF credit.score<80 THEN RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001'; END IF;
-      credit_state:='NOT_REQUIRED';required_text:='0';coverage_revision:=NULL;
-    ELSE
+    IF FOUND THEN
       SELECT COALESCE(sum(COALESCE(observed_amount_cents,amount_cents)),0),
         COALESCE(bool_or(provider_request_state<>'CONFIRMED' OR finance_event_id IS NULL OR ledger_entry_ref IS NULL),false)
         INTO confirmed,unrecognized FROM zzsh_order.owner_guarantee_payment WHERE requirement_id=requirement.id AND status='CONFIRMED';
@@ -74,21 +92,26 @@ BEGIN
         COALESCE(bool_or(status IN ('REQUESTED','PROCESSING','UNKNOWN')),false)
         INTO refunded,active_refund FROM zzsh_order.owner_guarantee_refund WHERE requirement_id=requirement.id;
       SELECT status INTO last_payment FROM zzsh_order.owner_guarantee_payment WHERE requirement_id=requirement.id ORDER BY created_at DESC,id DESC LIMIT 1;
-      IF active_refund OR refunded>0 OR last_payment IN ('REQUESTED','ACCEPTED','PROCESSING','UNKNOWN') OR unrecognized THEN
+      IF requirement.status='RESTRICTED' OR active_refund OR refunded>0
+        OR last_payment IN ('REQUESTED','ACCEPTED','PROCESSING','UNKNOWN') OR unrecognized THEN
         RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001';
       END IF;
-      IF confirmed<requirement.required_cents::numeric THEN
-        IF credit.score<80 OR confirmed<>0 OR (last_payment IS NOT NULL AND last_payment<>'FAILED') THEN
-          RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001';
-        END IF;
-        credit_state:='NOT_REQUIRED';required_text:='0';coverage_revision:=NULL;
-      ELSE
-        credit_state:='SATISFIED';required_text:=requirement.required_cents;coverage_revision:=requirement.updated_at;
+    END IF;
+    IF binding.credit_guarantee_waived IS TRUE AND binding.waiver_revision ~ '^[1-9][0-9]*$' THEN
+      IF COALESCE(confirmed,0)<>0 OR (last_payment IS NOT NULL AND last_payment<>'FAILED') THEN
+        RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001';
       END IF;
+      credit_state:='NOT_REQUIRED';required_text:='0';coverage_revision:=NULL;credit_revision:=binding.waiver_revision;
+    ELSE
+      IF requirement.id IS NULL OR requirement.score_snapshot IS NULL OR requirement.score_snapshot NOT BETWEEN 0 AND 100
+        OR requirement.required_cents::numeric<=0 OR confirmed IS NULL OR confirmed<requirement.required_cents::numeric THEN
+        RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001';
+      END IF;
+      credit_state:='SATISFIED';required_text:=requirement.required_cents;coverage_revision:=requirement.updated_at;credit_revision:=NULL;
     END IF;
     expected_reference:='credit-guarantee-v1:'||encode(sha256(convert_to(zzsh_order.canonical_finance_json(jsonb_build_object(
       'accountId',NEW.account_id,'ownerUserId',NEW.owner_user_id,'gameId',binding.game_id,'versionId',NEW.listing_version_id,
-      'priceVersionId',binding.price_id,'releaseId',NEW.rule_release_id,'creditRevision',credit.revision,
+      'priceVersionId',binding.price_id,'releaseId',NEW.rule_release_id,'creditRevision',credit_revision,
       'coverageRevision',coverage_revision,'state',credit_state,'requiredCents',required_text)), 'UTF8')),'hex');
     IF reference IS DISTINCT FROM expected_reference OR personal#>>'{guarantee,status}' IS DISTINCT FROM credit_state
       OR personal#>>'{funding,publisherBailRequirementCents}' IS DISTINCT FROM required_text THEN

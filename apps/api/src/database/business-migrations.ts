@@ -558,7 +558,9 @@ export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query
       AND pg_get_constraintdef(c.oid)='CHECK ((schema_version = ANY (ARRAY[1, 2, 3, 4])))') AS listing_constraint,
     EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
       WHERE p.oid=to_regprocedure('zzsh_order.guard_supply_final_funding()') AND p.proowner=c.relowner AND NOT p.prosecdef
-        AND position('personal-quote-v5' IN p.prosrc)>0) AS funding_guard,
+        AND position('personal-quote-v5' IN p.prosrc)>0 AND position('credit_guarantee_waived_revision' IN p.prosrc)>0
+        AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('zzsh_supply.listing_publication')
+          AND a.attname='credit_guarantee_waived_revision' AND a.attnum>0 AND NOT a.attisdropped)) AS funding_guard,
     NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
       WHERE p.oid IN(to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)'),to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()'))
         AND (p.proowner<>c.relowner OR p.prosecdef)) AS functions_safe`)).rows[0];
