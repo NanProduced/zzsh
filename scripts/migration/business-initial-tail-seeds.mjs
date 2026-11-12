@@ -9,7 +9,7 @@ export const {matchesKnown0155LineEndings}=createRequire(import.meta.url)('../..
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 // The 0174 proof remains immutable. Changes to later seed content require review.
-export const POST_TAIL_SEED_TABLES=new Set([...INITIAL_SEED_TABLES,'zzsh_order.opening_auto_confirm_policy']);
+export const POST_TAIL_SEED_TABLES=new Set([...INITIAL_SEED_TABLES,'zzsh_order.opening_auto_confirm_policy','zzsh_supply.account_image_watermark']);
 
 /** Check the independently established seed state against its frozen source prefix. */
 export function assertInitialTailSeedProof(baseline,baselineProofBytes,journalBytes,migrationHashes,proof,readMigration){
