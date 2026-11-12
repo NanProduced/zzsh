@@ -683,13 +683,15 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
   const updateListFromDetail = useCallback((next: MySupply) => {
     // Recovery can refresh another loaded row after its identity and original target were checked.
     if (!next.account) return;
-    const delisted = next.account.lifecycle === "DELISTED";
+    const historical = next.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED") === true;
+    const closedState: RentalState | null = next.account.lifecycle === "DELISTED" ? "DELISTED"
+      : next.account.lifecycle === "ARCHIVED" ? (historical ? "HISTORICAL" : "COMPLETED") : null;
     const free = next.occupancyKind === null && Array.isArray(next.blockers)
       && !next.blockers.some(reason => reason === "OCCUPIED" || reason === "OCCUPANCY_UNKNOWN");
     const filter = stateFilterRef.current;
     setRows((previous) => previous.flatMap((row) => {
       if (row.id !== next.account.id) return [row];
-      if (delisted && free && filter !== "ALL" && filter !== "DELISTED") return [];
+      if (closedState && free && filter !== "ALL" && filter !== closedState) return [];
       return [{
         ...row,
         title: next.version ? next.version.declaration?.title ?? row.title : null,
@@ -698,8 +700,9 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
         owner_paused: next.account.owner_paused,
         staff_restricted: next.account.staff_restricted,
         historicalRead: next.historicalRead === undefined ? row.historicalRead : next.historicalRead,
+        historicalReadOnly: historical || next.version?.origin === "LEGACY_OBSERVATION" ? true : row.historicalReadOnly,
         display_no: next.account.display_no ?? null,
-        ...(delisted ? { rentalState: (free ? "DELISTED" : "UNKNOWN") as RentalState, available: false,
+        ...(closedState ? { rentalState: (free ? closedState : "UNKNOWN") as RentalState, available: false,
           activeOrder: free ? null : undefined, blockers: next.blockers ?? ["OCCUPANCY_UNKNOWN"] } : {}),
       }];
     }));
