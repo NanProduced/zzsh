@@ -38,6 +38,11 @@ async function proxy(request: Request, context: { params: Promise<{ path: string
   if (path === "/message-access" && method !== "GET") return errorResponse(404, "NOT_FOUND", requestId);
   const headers = new Headers({ origin: webOrigin, "x-request-id": requestId });
   headers.set("accept", "application/json");
+  const expectedUserId = request.headers.get("x-zzsh-expected-user-id");
+  if (expectedUserId !== null) {
+    if (!requestIdPattern.test(expectedUserId)) return errorResponse(400, "INVALID_ARGUMENT", requestId);
+    headers.set("x-zzsh-expected-user-id", expectedUserId);
+  }
   const cookie = userCookies(request.headers.get("cookie"));
   if (cookie) headers.set("cookie", cookie);
   let body: ArrayBuffer | undefined;

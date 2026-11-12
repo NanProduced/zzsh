@@ -50,6 +50,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { createAuthSchema } from "./auth-schema";
 import { normalizeMainlandPhone } from "./phone-number";
 import { mountAuthSecurityHandlers, preflightAuthRealmSecurity, type AdminSecurityNotification, type AuthSecurityOptions } from "./auth-security";
+import { endSupportPresenceForAuthSession } from "../im/support-presence-session";
 import { buildAdminSelfSecurityPlugin, ADMIN_SELF_SECURITY_MESSAGES } from "./admin-self-security-plugin";
 import { adminSecurityCommandId, deriveAdminSecurityCommandKey } from "./admin-security-commands";
 import { createTransactionalUserSession, buildTransactionalPhoneSignIn } from "./user-auth-session";
@@ -1270,7 +1271,23 @@ export async function mountAuthHandlers(
 
   const userWebHandler = (request: Request) => safeWebAuthHandler(withUserAuthThrottle(userAuth.handler, userThrottle, throttleKey, { resolveLegacyNumberSubject: async identifier => (await resolveLegacyNumberLogin(options.pool, identifier))?.throttleSubject ?? null }), request);
   const adminSelfSecurityInterceptor = buildAdminSelfSecurityInterceptor(adminAuth as unknown as AdminSelfSecurityApi);
-  const adminWebHandler = withAdminBruteForce((request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor), adminBruteForce);
+  const adminAuthWebHandler = (request: Request) => safeWebAuthHandler(adminAuth.handler, request, adminSelfSecurityInterceptor);
+  const adminWebHandler = withAdminBruteForce(async (request: Request) => {
+    if (request.method !== "POST" || new URL(request.url).pathname !== "/api/auth/admin/sign-out") {
+      return adminAuthWebHandler(request);
+    }
+    // Capture the server's receipt time before Better Auth deletes the session.
+    // Cleanup is best-effort: the session itself is already non-dispatchable, and
+    // the tick has a REVOKED fallback if this process dies between the two writes.
+    const receivedAt = new Date();
+    const current = await adminAuth.api.getSession({ headers: request.headers }).catch(() => null);
+    const response = await adminAuthWebHandler(request);
+    if (response.ok && current?.session?.id) {
+      await withTransaction(options.pool, (client) => endSupportPresenceForAuthSession(client, current.session!.id, "LOGOUT", receivedAt))
+        .catch(() => undefined);
+    }
+    return response;
+  }, adminBruteForce);
   const userNodeHandler = toNodeHandler(userWebHandler) as unknown as AuthHandler;
   const adminNodeHandler = toNodeHandler(adminWebHandler) as unknown as AuthHandler;
   const securityOptions: AuthSecurityOptions = {

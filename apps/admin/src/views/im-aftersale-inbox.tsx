@@ -8,7 +8,7 @@ import { Textarea } from "../components/ui/textarea";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "../components/ui/sheet";
 import { Skeleton } from "../components/ui/skeleton";
 
-export function AftersaleInbox({open,onOpenChange,scope,adminId,canHandle,canTakeover,onContact,onDirtyChange}:{open:boolean;onOpenChange:(open:boolean)=>void;scope:string;adminId:string;canHandle:boolean;canTakeover:boolean;onContact:(record:AftersaleRecord,consultationId:string,threadId:string)=>void;onDirtyChange?:(dirty:boolean)=>void}) {
+export function AftersaleInbox({open,onOpenChange,scope,adminId,canHandle,canTakeover,onContact,onDirtyChange,getConnectionId}:{open:boolean;onOpenChange:(open:boolean)=>void;scope:string;adminId:string;canHandle:boolean;canTakeover:boolean;onContact:(record:AftersaleRecord,consultationId:string,threadId:string)=>void;onDirtyChange?:(dirty:boolean)=>void;getConnectionId?:()=>string}) {
   const [state,setState]=useState<"PENDING"|"RESOLVED">("PENDING"),[items,setItems]=useState<AftersaleRecord[]>([]),[selected,setSelected]=useState<AftersaleRecord|null>(null);
   const [cursor,setCursor]=useState<string|null>(null),[loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(""),[notice,setNotice]=useState(""),[draft,setDraft]=useState("");
   const [confirmDiscard,setConfirmDiscard]=useState<(()=>void)|null>(null);
@@ -66,7 +66,7 @@ export function AftersaleInbox({open,onOpenChange,scope,adminId,canHandle,canTak
     if(action==="resolve")operation.current ||= crypto.randomUUID().replaceAll("-","");
     try{
       const body=action==="claim"?{version:record.version}:action==="contact"?{}:{version:record.version,result:draft,operationId:operation.current};
-      const response=await adminRequest<{record:unknown;consultation?:{id?:unknown;threadId?:unknown}}>(`/im/aftersales/${encodeURIComponent(record.id)}/${action}`,body,"POST");
+      const response=await adminRequest<{record:unknown;consultation?:{id?:unknown;threadId?:unknown}}>(`/im/aftersales/${encodeURIComponent(record.id)}/${action}`,body,"POST",action==="contact"&&getConnectionId?{"x-zzsh-connection-id":getConnectionId()}:{});
       const next=parseAftersaleRecord(response.record);if(current.current!==expected)return;update(next);
       if(action==="resolve"){setDraft("");operation.current="";setConfirmDiscard(null);setItems(old=>old.filter(row=>row.id!==record.id));setNotice("已标记为已处理。");}
       else if(action==="claim")setNotice("已由你跟进，可以通过现有客服咨询联系用户。");

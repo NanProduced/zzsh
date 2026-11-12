@@ -182,7 +182,12 @@ globalThis.fetch = async (input, init = {}) => {
   requests.push({ path: `${url.pathname}${url.search}`, method, body: init.body ? JSON.parse(String(init.body)) : undefined });
   const pathname = url.pathname;
   if (pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
-  if (pathname.endsWith("/im/presence/heartbeat")) return json({ ok: true });
+  if (pathname.endsWith("/im/presence/connect")) return json({ ok: true, reason: "CLAIMED", version: fixture.presence.version, stateRevision: 1 });
+  if (pathname.endsWith("/im/presence/heartbeat")) return json({
+    ok: true, dispatchable: true, reason: null, disconnectedSince: null, dispatchPaused: false,
+    stateRevision: 1, today: { seconds: 0, sessions: 0, users: 0 },
+    serverTime: "2026-11-12T00:00:00.000000Z",
+  });
   if (pathname.endsWith("/im/presence")) {
     if (method === "PUT") {
       const body = JSON.parse(String(init.body));
@@ -277,6 +282,71 @@ async function mount(t, { permissions = basePermissions, isBoss = false } = {}) 
   await settle();
   return { rootNode, root };
 }
+
+for (const state of ["KICKED", "AUTH_FAILED"]) {
+  test(`initial ${state} login failure follows its bounded terminal policy`, async (t) => {
+    const { ImClientLifecycle } = await vite.ssrLoadModule("@zzsh/im-client/lifecycle");
+    const { NimLoginTerminalError } = await vite.ssrLoadModule("@zzsh/im-client/nim-web-client");
+    const originalOpen = ImClientLifecycle.prototype.open;
+    const originalTimeout = browser.setTimeout;
+    const originalClearTimeout = browser.clearTimeout;
+    const retryTimers = [];
+    let calls = 0;
+    ImClientLifecycle.prototype.open = async () => { calls += 1; throw new NimLoginTerminalError(state, new Error("sensitive fixture")); };
+    browser.setTimeout = (callback, delay, ...args) => {
+      if ([3000, 5000, 10000, 15000, 30000, 60000].includes(delay)) { retryTimers.push(delay); return -retryTimers.length; }
+      return originalTimeout.call(browser, callback, delay, ...args);
+    };
+    browser.clearTimeout = id => { if (typeof id !== "number" || id >= 0) originalClearTimeout.call(browser, id); };
+    t.after(() => { ImClientLifecycle.prototype.open = originalOpen; browser.setTimeout = originalTimeout; browser.clearTimeout = originalClearTimeout; });
+    requests.length = 0;
+    fixture = baseFixture({ presence: { adminUserId: "admin-a", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 0, version: 1, stateRevision: 1, ownedByAnotherSession: false, unbound: false } });
+    const { rootNode } = await mount(t);
+    await waitFor(() => calls === 1 && rootNode.querySelector(".im-wb-runtime-state")?.textContent.includes(state === "KICKED" ? "被踢" : "认证失败"));
+    if (state === "AUTH_FAILED") {
+      await act(async () => browser.dispatchEvent(new browser.Event("online")));
+      await waitFor(() => calls === 2);
+      await act(async () => browser.dispatchEvent(new browser.Event("online")));
+      await waitFor(() => calls === 3);
+      await waitFor(() => rootNode.querySelector(".im-wb-runtime-state")?.textContent.includes("认证失败"));
+      assert.equal(calls, 3, "AUTH_FAILED retries twice before reporting the terminal state");
+      assert.deepEqual(retryTimers, [5000, 15000], "the two retries use bounded backoff");
+    } else {
+      await act(async () => browser.dispatchEvent(new browser.Event("online")));
+      await settle();
+      assert.equal(calls, 1, "KICKED must never reopen automatically");
+      assert.deepEqual(retryTimers, [], "KICKED must not schedule a retry");
+    }
+    await waitFor(() => requests.some(request => request.path.endsWith("/im/presence/heartbeat")));
+    assert(!rootNode.querySelector(".im-wb-runtime-state").textContent.includes("可接待"));
+    assert(requests.filter(request => request.path.endsWith("/im/presence/heartbeat")).every(request => request.body.connectionState === state));
+    assert(!rootNode.textContent.includes("sensitive fixture"));
+  });
+}
+
+test("a terminal failure from the previous workbench identity does not report presence", async (t) => {
+  const { ImClientLifecycle } = await vite.ssrLoadModule("@zzsh/im-client/lifecycle");
+  const { NimLoginTerminalError } = await vite.ssrLoadModule("@zzsh/im-client/nim-web-client");
+  const originalOpen = ImClientLifecycle.prototype.open;
+  let rejectOld;
+  const started = [];
+  ImClientLifecycle.prototype.open = identity => {
+    started.push(identity);
+    return new Promise((_resolve, reject) => { if (identity === "admin-a") rejectOld = reject; });
+  };
+  t.after(() => { ImClientLifecycle.prototype.open = originalOpen; });
+  requests.length = 0;
+  fixture = baseFixture();
+  const { rootNode, root } = await mount(t);
+  await waitFor(() => started.includes("admin-a"));
+  const next = { ...snapshot(basePermissions), adminUserId: "admin-b", session: { ...snapshot(basePermissions).session, id: "session-b" } };
+  await act(async () => root.render(createElement(ImSupportView, { snapshot: next, onRefresh: async () => next })));
+  await waitFor(() => started.includes("admin-b"));
+  await act(async () => rejectOld(new NimLoginTerminalError("KICKED", new Error("old fixture"))));
+  await settle();
+  assert(!rootNode.textContent.includes("被踢下线"));
+  assert(!requests.some(request => request.path.endsWith("/im/presence/heartbeat") && request.body.connectionState === "KICKED"));
+});
 
 async function mountManagement(t, { canTakeover = true, onOpenConsultation } = {}) {
   const rootNode = browser.document.createElement("div");
@@ -472,6 +542,7 @@ const auditConversations = () => [
 ];
 
 test("patrol lists conversations and opens only a read-only shared transcript", async (t) => {
+  requests.length = 0;
   let openedWorkbench = false;
   fixture = baseFixture({ conversations: { items: auditConversations(), nextCursor: null } });
   fixture.messages = {
@@ -1660,6 +1731,7 @@ test("heartbeat posts every 30s while available and connected", async (t) => {
   const before = beats();
   await tickTimers();
   await waitFor(() => beats() === before + 1);
+  assert.equal(requests.filter((request) => request.path.endsWith("/im/presence/heartbeat")).at(-1)?.body?.connectionState, "CONNECTED");
 
   const originalVisibility = Object.getOwnPropertyDescriptor(browser.document, "visibilityState");
   Object.defineProperty(browser.document, "visibilityState", { configurable: true, get: () => "hidden" });

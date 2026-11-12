@@ -33,3 +33,23 @@ CREATE TABLE zzsh_supply.account_image_variant (
   CHECK (object_key LIKE '%/' || max_edge::text || '.webp')
 );
 COMMENT ON TABLE zzsh_supply.account_image_variant IS '已校验的私有账号展示衍生图；公开投放及撤权另行管理';
+COMMENT ON COLUMN zzsh_supply.media_upload_intent.direct_oss IS '是否由浏览器直传至私有 OSS 暂存区';
+COMMENT ON TABLE zzsh_supply.account_image_watermark IS '账号展示图片水印的当前平台配置';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.singleton IS '单行配置标识';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.revision IS '配置修订号';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.enabled IS '是否为新生成的展示图添加水印';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.logo_asset_id IS '水印 Logo 的平台素材编号';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.position IS '水印位置';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.size_percent IS '水印大小比例';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.opacity_percent IS '水印不透明度百分比';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.margin_percent IS '水印边距比例';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.updated_by_admin_id IS '最近修改配置的管理员';
+COMMENT ON COLUMN zzsh_supply.account_image_watermark.updated_at IS '配置最近修改时间';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.asset_id IS '来源账号图片素材编号';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.max_edge IS '衍生图最大边长';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.object_key IS '私有衍生图对象键';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.sha256 IS '衍生图字节 SHA-256';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.byte_size IS '衍生图字节数';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.width IS '衍生图宽度像素';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.height IS '衍生图高度像素';
+COMMENT ON COLUMN zzsh_supply.account_image_variant.watermark_revision IS '生成时使用的水印配置修订号';

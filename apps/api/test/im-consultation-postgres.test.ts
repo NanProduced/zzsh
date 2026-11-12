@@ -294,6 +294,7 @@ test(
       const boundaryUserAccountId = deriveYunxinAccountId(identityKey("USER", boundaryUserId));
       const adminAccountId = deriveYunxinAccountId(identityKey("ADMIN", adminId));
       const targetAdminAccountId = deriveYunxinAccountId(identityKey("ADMIN", targetAdminId));
+      const connectionIdFor = (context: AdminContext) => `conn_${context.sessionId}`;
       const writePresence = async (
         presenceOptions: typeof options,
         context: AdminContext,
@@ -302,7 +303,7 @@ test(
         expectedVersion?: number,
       ) => {
         const version = expectedVersion ?? (await readOwnPresence(presenceOptions, context)).version;
-        return updateOwnPresence(presenceOptions, context, { ...input, version }, requestId);
+        return updateOwnPresence(presenceOptions, context, { ...input, version, connectionId: input.connectionId ?? connectionIdFor(context) }, requestId);
       };
 
       const online = await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-online`);
@@ -381,30 +382,30 @@ test(
         `SELECT "auth_session_id" AS "sessionId" FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
         [APP_ID, presenceRaceAdminId],
       )).rows[0]?.sessionId, presenceRaceNewSessionId, "the latest live session owns presence");
-      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin)).ok, false, "a stale window cannot keep presence alive");
+      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin, "DISCONNECTED", (await readOwnPresence(options, presenceRaceOldAdmin)).stateRevision, "conn_race_old")).ok, false, "a stale window cannot keep presence alive");
 
       // A stale window cannot pause or periodically re-sync the owner's presence even
       // after it reads the current version; only an explicit takeover may change hands.
       await assert.rejects(
-        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "OFF_DUTY", connectionState: "CONNECTED", version: raceNewOnline.version }, `${prefix}presence-old-pause`),
+        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "OFF_DUTY", connectionState: "CONNECTED", version: raceNewOnline.version, connectionId: connectionIdFor(presenceRaceOldAdmin) }, `${prefix}presence-old-pause`),
         /owned by another session/,
       );
       await assert.rejects(
-        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version }, `${prefix}presence-old-sync`),
+        updateOwnPresence(options, presenceRaceOldAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version, connectionId: connectionIdFor(presenceRaceOldAdmin) }, `${prefix}presence-old-sync`),
         /owned by another session/,
       );
       const oldTakeover = await updateOwnPresence(options, presenceRaceOldAdmin, {
-        availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version, takeover: true,
+        availability: "AVAILABLE", connectionState: "CONNECTED", version: raceNewOnline.version, takeover: true, connectionId: connectionIdFor(presenceRaceOldAdmin),
       }, `${prefix}presence-old-takeover`);
       assert.equal((await readOwnPresence(options, presenceRaceNewAdmin)).ownedByAnotherSession, true);
       await assert.rejects(
-        updateOwnPresence(options, presenceRaceNewAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version }, `${prefix}presence-new-sync-after-old-takeover`),
+        updateOwnPresence(options, presenceRaceNewAdmin, { availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version, connectionId: connectionIdFor(presenceRaceNewAdmin) }, `${prefix}presence-new-sync-after-old-takeover`),
         /owned by another session/,
       );
       await updateOwnPresence(options, presenceRaceNewAdmin, {
-        availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version, takeover: true,
+        availability: "AVAILABLE", connectionState: "CONNECTED", version: oldTakeover.version, takeover: true, connectionId: connectionIdFor(presenceRaceNewAdmin),
       }, `${prefix}presence-new-takeover-back`);
-      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin)).ok, false, "ownership stays with the explicit takeover winner");
+      assert.equal((await heartbeatOwnPresence(options, presenceRaceOldAdmin, "DISCONNECTED", (await readOwnPresence(options, presenceRaceOldAdmin)).stateRevision, "conn_race_old")).ok, false, "ownership stays with the explicit takeover winner");
 
       const service = await createOrResumeUserConsultation(options, user, "SERVICE", "listing_demo_01", `${prefix}service-create`);
       assert.equal(service.consultation.state, "ACTIVE");
@@ -560,7 +561,7 @@ test(
       await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}presence-reopen`);
       const waitingQueue = await listAdminConsultations(options, admin, access, 10);
       assert.equal(waitingQueue.consultations.some(({ id }) => id === complaint.consultation.id), true);
-      const claimed = await claimConsultation(options, admin, complaint.consultation.id, `${prefix}complaint-claim`);
+      const claimed = await claimConsultation(options, admin, complaint.consultation.id, `${prefix}complaint-claim`, undefined, connectionIdFor(admin));
       assert.equal(claimed.consultation.state, "ACTIVE");
       assert.equal(claimed.consultation.assignedAdmin?.id, adminId);
       assert.equal(claimed.consultation.peerAccountId, userAccountId);
@@ -684,7 +685,7 @@ test(
       assert.equal(recoveryQueue.consultation.state, "WAITING");
       await writePresence(options, admin, { availability: "AVAILABLE", connectionState: "CONNECTED" }, `${prefix}recovery-create-online`);
       await assert.rejects(
-        claimConsultation(options, admin, recoveryQueue.consultation.id, `${prefix}recovery-create-claim`),
+        claimConsultation(options, admin, recoveryQueue.consultation.id, `${prefix}recovery-create-claim`, undefined, connectionIdFor(admin)),
         /being recovered/,
       );
       const findCallsAfterFailedCreate = provider.findCalls;

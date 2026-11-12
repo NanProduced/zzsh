@@ -183,6 +183,90 @@ test("user token route derives the subject from the authenticated session", asyn
     ttlSeconds: 600,
     transport: "nim",
   });
+  const stale = responseCapture();
+  await handleYunxinRoute({
+    method: "GET", url: "/api/v1/im/user/token",
+    headers: { origin: "http://127.0.0.1:3100", cookie: "zzsh_user.session_token=opaque", "x-zzsh-expected-user-id": "user-2" },
+  }, stale, options);
+  assert.equal(stale.statusCode, 401, "a stale tab cannot obtain another user's IM token");
+  assert.equal((stale.body as { token?: unknown })?.token, undefined);
+  for (const [method, url] of [
+    ["GET", "/api/v1/im/user/message-access?conversationId=user%7C2%7C1&operation=send"],
+    ["POST", "/api/v1/im/user/consultations/round-1/read"],
+    ["POST", "/api/v1/im/user/order-teams/order-1/read"],
+  ]) {
+    const rejected = responseCapture();
+    await handleYunxinRoute({ method, url, headers: { origin: "http://127.0.0.1:3100", cookie: "zzsh_user.session_token=opaque", "x-zzsh-expected-user-id": "user-2" } }, rejected, { ...options, consultation: {} as never });
+    assert.equal(rejected.statusCode, 401, `stale identity must not reach ${url}`);
+  }
+});
+
+test("admin token issuance rechecks the connection after a delayed issue and discards a taken-over token", async () => {
+  const adminKey = key("ADMIN", "admin-1");
+  const securityPool = {
+    query: async (text: string) => {
+      if (text.includes("admin_security")) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
+      if (text.includes("zzsh_auth_admin") && text.includes("suspended")) return { rows: [{ suspended: false }] };
+      if (text.includes("WITH role_permissions")) return { rows: [] };
+      return { rows: [] };
+    },
+  } as never;
+  let connectionUpdates = 0;
+  const consultationPool = {
+    connect: async () => ({
+      query: async (text: string) => {
+        if (text === "BEGIN" || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
+        if (text.includes('FROM "zzsh_auth_admin"."session"')) return { rows: [{ locked: false, expired: false }] };
+        if (text.includes('UPDATE "zzsh_iam"."im_support_presence"')) {
+          connectionUpdates += 1;
+          return connectionUpdates <= 2 ? { rows: [{ expiresAt: new Date() }] } : { rows: [] };
+        }
+        return { rows: [] };
+      },
+      release() {},
+    }),
+  } as never;
+  let resolveIssue: (value: unknown) => void;
+  const issueGate = new Promise((resolve) => { resolveIssue = resolve; });
+  let issueStarted: () => void;
+  const started = new Promise<void>((resolve) => { issueStarted = resolve; });
+  let issued = 0;
+  const tokenService = {
+    issue: async () => {
+      issued += 1;
+      issueStarted();
+      await issueGate;
+      return { accountId: deriveYunxinAccountId(adminKey), token: "must-not-leak", issuedAt: 1_000, expiresAt: 601_000, ttlSeconds: 600 };
+    },
+  } as never;
+  const options = userRouteOptions({
+    security: {
+      ...userRouteOptions().security,
+      pool: securityPool,
+      adminAuth: { api: { getSession: async () => ({ user: { id: "admin-1", twoFactorEnabled: true }, session: { id: "session-1", locked: false } }) } },
+    } as never,
+    tokenService,
+    consultation: { pool: consultationPool, appId: APP_ID } as never,
+  });
+  const response = responseCapture();
+  const request = handleYunxinRoute({
+    method: "GET",
+    url: "/api/v1/im/admin/token",
+    headers: {
+      origin: "http://127.0.0.1:3101",
+      cookie: "zzsh_admin.session_token=opaque",
+      "x-zzsh-connection-id": "conn_token_test",
+    },
+  }, response, options);
+  await started;
+  // The other session takes over while the provider call is still in flight.
+  resolveIssue!(undefined);
+  await request;
+  assert.equal(issued, 1);
+  assert.equal(connectionUpdates, 3, "the post-issue check re-reads the exact connection lease");
+  assert.equal(response.statusCode, 409, JSON.stringify(response.body));
+  assert.equal((response.body as { error?: { code?: string } }).error?.code, "CONFLICT");
+  assert.doesNotMatch(JSON.stringify(response.body), /must-not-leak/);
 });
 
 test("admin identity listing does not expose the provider marker", async () => {

@@ -70,7 +70,7 @@ import {
 } from "../../lib/supply-client";
 import { freezeRequest, IdentityPauseGate, isCurrentQuery } from "../../lib/supply-workspace-guards";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent, type SupplyWriteAction, type SupplyWriteReceipt } from "../../lib/supply-write-intent";
-import { compressListingScreenshot, MEDIA_ACCEPT_ATTRIBUTE, mediaUploadFailureHint } from "../../lib/media-upload";
+import { MEDIA_ACCEPT_ATTRIBUTE, mediaUploadFailureHint } from "../../lib/media-upload";
 import { selectDeltaGame } from "../../lib/supply-games";
 import { requiredAccountFactsProblem } from "../../lib/supply-publication-required";
 import { DELTA_REGION_OPTIONS } from "../../lib/delta-region-options";
@@ -152,7 +152,6 @@ type MediaEntry = {
   category?: MediaCategory;
   file?: File;
   transport?: "OSS_POST";
-  compress?: boolean;
   assetId?: string;
   reviewState?: string;
   publicDisplayEligible?: boolean;
@@ -2371,17 +2370,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     const controller = beginRequest();
     if (currentContext(context, controller.signal)) setMedia((previous) => previous.map((item) => item.id === entry.id ? { ...item, status: "uploading", error: undefined } : item));
     setBusy(`upload-${entry.id}`);
-    let retryEntry = entry;
     try {
       const ready = await ensureReady(context, controller.signal, "upload", () => upload(entry, context));
       const id = accountRef.current;
       if (cancelledMedia.current.has(entry.id) || !ready || !id || !currentContext(context, controller.signal)) return;
-      const file = entry.compress ? await compressListingScreenshot(entry.file) : entry.file;
-      if (cancelledMedia.current.has(entry.id) || !currentContext(context, controller.signal)) return;
-      if (entry.compress) {
-        retryEntry = { ...entry, file, compress: false };
-        setMedia(previous => previous.map(item => item.id === entry.id ? { ...item, file, compress: false } : item));
-      }
+      const file = entry.file;
       const result = await writePersisted("media", { ...context, accountId: id }, { purpose: entry.purpose, category: entry.category ?? "SHOWCASE", mime: file.type, size: file.size, uploadKey: entry.uploadKey }, entry.intentKey, () => uploadSupplyMedia({ gameId: context.gameId, accountId: id, purpose: entry.purpose, file, transport: entry.transport, intentKey: entry.intentKey, uploadKey: entry.uploadKey, signal: controller.signal, beforeBytesUpload: () => waitForIdentity(context) }));
       if (!currentContext(context, controller.signal)) return;
       if (!result) return;
@@ -2397,7 +2390,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       if (cancelledMedia.current.has(entry.id)) return;
       if (currentContext(context, controller.signal)) {
         setMedia((previous) => previous.map((item) => item.id === entry.id ? { ...item, status: "failed", error: failure instanceof SupplyRequestError ? failure.message : "上传未完成" } : item));
-        if (!isAbort(failure) && uncertainSupplyWriteFailure(failure)) rememberWrite({ action: "upload", context, run: () => upload(retryEntry, context) });
+        if (!isAbort(failure) && uncertainSupplyWriteFailure(failure)) rememberWrite({ action: "upload", context, run: () => upload(entry, context) });
         reportWriteFailure(failure, context);
       }
     } finally {
@@ -2414,7 +2407,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const entryId = newKey();
       cancelledMedia.current.delete(entryId);
       const hint = mediaUploadFailureHint(file);
-      const entry: MediaEntry = { id: entryId, purpose: "ACCOUNT_DISPLAY", category, file, transport, compress: transport === "OSS_POST" && category === "SHOWCASE", status: "failed", error: hint ?? undefined, intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context, previewUrl: hint ? undefined : URL.createObjectURL(file) };
+      const entry: MediaEntry = { id: entryId, purpose: "ACCOUNT_DISPLAY", category, file, transport, status: "failed", error: hint ?? undefined, intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context, previewUrl: hint ? undefined : URL.createObjectURL(file) };
       setMedia((previous) => [...previous, entry]);
       if (hint) {
         setNotice("");

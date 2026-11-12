@@ -213,6 +213,10 @@ export type OrderQuote = {
   unitAmountsInformational?: boolean;
   ownerTotal?: Money | null;
   ownerHaffRatio?: string | null;
+  /** Present in the server projection; kept optional for older order reads. */
+  resourceTotal?: Money | null;
+  tenantDeposit?: Money | null;
+  tenantPayableTotal?: Money | null;
 };
 
 export type OrderAmounts = {
@@ -317,6 +321,8 @@ export type Order = {
   listingFactsUnknownReason?: "ORDER_VERSION_UNREADABLE" | "ACCOUNT_PUBLIC_VERSION_MISSING" | "UNREADABLE" | "ACCOUNT_UNLINKED" | null;
   entitlements?: OrderEntitlement[] | null;
   entitlementsUnknownReason?: "NOT_DISCLOSED" | "NOT_FROZEN" | "UNREADABLE" | null;
+  /** Frozen renter membership marker; payableRatio is the aggregate discount, not a per-line rate. */
+  membership?: { tier: string; payableRatio?: string | null } | null;
   stage?: OrderStage | null;
 };
 

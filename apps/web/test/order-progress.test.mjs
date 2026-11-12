@@ -65,14 +65,14 @@ test("pending payment: renter gets the one payment action, owner never pays on t
   const renter = view({ status: "PENDING_PAYMENT" });
   assert.equal(renter.owner, "你");
   assert.equal(renter.primary.label, "去支付");
-  assert.equal(renter.primary.target, "trade");
-  assert.match(renter.note, /结果未确认时查询原请求/);
-  assert.match(renter.note, /模拟付款记录也不代表渠道扣款/);
+  assert.equal(renter.primary.target, "pay");
+  assert.match(renter.note, /支付弹窗/);
+  assert.match(renter.note, /不要重复付款/);
 
   const owner = view({ status: "PENDING_PAYMENT" }, { party: "owner" });
   assert.equal(owner.owner, "对方");
   assert.equal(owner.primary.target, "refresh");
-  assert.match(owner.note, /号主不能代付/);
+  assert.match(owner.note, /等待租客付款/);
   assert.ok(!JSON.stringify(owner).includes("去支付"));
 });
 
@@ -107,8 +107,8 @@ test("no generated opening: support guidance, group readiness is never an openin
   const missing = view({}, { facts: facts() });
   assert.equal(missing.owner, "客服");
   assert.equal(missing.primary.target, "support");
-  assert.match(missing.note, /不等于已经开租/);
-  assert.match(missing.note, /不会自动生成清单或交付/);
+  assert.match(missing.note, /开租清单还没有读到/);
+  assert.match(missing.note, /刷新或联系客服/);
   assert.equal(missing.primary.label, "联系客服");
 });
 
@@ -117,8 +117,7 @@ test("opening checklist: each party confirms independently; due time is the froz
   assert.equal(mine.owner, "你");
   assert.equal(mine.primary.label, "确认期初并开租");
   assert.equal(mine.primary.target, "trade");
-  assert.match(mine.note, /截止时间取本单冻结值/);
-  assert.match(mine.note, /本人、客服代操作与系统自动确认/);
+  assert.match(mine.note, /不等于已开租/);
 
   const waiting = view({}, { facts: facts({ openingVersionNo: "1", myAck: true, autoConfirmDueAt: "2026-11-09T03:00:00Z" }) });
   assert.equal(waiting.owner, "对方");
@@ -141,14 +140,14 @@ test("renting: the end-rental form uses server pricing, never a browser calculat
   const renting = view({}, { facts: opened });
   assert.equal(renting.owner, "你");
   assert.equal(renting.primary.label, "发起结束租用");
-  assert.match(renting.note, /最终金额不在浏览器计算/);
+  assert.match(renting.note, /预览金额/);
   assert.match(renting.note, /客服复核/);
 });
 
 test("intake pending: support owns the next step and no write action is offered", () => {
   const intake = view({}, { facts: facts({ ...opened, phase: "INTAKE_PENDING" }) });
   assert.equal(intake.owner, "客服");
-  assert.match(intake.note, /当前没有需要你提交的写操作/);
+  assert.match(intake.note, /等待客服核对/);
   assert.equal(intake.primary.target, "refresh");
   assert.notEqual(intake.primary.target, "trade");
 });
@@ -157,7 +156,7 @@ test("settlement decisions: confirm is mine, waiting is theirs, rejection is not
   const pending = view({}, { facts: facts({ ...opened, phase: "DECISION_PENDING" }) });
   assert.equal(pending.owner, "你");
   assert.equal(pending.primary.label, "确认结算");
-  assert.match(pending.note, /拒绝不会使这一版生效/);
+  assert.match(pending.note, /确认或拒绝/);
 
   const waiting = view({}, { facts: facts({ ...opened, phase: "DECISION_WAITING" }) });
   assert.equal(waiting.owner, "对方");
@@ -165,7 +164,8 @@ test("settlement decisions: confirm is mine, waiting is theirs, rejection is not
 
   const rejected = view({}, { facts: facts({ ...opened, phase: "DECISION_REJECTED" }) });
   assert.equal(rejected.owner, "客服");
-  assert.match(rejected.note, /拒绝不会使它生效/);
+  assert.match(rejected.note, /未达成一致/);
+  assert.match(rejected.note, /无需重复确认/);
   assert.ok(!JSON.stringify(rejected).includes("确认结算"));
 });
 
@@ -174,8 +174,8 @@ test("posted: terminal state keeps refund/aftersale, separates three independent
   assert.equal(posted.terminal, true);
   assert.equal(posted.noNewTransaction, true);
   assert.equal(posted.primary.target, "refund");
-  assert.match(posted.note, /应退金额、平台退款处理状态与渠道到账是三件独立的事/);
-  assert.match(posted.note, /不会再次上架/);
+  assert.match(posted.note, /退款到账以退款记录为准/);
+  assert.match(posted.note, /售后和客服入口/);
   assert.ok(!JSON.stringify(posted).includes("确认结算"));
 });
 
@@ -185,32 +185,39 @@ test("a completed status with a stale in-flight settlement read never offers a n
   assert.equal(mismatched.noNewTransaction, true);
   assert.equal(mismatched.pendingRead, true);
   assert.equal(mismatched.primary.target, "refund");
-  assert.ok(mismatched.known.some(line => line.includes("结算阶段与订单主状态不一致")));
+  assert.ok(mismatched.known.some(line => line.includes("结算阶段与订单状态不一致")));
   assert.ok(!JSON.stringify(mismatched).includes("确认结算"));
 });
 
-test("cancelled: terminal but not empty — refund, aftersale, support and role-specific next step", () => {
-  const renter = view({ status: "CANCELLED" });
+test("cancelled: terminal but not empty — paid orders keep refund, aftersale and support", () => {
+  const renter = view({ status: "CANCELLED", paidAt: "2026-10-28T09:00:00Z" });
   assert.equal(renter.terminal, true);
   assert.equal(renter.noNewTransaction, true);
   assert.equal(renter.primary.target, "refund");
   assert.ok(renter.secondary.some(a => a.target === "support"));
   assert.match(renter.note, /不再提供开租或结算操作/);
-  assert.match(renter.note, /不会因完单而再次上架/);
+  assert.match(renter.note, /退款、售后和客服入口仍可使用/);
 
-  // The existing attention band owns the single role-specific browse/manage link; the progress
-  // card must not duplicate it into a second competing exit.
   for (const party of ["renter", "owner"]) {
-    const state = view({ status: "CANCELLED" }, { party });
+    const state = view({ status: "CANCELLED", paidAt: "2026-10-28T09:00:00Z" }, { party });
     assert.ok(!state.secondary.some(a => a.href === "/accounts" || a.href === "/account?view=accounts"), `${party} progress card duplicates the attention-band link`);
     assert.equal(state.primary.target, "refund");
   }
 });
 
+test("an unpaid cancellation never claims a refund or a payment step", () => {
+  const renter = view({ status: "CANCELLED" });
+  assert.equal(renter.primary.target, "browse");
+  assert.match(renter.note, /未支付/);
+  assert.match(renter.note, /不会产生退款/);
+  assert.ok(!JSON.stringify(renter).includes("退款进度"));
+});
+
 test("prestart termination: refund progress is shown, arrival is never claimed", () => {
-  const prestart = view({ status: "CANCELLED", cancelReason: "PRESTART_TERMINATED" });
+  const prestart = view({ status: "CANCELLED", cancelReason: "PRESTART_TERMINATED", paidAt: "2026-10-28T09:00:00Z" });
   assert.equal(prestart.primary.target, "refund");
-  assert.match(prestart.note, /本地受理与核销都不等于渠道退款到账/);
+  assert.match(prestart.note, /退款进度见下方记录/);
+  assert.match(prestart.note, /到账以退款记录为准/);
 });
 
 test("historical manual close: funds stay unconfirmed and support owns the follow-up", () => {
@@ -249,7 +256,7 @@ test("an unknown server status never invents a stage", () => {
 });
 
 test("every primary/secondary action only points at an existing capability, never a new write", () => {
-  const allowed = new Set(["trade", "legacy", "refund", "support", "groups", "refresh", "browse", "manage", "list"]);
+  const allowed = new Set(["trade", "pay", "legacy", "refund", "support", "groups", "refresh", "browse", "manage", "list"]);
   for (const [index, state] of allViews().entries()) {
     const actions = [state.primary, ...state.secondary].filter(Boolean);
     assert.equal(actions.filter(a => a.target === "trade" && state.noNewTransaction).length, 0, `terminal state ${index} must not point at the transaction panel`);
@@ -273,7 +280,7 @@ test("an unknown channel payment result never invites another payment", () => {
   const unknown = view({ status: "PENDING_PAYMENT" }, { payment: paymentUnknown });
   assert.equal(unknown.tone, "unknown");
   assert.equal(unknown.title, "支付结果正在确认");
-  assert.match(unknown.note, /支付结果正在确认/);
+  assert.match(unknown.note, /不要重复付款/);
   assert.notEqual(unknown.primary.label, "去支付");
   assert.ok(!JSON.stringify(unknown).includes("完成支付"));
   assert.ok(!JSON.stringify(unknown).includes("去支付"));

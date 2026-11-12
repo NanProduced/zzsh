@@ -4,7 +4,7 @@
 
 ## 账号图片直传和私有衍生图
 
-`OSS_ACCOUNT_MEDIA_DIRECT=1` 启用账号图片的 `OSS_POST` 上传能力，默认关闭。API 继续支持原有中继上传，上传意图只允许使用创建时选择的方式。Web 普通展示截图尽量转为长边不超过 1920 px 的 WebP，处罚截图和审核证据保留所选文件的原始字节。其他业务媒体沿用各自入口。
+`OSS_ACCOUNT_MEDIA_DIRECT=1` 启用账号图片的 `OSS_POST` 上传能力，默认关闭。API 继续支持原有中继上传，上传意图只允许使用创建时选择的方式。展示截图、处罚截图和审核证据均保留所选文件的原始字节；公开展示另生成缩放及水印衍生图。其他业务媒体沿用各自入口。
 
 - `GET /api/v1/supply/games/:gameId/publishing-options` 在启用时返回 `accountMediaTransport: "OSS_POST"`。`POST /api/v1/supply/media/upload-intents` 接受 `transport: "OSS_POST"`，验证账号归属和声明后返回限时 `ossUpload` 表单，绑定 `<prefix>private/account-upload/<intentId>`、实际声明大小和 MIME。客户端按返回字段构造 multipart 表单，最后附文件，向 OSS HTTPS 域名 POST。有效期沿用上传意图的 10 分钟。
 - `POST /api/v1/supply/media/uploads/:intentId/complete` 沿用写幂等键，提交 `{ uploadToken, contentHash }`，其中 `contentHash` 是实际上传文件的十六进制 SHA-256。API 按当前身份与账号权限从 OSS 读取暂存字节，完整解码并重新核对大小、MIME 和 SHA-256。原图及中继兼容衍生图沿用现有内容寻址键。若 `MEDIA_STORAGE=oss` 使用同地域内网 Endpoint，这些校验读写发生在内网，用户上传流量直达 OSS。

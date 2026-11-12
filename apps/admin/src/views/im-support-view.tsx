@@ -9,8 +9,8 @@ import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
-import { ImClientLifecycle, ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
+import { ImClientLifecycle, ImLifecycleSupersededError, isImDisposeFailure, markImDisposeFailure } from "@zzsh/im-client/lifecycle";
+import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimLoginTerminalError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
 import { collapseImSystemNotices, decodeImSystemNotice, imSystemNoticeLabel, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
 import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
 import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
@@ -18,9 +18,10 @@ import "@zzsh/ui/message-media.css";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { ActionTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import "@zzsh/ui/message-actions.css";
-import { AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
+import { API_ROOT, AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
+import { acquireSupportTabLease } from "./support-tab-lease";
 import { planSupportNotificationToggle, playSupportChime, readSupportNotificationPreference, requestSupportNotificationPermission, storeSupportNotificationPreference, supportNotificationPermission, unlockSupportAudio, useSupportUnreadNotifications, type SupportNotificationPermission } from "./im-support-notifications";
 import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, useOrderGroupCloudPins, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
 import { OrderWorkbenchPane } from "./im-support-orders";
@@ -94,7 +95,39 @@ type SupportMessage = {
 };
 type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
 type PresenceToday = { seconds: number; sessions: number; users: number };
-type Presence = { adminUserId: string; availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED"; connectionState: string; activeLoad: number; version: number; ownedByAnotherSession?: boolean; unbound?: boolean; today?: PresenceToday };
+type Presence = {
+  adminUserId: string;
+  availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED";
+  connectionState: string;
+  lastConfirmedAt?: string | null;
+  disconnectedSince?: string | null;
+  dispatchPaused?: boolean;
+  dispatchable?: boolean;
+  reason?: string | null;
+  stateRevision?: number;
+  activeLoad: number;
+  version: number;
+  ownedByAnotherSession?: boolean;
+  unbound?: boolean;
+  today?: PresenceToday;
+};
+type PresenceHeartbeat = {
+  ok: boolean;
+  dispatchable: boolean;
+  reason: string | null;
+  disconnectedSince: string | null;
+  dispatchPaused: boolean;
+  stateRevision: number;
+  today?: PresenceToday;
+  serverTime: string;
+};
+type ConnectionClaim = {
+  ok: boolean;
+  reason: "CLAIMED" | "OTHER_WINDOW" | "LOCKED" | "FORBIDDEN" | "SESSION_INVALID";
+  version?: number;
+  stateRevision?: number;
+};
+type ConnectionLease = { ok: boolean; reason: string };
 type SupportSection = "consultation" | "orders";
 type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
 type UnifiedRow = {
@@ -211,8 +244,33 @@ function stageLabelOf(row: OrderTeamListItem): string {
 function stageToneOf(state: string): "good" | "warn" | "neutral" {
   return state === "接待中" || state === "租用中" ? "good" : state === "待接入" || state === "通道异常" || state === "已取消" ? "warn" : "neutral";
 }
-function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): Presence["connectionState"] {
+function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): NimWebConnectionState {
   return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
+}
+function createConnectionId(): string {
+  const value = globalThis.crypto?.randomUUID?.();
+  if (value) return value;
+  return `conn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+}
+/**
+ * A stale heartbeat may only be retried with the connection that is live *now*.
+ * A late CONNECTED from a kicked/reconnecting/older NIM client must be dropped;
+ * a terminal state may be re-sent after refreshing the revision because that is
+ * the current truth, not the old event.
+ */
+export function staleHeartbeatRetryState(input: {
+  liveConnection: NimWebConnectionState | "idle" | "error";
+  terminal: "KICKED" | "AUTH_FAILED" | undefined;
+  sentGeneration: number;
+  liveGeneration: number;
+  sentClient: object | null | undefined;
+  liveClient: object | null | undefined;
+}): NimWebConnectionState | null {
+  if (input.sentGeneration !== input.liveGeneration) return null;
+  if ((input.sentClient ?? null) !== (input.liveClient ?? null)) return null;
+  const live = connectionForPresence(input.liveConnection);
+  if (input.terminal && live !== input.terminal) return null;
+  return live;
 }
 /** Keep the runtime label, tone and action consistent when the IM channel is not CONNECTED. */
 export function presenceRuntimeState(
@@ -221,39 +279,48 @@ export function presenceRuntimeState(
   busy: boolean,
   ownedByAnotherSession = false,
   unbound = false,
+  localLeader = true,
+  dispatchable = true,
 ): { connected: boolean; tone: "good" | "warn" | "neutral"; label: string; toggleDisabled: boolean; toggleTitle: string | undefined; toggleLabel: string } {
   const connected = connection === "CONNECTED";
   const owned = ownedByAnotherSession === true;
   const needsExplicitStart = unbound === true;
+  const kicked = connection === "KICKED";
+  const authFailed = connection === "AUTH_FAILED";
   return {
     connected,
-    tone: owned || needsExplicitStart ? "warn" : availability === "AVAILABLE" && !connected ? "warn" : availability === "AVAILABLE" ? "good" : "neutral",
-    label: needsExplicitStart
-      ? connected ? "需重新开始接待" : connection === "idle" || connection === "CONNECTING" ? "需重新开始接待 · 连接中" : "需重新开始接待 · 连接异常"
-      : connection === "idle" || connection === "CONNECTING"
-        ? "连接中"
-        : !connected
-          ? availability === "AVAILABLE" ? "连接异常 · 接待中" : "连接异常"
-          : owned ? "其他窗口接待中" : availability === "AVAILABLE" ? "可接待" : availability === "PAUSED" ? "已暂停" : "未上线",
-    toggleDisabled: owned || needsExplicitStart ? busy || !connected : availability === "AVAILABLE" ? busy : busy || !connected,
+    tone: owned || !localLeader || needsExplicitStart || kicked || authFailed || (availability === "AVAILABLE" && (!connected || !dispatchable)) ? "warn"
+      : availability === "AVAILABLE" ? "good" : "neutral",
+    label: owned ? (connected ? "其他窗口接待中" : "其他窗口接待中 · 连接异常")
+      : !localLeader ? "其他窗口接待中"
+        : kicked ? availability === "AVAILABLE" ? "连接被踢下线 · 接待中" : "连接被踢下线 · 未接待"
+          : authFailed ? availability === "AVAILABLE" ? "连接认证失败 · 接待中" : "连接认证失败 · 未接待"
+            : needsExplicitStart
+              ? connected ? "需重新开始接待" : connection === "idle" || connection === "CONNECTING" ? "需重新开始接待 · 连接中" : "需重新开始接待 · 连接异常"
+              : connection === "idle" || connection === "CONNECTING"
+                ? "连接中"
+                : !connected
+                  ? availability === "AVAILABLE" ? "连接异常 · 接待中" : "连接异常"
+                  : availability === "AVAILABLE"
+                    ? dispatchable ? "可接待" : "接待中 · 暂停派单"
+                    : availability === "PAUSED" ? "已暂停" : "未上线",
+    toggleDisabled: owned ? busy
+      : !localLeader ? true
+        : needsExplicitStart ? busy || (!connected && !kicked && !authFailed)
+          : kicked || authFailed ? busy
+            : availability === "AVAILABLE" ? busy : busy || (!connected && !kicked && !authFailed),
     toggleTitle: owned
-      ? connected ? "接管当前接待窗口" : "消息服务异常，暂不可接管"
-      : needsExplicitStart
-        ? connected ? "重新开始接待" : "消息服务异常，暂不可开始接待"
-        : availability === "AVAILABLE"
-          ? connected ? undefined : "消息服务异常，可先结束接待"
-          : connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : !connected ? "消息服务异常，暂不可接待" : undefined,
-    toggleLabel: owned ? "接管接待" : needsExplicitStart ? "开始接待" : availability === "AVAILABLE" ? "暂停接待" : "开始接待",
+      ? "接管当前接待窗口"
+      : !localLeader ? "当前登录会话的云信连接由另一个标签页持有"
+        : kicked ? availability === "AVAILABLE" ? "重新连接并接管当前接待" : "重新连接消息服务"
+          : authFailed ? "重新获取登录凭据并连接"
+            : needsExplicitStart
+              ? connected ? "重新开始接待" : "消息服务异常，暂不可开始接待"
+              : availability === "AVAILABLE"
+                ? connected ? undefined : "消息服务异常，可先结束接待"
+                : connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : !connected ? "消息服务异常，暂不可接待" : undefined,
+    toggleLabel: owned ? "接管接待" : !localLeader ? "其他窗口接待中" : kicked ? availability === "AVAILABLE" ? "在此接待" : "重新连接" : authFailed ? "重新连接" : needsExplicitStart ? "开始接待" : availability === "AVAILABLE" ? "暂停接待" : "开始接待",
   };
-}
-/**
- * Reconnecting is written immediately so dispatch stops, while the server keeps the
- * reception interval open for a short reconnect. A terminal disconnect gets a short
- * grace before closing; auth failures and kicks are written immediately.
- */
-export function presenceDisconnectGraceMs(state: NimWebConnectionState): number | null {
-  if (state === "CONNECTED" || state === "AUTH_FAILED" || state === "KICKED") return null;
-  return state === "DISCONNECTED" ? 10_000 : 0;
 }
 /** Only this write's authoritative response may count as a successful presence change. */
 export function presenceWriteSucceeded(value: Presence | undefined, availability: Presence["availability"]): boolean {
@@ -328,8 +395,8 @@ function decodeImage(url: string): Promise<{ width: number; height: number }> {
     image.src = url;
   });
 }
-async function readImToken(): Promise<ImToken> {
-  const value = await adminRequest<Record<string, unknown>>("/im/token");
+async function readImToken(connectionId: string): Promise<ImToken> {
+  const value = await adminRequest<Record<string, unknown>>("/im/token", undefined, "GET", { "x-zzsh-connection-id": connectionId });
   if (typeof value.appKey !== "string" || typeof value.accountId !== "string" || typeof value.token !== "string" || !value.appKey || !value.accountId || !value.token || (value.transport !== "nim" && value.transport !== "local-fake")) throw new Error("云信登录凭据格式无效");
   return { appKey: value.appKey, accountId: value.accountId, token: value.token, transport: value.transport };
 }
@@ -337,6 +404,22 @@ async function readConsultations(): Promise<Consultation[]> {
   const value = await adminRequest<{ consultations?: unknown }>("/im/consultations?limit=50");
   if (!Array.isArray(value.consultations)) throw new Error("咨询队列格式无效");
   return value.consultations as Consultation[];
+}
+
+/** Isolates the 1-second display re-render from the rest of the workbench. */
+function TodayDuration({ seconds, active }: { seconds: number | undefined; active: boolean }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => { setTick(0); }, [seconds]);
+  useEffect(() => {
+    if (!active || seconds === undefined) return;
+    const timer = window.setInterval(() => setTick((value) => value + 1), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active, seconds]);
+  return (
+    <ActionTooltip content="今日接待开启时长（含短暂断线和锁屏存活；失联30分钟后按最后可信存活截断）">
+      <span className="im-wb-state im-wb-today" data-action="today-duty">今日接待 <b>{seconds === undefined ? "—" : formatDuration(seconds + tick)}</b></span>
+    </ActionTooltip>
+  );
 }
 
 export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange, active = true }: {
@@ -452,6 +535,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [filter, setFilter] = useState<"waiting" | "mine">("mine");
   const [blockedConsultations, setBlockedConsultations] = useState<Record<string, boolean>>({});
   const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">("idle");
+
+  const [localLeader, setLocalLeader] = useState(true);
+  const [reconnectEpoch, setReconnectEpoch] = useState(0);
+  const [connectionLeaseActive, setConnectionLeaseActive] = useState(false);
+  const connectionIdRef = useRef(createConnectionId());
   const [presence, setPresence] = useState<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
   const [busy, setBusy] = useState(false);
   const [notifyPermission, setNotifyPermission] = useState<SupportNotificationPermission>(() => supportNotificationPermission());
@@ -487,7 +575,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [replyTargets, setReplyTargets] = useState<Record<string, SupportMessage | null>>({});
   const [replyUncertain, setReplyUncertain] = useState<Record<string, boolean>>({});
   const [transferOpen, setTransferOpen] = useState(false);
-  const [transferState, setTransferState] = useState<{ targets: { adminUserId: string; displayName: string }[]; transferReady: boolean } | null>(null);
+  const [transferState, setTransferState] = useState<{ targets: { adminUserId: string; displayName: string; inGrace?: boolean; disconnectedSince?: string | null }[]; transferReady: boolean } | null>(null);
   const [transferError, setTransferError] = useState<string>();
   const [transferBusy, setTransferBusy] = useState(false);
   const [transferNote, setTransferNote] = useState("");
@@ -518,10 +606,26 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   useEffect(() => { if (cloudPins.error) setNotice(cloudPins.error); }, [cloudPins.error]);
   const availabilityRef = useRef<Presence["availability"]>("OFF_DUTY");
   const presenceVersionRef = useRef<number | null>(null);
+  const presenceStateRevisionRef = useRef<number | null>(null);
+  const heartbeatChainRef = useRef(Promise.resolve());
+  const handoffRef = useRef<Promise<void>>(Promise.resolve());
   // 最近一次由服务端确认的 presence。写入失败时用它回退 availabilityRef，
   // 让 30s 心跳与连接事件只重放"已知成立"的状态，而不是重试失败的用户意图。
   const presenceRef = useRef<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
   const presenceWriteRef = useRef(Promise.resolve());
+  const connectionRef = useRef(connection);
+  const sessionLockedRef = useRef(snapshot.session.locked);
+  sessionLockedRef.current = snapshot.session.locked;
+  const nimGenerationRef = useRef(0);
+  const terminalConnectionRef = useRef<"KICKED" | "AUTH_FAILED" | undefined>(undefined);
+  const applyConnection = useCallback((next: NimWebConnectionState | "idle" | "error") => {
+    connectionRef.current = next;
+    setConnection(next);
+  }, []);
+  const localLeaderRef = useRef(localLeader);
+  localLeaderRef.current = localLeader;
+  const authRetryRef = useRef(0);
+  const logoutRetryRef = useRef(false);
   const busyOwnerRef = useRef(0);
   const composingRef = useRef(false);
   const chatHeadingRef = useRef<HTMLElement | null>(null);
@@ -543,6 +647,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const operatorRef = useRef("");
   const operatorGenerationRef = useRef(0);
   const readyOperatorRef = useRef<string | null>(null);
+  const [readyOperator, setReadyOperator] = useState<string | null>(null);
+  const markReadyOperator = useCallback((value: string | null) => {
+    readyOperatorRef.current = value;
+    setReadyOperator(value);
+  }, []);
   const selectedIdRef = useRef(selectedId);
   const sectionRef = useRef(section);
   const queueRef = useRef(queue);
@@ -592,6 +701,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // 所有 presence 显示/版本只从服务端返回值更新；客户端没有任何"先行生效"的路径。
   const rememberPresence = useCallback((value: Presence) => {
     presenceVersionRef.current = value.version;
+    presenceStateRevisionRef.current = value.stateRevision ?? null;
     presenceRef.current = value;
     availabilityRef.current = value.availability;
     setPresence(value);
@@ -627,6 +737,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           connectionState: state,
           ...(version === null ? {} : { version }),
           ...(options?.takeover ? { takeover: true } : {}),
+          connectionId: connectionIdRef.current,
         }, "PUT");
         if (!current()) return undefined;
         rememberPresence(value);
@@ -656,10 +767,92 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     return operation;
   }, [canPresence, readClientKey, rememberPresence]);
 
+  const heartbeatPresence = useCallback((state: NimWebConnectionState, generation: number, client?: NimWebClientLike | null): Promise<void> => {
+    const key = readClientKey;
+    const operatorGeneration = operatorGenerationRef.current;
+    const current = () => canPresenceRef.current && operatorRef.current === key
+      && operatorGenerationRef.current === operatorGeneration && localLeaderRef.current
+      && !sessionLockedRef.current
+      && presenceRef.current.availability === "AVAILABLE"
+      && nimGenerationRef.current === generation
+      && (client == null || clientRef.current === client);
+    const run = async (sendState: NimWebConnectionState, retryStale: boolean): Promise<void> => {
+      if (!current()) return;
+      if (presenceStateRevisionRef.current === null) {
+        const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
+        if (!current() || !latest) return;
+        rememberPresence(latest);
+      }
+      try {
+        const value = await adminRequest<PresenceHeartbeat>("/im/presence/heartbeat", {
+          connectionState: sendState,
+          stateRevision: presenceStateRevisionRef.current,
+          connectionId: connectionIdRef.current,
+        }, "POST");
+        if (!current()) return;
+        // A newer NIM event already superseded this response; never let a late
+        // CONNECTED write over a disconnect/kick/reconnect state.
+        if (connectionForPresence(connectionRef.current) !== sendState) return;
+        presenceStateRevisionRef.current = value.stateRevision;
+        setPresence((currentPresence) => ({
+          ...currentPresence,
+          connectionState: sendState,
+          disconnectedSince: value.disconnectedSince,
+          dispatchPaused: value.dispatchPaused,
+          dispatchable: value.dispatchable,
+          reason: value.reason,
+          stateRevision: value.stateRevision,
+          ...(value.today ? { today: value.today } : {}),
+        }));
+        if (value.ok) return;
+        if (value.reason === "STALE_STATE" && retryStale) {
+          const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
+          if (!current() || !latest) return;
+          rememberPresence(latest);
+          // Retry with the *current* live connection state, not the stale closure's
+          // state. A terminal event must be recorded, and an old CONNECTED must not
+          // be replayed after the client was kicked or started reconnecting.
+          const liveState = staleHeartbeatRetryState({
+            liveConnection: connectionRef.current,
+            terminal: terminalConnectionRef.current,
+            sentGeneration: generation,
+            liveGeneration: nimGenerationRef.current,
+            sentClient: client,
+            liveClient: clientRef.current,
+          });
+          if (!liveState) return;
+          return run(liveState, false);
+        }
+        const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
+        if (!current()) return;
+        if (latest) rememberPresence(latest);
+        const stopConnection = value.reason === "OTHER_WINDOW" || value.reason === "TAKEN_OVER"
+          || value.reason === "STALE_CONNECTION"
+          || value.reason === "FORBIDDEN" || value.reason === "SESSION_INVALID" || value.reason === "LOCKED"
+          || latest?.ownedByAnotherSession === true;
+        if (stopConnection) {
+          clientRef.current = null;
+          nimGenerationRef.current += 1;
+          applyConnection("idle");
+          void lifecycleRef.current?.close();
+        }
+        if (value.reason === "OTHER_WINDOW" || value.reason === "TAKEN_OVER" || latest?.ownedByAnotherSession) {
+          setNotice("其他窗口已持有云信连接或接管接待，本页不再登录云信。");
+        } else if (value.reason === "FORBIDDEN") setNotice("接待权限已失效，请联系管理岗。");
+        else if (value.reason === "ENDED") setNotice("当前接待已结束，如需继续请重新开始接待。");
+      } catch {
+        // The next interval or visibility event retries; heartbeat failure does not
+        // end reception or rewrite the last server-confirmed state.
+      }
+    };
+    heartbeatChainRef.current = heartbeatChainRef.current.then(() => run(state, true), () => run(state, true));
+    return heartbeatChainRef.current;
+  }, [readClientKey, rememberPresence, applyConnection]);
+
   // Identity/permission change: drop every private projection and every owned preview URL.
   useEffect(() => {
     clientRef.current = null;
-    readyOperatorRef.current = null;
+    markReadyOperator(null);
     setQueue([]);
     setQueueLoaded(false);
     setOrderQueue([]);
@@ -699,8 +892,14 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     presenceRef.current = clearedPresence;
     setPresence(clearedPresence);
     presenceVersionRef.current = null;
+    presenceStateRevisionRef.current = null;
+    heartbeatChainRef.current = Promise.resolve();
     availabilityRef.current = "OFF_DUTY";
-    setConnection("idle");
+    applyConnection("idle");
+    setLocalLeader(true);
+    setReconnectEpoch(0);
+    authRetryRef.current = 0;
+    logoutRetryRef.current = false;
     setNotice(undefined);
     setBlockedConsultations({});
     setCloseOutcomeUnknown({});
@@ -738,12 +937,37 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   }, [onRefresh, snapshot.session.locked]);
 
   useEffect(() => {
-    if (!canRead || snapshot.session.locked) return;
+    if (!canRead) return;
+    // A locked page holds no live NIM connection. Reset the local state so an
+    // unlock cannot send a stale CONNECTED heartbeat before NIM actually recovers.
+    if (snapshot.session.locked) { applyConnection("idle"); return; }
+    // A kick is terminal until the operator explicitly reconnects; an automatic
+    // epoch/retry or an unrelated re-render must not log in over the new client.
+    if (terminalConnectionRef.current === "KICKED") { applyConnection("KICKED"); return; }
     let cancelled = false;
+    let retryTimer: number | undefined;
+    let retryWake: (() => void) | undefined;
+    let tabLease: ReturnType<typeof acquireSupportTabLease> | undefined;
+    const waitForRetry = (ms: number) => new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: number | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) window.clearTimeout(timer);
+        window.removeEventListener("online", finish);
+        retryWake = undefined;
+        resolve();
+      };
+      retryWake = finish;
+      timer = window.setTimeout(finish, ms);
+      window.addEventListener("online", finish, { once: true });
+    });
+    const leaseAbort = new AbortController();
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
     const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
-      const token = await readImToken();
+      const token = await readImToken(connectionIdRef.current);
       if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/bff/admin/im/messages", accountId: token.accountId, pollMs: 1_500 })(context);
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
@@ -756,54 +980,282 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           if (value.authorized !== true) throw new Error("当前咨询未获授权");
         },
         tokenProvider: async (accountId) => {
-          const refreshed = await readImToken();
+          const refreshed = await readImToken(connectionIdRef.current);
           if (refreshed.accountId !== accountId || refreshed.accountId !== token.accountId) throw new Error("云信账号不匹配");
           return refreshed.token;
         },
       });
-      return factory(context);
+      const handle = await factory(context);
+      // The token was bound before login, but a takeover can happen while the SDK
+      // is logging in. Re-check this exact instance before exposing the client; if
+      // it lost the slot, dispose what just logged in instead of keeping two
+      // clients on one account.
+      try {
+        const lease = await adminRequest<ConnectionLease>("/im/presence/connection", { connectionId: connectionIdRef.current }, "POST");
+        if (!lease.ok) throw new AdminApiError(
+          lease.reason === "LOCKED" ? 423 : lease.reason === "SESSION_INVALID" ? 401 : 409,
+          lease.reason,
+          undefined,
+          "/im/presence/connection",
+        );
+      } catch (error) {
+        try { await handle.dispose(); }
+        catch (disposeError) {
+          throw markImDisposeFailure(
+            error instanceof Error ? error : new Error("IM connection was taken over after login", { cause: error }),
+            disposeError,
+          );
+        }
+        throw error;
+      }
+      return handle;
     });
     lifecycleRef.current = lifecycle;
-    let graceTimer: number | undefined;
-    let graceState: NimWebConnectionState = "DISCONNECTED";
+    const connectionGeneration = ++nimGenerationRef.current;
+    terminalConnectionRef.current = undefined;
+    // Wait for every prior effect's real NIM close, not only the immediately
+    // preceding one. Rapid reconnects must not chain two overlapping clients.
+    const previousHandoff = handoffRef.current;
+    const current = () => !cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator;
+    const readQueueForReadOnly = async () => {
+      const queueResult = await readConsultations().catch((cause) => {
+        if (current()) setNotice(friendlyError(cause));
+        return null;
+      });
+      if (!current()) return;
+      if (queueResult) { setQueue(queueResult); setQueueLoaded(true); }
+    };
     const run = async () => {
       try {
-        setConnection("CONNECTING");
-        const client = await lifecycle.open(snapshot.adminUserId);
-        if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator) return;
+        await previousHandoff;
+      } catch {
+        if (current()) {
+          applyConnection("AUTH_FAILED");
+          setConnectionLeaseActive(false);
+          setNotice("旧连接未安全关闭，请刷新页面后重试。");
+        }
+        return;
+      }
+      try {
+        // Ownership is decided before any NIM login: a second browser (or a reader
+        // without presence permission) must never kick the reception holder.
+        let initialPresence: Presence | null = null;
+        let initialPresenceError: unknown;
+        if (canPresence) {
+          try { initialPresence = await adminRequest<Presence>("/im/presence"); }
+          catch (cause) { initialPresenceError = cause; }
+        }
+        if (!current()) return;
+        if (initialPresence) rememberPresence(initialPresence);
+        if (initialPresence?.ownedByAnotherSession && initialPresence.availability === "AVAILABLE") {
+          markReadyOperator(operator);
+          setLocalLeader(true);
+          setConnectionLeaseActive(false);
+          applyConnection("idle");
+          await readQueueForReadOnly();
+          return;
+        }
+        if (canPresence && !initialPresence) {
+          applyConnection("error");
+          const status = httpStatus(initialPresenceError);
+          if (status !== undefined && status < 500 && status !== 408 && status !== 429) {
+            setNotice("登录状态或接待权限已失效，请重新登录或联系管理员。");
+            return;
+          }
+          setNotice("接待状态读取失败，稍后自动重试。");
+          await waitForRetry(5_000);
+          if (current()) setReconnectEpoch((value) => value + 1);
+          return;
+        }
+        // One tab per administrator/NIM account owns the single IM login, even
+        // when two browser profiles have different auth sessions. The server claim
+        // below is the cross-browser authority; this lock only serializes tabs.
+        const lease = tabLease = acquireSupportTabLease(`zzsh-im-support:${snapshot.adminUserId}`, leaseAbort.signal);
+        setLocalLeader(!lease.supported);
+        // Directory reads do not need NIM. Let a waiting tab render the queue and
+        // order workbench while the current holder keeps the only IM login.
+        markReadyOperator(operator);
+        void readQueueForReadOnly();
+        const acquired = await lease.acquired;
+        if (!acquired) {
+          if (current()) { applyConnection("idle"); setNotice("云信连接锁不可用，本页保持只读。"); }
+          return;
+        }
+        if (!current()) return;
+        setLocalLeader(true);
+        markReadyOperator(operator);
+        applyConnection("CONNECTING");
+        // Server-side connection claim must run before any NIM login. Two browser
+        // sessions that both see an empty presence race on the same row.
+        if (current()) {
+          let claimed: ConnectionClaim | null = null;
+          let claimError: unknown;
+          try { claimed = await adminRequest<ConnectionClaim>("/im/presence/connect", { connectionId: connectionIdRef.current }, "POST"); }
+          catch (cause) { claimError = cause; }
+          if (!current()) return;
+          if (!claimed?.ok) {
+            const latest = canPresence ? await adminRequest<Presence>("/im/presence").catch(() => null) : null;
+            if (!current()) return;
+            if (latest) rememberPresence(latest);
+            // No NIM client exists yet on this path, so releasing the local lock
+            // immediately is safe; a waiting tab may try the server claim next.
+            lease.release();
+            // A server-side OTHER_WINDOW means this tab is the read-only fallback,
+            // including the no-Web-Locks case; it must not present as the holder.
+            const waitingForOwnLease = claimed?.reason === "OTHER_WINDOW"
+              && (latest?.ownedByAnotherSession === false || latest?.availability !== "AVAILABLE");
+            const status = httpStatus(claimError);
+            const retryNetwork = !claimed && (status === undefined || status >= 500 || status === 408 || status === 429);
+            setLocalLeader(claimed?.reason === "OTHER_WINDOW" ? false : true);
+            applyConnection(retryNetwork ? "error" : "idle");
+            setConnectionLeaseActive(false);
+            setNotice(waitingForOwnLease
+              ? "上一个接待连接尚未释放，系统会自动尝试恢复。"
+              : claimed?.reason === "OTHER_WINDOW" ? "其他窗口已持有云信连接，本页保持只读。"
+              : claimed?.reason === "LOCKED" ? "当前会话已锁屏，解锁后再连接。"
+                : retryNetwork ? "消息服务暂不可用，正在自动重试。"
+                : "接待权限或登录状态已失效，暂不能连接云信。");
+            await readQueueForReadOnly();
+            if (waitingForOwnLease || retryNetwork) {
+              await waitForRetry(waitingForOwnLease ? 15_000 : 5_000);
+              if (current()) setReconnectEpoch((value) => value + 1);
+            }
+            return;
+          }
+          presenceVersionRef.current = claimed.version ?? presenceVersionRef.current;
+          presenceStateRevisionRef.current = claimed.stateRevision ?? presenceStateRevisionRef.current;
+          setConnectionLeaseActive(true);
+          setPresence((currentPresence) => ({
+            ...currentPresence,
+            version: claimed.version ?? currentPresence.version,
+            stateRevision: claimed.stateRevision ?? currentPresence.stateRevision,
+          }));
+        }
+        let client: NimWebClientLike | null = null;
+        const delays = [3_000, 5_000, 10_000, 30_000, 60_000];
+        for (let attempt = 0; !client; attempt += 1) {
+          if (!current()) return;
+          try {
+            client = await lifecycle.open(snapshot.adminUserId);
+          } catch (cause) {
+            if (!current()) return;
+            if (cause instanceof NimLoginTerminalError) {
+              if (cause.state === "AUTH_FAILED" && authRetryRef.current < 2) {
+                // The first token/login attempt can fail on a stale credential.
+                // Re-request the token a bounded number of times; KICKED is never
+                // retried, and both terminal states still stop after the limit.
+                authRetryRef.current += 1;
+                applyConnection("AUTH_FAILED");
+                setNotice("云信登录认证失败，正在重新获取登录凭据。");
+                void heartbeatPresence("AUTH_FAILED", connectionGeneration, null);
+                await waitForRetry(authRetryRef.current === 1 ? 5_000 : 15_000);
+                continue;
+              }
+              terminalConnectionRef.current = cause.state;
+              applyConnection(cause.state);
+              setNotice(cause.state === "KICKED" ? "云信连接已被其他客户端下线。点击“在此接待”可重新连接。" : "云信登录认证失败，请点击“重新连接”。");
+              void heartbeatPresence(cause.state, connectionGeneration, null);
+              return;
+            }
+            if (terminalConnectionRef.current) {
+              applyConnection(terminalConnectionRef.current);
+              return;
+            }
+            if (isImDisposeFailure(cause)) {
+              terminalConnectionRef.current = "AUTH_FAILED";
+              applyConnection("AUTH_FAILED");
+              setNotice("旧连接未安全关闭，请刷新页面后重试。");
+              return;
+            }
+            const status = httpStatus(cause);
+            if (status === 409) {
+              applyConnection("idle");
+              setLocalLeader(false);
+              setConnectionLeaseActive(false);
+              setNotice("其他窗口已接管云信连接，本页保持只读。");
+              return;
+            }
+            if (status === 401 || status === 403 || status === 423) {
+              applyConnection("AUTH_FAILED");
+              setNotice("登录状态已失效，请重新登录后再连接云信。");
+              return;
+            }
+            // Transport/API failure: keep a controlled retry alive (and wake on
+            // `online`) while the session still permits reading. Explicit auth
+            // failure or kick is a terminal branch above and is never looped.
+            applyConnection(attempt === 0 ? "error" : "RECONNECTING");
+            setNotice("消息服务暂不可用，正在自动重连；接待计时与派单暂停由服务端规则保持。");
+            await waitForRetry(delays[Math.min(attempt, delays.length - 1)] ?? 60_000);
+          }
+        }
+        if (!current()) return;
+        if (!client) return;
         clientRef.current = client;
-        readyOperatorRef.current = operator;
-        setConnection(client.getConnectionState());
+        markReadyOperator(operator);
+        // Register before the first presence/queue read: a disconnect during those
+        // requests must not be lost behind a stale CONNECTED state.
+        client.onConnectionStateChange((state, details) => {
+          if (!current() || clientRef.current !== client) return;
+          applyConnection(state);
+          let beatGeneration = connectionGeneration;
+          if (state === "KICKED" || state === "AUTH_FAILED") {
+            terminalConnectionRef.current = state;
+            if (retryTimer !== undefined) { window.clearTimeout(retryTimer); retryTimer = undefined; }
+            retryWake?.();
+            // Invalidate any in-flight CONNECTED response from the previous state.
+            beatGeneration = ++nimGenerationRef.current;
+          } else if (state === "CONNECTED") {
+            terminalConnectionRef.current = undefined;
+            authRetryRef.current = 0;
+            logoutRetryRef.current = false;
+          }
+          if (state === "KICKED") {
+            const reason = details?.kickedReasonDesc ? `：${details.kickedReasonDesc}` : "";
+            setNotice(`云信连接已被其他客户端下线${reason}。点击“在此接待”可重新连接。`);
+          } else if (state === "AUTH_FAILED") {
+            setNotice("云信登录认证失败，正在重新获取登录凭据。");
+          }
+          if (canPresenceRef.current && localLeaderRef.current && !presenceRef.current.ownedByAnotherSession) {
+            void heartbeatPresence(connectionForPresence(state), beatGeneration, client);
+          }
+          if (state === "DISCONNECTED" && details?.kind === "LOGOUT" && !logoutRetryRef.current && presenceRef.current.availability === "AVAILABLE") {
+            logoutRetryRef.current = true;
+            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, 0);
+          } else if (state === "AUTH_FAILED" && authRetryRef.current < 2) {
+            authRetryRef.current += 1;
+            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, authRetryRef.current === 1 ? 5_000 : 15_000);
+          }
+        });
+        const initialConnection = client.getConnectionState();
+        if (initialConnection === "CONNECTED") {
+          authRetryRef.current = 0;
+          logoutRetryRef.current = false;
+          terminalConnectionRef.current = undefined;
+        } else if (initialConnection === "KICKED") {
+          terminalConnectionRef.current = "KICKED";
+          setNotice("云信连接已被其他客户端下线。点击“在此接待”可重新连接。");
+        } else if (initialConnection === "AUTH_FAILED") {
+          terminalConnectionRef.current = "AUTH_FAILED";
+          setNotice("云信登录认证失败，正在重新获取登录凭据。");
+          if (authRetryRef.current < 2 && retryTimer === undefined) {
+            authRetryRef.current += 1;
+            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, authRetryRef.current === 1 ? 5_000 : 15_000);
+          }
+        }
+        applyConnection(initialConnection);
         const [presenceResult, queueResult] = await Promise.allSettled([
           canPresence ? adminRequest<Presence>("/im/presence") : Promise.resolve(undefined),
           readConsultations(),
         ]);
-        if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
+        if (!current() || clientRef.current !== client) return;
         if (presenceResult.status === "fulfilled" && presenceResult.value) rememberPresence(presenceResult.value);
         if (queueResult.status === "fulfilled") { setQueue(queueResult.value); setQueueLoaded(true); }
         else setNotice(friendlyError(queueResult.reason));
-        if (canPresence && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) void writePresence(availabilityRef.current, connectionForPresence(client.getConnectionState()));
-        client.onConnectionStateChange((state) => {
-          if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
-          setConnection(state);
-          if (!canPresence || presenceRef.current.ownedByAnotherSession || presenceRef.current.unbound) return;
-          const delay = presenceDisconnectGraceMs(state);
-          if (delay === null || delay === 0) {
-            if (graceTimer !== undefined) { window.clearTimeout(graceTimer); graceTimer = undefined; }
-            void writePresence(availabilityRef.current, connectionForPresence(state));
-            return;
-          }
-          graceState = state;
-          // 同一次断线只给一次宽限；SDK 反复重试不续期，宽限内恢复则保留原 session。
-          if (graceTimer !== undefined) return;
-          graceTimer = window.setTimeout(() => {
-            graceTimer = undefined;
-            if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
-            void writePresence(availabilityRef.current, connectionForPresence(graceState));
-          }, delay);
-        });
+        if (canPresence && !presenceRef.current.ownedByAnotherSession) {
+          void heartbeatPresence(connectionForPresence(client.getConnectionState()), connectionGeneration, client);
+        }
         client.onMessages((incoming) => {
-          if (cancelled || generation !== operatorGenerationRef.current || operatorRef.current !== operator || clientRef.current !== client) return;
+          if (!current() || clientRef.current !== client) return;
           for (const raw of incoming) {
             const next = messageFromNim(raw, client.accountId, queueRef.current.find((c) => c.conversationId === raw.conversationId)?.peerAccountId);
             const consultation = queueRef.current.find((candidate) => candidate.state === "ACTIVE" && candidate.assignedAdmin?.id === snapshot.adminUserId && candidate.conversationId === raw.conversationId);
@@ -816,23 +1268,52 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           }
         });
       } catch (cause) {
-        if (!cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator) { setConnection("error"); setNotice(friendlyError(cause)); }
+        if (current()) { applyConnection("error"); setNotice(friendlyError(cause)); }
       }
     };
     void run();
     return () => {
       cancelled = true;
-      if (graceTimer !== undefined) window.clearTimeout(graceTimer);
+      leaseAbort.abort();
+      retryWake?.();
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       clientRef.current = null;
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator) readyOperatorRef.current = null;
+      setConnectionLeaseActive(false);
+      if (generation === operatorGenerationRef.current && operatorRef.current === operator) markReadyOperator(null);
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
-      void lifecycle.close();
-      if (canPresence && generation === operatorGenerationRef.current && operatorRef.current === operator) void writePresence("OFF_DUTY", "DISCONNECTED").catch(() => undefined);
+      // Dispose the old NIM connection (including a login that is still opening)
+      // before the next effect may claim again. A failed cleanup keeps the lock:
+      // an unproven handoff is not a safe handoff.
+      const handoff = previousHandoff.then(async () => {
+        try {
+          await lifecycle.close();
+        } catch (error) {
+          setNotice("旧连接未安全关闭，请刷新页面后重试。");
+          throw error;
+        }
+        tabLease?.release();
+      });
+      handoffRef.current = handoff;
+      void handoff.catch(() => undefined);
     };
-  }, [canPresence, canRead, readClientKey, snapshot.adminUserId, snapshot.session.locked, writePresence]);
+  }, [canPresence, canRead, readClientKey, snapshot.adminUserId, snapshot.session.locked, reconnectEpoch, heartbeatPresence, rememberPresence]);
+
+  // Browser connectivity recovery for a client that was already open. The NIM SDK
+  // usually reconnects itself; this is the user-visible fallback when it does not.
+  useEffect(() => {
+    if (!canRead || !localLeader || snapshot.session.locked) return;
+    const onOnline = () => {
+      if (terminalConnectionRef.current) return;
+      if (["DISCONNECTED", "RECONNECTING", "error"].includes(connectionRef.current)) {
+        setReconnectEpoch((value) => value + 1);
+      }
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [canRead, localLeader, snapshot.session.locked]);
 
   useEffect(() => {
-    if (!canRead || readyOperatorRef.current !== readClientKey) return;
+    if (!canRead || readyOperator !== readClientKey) return;
     const generation = operatorGenerationRef.current;
     const operator = readClientKey;
     let cancelled = false;
@@ -851,7 +1332,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     };
     const timer = window.setInterval(refreshQueue, 5_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [canRead, connection, readClientKey]);
+  }, [canRead, connection, readyOperator, readClientKey]);
 
   // Unified inbox: order groups share the same left directory as consultations.
   useEffect(() => {
@@ -1099,37 +1580,95 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     else if (section === "consultation" && !selectedId && initialConsultationId) restoreConsultation();
   }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, visibleOrderQueue, queue]);
 
+  // One heartbeat for every connection state. It runs without CONNECTED so a
+  // disconnect is reported once, a short reconnect keeps the same interval, and
+  // the server can return TAKEN_OVER/ENDED before the next UI action.
   useEffect(() => {
-    if (!canPresence || readyOperatorRef.current !== readClientKey || connection !== "CONNECTED") return;
-    const generation = operatorGenerationRef.current;
-    const operator = readClientKey;
-    const timer = window.setInterval(() => {
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator && !presenceRef.current.ownedByAnotherSession && !presenceRef.current.unbound) {
-        void writePresence(availabilityRef.current, connectionForPresence(connection));
-      }
-    }, 30_000);
-    return () => window.clearInterval(timer);
-  }, [canPresence, connection, readClientKey, writePresence]);
-
-  // 接待心跳：页面隐藏、切换管理 tab 时仍保持在线；恢复可见/网络/前台时立即补发，
-  // 避免浏览器后台定时器节流造成今日接待断档。失败不影响 UI。
-  useEffect(() => {
-    if (!canPresence || presence.ownedByAnotherSession || presence.unbound || presence.availability !== "AVAILABLE" || connection !== "CONNECTED" || snapshot.session.locked) return;
-    const heartbeat = () => { void adminRequest("/im/presence/heartbeat", {}, "POST").catch(() => undefined); };
-    const timer = window.setInterval(heartbeat, 30_000);
-    const onVisible = () => { if (document.visibilityState === "visible") heartbeat(); };
+    if (!canPresence || !localLeader || presence.ownedByAnotherSession || presence.unbound
+      || presence.availability !== "AVAILABLE" || snapshot.session.locked
+      || connection === "idle" || connection === "error") return;
+    const beat = () => { void heartbeatPresence(connectionForPresence(connectionRef.current), nimGenerationRef.current, clientRef.current); };
+    const timer = window.setInterval(beat, 30_000);
+    const onVisible = () => { if (document.visibilityState === "visible") beat(); };
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
-    window.addEventListener("online", heartbeat);
-    window.addEventListener("pageshow", heartbeat);
+    window.addEventListener("online", beat);
+    window.addEventListener("pageshow", beat);
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
-      window.removeEventListener("online", heartbeat);
-      window.removeEventListener("pageshow", heartbeat);
+      window.removeEventListener("online", beat);
+      window.removeEventListener("pageshow", beat);
     };
-  }, [canPresence, connection, presence.availability, presence.ownedByAnotherSession, presence.unbound, snapshot.session.locked]);
+  }, [canPresence, localLeader, connection, presence.availability, presence.ownedByAnotherSession, presence.unbound, snapshot.session.locked, heartbeatPresence]);
+
+  // Off-duty pages still own the exclusive connection slot. Renew the bounded
+  // connection lease so a crashed/closed window can recover after it expires.
+  useEffect(() => {
+    if (!connectionLeaseActive || !localLeader) return;
+    let cancelled = false;
+    const renew = () => {
+      void adminRequest<ConnectionLease>("/im/presence/connection", { connectionId: connectionIdRef.current }, "POST")
+        .then((value) => {
+          if (cancelled || value?.ok) return;
+          if (value.reason !== "OTHER_WINDOW" && value.reason !== "STALE_CONNECTION") return;
+          setConnectionLeaseActive(false);
+          clientRef.current = null;
+          nimGenerationRef.current += 1;
+          applyConnection("idle");
+          setLocalLeader(false);
+          void lifecycleRef.current?.close();
+          setNotice("其他窗口已接管云信连接，本页保持只读。");
+        })
+        .catch(() => undefined);
+    };
+    const timer = window.setInterval(renew, 30_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [applyConnection, connectionLeaseActive, localLeader]);
+
+  // Best-effort page-close notice: it only advances the first disconnect time, so
+  // a lost beacon (crash, sleep) simply falls back to the last confirmed liveness.
+  useEffect(() => {
+    if (!localLeader || presence.ownedByAnotherSession) return;
+    const onPageHide = (event: PageTransitionEvent) => {
+      // bfcache keeps the page (and its SDK) alive; do not hand off on a freeze.
+      if (event.persisted) return;
+      if (presence.availability === "AVAILABLE") {
+        const stateRevision = presenceStateRevisionRef.current;
+        if (stateRevision !== null) {
+          void fetch(`${API_ROOT}/im/presence/heartbeat`, {
+            method: "POST",
+            credentials: "include",
+            keepalive: true,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ connectionState: "DISCONNECTED", stateRevision, connectionId: connectionIdRef.current }),
+          }).catch(() => undefined);
+        }
+      }
+      // Dispose every prior effect's SDK, then this effect's client, before
+      // clearing the server claim. lifecycleRef may already point at a new effect
+      // whose open is still waiting on the old handoff chain; releasing early would
+      // let a standby tab log in while the old client is still alive. If any close
+      // is unproven or the page unloads first, the bounded lease is the recovery path.
+      void (async () => {
+        try { await handoffRef.current; } catch { return; }
+        const lifecycle = lifecycleRef.current;
+        if (lifecycle) {
+          try { await lifecycle.close(); } catch { return; }
+        }
+        await fetch(`${API_ROOT}/im/presence/release`, {
+          method: "POST",
+          credentials: "include",
+          keepalive: true,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ connectionId: connectionIdRef.current }),
+        }).catch(() => undefined);
+      })();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [localLeader, presence.availability, presence.ownedByAnotherSession]);
 
   // 日常流不代选：首次加载或队列刷新不替客服打开会话，否则未读会在没被看到时就上报。
   // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中的一轮消失时才清空。
@@ -1714,7 +2253,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const busyOwner = beginBusy();
     setNotice(undefined);
     try {
-      const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/claim`, {}, "POST");
+      const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/claim`, {}, "POST", { "x-zzsh-connection-id": connectionIdRef.current });
       const current = currentRequestKey();
       if (!current || !isCurrentImRequest(requestKey, current) || selectedIdRef.current !== consultationId) return;
       setQueue((current) => current.map((item) => item.id === result.consultation.id ? result.consultation : item));
@@ -1789,7 +2328,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     const busyOwner = beginBusy();
     setNotice(undefined);
     try {
-      const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/reconcile`, {}, "POST");
+      const result = await adminRequest<{ consultation: Consultation }>(`/im/consultations/${encodeURIComponent(consultationId)}/reconcile`, {}, "POST", { "x-zzsh-connection-id": connectionIdRef.current });
       const current = currentRequestKey();
       if (!current || !isCurrentImRequest(requestKey, current)) return;
       setQueue((current) => current.map((item) => item.id === result.consultation.id ? result.consultation : item));
@@ -1812,7 +2351,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     try {
       const value = await adminRequest<{ targets?: unknown; transferReady?: unknown }>(`/im/transfer-targets?consultationId=${encodeURIComponent(consultationId)}`);
       if (generation !== operatorGenerationRef.current || operatorRef.current !== operator || selectedIdRef.current !== consultationId) return;
-      const targets = Array.isArray(value.targets) ? value.targets.filter((target): target is { adminUserId: string; displayName: string } => Boolean(target) && typeof target === "object" && typeof (target as { adminUserId?: unknown }).adminUserId === "string" && typeof (target as { displayName?: unknown }).displayName === "string") : [];
+      const targets = Array.isArray(value.targets) ? value.targets.filter((target): target is { adminUserId: string; displayName: string; inGrace?: boolean; disconnectedSince?: string | null } => Boolean(target) && typeof target === "object" && typeof (target as { adminUserId?: unknown }).adminUserId === "string" && typeof (target as { displayName?: unknown }).displayName === "string") : [];
       setTransferState({ targets, transferReady: value.transferReady === true });
     } catch (cause) {
       if (generation !== operatorGenerationRef.current || operatorRef.current !== operator || selectedIdRef.current !== consultationId) return;
@@ -1857,14 +2396,35 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); return false; }
     finally { endBusy(busyOwner); }
   };
-  const togglePresence = async () => {
+  const endReception = async () => {
     if (!canPresence) return;
-    // Another window owns presence: an explicit "接管接待" is the only action here.
-    const takeover = presence.ownedByAnotherSession === true || presence.unbound === true || presence.availability !== "AVAILABLE";
-    const next = takeover ? "AVAILABLE" : "OFF_DUTY";
     // 暂停/下线前把未完成会话摆出来；用户可以继续暂停，也可以逐条去交接，不强制阻断。
-    if (next === "OFF_DUTY" && myOpenConsultations.length) { setNotice(undefined); setOffDutyOpen(true); return; }
-    await applyPresence(next, takeover ? { takeover: true } : undefined);
+    if (myOpenConsultations.length) { setNotice(undefined); setOffDutyOpen(true); return; }
+    await applyPresence("OFF_DUTY");
+  };
+  const togglePresence = async () => {
+    if (!canPresence || !localLeader) return;
+    // A terminal connection still keeps the reception entry; the secondary
+    // "结束接待" action below is the only way out without reconnecting.
+    if (connection === "KICKED" || connection === "AUTH_FAILED") {
+      terminalConnectionRef.current = undefined;
+      setReconnectEpoch((value) => value + 1);
+      return;
+    }
+    // Another browser session owns reception/connection. Transfer ownership first
+    // with a CONNECTING state; the effect opens NIM only after the takeover succeeds.
+    if (presence.ownedByAnotherSession === true) {
+      const busyOwner = beginBusy();
+      setNotice(undefined);
+      try {
+        const value = await writePresence("AVAILABLE", "CONNECTING", { takeover: true });
+        if (value && value.ownedByAnotherSession !== true) setReconnectEpoch((current) => current + 1);
+      } finally { endBusy(busyOwner); }
+      return;
+    }
+    if (presence.availability === "AVAILABLE") { await endReception(); return; }
+    const needsTakeover = presence.unbound === true;
+    await applyPresence("AVAILABLE", needsTakeover ? { takeover: true } : undefined);
   };
   const goTransferFromChecklist = (consultationId: string) => {
     setOffDutyOpen(false);
@@ -2648,10 +3208,18 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // Availability is the server's reception intent; the label must still show a broken
   // message channel instead of claiming "可接待". Ending presence stays available so
   // the operator can clear a stale AVAILABLE row even while the IM channel reconnects.
-  const runtime = presenceRuntimeState(presence.availability, connection, busy, presence.ownedByAnotherSession === true, presence.unbound === true);
+  const runtime = presenceRuntimeState(
+    presence.availability,
+    connection,
+    busy,
+    presence.ownedByAnotherSession === true,
+    presence.unbound === true,
+    localLeader,
+    presence.dispatchable !== false,
+  );
 
   return <div className="im-wb-root" data-unified="true">
-    <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty}/>
+    <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty} getConnectionId={() => connectionIdRef.current}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
       <div className="im-wb-bar-title"><strong>客服工作台</strong></div>
       <button type="button" className="im-wb-btn im-wb-btn-outline" disabled={!canRead} onClick={()=>setAftersaleOpen(true)}>售后记录</button>
@@ -2674,8 +3242,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         {canPresence ? <>
           <span className="im-wb-state im-wb-runtime-state" data-tone={runtime.tone}><i className={presence.availability === "AVAILABLE" && runtime.connected ? "on" : ""} />{runtime.label}</span>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
-          <ActionTooltip content="今日接待时长（仅统计可接待且可收发消息的时间）"><span className="im-wb-state im-wb-today" data-action="today-duty">今日接待 <b>{formatDuration(presence.today?.seconds)}</b></span></ActionTooltip>
+          <TodayDuration seconds={presence.today?.seconds} active={canPresence && localLeader && presence.availability === "AVAILABLE" && !snapshot.session.locked} />
           <ActionTooltip content={runtime.toggleTitle}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled}>{runtime.toggleLabel}</button></span></ActionTooltip>
+          {presence.availability === "AVAILABLE" && localLeader && (connection === "KICKED" || connection === "AUTH_FAILED")
+            ? <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-runtime-action" data-action="end-reception" onClick={() => void endReception()} disabled={busy}>结束接待</button>
+            : null}
         </> : <span className="im-wb-state">无在线状态权限</span>}
         {connection !== "CONNECTED" ? <>
           <span className="im-wb-runtime-divider" aria-hidden="true" />
@@ -2775,7 +3346,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           : transferState === null ? <p className="im-wb-dialog-empty">正在读取可转交客服…</p>
           : !transferState.transferReady ? <p className="im-wb-dialog-empty">会话尚未就绪，暂不可转交</p>
           : !transferState.targets.length ? <p className="im-wb-dialog-empty">暂无可转交的客服。这里只显示当前在线且可接待的其他客服；投诉会话还会排除无权处理或已被排除的客服。</p>
-          : <div className="im-wb-dialog-list">{transferState.targets.map((target) => <button key={target.adminUserId} type="button" disabled={transferBusy} onClick={() => void confirmTransfer(target.adminUserId)}><span>{target.displayName}</span><small>可接待客服</small></button>)}</div>}
+          : <div className="im-wb-dialog-list">{transferState.targets.map((target) => <button key={target.adminUserId} type="button" disabled={transferBusy} onClick={() => void confirmTransfer(target.adminUserId)}><span>{target.displayName}</span><small>{target.inGrace ? "连接异常，可能无法及时查看" : "可接待客服"}</small></button>)}</div>}
         <p className="im-wb-dialog-hint">转交后原会话与历史保留；填写的备注会写入交接记录</p>
       </DialogContent>
     </Dialog>

@@ -77,3 +77,15 @@ CREATE TRIGGER game_cdn AFTER UPDATE OF enabled ON zzsh_supply.game
 FOR EACH ROW WHEN (OLD.enabled IS DISTINCT FROM NEW.enabled) EXECUTE FUNCTION zzsh_supply.restrict_account_image_cdn();
 CREATE TRIGGER game_service_cdn AFTER UPDATE OF enabled ON zzsh_supply.game_service_operation
 FOR EACH ROW WHEN (OLD.enabled IS DISTINCT FROM NEW.enabled) EXECUTE FUNCTION zzsh_supply.restrict_account_image_cdn();
+COMMENT ON TABLE zzsh_supply.account_image_cdn_queue IS '账号公开图片投放与撤回的同步队列';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_queue.account_id IS '关联的出租账号';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_queue.request_revision IS '队列请求修订号，用于识别处理期间的变更';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_queue.due_at IS '下次处理时间';
+COMMENT ON TABLE zzsh_supply.account_image_cdn_delivery IS '新平台账号图片的单次 CDN 投放记录';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.id IS '单次投放标识';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.account_id IS '关联的出租账号';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.asset_id IS '投放的账号图片素材';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.state IS '投放或撤回处理状态';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.created_at IS '投放记录创建时间';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.published_at IS '源站图片校验完成并允许投放的时间';
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_delivery.purge_task_id IS 'CDN 接受的缓存刷新任务编号，不代表刷新完成';

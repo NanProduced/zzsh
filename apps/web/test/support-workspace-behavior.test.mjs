@@ -940,7 +940,7 @@ test("an ended order shows a neutral notice while canSend alone keeps the compos
     assert.equal(chip?.textContent, orderStatus === "COMPLETED" ? "结算完成" : "已取消", "the head carries the current stage");
     const notice = host.querySelector(".order-team-stage-now");
     assert.ok(notice, "the stage bar explains the ended state");
-    assert.match(notice.textContent, orderStatus === "COMPLETED" ? /^结算完成 · 已超过 72 小时 · 仅可查看$/ : /^已取消$/);
+    assert.match(notice.textContent, orderStatus === "COMPLETED" ? /^结算完成 · 已超过 72 小时 · 订单群仅可查看历史消息$/ : /^已取消$/);
     assert.doesNotMatch(notice.textContent, /只读|禁止发送|不可发送/, "the stage bar never claims a send restriction");
     const submit = host.querySelector('.order-team-chat form button[type="submit"]');
     assert.equal(submit.disabled, true, "an empty draft still blocks the submit");

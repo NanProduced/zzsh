@@ -39,6 +39,20 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+COMMENT ON COLUMN zzsh_supply.account_image_cdn_queue.legacy_candidate IS '账号是否包含需要核对的历史图片来源';
+COMMENT ON TABLE zzsh_supply.legacy_image_cdn_delivery IS '旧平台账号图片的来源核验与 CDN 投放记录';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.id IS '单次历史图片投放标识';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.account_id IS '关联的迁入账号';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.version_id IS '关联的历史资料快照';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.position IS '历史展示图片顺序';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.source_path IS '旧平台图片来源路径';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.sha256 IS '经核准的来源图片 SHA-256';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.byte_size IS '经核准的来源图片字节数';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.mime IS '经核准的来源图片 MIME 类型';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.state IS '来源导入、投放或撤回状态';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.created_at IS '投放记录创建时间';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.published_at IS '源站图片校验完成并允许投放的时间';
+COMMENT ON COLUMN zzsh_supply.legacy_image_cdn_delivery.purge_task_id IS 'CDN 接受的缓存刷新任务编号，不代表刷新完成';
 REVOKE ALL ON FUNCTION zzsh_supply.schedule_legacy_image_cdn() FROM PUBLIC;
 CREATE TRIGGER legacy_image_cdn_source_insert AFTER INSERT ON zzsh_supply.legacy_account_media_paths
 FOR EACH ROW EXECUTE FUNCTION zzsh_supply.schedule_legacy_image_cdn();

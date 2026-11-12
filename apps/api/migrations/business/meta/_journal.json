@@ -1382,24 +1382,31 @@
       "breakpoints": true
     },
     {
-      "idx": 205,
+      "idx": 197,
+      "version": "7",
+      "when": 1794335180088,
+      "tag": "0197_support_presence_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 198,
       "version": "7",
       "when": 1794456000000,
-      "tag": "0205_account_oss_media",
+      "tag": "0198_account_oss_media",
       "breakpoints": true
     },
     {
-      "idx": 206,
+      "idx": 199,
       "version": "7",
       "when": 1794456000001,
-      "tag": "0206_account_image_cdn",
+      "tag": "0199_account_image_cdn",
       "breakpoints": true
     },
     {
-      "idx": 207,
+      "idx": 200,
       "version": "7",
       "when": 1794456000002,
-      "tag": "0207_legacy_account_image_cdn",
+      "tag": "0200_legacy_account_image_cdn",
       "breakpoints": true
     }
   ]

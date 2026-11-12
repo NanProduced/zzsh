@@ -27,6 +27,7 @@ import { readMyWallet, walletMoney, WalletRequestError, type WalletRead } from "
 import { formatOrderTime, orderApi, orderItemKey, OrderRequestError, type Order, type OrderPage, type OrderParty, type OrderSearchFilters } from "@/lib/order-client";
 import { orderTermLabel, orderUrl } from "@/components/order/order-presentation";
 import { orderAccountTitle, orderAmountFacts, orderListingSourceLabel, orderSettlementStageLabel } from "@/lib/order-display";
+import { PaymentCountdown } from "@/components/order/payment-countdown";
 import { EntitlementBadge, formatScopeName, GrowthMemberCardArt, GROWTH_TIER_LABELS, MembershipCenterView } from "./membership-center";
 import { NicknameEditEntry } from "./nickname-edit";
 import { AvatarEditEntry } from "./avatar-edit";
@@ -562,6 +563,7 @@ export type PendingTaskItem = {
   description: string;
   buttonText: string;
   href: string;
+  meta?: { amount: string; holdUntil?: string | null; expired?: boolean };
 };
 
 export function AccountPendingTasks({
@@ -591,8 +593,9 @@ export function AccountPendingTasks({
         tagLabel: "租入",
         title: `订单待付款${order.displayNo ? ` · ${order.displayNo}` : ""}`,
         description: `完成付款后继续订单 · ${orderAccountTitle(order)}`,
-        buttonText: "去付款",
-        href: accountSectionHref("rentals", { view: "rentals", orderId: order.id, status: order.status }),
+        buttonText: "继续支付",
+        href: `${accountSectionHref("rentals", { view: "rentals", orderId: order.id, status: order.status })}&pay=1`,
+        meta: { amount: orderAmountFacts(order, "renter").main, holdUntil: order.holdUntil, expired: order.expiredAwaitingCancel },
       });
     }
   }
@@ -657,7 +660,7 @@ export function AccountPendingTasks({
       {items.length > 0 ? (
         <div className="account-pending-list">
           {items.map((item) => (
-            <div key={item.id} className="account-pending-row">
+            <div key={item.id} className="account-pending-row" data-tone={item.meta ? "payment" : undefined}>
               <span className="account-pending-icon" aria-hidden="true">
                 {item.type === "renter" ? <FileText size={18} /> : <House size={18} />}
               </span>
@@ -665,6 +668,12 @@ export function AccountPendingTasks({
               <div className="account-pending-info">
                 <strong className="account-pending-item-title">{item.title}</strong>
                 <span className="account-pending-item-desc">{item.description}</span>
+                {item.meta ? (
+                  <span className="account-pending-payment">
+                    <span className="account-pending-payment-amount">待付 {item.meta.amount}</span>
+                    <PaymentCountdown until={item.meta.holdUntil} expired={item.meta.expired} className="account-pending-countdown" />
+                  </span>
+                ) : null}
               </div>
               <Link
                 className={`button ${item.type === "renter" ? "primary" : "secondary"} button--xs account-pending-btn`}

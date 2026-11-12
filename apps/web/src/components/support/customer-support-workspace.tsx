@@ -11,8 +11,8 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
 import { useAuthOverlay } from "@/components/auth/auth-overlay-provider";
 import { useUserSession } from "@/components/session/user-session-provider";
-import { ImClientLifecycle } from "@/lib/im-client-lifecycle";
-import { collapseImSystemNotices, createLocalFakeNimWebClientFactory, createNimWebClientFactory, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type ImSystemNotice, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
+import { ImClientLifecycle, isImDisposeFailure } from "@/lib/im-client-lifecycle";
+import { collapseImSystemNotices, createLocalFakeNimWebClientFactory, createNimWebClientFactory, decodeImSystemNotice, isImSystemNoticeText, mergeImMessages, NimImageSendError, NimLoginTerminalError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type ImSystemNotice, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@/lib/nim-web-client";
 import { clearSupportIntent, normalizeSupportType, readSupportIntent, saveSupportIntent, supportSubjectRefFromUrl, type SupportType } from "@/lib/support-intent";
 import type { SupportOrderContext } from "./support-dialog-request";
 import "./customer-support-workspace.css";
@@ -448,8 +448,8 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
   return value as T;
 }
 
-async function fetchImToken(): Promise<ImToken> {
-  const response = await fetch("/api/im/token", { credentials: "same-origin", cache: "no-store" });
+async function fetchImToken(userId: string): Promise<ImToken> {
+  const response = await fetch("/api/im/token", { credentials: "same-origin", cache: "no-store", headers: { "x-zzsh-expected-user-id": userId } });
   const value = await readJson<Record<string, unknown>>(response, "暂时无法连接客服，请稍后重试。");
   if (typeof value.appKey !== "string" || typeof value.accountId !== "string" || typeof value.token !== "string" || !value.appKey || !value.accountId || !value.token || (value.transport !== "nim" && value.transport !== "local-fake")) throw new Error("客服连接信息异常，请稍后重试。");
   return { appKey: value.appKey, accountId: value.accountId, token: value.token, transport: value.transport };
@@ -673,6 +673,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const previousPanelViewRef = useRef(panelView);
   const composingRef = useRef(false);
   const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
+  const handoffRef = useRef<Promise<void>>(Promise.resolve());
   const reconnectRef = useRef<(() => void) | null>(null);
   const clientRef = useRef<NimWebClientLike | null>(null);
   const activeIdRef = useRef(activeId);
@@ -702,11 +703,24 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     return () => scope.removeEventListener("wheel", onWheel);
   }, [session.status, visible, preview]);
 
+  const [pageVisible, setPageVisible] = useState(() => typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus()));
+  useEffect(() => {
+    const sync = () => setPageVisible(document.visibilityState === "visible" && document.hasFocus());
+    document.addEventListener("visibilitychange", sync);
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    return () => { document.removeEventListener("visibilitychange", sync); window.removeEventListener("focus", sync); window.removeEventListener("blur", sync); };
+  }, []);
+  const readVisibleRef = useRef(false);
+  readVisibleRef.current = visible && pageVisible && session.status === "authenticated" && Boolean(session.userId);
   const lastAuthenticatedIdentityRef = useRef<string | null>(null);
+  const lastAuthenticatedUserIdRef = useRef<string | null>(null);
   if (session.status === "authenticated" && session.userId) {
     lastAuthenticatedIdentityRef.current = `${session.userId}:${session.identityVersion}`;
+    lastAuthenticatedUserIdRef.current = session.userId;
   } else if (session.status === "guest") {
     lastAuthenticatedIdentityRef.current = null;
+    lastAuthenticatedUserIdRef.current = null;
   }
 
   const currentIdentity = preview
@@ -716,6 +730,16 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       : session.status === "loading" && lastAuthenticatedIdentityRef.current
         ? lastAuthenticatedIdentityRef.current
         : `session:${session.status}`;
+  // A same-user visibility confirmation goes through `loading`. Keep the
+  // already-open IM lifecycle for that window; a real logout clears both refs,
+  // and a real identity switch changes the identity/version pair.
+  const connectionUserId = preview
+    ? "preview"
+    : session.status === "authenticated" && session.userId
+      ? session.userId
+      : session.status === "loading" && lastAuthenticatedIdentityRef.current
+        ? lastAuthenticatedUserIdRef.current
+        : null;
   useEffect(() => {
     setDirectoryMenu(null);
     setDirectoryPrefs(preview ? {} : readDirectoryPreferences(currentIdentity));
@@ -782,7 +806,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
    * 签名在发请求前记录以防并发重复；失败清掉该签名，保留 hasUnread，下次打开/刷新时可重试。
    */
   const markThreadRead = useCallback(async (threadKey: string, roundId: string, signature: string) => {
-    if (preview || !threadKey || !roundId || readSignatureRef.current[threadKey] === signature) return;
+    if (preview || !readVisibleRef.current || !threadKey || !roundId || readSignatureRef.current[threadKey] === signature) return;
     readSignatureRef.current[threadKey] = signature;
     const releaseSignature = () => {
       if (readSignatureRef.current[threadKey] === signature) delete readSignatureRef.current[threadKey];
@@ -794,6 +818,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         method: "POST",
         credentials: "same-origin",
         cache: "no-store",
+        headers: { "x-zzsh-expected-user-id": lastAuthenticatedUserIdRef.current! },
       });
       if (!response.ok) { releaseSignature(); return; }
       if (generation !== identityGenerationRef.current || identityRef.current !== identity) return;
@@ -947,13 +972,15 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   }, [currentIdentity, preview]);
 
   useEffect(() => {
-    if (preview || session.status !== "authenticated" || !session.userId) return;
+    if (preview || !connectionUserId) return;
     let cancelled = false;
     let reconnecting = false;
+    let logoutRetried = false;
+    const previousHandoff = handoffRef.current;
     const generation = identityGenerationRef.current;
     const identity = currentIdentity;
     const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
-      const token = await fetchImToken();
+      const token = await fetchImToken(connectionUserId);
       if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/im/messages", accountId: token.accountId, pollMs: 1_500 })(context);
       const factory = createNimWebClientFactory({
         appKey: token.appKey,
@@ -961,8 +988,8 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         messageReceiptEndpoint:"/api/im/messages",
         onReceiptStatus:({pending,failed,persistent})=>{if(pending&&(failed||!persistent))setError(NIM_RECEIPT_PENDING+(!persistent?"本地恢复记录未保存，请在离开前恢复登记。":""));else if(!pending)setError(current=>current?.startsWith(NIM_RECEIPT_PENDING)?undefined:current);},
         messageAuthorization: async ({ conversationId, operation,messageClientId,messageType }) => {
-          const response = await fetch(`/api/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}${operation==="send"?`&entryIntent=${entryIntentRef.current}`:""}${messageClientId?`&messageClientId=${encodeURIComponent(messageClientId)}&messageType=${messageType}`:""}`, { credentials: "same-origin", cache: "no-store" });
-          if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity) return;
+          const response = await fetch(`/api/im/message-access?conversationId=${encodeURIComponent(conversationId)}&operation=${operation}${operation==="send"?`&entryIntent=${entryIntentRef.current}`:""}${messageClientId?`&messageClientId=${encodeURIComponent(messageClientId)}&messageType=${messageType}`:""}`, { credentials: "same-origin", cache: "no-store", headers: { "x-zzsh-expected-user-id": connectionUserId } });
+          if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity) throw new Error("登录状态已变化，请重新连接客服。");
           if(operation==="read"&&(response.status===401||response.status===403)){
             readHiddenRef.current[conversationId] = true;
             const consultation = consultationsRef.current.find(item => item.conversationId === conversationId);
@@ -978,7 +1005,9 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         },
         tokenProvider: async (accountId) => {
           if (accountId !== token.accountId) throw new Error("客服账号校验失败，请刷新后重试。");
-          return (await fetchImToken()).token;
+          const refreshed = await fetchImToken(connectionUserId);
+          if (refreshed.accountId !== accountId) throw new Error("客服账号校验失败，请刷新后重试。");
+          return refreshed.token;
         },
       });
       return factory(context);
@@ -987,15 +1016,39 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     const run = async () => {
       if (cancelled) return;
       try {
+        await previousHandoff;
+      } catch {
+        if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) {
+          setConnection("error");
+          setImReady(false);
+          setError("旧连接未安全关闭，请刷新页面后重试。");
+        }
+        return;
+      }
+      try {
         setConnection("CONNECTING");
         setError(undefined);
-        const client = await lifecycle.open(session.userId!);
+        const client = await lifecycle.open(connectionUserId);
         if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity) return;
         clientRef.current = client;
-        setConnection(client.getConnectionState());
+        const initialConnection = client.getConnectionState();
+        if (initialConnection === "CONNECTED") { reconnecting = false; logoutRetried = false; }
+        else if (initialConnection === "AUTH_FAILED") setError("客服连接认证失败，请点击“重新连接”。");
+        else if (initialConnection === "KICKED") setError("客服连接已在其他设备下线，请刷新或重新连接。");
+        setConnection(initialConnection);
         readyIdentityRef.current = identity;
         setImReady(true);
-        client.onConnectionStateChange((state) => { if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) { setConnection(state); if (state === "AUTH_FAILED" || state === "KICKED") setError("客服连接已失效，请刷新后重试。"); } });
+        client.onConnectionStateChange((state, details) => {
+          if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity) return;
+          setConnection(state);
+          if (state === "CONNECTED") { reconnecting = false; logoutRetried = false; }
+          if (state === "AUTH_FAILED") setError("客服连接认证失败，请点击“重新连接”。");
+          else if (state === "KICKED") setError("客服连接已在其他设备下线，请刷新或重新连接。");
+          else if (state === "DISCONNECTED" && details?.kind === "LOGOUT" && !reconnecting && !logoutRetried) {
+            logoutRetried = true;
+            reconnect();
+          }
+        });
         client.onMessages((incoming) => {
           if (cancelled || generation !== identityGenerationRef.current || identityRef.current !== identity || clientRef.current !== client) return;
           for (const raw of incoming) {
@@ -1014,9 +1067,17 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       } catch (cause) {
         revalidateAfterUnauthorized(cause);
         if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) {
-          setConnection("error");
+          if (isImDisposeFailure(cause)) {
+            setConnection("error");
+            setImReady(false);
+            setError("旧连接未安全关闭，请刷新页面后重试。");
+            return;
+          }
+          setConnection(cause instanceof NimLoginTerminalError ? cause.state : "error");
           setImReady(false);
-          setError("客服连接失败，请点击“重新连接”或稍后刷新。");
+          setError(cause instanceof NimLoginTerminalError
+            ? cause.state === "KICKED" ? "客服连接已在其他设备下线，请刷新后重试。" : "客服连接认证失败，请刷新后重试。"
+            : "客服连接失败，请点击“重新连接”或稍后刷新。");
         }
       }
     };
@@ -1030,6 +1091,12 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         try {
           await lifecycle.close();
           await run();
+        } catch {
+          if (!cancelled && generation === identityGenerationRef.current && identityRef.current === identity) {
+            setConnection("error");
+            setImReady(false);
+            setError("旧连接未安全关闭，请刷新页面后重试。");
+          }
         } finally {
           reconnecting = false;
         }
@@ -1046,9 +1113,11 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
         setImReady(false);
       }
       if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
-      void lifecycle.close();
+      const handoff = previousHandoff.then(() => lifecycle.close());
+      handoffRef.current = handoff;
+      void handoff.catch(() => undefined);
     };
-  }, [currentIdentity, preview, revalidateAfterUnauthorized, session.status, session.userId]);
+  }, [currentIdentity, preview, revalidateAfterUnauthorized, connectionUserId]);
 
   const reconnect = () => reconnectRef.current?.();
 
@@ -1159,7 +1228,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
   const chatPaneVisible = !narrowViewport || panelView === "chat";
   // 订单群未读按成员身份计数；只有群聊真正可见时清自己的未读，列表视图不代读。
   useEffect(() => {
-    if (preview || !visible || !chatPaneVisible || section !== "orders" || !selectedOrder) return;
+    if (preview || !readVisibleRef.current || !chatPaneVisible || section !== "orders" || !selectedOrder) return;
     const order = orders.find((item) => item.id === selectedOrder.id);
     if (!order || (order.unreadCount ?? 0) <= 0) return;
     const signature = `${order.id}:${order.lastMessageAt ?? ""}:${order.unreadCount}`;
@@ -1171,6 +1240,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
+      headers: { "x-zzsh-expected-user-id": lastAuthenticatedUserIdRef.current! },
     }).then((response) => {
       if (!response.ok) {
         if (readOrderSignatureRef.current[order.id] === signature) delete readOrderSignatureRef.current[order.id];
@@ -1181,7 +1251,7 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
     }).catch(() => {
       if (readOrderSignatureRef.current[order.id] === signature) delete readOrderSignatureRef.current[order.id];
     });
-  }, [preview, visible, chatPaneVisible, section, selectedOrder, orders, currentIdentity]);
+  }, [preview, visible, pageVisible, session.status, chatPaneVisible, section, selectedOrder, orders, currentIdentity]);
   const activeHistoryLoaded = historyLoaded[activeConversationKey] === true;
   const activeRoundId = activeConversation ? activeConversation.roundId || activeConversation.id : null;
   const activeRatingResolution = activeRoundId ? ratingResolved[activeRoundId] : undefined;
@@ -1478,10 +1548,10 @@ export function CustomerSupportWorkspace({ preview = false, embedded = false, vi
 
   // 当前线程可见且历史就绪时才上报已读；预览模式、未加载历史的目录行和窄屏列表视图都不发请求。
   useEffect(() => {
-    if (preview || !visible || !chatPaneVisible || section !== "consultation" || !activeConversation || activeConversation.hasUnread !== true || !activeHistoryLoaded) return;
+    if (preview || !readVisibleRef.current || !chatPaneVisible || section !== "consultation" || !activeConversation || activeConversation.hasUnread !== true || !activeHistoryLoaded) return;
     const roundId = activeConversation.roundId || activeConversation.id;
     void markThreadRead(threadKeyOf(activeConversation), roundId, `${roundId}:${activeConversation.lastMessageAt ?? ""}`);
-  }, [activeConversation, activeConversationKey, activeHistoryLoaded, chatPaneVisible, markThreadRead, preview, section, visible]);
+  }, [activeConversation, activeConversationKey, activeHistoryLoaded, chatPaneVisible, markThreadRead, preview, section, visible, pageVisible, session.status]);
 
   const loadEarlier = async () => {
     if (preview || !activeConversation?.conversationId || !clientRef.current || historyLoading) return;

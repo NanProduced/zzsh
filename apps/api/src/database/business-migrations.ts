@@ -212,7 +212,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
-    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at", "auth_session_id") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
+    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "last_confirmed_at", "disconnected_since", "dispatch_paused", "state_revision", "connection_id", "connection_expires_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at", "auth_session_id") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};

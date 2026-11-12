@@ -819,6 +819,23 @@ test('KD retains invalid/decimal/empty/historical input instead of laundering it
 
 test('an uncertain retry rejected after remount retains responsibility rather than unlocking edits',async()=>{let attempts=0;const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),saveDraft:()=>{if(++attempts===1)throw new actualSupply.SupplyRequestError(503,{error:{code:'INTERNAL_ERROR',message:'unknown'}});throw new actualSupply.SupplyRequestError(404,{error:{code:'NOT_FOUND',message:'no current object'}});}});try{await p.render();await p.type('#publish-description','frozen');await p.clickButton('保存草稿');await p.waitFor(()=>p.calls.length);await p.remount();await p.clickButton('重试当前步骤');assert.equal(p.host.querySelector('#publish-description').disabled,true);assert.ok(p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));assert.equal(p.calls[1].key,p.calls[0].key);}finally{await p.close();}});
 
+test('display screenshot uploads the original selected file without re-encoding', async () => {
+  let uploaded;
+  const p = await probe({ accountId: 'account_1', options: { ...optionsV1, accountMediaTransport: 'OSS_POST' }, mine: () => supplyOf(declaration()), uploadMedia: async input => { uploaded = input; return { assetId: 'asset_original', reviewState: 'PENDING' }; } });
+  try {
+    await p.render();
+    const original = new File(['original screenshot bytes'], 'show.png', { type: 'image/png' });
+    const input = p.host.querySelector('input[type=file]');
+    Object.defineProperty(input, 'files', { value: [original], configurable: true });
+    await React.act(async () => input.dispatchEvent(new p.window.Event('change', { bubbles: true })));
+    await p.waitFor(() => uploaded);
+    assert.equal(uploaded.file, original);
+    assert.equal(uploaded.purpose, 'ACCOUNT_DISPLAY');
+    assert.equal(uploaded.transport, 'OSS_POST');
+    assert.equal(await uploaded.file.text(), 'original screenshot bytes');
+  } finally { await p.close(); }
+});
+
 test('pending media survives remount without storing File or upload tokens and cannot pretend to reupload',async()=>{const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),uploadMedia:()=>{throw new actualSupply.SupplyRequestError(503,{error:{code:'INTERNAL_ERROR',message:'upload unknown'}})}});try{await p.render();const input=p.host.querySelector('input[type=file]');Object.defineProperty(input,'files',{value:[new File(['valid-bytes-for-component-probe'],'show.png',{type:'image/png'})],configurable:true});await React.act(async()=>input.dispatchEvent(new p.window.Event('change',{bubbles:true})));await p.waitFor(()=>p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));const raw=p.storageDump().find(([key])=>key.startsWith('zzsh.supply-write'))[1];assert.doesNotMatch(raw,/uploadToken|valid-bytes-for-component-probe/);assert.equal(JSON.parse(raw).action,'media');await p.remount();await p.clickButton('重试当前步骤');assert.match(p.text(),/原图片文件没有保留/);assert.ok(p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));}finally{await p.close();}});
 
 test('R03: publishing cannot resolve pause/resume/withdraw by reading current account state',async()=>{
