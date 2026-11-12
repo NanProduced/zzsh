@@ -241,22 +241,41 @@ try {
     report.identityProfiles = { ...identityProfiles, source: identitySource };
   }
   report.registrationTime = registrationTime;
+  const legacyListedTarget = { expectedMapped: 0, verifiedMapped: 0, missingTarget: 0, missingSnapshot: 0, published: 0 };
   const accounts = await batched("accounts", async batch => {
     const actual = new Map((await query(`SELECT m.legacy_id,m.account_id,m.source_digest,m.evidence_ref,m.version_id,a.owner_user_id,a.game_id,a.current_version_id,a.legacy_hold,v.origin,v.review_state,
+       EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id) AS has_publication,
        h.account_id snapshot_account,h.snapshot,h.source_digest snapshot_digest,to_char(h.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') snapshot_updated_at,h.source_status
        FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id JOIN zzsh_supply.listing_version v ON v.id=m.version_id
        LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id
        WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(row => row.sourceId)])).rows.map(row => [row.legacy_id, row]));
     for (const row of batch) {
+      const nextDelta = registration.migrationProfile === NEXT_MIGRATION_PROFILE && row.gameCode === "delta";
+      const listed = nextDelta && Number(row.sourceStatus) === 3 && !row.sourceDeleted;
+      if (listed) legacyListedTarget.expectedMapped++;
       if (originalMetricSources && !matchesLegacyAccountCapture(originalMetricSources.accounts.get(row.sourceId), row, canonical)) difference("accounts", row.sourceId, "ACCOUNT_CAPTURE_METRIC_SOURCE_DRIFT");
       const found = actual.get(row.sourceId);
-      if (!found) { difference("accounts", row.sourceId, "TARGET_ACCOUNT_MAP_MISSING"); continue; }
-      if (found.account_id !== accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId) || found.source_digest !== row.sourceDigest || found.evidence_ref !== row.evidenceRef || found.owner_user_id !== row.ownerUserId || found.game_id !== state.gameBindings[row.gameCode] || found.version_id !== found.current_version_id || found.origin !== "LEGACY_OBSERVATION" || found.review_state !== "IMPORTED_UNVERIFIED" || found.legacy_hold !== "UNRESOLVED") difference("accounts", row.sourceId, "SOURCE_OWNER_GAME_OBSERVATION_OR_HOLD_DRIFT");
+      if (!found) { if (listed) legacyListedTarget.missingTarget++; difference("accounts", row.sourceId, "TARGET_ACCOUNT_MAP_MISSING"); continue; }
+      const sourceMatches = found.account_id === accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId) && found.source_digest === row.sourceDigest && found.evidence_ref === row.evidenceRef && found.owner_user_id === row.ownerUserId && found.game_id === state.gameBindings[row.gameCode] && found.version_id === found.current_version_id && found.origin === "LEGACY_OBSERVATION" && found.review_state === "IMPORTED_UNVERIFIED" && found.legacy_hold === "UNRESOLVED";
+      if (!sourceMatches) difference("accounts", row.sourceId, "SOURCE_OWNER_GAME_OBSERVATION_OR_HOLD_DRIFT");
       const snapshotExpected = row.snapshot && row.sourceUpdatedAt && [0, 3, 4, 5, 6].includes(Number(row.sourceStatus)) && !row.sourceDeleted;
-      if (snapshotExpected ? !found.snapshot_account || canonical(found.snapshot) !== canonical(row.snapshot) || found.snapshot_digest !== row.sourceDigest || found.snapshot_updated_at !== row.sourceUpdatedAt || Number(found.source_status) !== Number(row.sourceStatus) : found.snapshot_account !== null) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
+      if (nextDelta && found.has_publication !== false) difference("accounts", row.sourceId, "MIGRATED_ACCOUNT_HAS_PUBLICATION");
+      if (listed && !snapshotExpected) difference("accounts", row.sourceId, "LISTED_SOURCE_SNAPSHOT_MISSING");
+      const snapshotMatches = snapshotExpected ? Boolean(found.snapshot_account) && canonical(found.snapshot) === canonical(row.snapshot) && found.snapshot_digest === row.sourceDigest && found.snapshot_updated_at === row.sourceUpdatedAt && Number(found.source_status) === Number(row.sourceStatus) : found.snapshot_account === null;
+      if (!snapshotMatches) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
+      if (listed) {
+        if (!snapshotExpected || !snapshotMatches) legacyListedTarget.missingSnapshot++;
+        if (found.has_publication !== false) legacyListedTarget.published++;
+        if (sourceMatches && snapshotExpected && snapshotMatches && found.has_publication === false) legacyListedTarget.verifiedMapped++;
+      }
     }
   }, accountKeys);
   report.domains.accounts = { expected: accounts };
+  if (registration.migrationProfile === NEXT_MIGRATION_PROFILE) report.legacyListedTarget = {
+    ...legacyListedTarget,
+    status: legacyListedTarget.verifiedMapped === legacyListedTarget.expectedMapped ? "MAPPED_HISTORICAL_NOT_PUBLISHED" : "REVIEW_REQUIRED",
+    scope: "MAPPED_DELTA_ACCOUNT_FACTS_ONLY", marketAndDirectOrder: "NOT_ASSESSED", sourceIsolations: "SEE_SOURCE_SCOPE_VERIFICATION",
+  };
   let deleted = 0;
   const accountMetricAudit = { expected: 0, matched: 0 };
   const orders = await batched("orders", async batch => {

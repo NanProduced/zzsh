@@ -37,7 +37,18 @@ test('independent selected-scope check proves paid orders, listed accounts and t
   assert.deepEqual(proof.users,{captured:2,retained:2,excluded:0,ready:2,isolated:0});
   assert.deepEqual(proof.accounts,{captured:3,retained:2,excluded:1,ready:2,isolated:0});
   assert.deepEqual(proof.orders,{captured:3,retained:1,excluded:2,ready:1,isolated:0});
+  assert.deepEqual(proof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'});
   assert.equal(proof.sourceConnections,0);assert.equal(proof.targetConnections,0);assert.equal(proof.targetWrites,0);
+});
+
+test('listed account source partition keeps missing snapshots and quarantined accounts visible',async()=>{
+  const missing=independentlyCheckedFixture();missing.rows['target-accounts'][0].snapshot=null;
+  const missingProof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...missing});
+  assert.deepEqual(missingProof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:0,readyWithoutSnapshot:1,isolated:0,status:'SOURCE_REVIEW_REQUIRED'});
+  const isolated=independentlyCheckedFixture();isolated.rows['target-accounts'].shift();isolated.rows.quarantine.push({domain:'accounts',sourceId:'a1'});
+  isolated.dataset.domains.accounts.ready--;isolated.dataset.domains.accounts.isolated++;
+  const isolatedProof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...isolated});
+  assert.deepEqual(isolatedProof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:0,readyWithoutSnapshot:0,isolated:1,status:'SOURCE_REVIEW_REQUIRED'});
 });
 
 test('independent selected-scope check refuses omitted users and non-order source exclusions',async()=>{

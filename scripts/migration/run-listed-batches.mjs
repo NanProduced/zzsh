@@ -9,7 +9,7 @@ import {writePrivate} from '../local-auth.mjs';
 import {assertDistributionCoreReadback,assertRegisteredDistributionTarget,isolatedDistributionBuild} from './local-distribution-qualification-plan.mjs';
 import {assertListedRunnerScripts,assertRoundDependencyProof,inspectRoundDependencyLayout} from './local-round-dependencies.mjs';
 import {readRoundListedBatch,validateRoundAccountSet,validateRoundTrialReceipt} from './legacy-listed-round-source.mjs';
-import {validateListedExecutionCheckpoint} from './legacy-listed-execution-plan.mjs';
+import {assertLegacyAutoPublicationPermitted,validateListedExecutionCheckpoint} from './legacy-listed-execution-plan.mjs';
 import {scanEmptyListedSource} from './readback-empty-legacy-listed.mjs';
 import {runListedBatchWorkflow} from './listed-batch-workflow.mjs';
 import {assertNextMigrationWriteReady,loadRegisteredTarget,NEXT_MIGRATION_PROFILE} from './local-target-registry.mjs';
@@ -72,6 +72,7 @@ async function main(){
   &&Array.isArray(policyReceipt.batches)&&Array.isArray(manifest.batches)&&policyReceipt.batches.length===manifest.batches.length
   &&(manifest.listedAccounts===0?policyReceipt.status==='NO_LISTED_SOURCE_ACCOUNTS':
    ['SAME_CAPTURE_POLICY_PREPARED_NO_TARGET','SAME_CAPTURE_BATCHES_PREPARED_NO_TARGET'].includes(policyReceipt.status)),'LISTED_RUN_POLICY_CHANGED');
+ if(mode==='--execute'&&manifest.listedAccounts>0)assertLegacyAutoPublicationPermitted(round.target);
  assert(isAbsolute(round.credentials??'')&&!lstatSync(round.credentials).isSymbolicLink(),'LISTED_RUN_CREDENTIALS_REQUIRED');
  const resourcePath=join(dirname(round.credentials),'resource.json');assert(!lstatSync(resourcePath).isSymbolicLink(),'LISTED_RUN_LINK_REFUSED');
  const resource=JSON.parse(readFileSync(resourcePath)),registered=loadRegisteredTarget(round.credentials);

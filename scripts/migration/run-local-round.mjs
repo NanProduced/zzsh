@@ -23,6 +23,7 @@ const externalReadiness = { status: "NOT_ASSESSED_BY_ROUND", checks: ["distribut
 function setSourceReadiness(proof) {
   const accounts = proof.accountSnapshots, refunds = proof.refundParents;
   externalReadiness.accountSnapshots = { status: accounts.unavailable ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_PREPARED_INPUT", ...accounts };
+  if (proof.legacyListed) externalReadiness.legacyListed = { ...proof.legacyListed, targetStatus: "NOT_ASSESSED" };
   externalReadiness.refundRelationships = { status: refunds.relationshipUnresolved || refunds.subjectIsolated ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...refunds };
   if (proof.unsupportedContinuations) externalReadiness.unsupportedContinuations = {
     status: proof.unsupportedContinuations.total ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_CAPTURED_INPUT", ...proof.unsupportedContinuations };
@@ -56,7 +57,10 @@ function bound(file, expected) {
 const inputSha256 = option("--input-sha"), input = bound(privatePath(option("--input")), inputSha256);
 const runnerDir = dirname(fileURLToPath(import.meta.url));
 assert.equal(input.schema, "zzsh.local-round.v1");
-if (input.target?.migrationProfile === NEXT_MIGRATION_PROFILE) externalReadiness.nextTargetAdmission = { status: "INCOMPLETE" };
+if (input.target?.migrationProfile === NEXT_MIGRATION_PROFILE) {
+  externalReadiness.nextTargetAdmission = { status: "INCOMPLETE" };
+  externalReadiness.checks = externalReadiness.checks.map(check => check === "listed-account-takeover" ? "legacy-listed-offline-readback" : check);
+}
 if (execute || resumeGrowth) assertNextMigrationWriteReady(input.target);
 assert(!input.growth||input.growth.packageLayout===undefined||input.growth.packageLayout==='PACKED_V2',"ROUND_GROWTH_PACKAGE_LAYOUT_INVALID");
 assert(!input.growth || input.growth.approvalLayout === undefined || input.growth.packageLayout === 'PACKED_V2'

@@ -103,13 +103,13 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
  }
  for(const [id,account] of accounts)
   assert(selected.accounts.has(id)===(account.listed||paidAccounts.has(id)),'SELECTED_SCOPE_SOURCE_ACCOUNT_DISPOSITION_MISMATCH');
- const ready={users:[],accounts:[],orders:[]},isolated={users:[],accounts:[],orders:[]},accountSnapshots={compared:0,unavailable:0};
+ const ready={users:[],accounts:[],orders:[]},isolated={users:[],accounts:[],orders:[]},accountSnapshots={compared:0,unavailable:0},listedWithoutSnapshot=new Set();
  for(const name of ['users','accounts','orders'])if(dataset.files?.[name])await readRows(datasetDir,dataset.files[name],row=>{
   if(name==='accounts'){
    const source=accounts.get(row.sourceId)?.source;
    assert(source&&row.ownerLegacyId===source.user_id&&row.sourceStatus===source.status&&row.sourceDeleted===(source.is_delete==='1')
     &&row.businessNo===(source.no===null||source.no===''?null:source.no)&&Object.hasOwn(row,'snapshot'),'SELECTED_SCOPE_ACCOUNT_SOURCE_MISMATCH');
-   if(row.snapshot===null)accountSnapshots.unavailable++;
+   if(row.snapshot===null){accountSnapshots.unavailable++;if(accounts.get(row.sourceId)?.listed)listedWithoutSnapshot.add(row.sourceId);}
    else{
     const snapshot=row.snapshot;
     assert(snapshot&&typeof snapshot==='object'&&!Array.isArray(snapshot)&&/^[1-5]$/.test(source.default_consume_type??'')
@@ -134,6 +134,15 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
    'SELECTED_SCOPE_INPUT_COUNTS_MISMATCH');
   result[name]={captured:sourceSet.size,retained:partition.captured,excluded:sourceSet.size-partition.captured,ready:partition.ready,isolated:partition.isolated};
  }
+ const readyAccounts=new Set(ready.accounts),isolatedAccounts=new Set(isolated.accounts);
+ const legacyListed={scope:'ALL_CAPTURED_GAMES',sourceCount:0,readyWithSnapshot:0,readyWithoutSnapshot:0,isolated:0};
+ for(const [id,account] of accounts)if(account.listed){
+  legacyListed.sourceCount++;
+  if(readyAccounts.has(id)){if(listedWithoutSnapshot.has(id))legacyListed.readyWithoutSnapshot++;else legacyListed.readyWithSnapshot++;}
+  else if(isolatedAccounts.has(id))legacyListed.isolated++;
+  else throw new Error('SELECTED_SCOPE_LISTED_ACCOUNT_DISPOSITION_MISSING');
+ }
+ legacyListed.status=legacyListed.readyWithoutSnapshot||legacyListed.isolated?'SOURCE_REVIEW_REQUIRED':'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN';
  const readyUsers=new Set(ready.users),readyOrders=new Set(ready.orders),refundParents={captured:0,retainedOrder:0,subjectIsolated:0,relationshipMatched:0,relationshipUnresolved:0},refundIds=new Set(),refundDigest=createHash('sha256');
  assert(source.files?.refunds&&population.domains?.refunds,'SELECTED_SCOPE_SOURCE_DOMAIN_MISSING');
  await readRows(sourceDir,source.files.refunds,row=>{
@@ -166,7 +175,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   liabilitySource=assertLegacyLiabilitySourceCoverage(liabilities,continuationSources.orders,sourceRefunds,readyOrders);
   assert.equal(dataset.domains?.liabilities?.source,liabilitySource.total,'SELECTED_SCOPE_LIABILITY_SOURCE_COUNT_DRIFT');
  }
- return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,
+ return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,legacyListed,refundParents,
   ...(verifyContinuationStatus?{liabilitySource,continuationSource,continuationCommissions:continuationCommissionsProof,unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 export async function verifyPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){

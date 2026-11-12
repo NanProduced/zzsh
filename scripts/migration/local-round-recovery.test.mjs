@@ -944,6 +944,9 @@ test("fresh selected rounds independently check the source before credentials or
   assert.equal(good.logs[0].population.sourceVerification.status, "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN");
   assert.equal(good.logs[0].population.sourceVerification.orders.retained, 1);
   assert.equal(good.logs[0].externalReadiness.status, "NOT_ASSESSED_BY_ROUND");
+  assert.equal(good.logs[0].externalReadiness.legacyListed.status, "SOURCE_REVIEW_REQUIRED");
+  assert.equal(good.logs[0].externalReadiness.legacyListed.readyWithoutSnapshot, 1);
+  assert.equal(good.logs[0].externalReadiness.legacyListed.targetStatus, "NOT_ASSESSED");
   const unresolved = await round({ action: "validate", selectedPopulation: true, refundMismatch: true });
   assert.ifError(unresolved.error);
   assert.equal(unresolved.logs[0].externalReadiness.refundRelationships.status, "REVIEW_REQUIRED");
