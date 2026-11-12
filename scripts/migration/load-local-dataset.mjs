@@ -145,22 +145,28 @@ if (execute) assertNextMigrationWriteReady(registered);
 if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const usesSystemUser = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemUserId === "string"));
+const usesSystemAccount = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemAccountId === "string"));
 let systemUserMigration = null;
-if (usesSystemUser) {
+if (usesSystemUser || usesSystemAccount) {
     try { systemUserMigration = mod("legacy-load/system-user-migration"); }
     catch { throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED"); }
 }
 if (usesSystemUser
     && (typeof systemUserMigration?.systemUserMigrationId !== "function" || typeof systemUserMigration?.withSystemUserMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED");
+if (usesSystemAccount
+    && (typeof systemUserMigration?.systemAccountMigrationId !== "function" || typeof systemUserMigration?.withSystemAccountMigrationBatch !== "function"))
+    throw new Error("NEXT_SYSTEM_ACCOUNT_MIGRATION_BUILD_REQUIRED");
 const systemUserTarget = systemUserMigration ? {
     systemIdentifier: registered.instance?.systemIdentifier, databaseOid: registered.oid, marker: registered.marker,
     nonce: registered.nonce, roleOid: registered.migrationRoleOid,
 } : null;
-const systemUserId = systemUserMigration && systemUserTarget ? systemUserMigration.systemUserMigrationId(sha(manifestBytes), systemUserTarget) : null;
+const systemUserId = usesSystemUser ? systemUserMigration.systemUserMigrationId(sha(manifestBytes), systemUserTarget) : null;
+const systemAccountId = usesSystemAccount ? systemUserMigration.systemAccountMigrationId(sha(manifestBytes), systemUserTarget) : null;
 
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
     ...(systemUserId ? {systemUserId} : {}),
+    ...(systemAccountId ? {systemAccountId} : {}),
     ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
@@ -471,9 +477,54 @@ async function applyUsers() {
         return nextProfile ? systemUserMigration.withSystemUserMigrationBatch(client, userActor, applyBatch) : applyBatch();
     }, 100);
 }
-async function applyAccounts() { await runPhase("accounts", async (row) => { const gameId = gameIds.get(row.gameCode); if (!gameId)
-    throw new Error("TARGET_GAME_NOT_BOUND"); const input = { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.sourceId, sourceDigest: row.sourceDigest, evidenceRef: row.evidenceRef, owner: { legacyId: row.ownerLegacyId, sourceDigest: row.ownerSourceDigest }, gameId }; const result = await mod("legacy-load/legacy-account-seam").createLegacyOwnerRentalAccount(client, input, actor); const observationVersionId = await mod("supply/legacy-observation").recordLegacyObservation(client, result.accountId, { sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, evidenceRef: input.evidenceRef, inventory: [] }, actor); if (row.snapshot && row.sourceUpdatedAt && mod("supply/legacy-listing-read").legacyReadSourceAllowed(Number(row.sourceStatus), row.sourceDeleted))
-    await mod("supply/legacy-listing-read").recordLegacyReadSnapshot(client, result.accountId, { observationVersionId, sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId, sourceDigest: input.sourceDigest, sourceStatus: Number(row.sourceStatus), sourceDeleted: row.sourceDeleted, sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: input.evidenceRef, snapshot: row.snapshot }, actor); return result; }); }
+function accountInputs(row, observationVersionId = "") {
+    const gameId = gameIds.get(row.gameCode); if (!gameId) throw new Error("TARGET_GAME_NOT_BOUND");
+    const input = { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.sourceId, sourceDigest: row.sourceDigest,
+        evidenceRef: row.evidenceRef, owner: { legacyId: row.ownerLegacyId, sourceDigest: row.ownerSourceDigest }, gameId };
+    const observation = { sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId,
+        sourceDigest: input.sourceDigest, evidenceRef: input.evidenceRef, inventory: [] };
+    const snapshot = row.snapshot && row.sourceUpdatedAt && mod("supply/legacy-listing-read").legacyReadSourceAllowed(Number(row.sourceStatus), row.sourceDeleted)
+        ? { observationVersionId, sourceSystem: input.sourceSystem, sourceEntity: input.sourceEntity, legacyId: input.legacyId,
+            sourceDigest: input.sourceDigest, sourceStatus: Number(row.sourceStatus), sourceDeleted: row.sourceDeleted,
+            sourceUpdatedAt: row.sourceUpdatedAt, evidenceRef: input.evidenceRef, snapshot: row.snapshot } : null;
+    return {input, observation, snapshot};
+}
+async function applyAccount(row, accountActor) {
+    const {input, observation} = accountInputs(row);
+    const result = await mod("legacy-load/legacy-account-seam").createLegacyOwnerRentalAccount(client, input, accountActor);
+    const version = await mod("supply/legacy-observation").recordLegacyObservation(client, result.accountId, observation, accountActor);
+    const {snapshot} = accountInputs(row, version);
+    if (snapshot) await mod("supply/legacy-listing-read").recordLegacyReadSnapshot(client, result.accountId, snapshot, accountActor);
+    return result;
+}
+async function applyAccounts() {
+    if (registered.migrationProfile !== NEXT_MIGRATION_PROFILE) return runPhase("accounts", row => applyAccount(row, actor));
+    const file = domainFile("accounts"); if (!file) return;
+    const proof = await preflightBoundSourceBatches(file, manifest.files.accounts, 100);
+    return runBatches("accounts", readBoundSourceBatches(file, manifest.files.accounts, proof), async batch => {
+        const admitted = new Set(), ids = new Set(), accountModule = mod("legacy-load/legacy-account-seam"),
+            observationModule = mod("supply/legacy-observation"), snapshotModule = mod("supply/legacy-listing-read");
+        for (const row of batch) {
+            const {input, observation, snapshot} = accountInputs(row), accountId = accountModule.legacyAccountId(input.sourceSystem,input.sourceEntity,input.legacyId);
+            if (row.ownerUserId !== mod("supply/legacy-user-migration").legacyOwnerUserId("legacy_mysql_restore","la_user",row.ownerLegacyId)
+                || ids.has(accountId)) throw new Error("LEGACY_SYSTEM_ACCOUNT_SOURCE_BINDING_INVALID");
+            ids.add(accountId);
+            const allow = (operation, payloadDigest) => admitted.add(JSON.stringify({operation,accountId,sourceSystem:input.sourceSystem,
+                sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest}));
+            allow("CREATE",sha(JSON.stringify(input)));
+            allow("OBSERVATION",sha(JSON.stringify(observationModule.normalizeLegacyObservationInput(observation))));
+            if (snapshot) allow("SNAPSHOT",snapshotModule.legacyReadSnapshotMigrationDigest(snapshot));
+        }
+        const accountActor = {kind:"SYSTEM_ACCOUNT_MIGRATION",id:systemAccountId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+            requestId:"core-legacy-dataset-"+expectedOid,
+            assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||!fenceEpoch)throw new Error("TARGET_FENCE_EPOCH_LOST");
+                await assertMigrationFenceHeld(targetClient,registered,fenceEpoch);assertRoundWindow();},
+            assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error("LEGACY_SYSTEM_ACCOUNT_SOURCE_NOT_ADMITTED");}};
+        return systemUserMigration.withSystemAccountMigrationBatch(client,accountActor,async()=>{
+            const results=[];for(const row of batch) results.push(await applyAccount(row,accountActor));return results;
+        });
+    },100);
+}
 async function applyOrders() { await runPhase("orders", async (row) => { const gameId = gameIds.get(row.gameCode), accountId = mod("legacy-load/legacy-account-seam").legacyAccountId("legacy_mysql_restore", "la_rental_accounts", row.account.legacyId); const input = { source: row.source, account: { ...row.account, accountId, gameId }, owner: row.owner, renter: row.renter }; return mod("order/legacy-order-read").importLegacyOrderRead(client, input, actor); }); }
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {

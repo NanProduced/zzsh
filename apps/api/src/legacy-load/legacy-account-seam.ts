@@ -16,6 +16,7 @@ import { assignAccountNumber } from "../supply/account-number";
 import { GAME_SERVICE, requireWritableGameService } from "../supply/game-services";
 import { lockLegacySource } from "../supply/legacy-observation";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
+import { authorizeSystemAccountMigration, type SystemAccountMigrationActor } from "./system-user-migration";
 import {
   assertGameScope,
   conflict,
@@ -69,30 +70,41 @@ function normalized(input: LegacyAccountCreationInput): LegacyAccountCreationInp
 export async function createLegacyOwnerRentalAccount(
   client: PoolClient,
   input: LegacyAccountCreationInput,
-  actor: LegacyAccountCreationActor,
+  actor: LegacyAccountCreationActor | SystemAccountMigrationActor,
 ): Promise<{ accountId: string; replayed: boolean }> {
   const normalizedInput = normalized(input);
   const ownerUserId = legacyOwnerUserId(MIGRATED_PROVIDER, "la_user", normalizedInput.owner.legacyId);
   const accountId = legacyAccountId(normalizedInput.sourceSystem, normalizedInput.sourceEntity, normalizedInput.legacyId);
   const idempotencyKey = sha256Hex(JSON.stringify([OPERATION, normalizedInput.sourceSystem, normalizedInput.sourceEntity, normalizedInput.legacyId]));
   const fingerprint = fingerprintRequest(OPERATION, accountId, normalizedInput);
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_ACCOUNT_MIGRATION" ? actor : null;
+  const payloadDigest = sha256Hex(JSON.stringify(normalizedInput));
+  if (systemActor && !/^[1-9][0-9]{0,23}$/.test(normalizedInput.legacyId)) throw invalid("Legacy account source is invalid");
   const result = await withIdempotency(
     client,
-    { realm: "admin", principalId: actor.id, operation: OPERATION, resourceId: accountId },
+    { realm: systemActor ? "system" : "admin", principalId: actor.id, operation: OPERATION, resourceId: accountId },
     idempotencyKey,
     fingerprint,
     async () => {
-      const access = await loadEffectiveAdminAccess(client, actor.id);
-      requirePermission(access, "supply.catalog.manage");
+      const access = systemActor ? null : await loadEffectiveAdminAccess(client, actor.id);
+      if (systemActor) await authorizeSystemAccountMigration(client, systemActor, { operation:"CREATE", accountId,
+        sourceSystem:normalizedInput.sourceSystem,sourceEntity:normalizedInput.sourceEntity,legacyId:normalizedInput.legacyId,
+        sourceDigest:normalizedInput.sourceDigest,payloadDigest });
+      else requirePermission(access, "supply.catalog.manage");
       await requireWritableGameService(client, normalizedInput.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
-      await assertGameScope(client, actor.id, access!.isBoss, normalizedInput.gameId);
+      if (!systemActor) await assertGameScope(client, actor.id, access!.isBoss, normalizedInput.gameId);
       const owner = (
         await client.query<{ provider: string; provider_reference: string; account_status: string; suspended: boolean; migration_proven: boolean }>(
           `SELECT i.provider, i.provider_reference, i.account_status, u.suspended,
-                  EXISTS (SELECT 1 FROM zzsh_iam.audit_event
-                    WHERE object_id=u.id AND action='user.legacy_owner.migrated' AND outcome='SUCCESS'
-                      AND details->>'sourceSystem'=$2 AND details->>'sourceEntity'='la_user'
-                      AND details->>'legacyId'=$3 AND details->>'sourceDigest'=$4) AS migration_proven
+                  EXISTS (SELECT 1 FROM zzsh_iam.audit_event e
+                    WHERE e.object_id=u.id AND e.object_type='user' AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS'
+                      AND e.details->>'sourceSystem'=$2 AND e.details->>'sourceEntity'='la_user'
+                      AND e.details->>'legacyId'=$3 AND e.details->>'sourceDigest'=$4
+                      AND (e.actor_type='admin' OR (e.actor_type='system' AND e.session_id IS NULL
+                        AND to_jsonb(e)->>'legacy_user_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
+                        AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_user_migration_manifest_sha256'
+                        AND e.details->>'migrationRunDigest' ~ '^[a-f0-9]{64}$'
+                        AND e.actor_id='legacy-user-migration:'||(e.details->>'migrationRunDigest')))) AS migration_proven
              FROM zzsh_auth_user."user" u
              JOIN zzsh_iam.user_identity_state i ON i.user_id = u.id
             WHERE u.id = $1`,
@@ -124,9 +136,9 @@ export async function createLegacyOwnerRentalAccount(
         [accountId, ownerUserId, normalizedInput.gameId],
       );
       await recordAudit(client, {
-        actorType: "admin",
+        actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        sessionId: actor.sessionId,
+        ...(systemActor ? {legacyAccountMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyAccountCreationActor).sessionId}),
         requestId: actor.requestId,
         action: "supply.legacy.account_created",
         objectType: "rental_account",
@@ -138,6 +150,7 @@ export async function createLegacyOwnerRentalAccount(
           sourceEntity: normalizedInput.sourceEntity,
           legacyId: normalizedInput.legacyId,
           sourceDigest: normalizedInput.sourceDigest,
+          ...(systemActor ? {sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-account-migration:".length),payloadDigest} : {}),
           evidenceRef: normalizedInput.evidenceRef,
           ownerUserId,
           ownerLegacyId: normalizedInput.owner.legacyId,

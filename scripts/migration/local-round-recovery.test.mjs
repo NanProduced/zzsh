@@ -77,7 +77,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1, evidence: { status: { realNameBound: false } } } }, { sourceId: "102", input: { id: 2, evidence: { status: { realNameBound: false } } } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag, accountFixture = false } = {}) {
   if(migrationProfile===NEXT_MIGRATION_PROFILE && populationMode===undefined){
     populationMode='SELECTED_BUSINESS_SCOPE';selectedScope=planSelectedBusinessScope({accounts:[],orders:[],pays:[]});selectedFixture=true;
   }
@@ -96,7 +96,10 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
   const fileEntries = {};
-  for (const [name, rows] of Object.entries({ users: userRows, accounts: failure === "account-batch-changed" ? [{ sourceId: "10" }] : [], orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
+  const accountRows = accountFixture ? [{sourceId:"10",sourceDigest:"c".repeat(64),evidenceRef:"synthetic:account",ownerLegacyId:"101",
+    ownerUserId:"synthetic-user-101",ownerSourceDigest:"a".repeat(64),gameCode:"delta",sourceStatus:"3",sourceDeleted:false,
+    sourceUpdatedAt:"2026-01-01T00:00:00.000Z",snapshot:{schema:"synthetic"}}] : failure === "account-batch-changed" ? [{sourceId:"10"}] : [];
+  for (const [name, rows] of Object.entries({ users: userRows, accounts: accountRows, orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
     const file = name + ".jsonl", body = rows.map(row => JSON.stringify(row) + "\n").join("");
     files.set(path.join(ds, file), body);
     fileEntries[name] = { file, sha256: sha(body), rows:rows.length };
@@ -104,7 +107,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
   const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
   const continuationFixture=continuationDomains===undefined && migrationProfile===NEXT_MIGRATION_PROFILE ? {source:0,parameterComplete:0,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:0,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}} : continuationDomains;
-  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries,
+  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: accountFixture ? {"1":"delta"} : {}, files: fileEntries,
     ...(continuationFixture?{domains:{continuations:continuationFixture}}:{}),
     ...(identityProfiles && refundPolicy ? { refundRelationshipPolicy: LEGACY_REFUND_RELATIONSHIP_POLICY } : {}),
     ...(selectedFixture ? { source: path.join(restricted, "fixture-source"), sourceReceiptSha256: "a".repeat(64) } : {}),
@@ -135,6 +138,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", can_inherit: "false", can_bypass_rls: "false", system_identifier: instance?.systemIdentifier ?? null }] };
       if (sql.startsWith("SELECT hash")) return { rows: schema.map(hash => ({ hash })) };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ occupied: false }] };
+      if (sql.startsWith("SELECT id,enabled FROM zzsh_supply.game")) return {rows:[{id:"synthetic-delta",enabled:true}]};
       commands.push(sql);
       if (sql.includes('ORDER BY id COLLATE')) userLockComplete = true;
       if (sql.startsWith("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject")) return { rows: [] };
@@ -170,7 +174,24 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){} },
     "legacy-load/system-user-migration": { systemUserMigrationId(source, target) { return "synthetic-system-" + sha(JSON.stringify([source,target])); },
       async withSystemUserMigrationBatch(c, acting, body) { commands.push("SYSTEM_USER_BATCH"); if (failure === "batch-actor-lost") throw Object.assign(Error("system actor unavailable"), {status:403});
-        await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; } },
+        await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; },
+      systemAccountMigrationId(source,target) { return "synthetic-account-system-" + sha(JSON.stringify([source,target])); },
+      async withSystemAccountMigrationBatch(c,acting,body) { commands.push("SYSTEM_ACCOUNT_BATCH");await acting.assertMigrationFence(c);
+        const result=await body();await acting.assertMigrationFence(c);return result; } },
+    "legacy-load/legacy-account-seam": { legacyAccountId(_system,_entity,id) { return "synthetic-account-"+id; },
+      async createLegacyOwnerRentalAccount(_c,input,acting) {const accountId="synthetic-account-"+input.legacyId;
+        await acting.assertSourceEvidence({operation:"CREATE",accountId,sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,
+          legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest:failure==="account-source-mismatch" ? "0".repeat(64) : sha(JSON.stringify(input))});
+        commands.push("SYNTHETIC_ACCOUNT_CREATE");return {accountId,replayed:false};} },
+    "supply/legacy-observation": {normalizeLegacyObservationInput(input){return input;},
+      async recordLegacyObservation(_c,accountId,input,acting) {await acting.assertSourceEvidence({operation:"OBSERVATION",accountId,
+        sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest:sha(JSON.stringify(input))});
+        commands.push("SYNTHETIC_ACCOUNT_OBSERVATION");return "synthetic-version";} },
+    "supply/legacy-listing-read": {legacyReadSourceAllowed(status,deleted){return status===3&&!deleted;},
+      legacyReadSnapshotMigrationDigest(input){const {observationVersionId,...source}=input;return sha(JSON.stringify(source));},
+      async recordLegacyReadSnapshot(_c,accountId,input,acting) {await acting.assertSourceEvidence({operation:"SNAPSHOT",accountId,
+        sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,
+        payloadDigest:modules["supply/legacy-listing-read"].legacyReadSnapshotMigrationDigest(input)});commands.push("SYNTHETIC_ACCOUNT_SNAPSHOT");} },
     "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, async migrateLegacyOwner(_client, row, acting) {
       if (migrationProfile === NEXT_MIGRATION_PROFILE) { assert.equal(acting.kind,"SYSTEM_USER_MIGRATION");
         await acting.assertSourceEvidence({sourceSystem:row.evidence.sourceSystem,sourceEntity:row.evidence.sourceEntity,legacyId:row.evidence.legacyId,sourceDigest:row.evidence.sourceDigest,evidenceDigest:row.evidenceDigest}); commands.push("SYNTHETIC_MIGRATE_USER"); }
@@ -313,14 +334,30 @@ test('NEXT refuses a changed account batch before writing it', async () => {
   assert(!result.commands.includes('ORDER_SOURCE_PREFLIGHT'));
 });
 
+test('NEXT account batch binds the source and system actor before all three account writes', async () => {
+  const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true,accountFixture:true};
+  const applied=await load(options);assert.ifError(applied.error);assert.equal(applied.exit,undefined);
+  assert.match(applied.state.binding.systemAccountId,/^synthetic-account-system-/);
+  assert(applied.commands.indexOf('SYSTEM_ACCOUNT_BATCH')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_CREATE'));
+  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_CREATE')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_OBSERVATION'));
+  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_OBSERVATION')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_SNAPSHOT'));
+  assert.equal(applied.state.phases.accounts.nextIndex,1);
+  const rejected=await load({...options,failure:'account-source-mismatch'});assert.equal(rejected.exit,1);
+  assert.match(rejected.state.error.message,/LEGACY_SYSTEM_ACCOUNT_SOURCE_NOT_ADMITTED/);
+  assert.equal(rejected.state.phases.accounts.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ACCOUNT_CREATE'));
+});
+
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
   const options = { instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, verifiedFirst:true };
   const failed = await load({ ...options, failure:'lost-commit', exitAfterUsers:true });
   assert.equal(failed.state.status, 'COMMIT_UNKNOWN'); assert.match(failed.state.binding.systemUserId, /^synthetic-system-/);
+  assert.match(failed.state.binding.systemAccountId, /^synthetic-account-system-/);
   const recovered = await load({ ...options, previous:failed, recover:true });
   assert.ifError(recovered.error); assert.equal(recovered.exit, undefined);
   const receipt = JSON.parse([...recovered.files].find(([file]) => file.startsWith(path.join(out, 'recovery-')))[1]);
   assert.equal(receipt.binding.systemUserId, failed.state.binding.systemUserId); assert.equal(receipt.knowledge, 'EXACT_PENDING_KEYS_REQUIRE_INSPECTION');
+  assert.equal(receipt.binding.systemAccountId, failed.state.binding.systemAccountId);
   assert(!recovered.commands.includes('SYNTHETIC_MIGRATE_USER')); assert(!recovered.commands.includes('COMMIT'));
 });
 

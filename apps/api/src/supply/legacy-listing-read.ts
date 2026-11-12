@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 import type { PublicListingProjection } from "./legacy-path-projection";
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import { authorizeSystemAccountMigration, type SystemAccountMigrationActor } from "../legacy-load/system-user-migration";
 import { canonicalize } from "./content-hash";
 import { isAccountMediaBinding, listingSearchPattern, projectPublicAttributeDisplay } from "./listing-query";
 import { assertGameScope, conflict, fingerprintRequest, invalid, notFound, sha256Hex, withIdempotency } from "./supply-util";
@@ -204,30 +205,45 @@ export function legacySnapshotConflicts(old: {
     || old.source_updated_at.toISOString() !== next.sourceUpdatedAt || old.evidence_ref !== next.evidenceRef || canonicalize(old.snapshot) !== canonicalize(snapshot);
 }
 
-/** Controlled importer only; caller owns the transaction. No public write route. */
-export async function recordLegacyReadSnapshot(client: PoolClient, accountId: string, input: {
+type LegacyReadSnapshotInput = {
   observationVersionId: string; sourceSystem: string; sourceEntity: string; legacyId: string;
   sourceDigest: string; sourceStatus: number; sourceDeleted: boolean; sourceUpdatedAt: string; evidenceRef: string; snapshot: unknown;
-}, actor: { id: string; sessionId: string; requestId: string }): Promise<void> {
-  const access = await loadEffectiveAdminAccess(client, actor.id);
-  requirePermission(access, "supply.catalog.manage");
+};
+export function legacyReadSnapshotMigrationDigest(input: LegacyReadSnapshotInput): string {
+  return sha256Hex(canonicalize([input.sourceSystem,input.sourceEntity,input.legacyId,input.sourceDigest,
+    input.sourceStatus,input.sourceDeleted,input.sourceUpdatedAt,input.evidenceRef,parseLegacyReadSnapshot(input.snapshot)]));
+}
+
+/** Controlled importer only; caller owns the transaction. No public write route. */
+export async function recordLegacyReadSnapshot(client: PoolClient, accountId: string, input: LegacyReadSnapshotInput,
+  actor: { id: string; sessionId: string; requestId: string } | SystemAccountMigrationActor): Promise<void> {
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_ACCOUNT_MIGRATION" ? actor : null;
+  const access = systemActor ? null : await loadEffectiveAdminAccess(client, actor.id);
+  if (!systemActor) requirePermission(access, "supply.catalog.manage");
   const account = (await client.query("SELECT game_id FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE", [accountId])).rows[0];
   if (!account) throw notFound();
-  await assertGameScope(client, actor.id, access!.isBoss, account.game_id);
-  const snapshot = parseLegacyReadSnapshot(input.snapshot);
+  if (!systemActor) await assertGameScope(client, actor.id, access!.isBoss, account.game_id);
+  const snapshot = parseLegacyReadSnapshot(input.snapshot), payloadDigest = systemActor ? legacyReadSnapshotMigrationDigest(input) : "";
+  if (systemActor) await authorizeSystemAccountMigration(client,systemActor,{operation:"SNAPSHOT",accountId,
+    sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest});
   if (!legacyReadSourceAllowed(input.sourceStatus, input.sourceDeleted)) throw invalid("Historical listing source status is not allowed");
   if (input.sourceSystem !== "legacy_mysql_restore" || input.sourceEntity !== "la_rental_accounts"
     || !/^[a-f0-9]{64}$/.test(input.sourceDigest) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(input.sourceUpdatedAt)
     || Number.isNaN(Date.parse(input.sourceUpdatedAt)) || !input.evidenceRef || input.evidenceRef.length > 512) throw invalid("Historical listing requires source publication evidence");
-  const values = [accountId,input.observationVersionId,input.sourceSystem,input.sourceEntity,input.legacyId,input.sourceDigest,input.sourceStatus,input.sourceUpdatedAt,input.evidenceRef,snapshot,actor.id];
+  const values = [accountId,input.observationVersionId,input.sourceSystem,input.sourceEntity,input.legacyId,input.sourceDigest,input.sourceStatus,input.sourceUpdatedAt,input.evidenceRef,snapshot,systemActor ? null : actor.id,
+    ...(systemActor ? [systemActor.id,systemActor.sourceDatasetSha256] : [])];
   const old = (await client.query(legacySnapshotReplaySql(),[accountId])).rows[0];
   if (old) {
     if (legacySnapshotConflicts(old, input, snapshot)) throw conflict("Historical snapshot conflicts with the recorded source");
     return;
   }
-  await client.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, values);
-  await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站账号资料与原始金额只读保存；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,sourceStatus:input.sourceStatus,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});
+  await client.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id${systemActor ? ",created_by_migration_id,migration_manifest_sha256" : ""})
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11${systemActor ? ",$12,$13" : ""})`, values);
+  await recordAudit(client,{actorType:systemActor ? "system" : "admin",actorId:actor.id,
+    ...(systemActor ? {legacyAccountMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
+    requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站账号资料与原始金额只读保存；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,
+      ...(systemActor ? {sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-account-migration:".length),payloadDigest} : {}),
+      sourceStatus:input.sourceStatus,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});
 }
 
 /** Additive maintenance writer; caller owns the transaction. No public route. */

@@ -7,6 +7,19 @@ import * as util from "../src/supply/supply-util";
 import * as accountNumber from "../src/supply/account-number";
 import { createLegacyOwnerRentalAccount } from "../src/legacy-load/legacy-account-seam";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
+import { systemAccountMigrationId } from "../src/legacy-load/system-user-migration";
+
+test("system account import cannot write without its protected source batch", async t => {
+  t.mock.method(util,"withIdempotency",async(_client:unknown,scope:any,_key:unknown,_fingerprint:unknown,authorize:()=>Promise<unknown>)=>{
+    assert.equal(scope.realm,"system");await authorize();throw Error("unexpected write");
+  });
+  const input={sourceSystem:"legacy_mysql_restore" as const,sourceEntity:"la_rental_accounts" as const,legacyId:"10",sourceDigest:"a".repeat(64),
+    evidenceRef:"synthetic:account",owner:{legacyId:"20",sourceDigest:"b".repeat(64)},gameId:"delta_fixture"};
+  const target={systemIdentifier:"12345",databaseOid:"42",marker:"zzsh:synthetic:v1",nonce:"c".repeat(24),roleOid:"91"};
+  const actor={kind:"SYSTEM_ACCOUNT_MIGRATION" as const,id:systemAccountMigrationId("d".repeat(64),target),
+    requestId:"synthetic",sourceDatasetSha256:"d".repeat(64),target,assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+  await assert.rejects(createLegacyOwnerRentalAccount({} as PoolClient,input,actor),/batch is unavailable/);
+});
 
 test("historical account import preserves frozen/cancelled source owners without publishing or restoring identity", async t => {
   const numbered: string[] = [];
