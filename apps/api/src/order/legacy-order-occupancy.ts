@@ -6,10 +6,11 @@ export type OrderOccupancy = "FREE" | "OCCUPIED" | "UNKNOWN";
 export type AccountOccupancyFacts = { state: OrderOccupancy; kind: "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | null; rentalCompleted?: true };
 
 /** The same active legacy rows determine occupancy and the owner-only order link. */
-export function occupyingLegacyOrdersSql(accountId: string, continuationReady = true) {
+export function occupyingLegacyOrdersSql(accountId: string, continuationReady = true, includeUncertain = false) {
   return `FROM zzsh_order.legacy_order_read_snapshot l
     ${continuationReady ? `LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL` : ""}
-    WHERE l.account_id=${accountId} AND l.source_pay_status=1 AND ${continuationReady ? LEGACY_EFFECTIVE_STAGE_SQL : "l.source_order_status"} IN(3,8,9)`;
+    WHERE l.account_id=${accountId} AND ((l.source_pay_status=1 AND ${continuationReady ? LEGACY_EFFECTIVE_STAGE_SQL : "l.source_order_status"} IN(3,8,9))
+      ${includeUncertain ? "OR l.source_pay_status NOT IN(0,1) OR (l.source_pay_status=1 AND l.source_order_status NOT IN(3,4,5,8,9))" : ""})`;
 }
 
 /** Only server-owned SQL references (a.id or $1); never a request value. */
