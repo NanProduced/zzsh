@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {prepareHistoricalObservation} from '../src/finance/personal-finance-read';
-import {bindReviewedFinanceObservationAdmission,importReviewedFinanceObservationsBatch,planFinanceObservations,recoverReviewedFinanceObservations,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
+import {bindReviewedFinanceObservationAdmission,bindReviewedFinanceObservationAdmissionBatch,importReviewedFinanceObservationsBatch,importReviewedFinanceObservationsBatchOn,planFinanceObservations,recoverReviewedFinanceObservations,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
 
 const actor={userId:'fixture_boss',sessionId:'fixture_session',requestId:'fixture_request'};
 const resource={host:'127.0.0.1' as const,port:55432 as const,database:'zzsh_test_order_history',oid:42,owner:'fixture_owner',marker:'zzsh:order-reservation-test:v1',role:'fixture_owner',roleOid:43};
@@ -26,6 +26,11 @@ function fixture(){
   if(sql.includes('SELECT suspended'))return{rows:[{suspended:false}],rowCount:1};
   if(sql.includes('finance history maintenance schema'))return{rows:[{ready:true,owner:state.owner}]};
   if(sql.includes('finance history source identity'))return{rows:state.identity?[{}]:[],rowCount:state.identity?1:0};
+  if(sql.includes('batch window head')||sql.includes('batch window tail'))return{rows:[{at:state.now}],rowCount:1};
+  if(sql.includes('finance history batch subject locks'))return{rows:args[0].map((id:string)=>({id})),rowCount:args[0].length};
+  if(sql.includes('finance history batch source identities'))return{rows:state.identity?[]:[{}]};
+  if(sql.includes('finance history batch existing observations'))return{rows:JSON.parse(args[0]).flatMap((x:any)=>{const row=state.observations.get([x.source_system,x.source_entity,x.source_id].join(':'));return row?[row]:[];})};
+  if(sql.includes('finance history batch original receipts'))return{rows:args[1].flatMap((key:string)=>{const r=state.receipts.get(key);return r?[{key,request_fingerprint:r.fingerprint,response_status:r.status,response_body:r.body,publish_required:r.publishRequired??false}]:[];})};
   if(sql.includes('finance single cutoff admission'))return{rows:[{openingDiffers:state.cutoffGate.openingDiffers,coverageDiffers:state.cutoffGate.coverageDiffers}],rowCount:1};
   if(sql.includes('"requestFingerprint"')){const r=state.receipts.get(args[1]);return{rows:r?[{requestFingerprint:r.fingerprint,responseStatus:r.status,responseBody:r.body,publishRequired:false}]:[]};}
   if(sql.includes('request_fingerprint AS fingerprint')){if(state.readError)throw Error('FIXTURE_READBACK_UNKNOWN');const r=state.receipts.get(args[1]);return{rows:r?[r]:[]};}
@@ -54,6 +59,18 @@ test('opaque reviewed import is idempotent, preserves exact source and does not 
  assert(!f.state.queries.some(q=>q.sql.startsWith('INSERT')&&/finance_event|ledger_entry|finance_opening_basis|withdrawal_intent/.test(q.sql)));
  const changed=structuredClone(i);changed.observations[0]!.fee='0.33';await assert.rejects(()=>importReviewedFinanceObservationsBatch(f.pool,actor,[changed],[scope]));
  await assert.rejects(()=>importReviewedFinanceObservationsBatch(f.pool,actor,[i],[JSON.parse(JSON.stringify(scope))]));
+});
+test('batched history replay verifies the original receipt, source facts and audit before skipping writes',async()=>{
+ const f=fixture(),i=input(),scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));
+ await importReviewedFinanceObservationsBatch(f.pool,actor,[i],[scope]);
+ const scopes=await bindReviewedFinanceObservationAdmissionBatch(f.client,actor,[review(i)]),key=planFinanceObservations(i).key,receipt=f.state.receipts.get(key);
+ const replay=()=>importReviewedFinanceObservationsBatchOn(f.client,actor,[i],scopes);
+ const result=await replay();assert.equal(result.body.created,0);assert.equal(result.body.replayed,1);
+ for(const change of [()=>{receipt.fingerprint='changed';},()=>{receipt.body={...receipt.body,importedCount:0};},()=>{receipt.publishRequired=true;},()=>{f.state.audit=false;},()=>{f.state.coverage.clear();},()=>{f.state.observations.clear();}]){
+  const before=structuredClone({receipt,coverage:f.state.coverage,observations:f.state.observations,audit:f.state.audit});change();const start=f.state.queries.length;
+  await assert.rejects(replay);assert(!f.state.queries.slice(start).some(q=>/^\s*(INSERT|UPDATE|DELETE)/.test(q.sql)));
+  Object.assign(receipt,before.receipt);delete receipt.publishRequired;f.state.coverage=before.coverage;f.state.observations=before.observations;f.state.audit=before.audit;
+ }
 });
 test('known empty coverage is an explicit import, not a zero balance or synthesized observation',async()=>{
  const f=fixture(),i=input(true),scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));

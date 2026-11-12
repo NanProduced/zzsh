@@ -437,8 +437,14 @@ export async function importReviewedFinanceObservationsBatchOn(client:PoolClient
  if(keyRows.length){const rows=(await client.query(`/* finance history batch existing observations */ SELECT o.* FROM jsonb_to_recordset($1::jsonb) x(source_system text,source_entity text,source_id text)
    JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=x.source_system AND o.source_entity=x.source_entity AND o.source_id=x.source_id`,
   [JSON.stringify(keyRows)])).rows;for(const row of rows)prior.set(row.source_system+'|'+row.source_entity+'|'+row.source_id,row);}
- const receipts=await client.query(`/* finance history batch original receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,pairs.map(p=>p.plan.key)]);
- const receiptByKey=new Set<string>(receipts.rows.map((r:any)=>r.key));
+ const receipts=await client.query(`/* finance history batch original receipts */ SELECT key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,pairs.map(p=>p.plan.key)]);
+ const receiptByKey=new Map<string,Record<string,any>>(receipts.rows.map((row:any)=>[row.key,row]));
+ for(const {input,plan,scope} of pairs){
+  const receipt=receiptByKey.get(plan.key);if(!receipt)continue;
+  const c=plan.coverage,body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:c.importedCount,isolatedCount:c.isolatedCount,financialEffect:'NONE'};
+  if(receipt.request_fingerprint!==fingerprintRequest(operation,c.id,input)||receipt.response_status!==200||receipt.publish_required!==false||canonicalize(receipt.response_body)!==canonicalize(body))throw conflict('Historical batch original receipt differs');
+  if((await recoverReviewedFinanceObservations(client,actor,input,scope)).knowledge!=='KNOWN')throw conflict('Historical batch original receipt is unavailable');
+ }
  const fresh=pairs.filter(p=>!receiptByKey.has(p.plan.key));
  const observationRows:any[]=[],coverageRows:any[]=[],auditRows:any[]=[],receiptRows:any[]=[];
  for(const {input,plan,scope} of fresh){
