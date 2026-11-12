@@ -38,6 +38,8 @@ export function PlatformUpdateTicker() {
   }, []);
   const running = items.length > 1 && !paused && !hovered && !focused && !reduced && visible, current = items[index % (items.length || 1)];
   useEffect(() => { if (!running) return; const timer = setInterval(() => setIndex(n => n + 1), 5000); return () => clearInterval(timer); }, [running, items.length]);
+  // 无可见动态时整块不渲染（定时可见未到期 / 无轮播内容）；加载与失败态仍保留反馈。
+  if (state === 'ready' && items.length === 0) return null;
   return <div className="platform-update-ticker" data-running={running} onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onFocusCapture={() => setFocused(true)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
     <span className="platform-update-label"><Megaphone size={19} aria-hidden="true" />平台动态</span>
     <div className="platform-update-message" aria-live="off">{state === 'loading' ? <span role="status">正在读取…</span> : state === 'error' ? <span role="status">动态暂时无法读取 <button type="button" onClick={retry}>重试</button></span> : current ? <><span className={`ticker-kind ticker-kind--${current.type.toLowerCase()}`}>{updateTypeLabel(current.type)}</span><Link href={`/updates/${encodeURIComponent(current.id)}`}>{current.title}</Link></> : null}</div>

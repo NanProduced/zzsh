@@ -121,8 +121,10 @@ test("watermark chooses a PNG and previews with an automatic or selected sample"
   });
   await h.click("设置水印");
   await h.click("选择图片");
-  assert.equal(h.container.querySelectorAll('img[alt="可选图片"]').length, 1, "Logo picker only offers PNG");
-  const logo = h.container.querySelector('img[src*="logo_png"]').closest("button");
+  const logoDialog = h.browser.document.querySelector("[role=dialog]");
+  assert.ok(logoDialog);
+  assert.equal(logoDialog.querySelectorAll(".content-image-option").length, 1, "Logo picker only offers PNG");
+  const logo = logoDialog.querySelector('img[src*="logo_png"]').closest("button");
   await act(async () => logo.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
   await h.click("预览封面和详情");
   const previews = () => h.requests.filter(request => request.url.pathname === path + "/preview");
@@ -131,7 +133,7 @@ test("watermark chooses a PNG and previews with an automatic or selected sample"
   assert.match(h.text(), /暂无可用的账号图片，请选择或上传预览底图/);
   const chooseSample = [...h.container.querySelectorAll("button")].find(button => button.textContent.trim() === "选择图片" && button.closest(".content-media-field")?.textContent.includes("更换预览底图"));
   await act(async () => chooseSample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
-  const sample = h.container.querySelector('img[src*="sample_jpeg"]').closest("button");
+  const sample = h.browser.document.querySelector('img[src*="sample_jpeg"]').closest("button");
   await act(async () => sample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
   await h.click("预览封面和详情");
   assert.equal(JSON.parse(previews()[1].init.body).assetId, "sample_jpeg");

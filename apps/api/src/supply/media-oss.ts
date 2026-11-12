@@ -9,6 +9,28 @@ import { ALLOWED_IMAGE_MIMES, createLocalMediaStorage, MediaStorageError, STORAG
 
 export const OSS_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * P1a internal documentation images live under this private prefix in the same
+ * bucket. Public media paths must never read, write or generate URLs for it; the
+ * docs relay adapter is the only writer/reader. The prefix is fixed and must not
+ * overlap the public object prefix (validated at startup).
+ */
+export const INTERNAL_DOCS_OSS_PREFIX = "internal-docs/";
+
+/** Reject any object key that falls inside the private internal-docs prefix. */
+export function assertPublicOssObjectKey(objectKey: string): void {
+  if (objectKey.startsWith(INTERNAL_DOCS_OSS_PREFIX)) {
+    throw new ConfigurationError("internal-docs objects are not reachable through public media paths");
+  }
+}
+
+/** The public object prefix must not overlap the private internal-docs prefix. */
+export function assertPublicObjectPrefix(objectPrefix: string): void {
+  if (objectPrefix.startsWith(INTERNAL_DOCS_OSS_PREFIX) || INTERNAL_DOCS_OSS_PREFIX.startsWith(objectPrefix)) {
+    throw new ConfigurationError("OSS_OBJECT_PREFIX must not overlap the internal-docs/ private prefix");
+  }
+}
+
 export type OssMediaStorageOptions = {
   bucket: string;
   region: string;
@@ -66,6 +88,7 @@ export function loadOssMediaStorageOptions(env: NodeJS.ProcessEnv): OssMediaStor
   if (!/^[A-Za-z0-9][A-Za-z0-9/._-]*\/$/.test(objectPrefix) || objectPrefix.split("/").some((segment) => segment === "." || segment === "..")) {
     throw new ConfigurationError("OSS_OBJECT_PREFIX is invalid");
   }
+  assertPublicObjectPrefix(objectPrefix);
   return { bucket, region, endpoint, objectPrefix };
 }
 
@@ -81,7 +104,9 @@ export function loadOssCredentials(env: NodeJS.ProcessEnv): OssCredentials {
 }
 
 export function ossObjectKey(objectPrefix: string, storageKey: string): string {
-  return `${objectPrefix}${storageKey.slice(0, 2)}/${storageKey}`;
+  const objectKey = `${objectPrefix}${storageKey.slice(0, 2)}/${storageKey}`;
+  assertPublicOssObjectKey(objectKey);
+  return objectKey;
 }
 
 function isObjectMissing(error: unknown): boolean {

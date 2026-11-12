@@ -18,8 +18,18 @@ import { createLocalMediaStorage } from "../src/supply/media";
 import { loadConfig, type AppConfig } from "../src/config/config";
 import { assertNotProtectedTarget, registeredException, REGRESSION_ALLOW_NEW_RESOURCE, REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_MIGRATION_USER, REGRESSION_RESOURCE_LOCK_KEY, REGRESSION_ROLE_PREFIX, REGRESSION_RUNTIME_USER, regressionOidBinding } from "../src/config/test-resource";
 
-import { DEFAULT_GUIDES, DEFAULT_RESOURCES, validateResource, type ContentResource } from "@zzsh/content";
+import { DEFAULT_RESOURCES, validateResource, type ContentResource, type GuideResource } from "@zzsh/content";
 import { fingerprintRequest } from "../src/supply/supply-util";
+
+// P2：帮助文章不再有运行时代码默认；夹具直接构造合法 Plate 文档（help 预设）。
+const GUIDE_SLUG = "rental-getting-started";
+const GUIDE_META = { id: "R01", slug: GUIDE_SLUG, title: "租号入门", summary: "摘要", category: "rental", audience: ["renter"], keywords: ["租号"], updatedAt: "2026-10-06", related: [], contactCta: true };
+const plateHelp = (value: unknown[]) => ({ format: "plate", schemaVersion: 1, preset: "help", value });
+const pText = (text: string) => ({ type: "p", children: [{ text }] });
+function guidePayload(value: unknown[], extra: Record<string, unknown> = {}): GuideResource {
+  return validateResource(`guide:${GUIDE_SLUG}`, { kind: "guide", ...GUIDE_META, ...extra, format: "plate", schemaVersion: 1, document: plateHelp(value), mediaIds: [] }) as GuideResource;
+}
+const DEFAULT_GUIDE = guidePayload([{ type: "h2", id: "intro", children: [{ text: "租号入门" }] }, pText("默认正文。")]);
 
 const RESOURCE_SET = process.env.CONTENT_TEST_RESOURCE_SET?.trim() || "";
 if (RESOURCE_SET && !/^[a-z][a-z0-9_]{0,20}$/.test(RESOURCE_SET)) throw new Error("Invalid content test resource set");
@@ -1004,33 +1014,31 @@ test("M3 content foundation: announcements, news, carousel and platform media un
 
     // ---------- 受控资源：草稿、发布、回执、撤回与范围 ----------
     const resourceRoot = "/api/bff/admin/content/resources/";
-    const resourceKey = `guide:${DEFAULT_GUIDES[0]!.slug}`;
+    const resourceKey = `guide:${GUIDE_SLUG}`;
     const resourceUrl = resourceRoot + encodeURIComponent(resourceKey);
     const publicResourceUrl = "/api/v1/content/resources/" + encodeURIComponent(resourceKey);
     const readResource = () => request(base, resourceUrl, undefined, platform.jar, ADMIN_ORIGIN);
     const resourceWrite = (suffix: string, body: Record<string, unknown>, verb = "POST", headers = key(), jar = platform.jar) => request(base, `${resourceUrl}/${suffix}`, body, jar, ADMIN_ORIGIN, verb, headers);
-    const builtin = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
-    assert.equal(builtin.response.status, 200); assert.equal(builtin.body?.source, "BUILTIN");
-    assert.deepEqual(builtin.body?.payload, validateResource(resourceKey, DEFAULT_GUIDES[0]), "the current built-in document survives the ownership switch");
+    // 帮助文章无运行时代码默认：首次创建前公开读取 404。
+    assert.equal((await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN)).response.status, 404, "guide has no builtin fallback before creation");
     assert.equal((await resourceWrite("draft", {}, "POST", key(), reader.jar)).response.status, 403);
     assert.equal((await resourceWrite("draft", {}, "POST", { "idempotency-key": "bad key with spaces" })).response.status, 400);
-    const originalBody = {}, originalKey = key();
+    const originalBody = { payload: DEFAULT_GUIDE }, originalKey = key();
     const adopted = await resourceWrite("draft", originalBody, "POST", originalKey);
     assert.equal(adopted.response.status, 200, JSON.stringify(adopted.body));
     assert.equal(adopted.body?.draft.state, "DRAFT");
     assert.equal((await resourceWrite("draft", originalBody, "POST", originalKey)).body?.draft.id, adopted.body?.draft.id, "same key replays the original draft");
-    assert.equal((await resourceWrite("draft", { payload: DEFAULT_GUIDES[0] }, "POST", originalKey)).response.status, 409, "original key cannot change its payload");
+    assert.equal((await resourceWrite("draft", { payload: DEFAULT_GUIDE }, "POST", originalKey)).response.status, 409, "original key cannot change its payload");
     const recoveryQuery = new URLSearchParams({ operation: "content.resource.draft.create", resourceId: resourceKey, fingerprint: fingerprintRequest("content.resource.draft.create", resourceKey, originalBody) });
     const recovery = await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, platform.jar, ADMIN_ORIGIN, "GET", originalKey);
     assert.equal(recovery.body?.receipt, "RECORDED", JSON.stringify(recovery.body));
     assert.equal(recovery.body?.result.itemId, adopted.body?.item.id); assert.equal("payload" in recovery.body!, false);
     assert.equal((await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, reader.jar, ADMIN_ORIGIN, "GET", originalKey)).response.status, 403);
     assert.equal((await request(base, `/api/bff/admin/content/operation-result?${recoveryQuery}`, undefined, carouselEditor.jar, ADMIN_ORIGIN, "GET", originalKey)).body?.receipt, "UNRESOLVED", "another principal cannot read an original receipt");
-    const { format: _oldFormat, schemaVersion: _oldSchema, markdown: _oldMarkdown, mediaIds: _oldMedia, anchorAliases: _oldAliases, sections: _oldSections, ...legacyMetadata } = adopted.body?.draft.payload;
-    const changed = { ...legacyMetadata, title: "内容发布后可读的手册", sections: [{ id: "check", title: "核对", blocks: [{ type: "paragraph", text: "<script>只会作为文字展示</script>" }, { type: "link", text: "帮助中心", href: "/help" }] }] };
+    const changed = guidePayload([{ type: "h2", id: "check", children: [{ text: "核对" }] }, pText("<script>只会作为文字展示</script>"), { type: "p", children: [{ type: "a", url: "/help", children: [{ text: "帮助中心" }] }] }], { title: "内容发布后可读的手册" });
     const savedResource = await resourceWrite("draft", { versionId: adopted.body?.draft.id, expectedRevision: adopted.body?.item.revision, payload: changed }, "PUT");
     assert.equal(savedResource.response.status, 200, JSON.stringify(savedResource.body));
-    assert.equal((await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN)).body?.payload.title, DEFAULT_GUIDES[0]!.title, "saving a draft must not replace public content");
+    assert.equal((await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN)).response.status, 404, "an unpublished guide is not public; saving a draft creates no builtin fallback");
     const publishBody = { versionId: savedResource.body?.draft.id, expectedRevision: savedResource.body?.item.revision };
     const concurrent = await Promise.all([resourceWrite("publish", publishBody), resourceWrite("publish", publishBody)]);
     assert.deepEqual(concurrent.map(result => result.response.status).sort(), [200, 409], "one current revision may publish only once");
@@ -1056,21 +1064,17 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const archivedResourceDraft = explicitRestore.body?.versions.find((row: { id: string }) => row.id === restored.body?.draft.id);
     assert.equal(archivedResourceDraft?.publishedAt, null, "archiving a draft must not invent a publication time");
     assert.equal(archivedResourceDraft?.publishedByAdminId, null, "archiving a draft must not invent a publisher");
-    const { sections: _sections, format: _format, schemaVersion: _schemaVersion, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _aliases, ...guideMetadata } = DEFAULT_GUIDES[0]!;
-    const markdownPayload = { ...guideMetadata, format: "markdown", schemaVersion: 1, markdown: "<div>保留原文，不能发布</div>", mediaIds: [] };
-    const markdownDraft = await resourceWrite("draft", { versionId: explicitRestore.body?.draft.id, expectedRevision: explicitRestore.body?.item.revision, payload: markdownPayload }, "PUT");
-    assert.equal(markdownDraft.response.status, 200, JSON.stringify(markdownDraft.body));
-    assert.equal(markdownDraft.body?.draft.payload.markdown, markdownPayload.markdown);
-    assert.equal((await resourceWrite("publish", { versionId: markdownDraft.body?.draft.id, expectedRevision: markdownDraft.body?.item.revision })).response.status, 400, "HTML can be saved verbatim but not published");
-    const validMarkdown = { ...markdownPayload, markdown: "## 新正文\n\n这一版已通过正文校验。", mediaIds: [] };
-    const validDraft = await resourceWrite("draft", { versionId: markdownDraft.body?.draft.id, expectedRevision: markdownDraft.body?.item.revision, payload: validMarkdown }, "PUT");
+    const rejectedPayload = { kind: "guide", ...GUIDE_META, format: "markdown", schemaVersion: 1, markdown: "## 旧格式", mediaIds: [] };
+    assert.equal((await resourceWrite("draft", { versionId: explicitRestore.body?.draft.id, expectedRevision: explicitRestore.body?.item.revision, payload: rejectedPayload }, "PUT")).response.status, 400, "markdown payload is rejected; only plate is accepted");
+    const validPayload = guidePayload([{ type: "h2", id: "new", children: [{ text: "新正文" }] }, pText("这一版已通过正文校验。")]);
+    const validDraft = await resourceWrite("draft", { versionId: explicitRestore.body?.draft.id, expectedRevision: explicitRestore.body?.item.revision, payload: validPayload }, "PUT");
     assert.equal(validDraft.response.status, 200);
     assert.equal((await resourceWrite("publish", { versionId: validDraft.body?.draft.id, expectedRevision: validDraft.body?.item.revision })).response.status, 200);
-    const markdownPublic = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
-    assert.equal(markdownPublic.body?.payload.markdown, validMarkdown.markdown);
-    assert.equal(markdownPublic.body?.version.id, validDraft.body?.draft.id);
+    const platePublic = await request(base, publicResourceUrl, undefined, cookieJar(), API_ORIGIN);
+    assert.deepEqual(platePublic.body?.payload.document, validPayload.document);
+    assert.equal(platePublic.body?.version.id, validDraft.body?.draft.id);
     const unknownKey = "guide:custom-content-test";
-    const custom = { ...DEFAULT_GUIDES[0]!, id: "custom-content-test", slug: "custom-content-test" };
+    const custom = validateResource(unknownKey, { kind: "guide", ...GUIDE_META, id: "custom-content-test", slug: "custom-content-test", format: "plate", schemaVersion: 1, document: plateHelp([pText("自定义正文")]), mediaIds: [] });
     const customCreated = await request(base, resourceRoot + encodeURIComponent(unknownKey) + "/draft", { payload: custom, gameId: gameA }, gameEditor.jar, ADMIN_ORIGIN, "POST", key());
     assert.equal(customCreated.response.status, 200, JSON.stringify(customCreated.body));
     assert.equal((await request(base, `${resourceUrl}/versions/${customCreated.body?.draft.id}`, undefined, platform.jar, ADMIN_ORIGIN)).response.status, 404, "history detail cannot cross resource ownership");
@@ -1086,15 +1090,15 @@ test("M3 content foundation: announcements, news, carousel and platform media un
       assert.equal(list.response.status, 200, JSON.stringify(list.body));
       allPublicKeys.push(...list.body!.items.map((row: { key: string }) => row.key)); resourcesCursor = list.body!.nextCursor;
     } while (resourcesCursor);
-    assert.equal(allPublicKeys.length, 24); assert.equal(new Set(allPublicKeys).size, 24); assert.equal(allPublicKeys.includes(unknownKey), false);
+    assert.equal(allPublicKeys.length, 1); assert.equal(new Set(allPublicKeys).size, 1); assert.equal(allPublicKeys.includes(resourceKey), true); assert.equal(allPublicKeys.includes(unknownKey), false);
     for (const limit of [6, 10]) {
       assert.equal((await request(base, `/api/v1/content/resources?limit=${limit}`, undefined, cookieJar(), API_ORIGIN)).response.status, 400);
       assert.equal((await request(base, `/api/bff/admin/content/resources?scope=platform&limit=${limit}`, undefined, platform.jar, ADMIN_ORIGIN)).response.status, 400);
     }
     const largeKey = "guide:resource-size-contract", largeUrl = resourceRoot + encodeURIComponent(largeKey);
-    const largePrefix = "## 合成容量校验\n\n";
-    const largeMarkdown = largePrefix + "x".repeat(195_000 - Buffer.byteLength(largePrefix, "utf8"));
-    const largePayload = { ...guideMetadata, id: "resource-size-contract", slug: "resource-size-contract", title: "本地合成容量测试", format: "markdown", schemaVersion: 1, markdown: largeMarkdown, mediaIds: [] };
+    const largeText = "x".repeat(194_000);
+    const largePayload = validateResource(largeKey, { kind: "guide", ...GUIDE_META, id: "resource-size-contract", slug: "resource-size-contract", title: "本地合成容量测试", format: "plate", schemaVersion: 1, document: plateHelp([pText(largeText)]), mediaIds: [] }) as GuideResource;
+    const largeDocumentBytes = Buffer.byteLength(JSON.stringify(largePayload.document));
     const largeCreateBody = { payload: largePayload }, largeCreateKey = key();
     const largeCreated = await request(base, `${largeUrl}/draft`, largeCreateBody, platform.jar, ADMIN_ORIGIN, "POST", largeCreateKey);
     assert.equal(largeCreated.response.status, 200, JSON.stringify(largeCreated.body));
@@ -1108,16 +1112,16 @@ test("M3 content foundation: announcements, news, carousel and platform media un
     const largeReplay = await request(base, `${largeUrl}/publish`, largePublishBody, platform.jar, ADMIN_ORIGIN, "POST", largePublishKey);
     assert.equal(largeReplay.response.status, 200); assert.equal(largeReplay.body?.published.id, largeSaved.body?.draft.id);
     const largePublic = await request(base, "/api/v1/content/resources/" + encodeURIComponent(largeKey), undefined, cookieJar(), API_ORIGIN);
-    assert.equal(largePublic.response.status, 200); assert.equal(largePublic.body?.payload.markdown, largeMarkdown);
+    assert.equal(largePublic.response.status, 200); assert.deepEqual(largePublic.body?.payload.document, largePayload.document);
     assert.equal(largePublic.body?.version.id, largeSaved.body?.draft.id);
-    const largeStored = (await runtimePool.query(`SELECT "body", octet_length("payload"->>'markdown') AS "markdownBytes" FROM "zzsh_content"."content_version" WHERE "id" = $1`, [largeSaved.body?.draft.id])).rows[0];
-    assert.equal(largeStored.body, ""); assert.equal(largeStored.markdownBytes, 195_000, "large Markdown must not be truncated to the legacy body limit");
+    const largeStored = (await runtimePool.query(`SELECT "body", octet_length("payload"->>'document') AS "documentBytes" FROM "zzsh_content"."content_version" WHERE "id" = $1`, [largeSaved.body?.draft.id])).rows[0];
+    assert.equal(largeStored.body, ""); assert.equal(largeStored.documentBytes, largeDocumentBytes, "large plate document must not be truncated to the legacy body limit");
     const largeReceiptQuery = new URLSearchParams({ operation: "content.resource.publish", resourceId: largeKey, fingerprint: fingerprintRequest("content.resource.publish", largeKey, largePublishBody) });
     const largeReceipt = await request(base, `/api/bff/admin/content/operation-result?${largeReceiptQuery}`, undefined, platform.jar, ADMIN_ORIGIN, "GET", largePublishKey);
     assert.equal(largeReceipt.response.status, 200); assert.equal(largeReceipt.body?.receipt, "RECORDED"); assert.equal(largeReceipt.body?.result.publishedVersionId, largeSaved.body?.draft.id);
     const largeRestored = await request(base, `${largeUrl}/restore`, { sourceVersionId: largeSaved.body?.draft.id, expectedRevision: largePublished.body?.item.revision }, platform.jar, ADMIN_ORIGIN, "POST", key());
     assert.equal(largeRestored.response.status, 200, JSON.stringify(largeRestored.body)); assert.equal(largeRestored.body?.draft.body, "");
-    assert.equal(largeRestored.body?.draft.payload.markdown, largeMarkdown);
+    assert.deepEqual(largeRestored.body?.draft.payload.document, largePayload.document);
     const contactKey = "placement:FOLLOW", contactUrl = resourceRoot + encodeURIComponent(contactKey);
     assert.equal((await request(base, `${contactUrl}/draft`, { payload: DEFAULT_RESOURCES[contactKey] }, platform.jar, ADMIN_ORIGIN, "POST", key())).response.status, 400, "fixed resource metadata cannot be injected at creation");
     const createdContact = await request(base, `${contactUrl}/draft`, {}, platform.jar, ADMIN_ORIGIN, "POST", key());

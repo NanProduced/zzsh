@@ -1,7 +1,7 @@
 import { cache } from "react";
 import { isHttpOrigin } from "./user-proxy";
 import { ContentReadError, fetchContentResources } from "./content-public";
-import type { HelpArticle } from "@/content/help/types";
+import type { HelpArticle, PublicHelpTreeNode } from "@/content/help/types";
 import { publicHelpArticle } from "./help-content";
 
 export function contentServerOptions() {
@@ -16,6 +16,53 @@ export const loadPublicHelpArticles = cache(async (): Promise<HelpArticle[]> => 
   const resources = await fetchContentResources("guide", contentServerOptions());
   const articles = await Promise.all(resources.map(publicHelpArticle));
   return articles.filter((article): article is HelpArticle => article !== null);
+});
+
+export const loadPublicHelpTree = cache(async (): Promise<PublicHelpTreeNode[]> => {
+  const options = contentServerOptions();
+  const response = await fetch(`${options.base}/help-tree`, { ...options, cache: "no-store", redirect: "error" });
+  if (!response.ok) throw new ContentReadError();
+  const data: unknown = await response.json();
+  if (!data || typeof data !== "object" || !("nodes" in data) || !Array.isArray(data.nodes)) throw new ContentReadError();
+  const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+  const slugs = new Set<string>();
+  const nodes = new Map<string, PublicHelpTreeNode>();
+  for (const value of data.nodes) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new ContentReadError();
+    const { id, parentId, kind, title, slug, depth, sortKey, iconKey = null, description = null } = value as Record<string, unknown>;
+    if (!validId(id) || nodes.has(id) || !(parentId === null || validId(parentId))
+      || (kind !== "FOLDER" && kind !== "ARTICLE") || typeof title !== "string"
+      || typeof depth !== "number" || !Number.isInteger(depth) || depth < 1 || depth > 3
+      || typeof sortKey !== "string" || !sortKey
+      || !(iconKey === null || typeof iconKey === "string") || !(description === null || typeof description === "string")) {
+      throw new ContentReadError();
+    }
+    if (kind === "ARTICLE") {
+      if (typeof slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slugs.has(slug)) throw new ContentReadError();
+      slugs.add(slug);
+    } else if (slug !== null) throw new ContentReadError();
+    nodes.set(id, { id, parentId, kind, title, slug: typeof slug === "string" ? slug : null, depth, sortKey, iconKey, description });
+  }
+  for (const node of nodes.values()) {
+    const parent = node.parentId ? nodes.get(node.parentId) : null;
+    if (node.parentId ? parent?.kind !== "FOLDER" || node.depth !== parent.depth + 1 : node.depth !== 1) throw new ContentReadError();
+  }
+  return [...nodes.values()];
+});
+
+/** RETIRED covers withdrawn and deleted articles. */
+
+export const loadHelpSlugStatus = cache(async (slug: string): Promise<{ state: "AVAILABLE" | "RETIRED"; title: string | null } | null> => {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return null;
+  const options = contentServerOptions();
+  const response = await fetch(`${options.base}/help-slugs/${encodeURIComponent(slug)}`, { ...options, cache: "no-store", redirect: "error" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new ContentReadError();
+  const data: unknown = await response.json();
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new ContentReadError();
+  const row = data as { state?: unknown; title?: unknown };
+  if (row.state !== "AVAILABLE" && row.state !== "RETIRED") throw new ContentReadError();
+  return { state: row.state, title: typeof row.title === "string" ? row.title : null };
 });
 
 export type PublicUpdate = { id: string; type: "ANNOUNCEMENT" | "NEWS"; title: string; summary: string; body?: string; coverMediaId: string | null; publishedAt: string; gameName: string | null };

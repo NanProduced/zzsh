@@ -11,7 +11,7 @@ export type ResourceDetail = {
 };
 export type ResourceListItem = { current: PublicContentResource; definition: ResourceDefinition | null; metadata: { itemId: string; revision: string; updatedAt: string; hasDraft: boolean; title?: string | null } | null };
 export type ResourcePage = { items: ResourceListItem[]; nextCursor: string | null; limit: number };
-export type ContentOperation = "content.resource.draft.create" | "content.resource.draft.save" | "content.resource.media-draft.save" | "content.resource.draft.restore" | "content.resource.publish" | "content.resource.withdraw";
+export type ContentOperation = "content.resource.draft.create" | "content.resource.draft.save" | "content.resource.media-draft.save" | "content.resource.draft.restore" | "content.resource.draft.discard" | "content.resource.publish" | "content.resource.withdraw";
 export const resourcePath = (key: string) => `/content/resources/${encodeURIComponent(key)}`;
 
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -42,9 +42,4 @@ export function resourceStateInfo(item: ResourceListItem): { label: string; tone
 export function resourceCategoryLabel(value: ContentResource | null | undefined): string {
   if (!value || value.kind !== "guide") return "";
   return RESOURCE_CATEGORY_LABEL[value.category] ?? value.category;
-}
-export function resourceRequirement(definition: ResourceDefinition | null): string {
-  if (!definition) return "";
-  const ratio = definition.aspectRatio ? `${definition.aspectRatio}:1` : "";
-  return [ratio, definition.recommendedSize ? `建议 ${definition.recommendedSize}` : ""].filter(Boolean).join(" · ");
 }

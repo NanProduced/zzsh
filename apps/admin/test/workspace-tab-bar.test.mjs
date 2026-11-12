@@ -35,6 +35,7 @@ export function WorkspacePageContent({tab,onDirtyChange,onWriteLockChange,onOpen
   return createElement("div",{"data-write-test-page":tab.kind,"data-refresh-nonce":refreshNonce},
     createElement("button",{onClick:()=>onDirtyChange(true)},"标记未保存"),
     createElement("button",{onClick:()=>onOpenPath("/finance")},"打开资金"),
+    createElement("button",{onClick:()=>onOpenPath("/docs/doc_b","另一篇文档")},"打开另一篇内部文档"),
     createElement("button",{onClick:()=>onOpenPath("/content?tab=news&scope=game&gameId=game_1")},"改变内容范围"),
     createElement("button",{onClick:()=>onWriteLockChange?.(true)},"标记写入中"),
     createElement("button",{onClick:()=>onWriteLockChange?.(false)},"解除写入锁"));
@@ -226,6 +227,25 @@ test("pending browser-history navigation is cancelled with revoked finance conte
   await act(async () => browser.dispatchEvent(new browser.CustomEvent("zzsh-admin-finance-access-failure"))); await settle();
   await confirmOnlyIfStillPending(); assert.equal(tabButton(financeTabId), null);
   assert.equal(browser.location.pathname, "/workbench");
+});
+
+test("switching documents in the same tab protects dirty input on click and history", async t => {
+  const snapshot = { authenticated: true, adminUserId: `docs-admin-${++shellSerial}`, user: { name: "测试运营", username: "ZZ1" }, security: { status: "ACTIVE", isBoss: false }, session: { id: `docs-session-${shellSerial}`, pinConfigured: false, locked: false }, permissions: ["docs.internal.read"] };
+  browser.history.replaceState({}, "", "/docs/doc_a");
+  await mount(t, createElement(WorkspaceApp, shellProps(snapshot)));
+  await dispatch(button("标记未保存"), "click");
+  await dispatch(button("打开另一篇内部文档"), "click");
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'));
+  assert.equal(browser.location.pathname, "/docs/doc_a");
+  await dispatch(button("继续编辑"), "click");
+  browser.history.pushState({}, "", "/docs/doc_b");
+  await act(async () => browser.dispatchEvent(new browser.PopStateEvent("popstate"))); await settle();
+  assert.ok(browser.document.querySelector('[role="alertdialog"]'));
+  assert.equal(browser.location.pathname, "/docs/doc_a");
+  await dispatch(button("放弃修改并离开"), "click");
+  assert.equal(browser.location.pathname, "/docs/doc_b");
+  assert.equal(tabButton("docs").getAttribute("aria-label"), "内部文档");
+  assert.equal(browser.document.querySelectorAll('[data-tab-id="docs"]').length, 1);
 });
 
 async function mountWriteLockedShell(t, refresh = async snapshot => snapshot) {

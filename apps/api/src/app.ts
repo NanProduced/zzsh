@@ -19,6 +19,7 @@ import { assertDistributionManagementAssembly } from "./finance/distribution-man
 import type { BusinessDatabaseOptions } from "./database/business";
 import type { OrderSweepModuleOptions } from "./order/order-sweep.module";
 import type { DistributionDueModuleOptions } from "./finance/distribution-due.module";
+import type { TrashPurgeModuleOptions } from "./content/trash-purge.module";
 import { OpeningAutoConfirmWorker } from "./order/opening-auto-confirm";
 
 export type ApiAppOptions = ApiAppInfrastructureOptions & {
@@ -27,6 +28,7 @@ export type ApiAppOptions = ApiAppInfrastructureOptions & {
   auth?: AuthRuntimeOptions;
   orderSweep?: OrderSweepModuleOptions;
   distributionDue?: DistributionDueModuleOptions;
+  trashPurge?: TrashPurgeModuleOptions;
 };
 
 const LARGE_IM_MESSAGE_PATHS = new Set([
@@ -89,8 +91,9 @@ function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: ()
     }
     const method = request.method?.toUpperCase();
     const resourceBody = json && (method === "POST" || method === "PUT") && ["/api/v1/admin/content/resources", "/api/bff/admin/content/resources"].some(prefix => path === prefix || path.startsWith(`${prefix}/`));
+    const docsContentBody = json && method === "PUT" && /^\/api\/(?:bff\/admin|v1\/admin)\/docs\/[^/]+\/content$/.test(path);
     const largeMessage = json && method === "POST" && LARGE_IM_MESSAGE_PATHS.has(path);
-    if (!resourceBody && !largeMessage) {
+    if (!resourceBody && !docsContentBody && !largeMessage) {
       next();
       return;
     }
@@ -101,7 +104,7 @@ function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: ()
       if (closed || chunk === undefined) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += bytes.length;
-      if (total > (resourceBody ? 256 * 1024 : 15 * 1024 * 1024)) {
+      if (total > (resourceBody || docsContentBody ? 256 * 1024 : 15 * 1024 * 1024)) {
         closed = true;
         response.statusCode = 413;
         response.end();
@@ -139,7 +142,7 @@ export async function createApp(options: ApiAppOptions) {
     assertDistributionManagementAssembly(options.auth.distributionManagement,options.auth.distributionReadScope,{...options.auth,distributionDue:options.distributionDue});
   }
   const app = await NestFactory.create(
-    AppModule.register(options.health, options.database, options.orderSweep, options.distributionDue),
+    AppModule.register(options.health, options.database, options.orderSweep, options.distributionDue, options.trashPurge),
     { logger: ["error", "warn"], bodyParser: false, rawBody: true },
   );
   if (options.database) app.get(ReadinessService).observeBusinessPool(options.database.pool);

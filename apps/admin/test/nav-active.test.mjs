@@ -72,7 +72,12 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
     ["/distribution/participants/user_1", "", ["/distribution/participants"]],
     ["/distribution/policy", "", ["/distribution/policy"]],
     ["/distribution-policy", "", []],
-    ["/content", "", ["/content"]],
+    ["/content", "", ["/content/help"]],
+    ["/content", "?tab=news", ["/content/updates"]],
+    ["/content/updates", "?tab=announcement", ["/content/updates"]],
+    ["/content/legal", "", ["/content/legal"]],
+    ["/docs", "", ["/docs"]],
+    ["/docs/doc_a", "", ["/docs"]],
     ["/support", "", ["/support"]],
     ["/workbench", "", ["/workbench"]],
   ];
@@ -101,7 +106,8 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 37, "资金与经营看板取代两个总览入口");
+  assert.equal(paths.length, 42, "运营内容的五个页面替代原内容管理入口");
+  assert.deepEqual(paths.filter((path) => path.startsWith("/content")), ["/content/help", "/content/updates", "/content/legal", "/content/pages", "/content/media"]);
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
   assert.equal(paths.includes("/finance/period"), false, "期间核对从导航移除，旧链接仍可使用");
   assert.equal(items.find((item) => item.path === "/finance").label, "资金与经营看板");

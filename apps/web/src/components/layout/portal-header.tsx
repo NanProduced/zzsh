@@ -44,8 +44,10 @@ function SessionEntry() {
   );
 }
 
+export type PortalSearchMode = "standard" | "hidden" | "compact-mobile";
+
 // Adapted from Aceternity Resizable Navbar; keep the search mounted across states.
-export function PortalHeader({ query, onQueryChange, onSearch, home=true, searchLabel = "搜索公开账号", searchInputLabel = "搜索账号编号或关键词", searchPlaceholder = "搜索账号编号或关键词", searchCompactPlaceholder = "搜索账号或关键字..." }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean; searchLabel?: string; searchInputLabel?: string; searchPlaceholder?: string; searchCompactPlaceholder?: string }) {
+export function PortalHeader({ query, onQueryChange, onSearch, home=true, searchLabel = "搜索公开账号", searchInputLabel = "搜索账号编号或关键词", searchPlaceholder = "搜索账号编号或关键词", searchCompactPlaceholder = "搜索账号或关键字...", searchMode = "standard" }: { query: string; onQueryChange: (value: string) => void; onSearch?:(query:string)=>void; home?:boolean; searchLabel?: string; searchInputLabel?: string; searchPlaceholder?: string; searchCompactPlaceholder?: string; searchMode?: PortalSearchMode }) {
   const { scrollY } = useScroll();
   const [reducedMotion,setReducedMotion]=useState(true);
   const [scrollPosition, setScrollPosition] = useState(0);
@@ -69,9 +71,9 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
   const compact = desktop && scrollPosition > 100 && !navFocused;
   // 移动端滚动后把第二行搜索收成一颗图标钮，腾出视口；搜索/导航持有焦点、或用户主动
   // 展开过时都不收起，输入内容随 input 一起保留。回顶部自动恢复两行。
-  const searchCollapsed = !desktop && scrollPosition > 100 && !searchFocused && !searchPinned && !navFocused;
+  const searchCollapsed = !desktop && (scrollPosition > 100 || searchMode === "compact-mobile") && !searchFocused && !searchPinned && !navFocused;
   const expandSearch = () => { setSearchPinned(true); requestAnimationFrame(() => searchRef.current?.focus()); };
-  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || navFocused} data-search-collapsed={searchCollapsed}>
+  return <header className="site-header" data-compact={compact} data-scrolled={scrollPosition > 0 || navFocused} data-search-collapsed={searchCollapsed} data-search-mode={searchMode}>
     <motion.div
       className="site-header-bar"
       initial={false}
@@ -85,7 +87,7 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
         <Link href="/help">帮助中心</Link>
       </nav>
 
-      <form
+      {searchMode !== "hidden" ? <form
         className="site-search"
         role="search"
         aria-label={searchLabel}
@@ -123,10 +125,10 @@ export function PortalHeader({ query, onQueryChange, onSearch, home=true, search
           <Search size={13} strokeWidth={2.5} />
           <span>搜索</span>
         </button>
-      </form>
+      </form> : null}
 
       <div className="site-header-actions">
-        <button type="button" className="icon-button site-search-toggle" aria-label="展开搜索" onClick={expandSearch}><Search size={20} aria-hidden="true" /></button>
+        {searchMode !== "hidden" ? <button type="button" className="icon-button site-search-toggle" aria-label="展开搜索" onClick={expandSearch}><Search size={20} aria-hidden="true" /></button> : null}
         <SessionEntry />
         <ThemeToggle /><MobileNav />
       </div>

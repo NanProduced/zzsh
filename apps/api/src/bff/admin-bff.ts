@@ -17,6 +17,8 @@ import {
 import { handleSupplyAdminRoute, type SupplyRuntimeOptions } from "../supply/supply-routes";
 import type { ListingCursorKey } from "../supply/listing-cursor";
 import { handleContentAdminRoute } from "../content/content-routes";
+import { handleDocsAdminRoute } from "../docs/docs-routes";
+import { DOCS_IMAGES_DISABLED, type DocsImageFeature } from "../docs/docs-images";
 import { handleProfileAvatarAdminReviewRoute, handleProfileAvatarAdminSelfRoute } from "../profile/profile-avatar-routes";
 import { handleSystemConfiguration } from "../system/system-configuration-routes";
 import { handleLegalAdminRoute } from "../legal/legal-routes";
@@ -63,6 +65,7 @@ export type AdminBffOptions = {
   distributionManagement?: DistributionManagementResource;
   distributionEarnings?: DistributionEarningStore;
   supply: SupplyRuntimeOptions;
+  docsImages?: DocsImageFeature;
   order: OrderRuntimeOptions;
   yunxin?: YunxinRouteOptions;
 };
@@ -616,8 +619,13 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   }
   if (path === "/legal-documents" || path.startsWith("/legal-documents/")) {
     const draft = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+$/;
-    const seal = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/seal$/;
-    if (!(method === "GET" && path === "/legal-documents") && !(method === "POST" && (path === "/legal-documents/drafts" || seal.test(path))) && !(method === "PUT" && draft.test(path))) {
+    // P3a：直接封存入口下线，改为差异只读、退回草稿与「固定文书发布」审批提交。
+    const diff = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/diff$/;
+    const back = /^\/legal-documents\/drafts\/[A-Za-z0-9._:-]+\/return$/;
+    const allowed = method === "GET" && (path === "/legal-documents" || diff.test(path))
+      || method === "POST" && (path === "/legal-documents/drafts" || path === "/legal-documents/fixed-document-submissions" || back.test(path))
+      || method === "PUT" && draft.test(path);
+    if (!allowed) {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId); return;
     }
     const targetPath = `/api/v1/admin${path}${requestQuery(request)}`;
@@ -636,7 +644,7 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     return;
   }
   if (path === "/content" || path.startsWith("/content/")) {
-    if (method !== "GET" && method !== "POST" && method !== "PUT") {
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") {
       sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
       return;
     }
@@ -646,6 +654,23 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     request.headers = { ...request.headers, "x-request-id": requestId };
     try {
       await handleContentAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, options.supply);
+    } catch (error) {
+      if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
+      else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);
+    }
+    return;
+  }
+  if (path === "/docs" || path.startsWith("/docs/")) {
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") {
+      sendError(response, 404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", requestId);
+      return;
+    }
+    const targetPath = `/api/v1/admin/docs${path.slice("/docs".length)}${requestQuery(request)}`;
+    request.url = targetPath;
+    request.originalUrl = targetPath;
+    request.headers = { ...request.headers, "x-request-id": requestId };
+    try {
+      await handleDocsAdminRoute(request, response as AuthSecurityNodeResponse & { send?: (body: Buffer | string) => void }, { ...options.supply, docsImages: options.docsImages ?? DOCS_IMAGES_DISABLED });
     } catch (error) {
       if (error instanceof SecurityApiError) sendError(response, error.status, error.code, error.message, requestId);
       else sendError(response, 500, API_V1_ERROR_CODES.INTERNAL_ERROR, "Internal server error", requestId);

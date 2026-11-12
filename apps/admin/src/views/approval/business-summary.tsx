@@ -1,8 +1,11 @@
 import { Info, TriangleAlert } from "lucide-react";
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
+import { PlateDocument } from "@zzsh/ui/plate-document";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { formatDiscountLabel } from "../membership-entitlement-form";
 import { financeMoney } from '../admin-finance-api';
+import { DiffBlocks } from "../legal-documents-panel";
 import {
   BUSINESS_NOT_CONNECTED,
   entitlementStateView,
@@ -287,6 +290,68 @@ function partyLabel(party: string): string {
   return party;
 }
 
+const FIXED_KIND_LABELS: Record<string, string> = {
+  PLATFORM_TERMS: "平台服务协议", PLATFORM_PRIVACY: "用户隐私政策", EARLY_SETTLEMENT: "提前结算告知", NOTICE: "场景说明",
+};
+
+type FixedDocumentItem = {
+  kind: string; key: string; draftVersionId: string; baseVersionId: string | null; digest: string;
+  readAvailable?: boolean; title?: string | null; bodyFormat?: "text" | "plate" | null; status?: string;
+  digestMatches?: boolean; baseMatches?: boolean;
+  preview?: { body: string; document: PlateDocumentEnvelope | null } | null;
+  base?: { versionId: string; title: string; body: string; document: PlateDocumentEnvelope | null; effectiveAt: string | null } | null;
+  blocks?: { status: "ADDED" | "REMOVED" | "CHANGED" | "UNCHANGED"; before: string | null; after: string | null }[];
+  changes?: { added: number; removed: number; changed: number; unchanged: number };
+};
+
+/** 用户端预览：plate 走白名单只读渲染，纯文本按段落显示（与订单快照一致）。 */
+function FixedPreview({ item }: { item: FixedDocumentItem }) {
+  const preview = item.preview;
+  if (!preview) return <p className="text-xs text-muted-foreground">读不到本次草稿正文，不用当前线上版本替代。</p>;
+  if (item.bodyFormat === "plate" && preview.document) return <article className="content-notion-readonly" aria-label="用户端预览"><PlateDocument document={preview.document} /></article>;
+  return <div className="space-y-2 text-sm leading-relaxed" aria-label="用户端预览">{preview.body.split(/\n+/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div>;
+}
+
+/**
+ * 固定文书发布：详情最显眼处并排给出用户端预览与当前生效版本的按块差异。
+ * 全部来自申请冻结载荷与服务端只读投影，不在前端重算摘要或改写任何正文。
+ */
+function FixedDocumentSummary({ business }: { business: BusinessView }) {
+  const fixed = (business.summary?.fixedDocument ?? undefined) as { schema?: string; payloadState?: string; items?: FixedDocumentItem[] } | undefined;
+  if (!fixed || !Array.isArray(fixed.items)) return <NotApplicable reason="固定文书发布快照未提供，不能用当前线上文书替代本次申请。" />;
+  const result = business.result as { knowledge?: string; effectiveAt?: string | null; versionIds?: string[] } | undefined;
+  return <Section title="固定文书发布：用户端预览与线上差异" hint="批准即生效：同一批法律文书共用一个生效时间；已封存正文、摘要与接受记录不会被改写。">
+    {fixed.payloadState === "INVALID" ? <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>申请载荷不符合固定文书合同</AlertTitle><AlertDescription>无法逐项展示预览与差异，请驳回并要求重新提交。</AlertDescription></Alert> : null}
+    <div className="space-y-4">
+      {fixed.items.map(item => <div key={`${item.kind}:${item.key}:${item.draftVersionId}`} className="rounded-md border border-border/60 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-sm font-medium text-foreground">{FIXED_KIND_LABELS[item.kind] ?? item.kind}</p>
+          <span className="text-xs text-muted-foreground">{item.title ?? item.key}</span>
+          {item.status ? <Badge variant={item.status === "SEALED" || item.status === "PUBLISHED" ? "success" : item.status === "PENDING" ? "info" : "warning"}>{item.status === "SEALED" ? "已封存" : item.status === "PENDING" ? "待审批" : item.status === "PUBLISHED" ? "已发布" : "草稿"}</Badge> : null}
+          {item.readAvailable === false ? <Badge variant="destructive">草稿不可读</Badge> : null}
+          {item.digestMatches === false ? <Badge variant="destructive">摘要与申请不一致</Badge> : null}
+          {item.baseMatches === false ? <Badge variant="warning">线上版本已变化</Badge> : null}
+        </div>
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <div><p className="text-xs font-medium text-muted-foreground">用户端预览（本次草稿）</p><div className="mt-2 max-h-96 overflow-auto rounded-md border border-border/40 p-2"><FixedPreview item={item} /></div></div>
+          <div><p className="text-xs font-medium text-muted-foreground">与当前生效版本差异{item.base ? `（线上 ${item.base.versionId}）` : "（线上尚无生效版本）"}</p><div className="mt-2 max-h-96 overflow-auto"><DiffBlocks blocks={item.blocks ?? []} emptyText="没有可比较的正文。" /></div></div>
+        </div>
+        <FactGrid>
+          <Fact label="本次草稿版本" value={item.draftVersionId} mono />
+          <Fact label="申请冻结的线上版本" value={item.baseVersionId ?? "无（首次生效）"} mono />
+          <Fact label="摘要" value={item.digest} mono />
+          <Fact label="改动块数" value={item.changes ? `新增 ${item.changes.added} · 删除 ${item.changes.removed} · 修改 ${item.changes.changed}` : null} />
+        </FactGrid>
+      </div>)}
+    </div>
+    <FactGrid>
+      <Fact label="本次生效时间" value={business.resultAvailability === "KNOWN" ? formatDate(result?.effectiveAt ?? null) : null} />
+      <Fact label="生效结果" value={business.resultAvailability === "KNOWN" ? "已读到本次执行结果" : business.resultAvailability === "UNRESOLVED" ? "结果待核对，请勿重复办理" : "尚未生效"} />
+    </FactGrid>
+    <p className="text-xs leading-relaxed text-muted-foreground">平台服务协议与隐私政策首次生效必须同一事务；之后可单份更新，用户只需重新同意变更的那份。提前结算告知保持纯文本，订单快照仍按 versionId + sha256(原文) 校验。</p>
+  </Section>;
+}
+
 export function BusinessSummary({ business, operationCode }: { business: BusinessView | undefined; operationCode: string }) {
   if (business === undefined) {
     return (
@@ -310,10 +375,14 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
   const entitlementOperation = ["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"].includes(operationCode);
   const settlementOperation = operationCode === "order.settlement.adjust";
   const compensationOperation = operationCode === 'order.compensation.grant';
+  const fixedOperation = operationCode === "content.fixed_document.publish";
   const structuredOperation = policyOperation || entitlementOperation || settlementOperation;
 
   return (
     <>
+      {/* 固定文书发布：用户端预览与线上差异放在详情最显眼处。 */}
+      {fixedOperation && business.summaryAvailable !== false ? <FixedDocumentSummary business={business} /> : null}
+
       <Section
         title="此次申请改变什么"
         hint="全部来自申请时冻结的载荷快照，不用当前值替换；当前事实另列在下方与「领域结果」。"
@@ -334,7 +403,7 @@ export function BusinessSummary({ business, operationCode }: { business: Busines
         <p className="text-sm text-muted-foreground">{business.resultAvailability === 'KNOWN' && business.result?.caseId ? '已核实赔偿入账号主余额。' : business.resultAvailability === 'UNRESOLVED' ? '入账结果待核对，请勿重复办理。' : '尚未形成赔偿入账。'}</p>
       </Section> : null}
 
-      {!distributionOperation && business.summaryAvailable !== false && summary ? (
+      {!distributionOperation && !fixedOperation && business.summaryAvailable !== false && summary ? (
         <Section title="申请时快照">
           {settlementOperation ? <SettlementSummary summary={summary} /> : policyOperation ? <PolicySummary summary={summary} /> : entitlementOperation ? <MembershipSummary summary={summary} /> : <NotApplicable reason="业务摘要暂不可用；请查看申请说明并按当前办理资格处理。" />}
           <FactGrid>

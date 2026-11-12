@@ -11,6 +11,7 @@ import { parseMembershipChange, membershipProjection, RENTAL_MEMBERSHIP_BENEFIT_
 import { confirmationInput } from "../src/order/personal-confirmation";
 import { personalOrderInput, createPersonalReservation } from "../src/order/personal-order";
 import { createReservation } from "../src/order/order";
+import { legalDigest } from "../src/legal/legal-documents";
 
 const key={keyId:"fixture",secret:"isolated-fixture-only-not-production-key"};
 const binding={userId:"user-1",sessionId:"session-1",accountId:"account-1",versionId:"version-1",releaseId:"release-1",listingHash:"a".repeat(64),quoteDigest:"b".repeat(64)};
@@ -104,6 +105,40 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:v2?`policy:price-1:fixture:trb3b1:${runId}:funding-v1:NOT_REQUIRED`:"fixture"}),fundingReader:v2?controlled:legacy};
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
+
+test("an agreed reservation freezes the current early settlement disclosure and refuses a missing version", async () => {
+  const f = personalRefsFixture();
+  const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
+  const body = "第二版提前结算告知";
+  const disclosure = { versionId: "legal_early_v2", body, digest: legalDigest(body) };
+  const row = { id: disclosure.versionId, body, digest: disclosure.digest, bodyFormat: "text", status: "SEALED" };
+  let current: typeof row | null = row;
+  let inserted: Record<string, unknown> | undefined;
+  const transport = f.client as unknown as { query: (sql: string, values?: unknown[]) => Promise<unknown> };
+  const query = transport.query.bind(transport);
+  transport.query = async (sql, values) => {
+    if (sql.includes('FROM "zzsh_content"."legal_document_version"')) {
+      assert.equal(values?.[0], "EARLY_SETTLEMENT");
+      return { rows: current ? [current] : [] };
+    }
+    if (sql.startsWith("INSERT INTO zzsh_order.rental_order")) {
+      inserted = JSON.parse(values![12] as string);
+      throw Error("OFFLINE_INSERT_CAPTURED");
+    }
+    return query(sql, values);
+  };
+  const create = () => createPersonalReservation(f.client, f.context, issued.confirmationToken,
+    { ...f.options, holdSeconds: 600 }, "offline-request", undefined, issued.agreementAcceptance);
+  await assert.rejects(create, /OFFLINE_INSERT_CAPTURED/);
+  assert.equal(inserted?.agreementAcceptanceSchema, 1);
+  assert.deepEqual(inserted?.agreementAcceptance, issued.agreementAcceptance);
+  assert.deepEqual(inserted?.earlySettlementDisclosure, disclosure);
+
+  current = null;
+  inserted = undefined;
+  await assert.rejects(create, { status: 503, code: "CONFIRMATION_DEPENDENCY_UNAVAILABLE" });
+  assert.equal(inserted, undefined);
+});
 
 test("a non-growth spread quote freezes its own price basis for later actual consumption", async () => {
   const f = personalRefsFixture(true, "SPREAD");

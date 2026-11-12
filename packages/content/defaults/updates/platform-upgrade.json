@@ -1,0 +1,75 @@
+{
+  "key": "platform-upgrade",
+  "kind": "update",
+  "file": "updates/platform-upgrade.json",
+  "meta": {
+    "type": "announcement",
+    "pinned": false,
+    "tickerEnabled": false,
+    "validUntil": null,
+    "visibleFrom": null,
+    "title": "洲洲商行平台全新升级",
+    "summary": "平台已完成升级，帮助中心与平台动态同步上线。"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "update",
+    "value": [
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "洲洲商行平台已完成全新升级，现已上线。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "本次升级后："
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "帮助中心：按租号、发布、费用、账号、售后、会员、协议等场景整理了使用说明，可直接搜索。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "平台动态：平台公告与资讯会在这里发布。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "平台服务协议与用户隐私政策：可在页面底部查看。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "使用中遇到问题，可先查阅帮助中心，或联系平台客服。感谢您的支持。"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,14 +1,16 @@
 // Source: https://platejs.org/r/block-draggable.json — Plate UI (MIT), platejs v53.5.2 registry.
 // Adapted: scoped ../ui primitives; the drag handle carries a Chinese
 // aria-label (registry only had a tooltip). block-context-menu is not
-// installed; right-click still adds the block to the selection.
+// installed; right-click still adds the block to the selection. Added a
+// Notion-style "+" insert button (self-drawn, not in the registry) in its own
+// gutter wrapper so it inserts a fresh paragraph and opens the slash menu.
 import * as React from 'react';
 
 import { DndPlugin, useDraggable, useDropLine } from '@platejs/dnd';
 import { expandListItemsWithChildren } from '@platejs/list';
 import { BlockSelectionPlugin } from '@platejs/selection/react';
-import { GripVertical } from 'lucide-react';
-import { type TElement, getPluginByType, isType, KEYS } from 'platejs';
+import { ArrowDown, ArrowUp, Copy, GripVertical, Plus, Trash2 } from 'lucide-react';
+import { type TElement, getPluginByType, isType, KEYS, PathApi } from 'platejs';
 import {
   type PlateEditor,
   type PlateElementProps,
@@ -21,12 +23,17 @@ import {
 import { useSelected } from 'platejs/react';
 
 import { Button } from '../ui/button';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '../ui/dropdown-menu';
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '../ui/tooltip';
 import { cn } from '@/lib/utils';
+import type { PlatePreset } from '@zzsh/content/plate';
+import { usePlatePageBlocks } from './page-block';
+import { setBlockType } from './transforms';
+import { turnIntoItemsFor } from './turn-into-toolbar-button';
 
 const UNDRAGGABLE_KEYS = [KEYS.column, KEYS.tr, KEYS.td];
 
@@ -75,6 +82,8 @@ export const BlockDraggable: RenderNodeWrapper = (props) => {
 function Draggable(props: PlateElementProps) {
   const { children, editor, element, path } = props;
   const blockSelectionApi = editor.getApi(BlockSelectionPlugin).blockSelection;
+  const { blockActions } = usePlatePageBlocks();
+  const hasBlockMenu = Boolean(blockActions && path.length === 1);
 
   const { isAboutToDrag, isDragging, nodeRef, previewRef, handleRef } =
     useDraggable({
@@ -117,6 +126,25 @@ function Draggable(props: PlateElementProps) {
   }, [isAboutToDrag]);
 
   const [dragButtonTop, setDragButtonTop] = React.useState(0);
+  const handle = (
+    <Button
+      ref={handleRef}
+      type="button"
+      variant="ghost"
+      aria-label={hasBlockMenu ? '块操作' : undefined}
+      className="-left-0 absolute h-6 w-full p-0"
+      style={{ top: `${dragButtonTop + 3}px` }}
+      data-plate-prevent-deselect
+    >
+      <DragHandle
+        isDragging={isDragging}
+        withActions={hasBlockMenu}
+        previewRef={previewRef}
+        resetPreview={resetPreview}
+        setPreviewTop={setPreviewTop}
+      />
+    </Button>
+  );
 
   return (
     <div
@@ -134,6 +162,31 @@ function Draggable(props: PlateElementProps) {
     >
       {!isInTable && (
         <Gutter>
+          {!isInColumn && (
+            <div className="slate-blockPlusWrapper flex h-[1.5em] items-center">
+              <Button
+                type="button"
+                variant="ghost"
+                aria-label="插入块"
+                className="h-6 w-4 p-0"
+                style={{ marginTop: `${dragButtonTop + 3}px` }}
+                data-plate-prevent-deselect
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  const path = editor.api.findPath(element);
+                  if (!path) return;
+                  // Notion "+": insert a fresh paragraph below and open slash.
+                  editor.tf.insertNodes(editor.api.create.block({ type: KEYS.p }), {
+                    at: PathApi.next(path),
+                    select: true,
+                  });
+                  editor.tf.insertText('/');
+                }}
+              >
+                <Plus className="text-muted-foreground" />
+              </Button>
+            </div>
+          )}
           <div
             className={cn(
               'slate-blockToolbarWrapper',
@@ -148,20 +201,7 @@ function Draggable(props: PlateElementProps) {
                 isInColumn && 'mr-1.5'
               )}
             >
-              <Button
-                ref={handleRef}
-                variant="ghost"
-                className="-left-0 absolute h-6 w-full p-0"
-                style={{ top: `${dragButtonTop + 3}px` }}
-                data-plate-prevent-deselect
-              >
-                <DragHandle
-                  isDragging={isDragging}
-                  previewRef={previewRef}
-                  resetPreview={resetPreview}
-                  setPreviewTop={setPreviewTop}
-                />
-              </Button>
+              {hasBlockMenu && blockActions ? <BlockActions editor={editor} element={element} path={path} preset={blockActions} trigger={handle} /> : handle}
             </div>
           </div>
         </Gutter>
@@ -190,6 +230,57 @@ function Draggable(props: PlateElementProps) {
   );
 }
 
+const CONVERTIBLE: string[] = [KEYS.p, KEYS.h2, KEYS.h3, KEYS.h4];
+
+function BlockActions({ editor, element, path, preset, trigger }: Pick<PlateElementProps, 'editor' | 'element' | 'path'> & { preset: PlatePreset; trigger: React.ReactElement }) {
+  const index = path[0]!;
+  const run = (action: (at: number[]) => void) => {
+    const at = editor.api.findPath(element);
+    if (!at || editor.dom.readOnly) return;
+    editor.tf.withNewBatch(() => editor.tf.withoutNormalizing(() => action(at)));
+  };
+  const copy = (node: TElement): TElement => {
+    const out = { ...node };
+    delete out.id;
+    out.children = node.children.map((child) => {
+      if ('children' in child) return copy(child as TElement);
+      const text = { ...child };
+      for (const key of Object.keys(text)) if (key === KEYS.comment || key.startsWith('comment_')) delete text[key];
+      return text;
+    });
+    return out;
+  };
+
+  return (
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
+      <DropdownMenuContent align="start" onCloseAutoFocus={(event) => { event.preventDefault(); editor.tf.focus(); }}>
+        {CONVERTIBLE.includes(element.type) ? (
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>转换为</DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {turnIntoItemsFor(preset).filter((item) => item.value !== KEYS.toggle).map((item) => (
+                <DropdownMenuItem key={item.value} onSelect={() => run((at) => {
+                  if (item.value === KEYS.codeBlock) editor.tf.select(editor.api.start(at));
+                  setBlockType(editor, item.value, { at });
+                })}>{item.icon}{item.label}</DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : null}
+        <DropdownMenuItem onSelect={() => run((at) => editor.tf.insertNodes(copy(element), { at: PathApi.next(at) }))}><Copy />复制块</DropdownMenuItem>
+        <DropdownMenuItem disabled={index === 0} onSelect={() => run(([at]) => editor.tf.moveNodes({ at: [at!], to: [at! - 1] }))}><ArrowUp />上移</DropdownMenuItem>
+        <DropdownMenuItem disabled={index === editor.children.length - 1} onSelect={() => run(([at]) => editor.tf.moveNodes({ at: [at!], to: [at! + 1] }))}><ArrowDown />下移</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => run((at) => {
+          editor.tf.removeNodes({ at });
+          if (editor.children.length === 0) editor.tf.insertNodes(editor.api.create.block({ type: KEYS.p }), { at: [0] });
+        })}><Trash2 />删除块</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function Gutter({
   children,
   className,
@@ -208,7 +299,7 @@ function Gutter({
       {...props}
       className={cn(
         'slate-gutterLeft',
-        '-translate-x-full absolute top-0 z-50 flex h-full cursor-text hover:opacity-100 sm:opacity-0',
+        '-translate-x-full absolute top-0 z-50 flex h-full cursor-text gap-0.5 hover:opacity-100 sm:opacity-0',
         getPluginByType(editor, element.type)?.node.isContainer
           ? 'group-hover/container:opacity-100'
           : 'group-hover:opacity-100',
@@ -225,11 +316,13 @@ function Gutter({
 
 const DragHandle = React.memo(function DragHandle({
   isDragging,
+  withActions,
   previewRef,
   resetPreview,
   setPreviewTop,
 }: {
   isDragging: boolean;
+  withActions: boolean;
   previewRef: React.RefObject<HTMLDivElement | null>;
   resetPreview: () => void;
   setPreviewTop: (top: number) => void;
@@ -244,6 +337,7 @@ const DragHandle = React.memo(function DragHandle({
           className="flex size-full items-center justify-center"
           aria-label="拖动以移动此块"
           onClick={(e) => {
+            if (withActions) return;
             e.preventDefault();
             editor.getApi(BlockSelectionPlugin).blockSelection.focus();
           }}
@@ -326,12 +420,12 @@ const DragHandle = React.memo(function DragHandle({
             resetPreview();
           }}
           data-plate-prevent-deselect
-          role="button"
+          role={withActions ? undefined : 'button'}
         >
           <GripVertical className="text-muted-foreground" />
         </div>
       </TooltipTrigger>
-      <TooltipContent>拖动以移动</TooltipContent>
+      <TooltipContent>{withActions ? '点击打开菜单，拖动以移动' : '拖动以移动'}</TooltipContent>
     </Tooltip>
   );
 });

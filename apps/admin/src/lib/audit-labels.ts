@@ -51,6 +51,18 @@ const ACTION_LABELS: Record<string, string> = {
   "approval.template.created": "创建审批模板",
   "approval.template.updated": "修改审批模板",
   "approval.approver.appended": "追加审批人",
+  // P1a 内部文档库（requirements「P1 权限与审计」的 DOC_* 动作；自动保存不逐次记录）。
+  DOC_CREATED: "创建内部文档",
+  DOC_RENAMED: "重命名内部文档",
+  DOC_MOVED: "移动内部文档",
+  DOC_DELETED: "删除内部文档（进回收站）",
+  DOC_UNDELETED: "恢复内部文档",
+  DOC_VERSION_RESTORED: "回滚内部文档版本",
+  DOC_IMAGE_UPLOADED: "上传内部文档图片",
+  DOC_DISCUSSION_RESOLVED: "解决内部文档讨论",
+  DOC_DISCUSSION_REOPENED: "重开内部文档讨论",
+  DOC_COMMENT_DELETED: "删除内部文档回复",
+  DOC_PURGED: "永久清理内部文档",
 };
 
 const SEGMENT_LABELS: Record<string, string> = {
@@ -86,10 +98,14 @@ export const DOMAIN_LABELS: Record<string, string> = {
   // 仅补真实业务域；本地沙盒 / ECS 演示等测试环境前缀不进入运营筛选下拉。
   supply: "供给", im: "客服会话", profile: "资料", finance: "资金", credit: "信用",
   joinpay: "汇聚支付", legal: "法务合同", withdrawal: "提现", controlled: "受控提现",
+  docs: "内部文档",
 };
 
 export function domainOf(action: string): string {
-  return action.split(".", 1)[0] ?? "";
+  const domain = action.split(".", 1)[0] ?? "";
+  // DOC_* 为大写下划线动作（P1a 合同），归入 docs 域而不是每个动作自成一域。
+  if (domain.startsWith("DOC_")) return "docs";
+  return domain;
 }
 
 const OBJECT_TYPE_LABELS: Record<string, string> = {
@@ -111,6 +127,9 @@ const OBJECT_TYPE_LABELS: Record<string, string> = {
   rental_account: "资源账号",
   payment_request: "支付请求",
   content_resource: "内容资源",
+  doc_node: "内部文档",
+  doc_version: "内部文档版本",
+  doc_image: "内部文档图片",
   credit_event: "信用记录",
   distribution_participant: "分销商",
   im_consultation: "客服会话",

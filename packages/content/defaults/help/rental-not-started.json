@@ -1,0 +1,42 @@
+{
+  "key": "rental-not-started",
+  "kind": "help",
+  "file": "help/rental-not-started.json",
+  "meta": {
+    "id": "R04",
+    "slug": "rental-not-started",
+    "title": "接号信息不符，或还没开始使用怎么办？",
+    "summary": "尚未正式开租的订单可以申请结束：无争议且无其他调整时全额应退；接号差异由平台调整流程处理，不私自协商。",
+    "category": "rental",
+    "audience": ["renter"],
+    "keywords": ["信息不符", "接号", "还没用", "取消", "未开租", "退单", "差异", "补款"],
+    "updatedAt": "2026-10-06",
+    "related": ["rental-getting-started", "issue-during-rental", "fees-refund-status"],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-未开租可以结束不自动扣费",
+    "mismatch": "content-接号信息与订单不一致"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "未开租可以结束不自动扣费", "children": [{ "text": "未开租可以结束，不自动扣费" }] },
+      { "type": "p", "children": [{ "text": "订单已付款但尚未正式开租时，任一方都可以发起结束申请，由受权客服核实交付与使用情况后办理。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "无争议且没有其他受审调整时全额应退，不会自动收取包赔费或提前补足；但「应退」不代表支付渠道已经到账。" }] }
+        ]
+      },
+      { "type": "h2", "id": "接号信息与订单不一致", "children": [{ "text": "接号信息与订单不一致" }] },
+      { "type": "p", "children": [{ "text": "实际账号与订单内容存在差异时，在订单群内说明，由平台调整申请承载：双方确认、负责客服审核、必要补款完成后才生效，原订单和每次变更都会保留记录。" }] },
+      { "type": "p", "children": [{ "text": "不要私下与对方协商转账或线下处理，所有调整以订单页面和群内客服确认为准。" }] }
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-import { inspectMarkdown } from "@zzsh/content/markdown";
+import { extractPlate } from "@zzsh/content/plate";
 import type { PublicContentResource } from "@zzsh/content";
 import type { HelpArticle } from "../content/help/types.ts";
 
@@ -8,8 +8,13 @@ export async function publicHelpArticle(resource: PublicContentResource): Promis
   if (resource.state !== "available" || payload?.kind !== "guide") return null;
   const publishedAt = resource.version?.publishedAt;
   const updatedAt = publishedAt ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(publishedAt)) : payload.updatedAt;
-  const article: HelpArticle = { ...payload, updatedAt, mediaUrls: Object.fromEntries(resource.media.map(row => [row.id, row.url])), version: resource.version ?? null };
-  if (payload.format !== "markdown") return article;
-  const document = await inspectMarkdown(payload.markdown);
-  return { ...article, toc: document.toc, plainText: document.plainText };
+  const extracted = extractPlate(payload.document);
+  return {
+    ...payload,
+    updatedAt,
+    mediaUrls: Object.fromEntries(resource.media.map(row => [row.id, row.url])),
+    version: resource.version ?? null,
+    toc: extracted.toc.map(entry => ({ id: entry.id, title: entry.text, depth: entry.level })),
+    plainText: extracted.plainText,
+  };
 }

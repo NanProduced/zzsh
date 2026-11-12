@@ -16,6 +16,8 @@ import { createDemoDistributionManagementResource, createProvisionedDistribution
 import { createDemoNativeDistributionScope } from "./finance/distribution-policy-store";
 import { createDemoNativeWalletOriginResource, createNativeWalletOriginResource, createProvisionedNativeWalletOriginResource } from "./finance/native-wallet-origin";
 import { loadDistributionDueRuntime } from "./finance/distribution-due.module";
+import { loadDocsImageFeature } from "./docs/docs-images";
+import { loadTrashPurgeRuntime } from "./content/trash-purge.module";
 import { loadOrderSweepRuntime } from "./order/order-sweep.module";
 import { loadDemoFinanceRuntime } from "./finance/ecs-test-demo-loader";
 
@@ -63,6 +65,8 @@ export async function bootstrap() {
         ? createProvisionedDistributionManagementResource(config) : undefined;
     const orderSweep = loadOrderSweepRuntime(businessPool);
     const distributionDue = loadDistributionDueRuntime(businessPool, distributionNative?.auth.distributionEarnings);
+    const docsImages = businessPool ? loadDocsImageFeature(process.env) : undefined;
+    const trashPurge = loadTrashPurgeRuntime(businessPool, docsImages?.enabled ? docsImages.storage : undefined);
     if (businessPool) await assertBusinessRuntimeIdentity(businessPool, config);
     // New-user zero origin trusts the owner's exact resource admission, not a merchant account.
     const nativeWalletOrigin = !businessPool ? undefined : demo ? createDemoNativeWalletOriginResource(demo.demo)
@@ -73,11 +77,13 @@ export async function bootstrap() {
       health: { dependencies },
       ...(orderSweep ? { orderSweep } : {}),
       ...(distributionDue ? { distributionDue } : {}),
+      ...(trashPurge ? { trashPurge } : {}),
       ...(businessPool
         ? {
             database: { pool: businessPool, directoryReadPool },
             auth: {
               ...authConfig!,
+              docsImages,
               pool: businessPool,
               ...(withdrawalBankBinding ? { withdrawalBankBinding } : {}),
               ...(joinpayWithdrawal ? { joinpayWithdrawal } : {}),

@@ -1,0 +1,84 @@
+{
+  "key": "minor-protection",
+  "kind": "help",
+  "file": "help/minor-protection.json",
+  "meta": {
+    "id": "X01",
+    "slug": "minor-protection",
+    "title": "未成年人保护",
+    "summary": "未成年人禁止在平台消费；交易环节要求成年实名核验。",
+    "category": "agreement",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "未成年",
+      "未成年人",
+      "防沉迷",
+      "保护"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "terms-and-privacy"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "rule": "content-平台要求",
+    "guardian": "content-家长或监护人"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "平台要求",
+        "children": [
+          {
+            "text": "平台要求"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "未成年人禁止在平台租号、出租或进行任何消费。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "下单等交易环节要求通过成年实名核验，未完成核验无法交易。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "家长或监护人",
+        "children": [
+          {
+            "text": "家长或监护人"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "如发现未成年人使用本平台消费，请保留相关信息并联系平台客服处理。"
+          }
+        ]
+      }
+    ]
+  }
+}

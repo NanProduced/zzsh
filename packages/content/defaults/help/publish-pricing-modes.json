@@ -1,0 +1,35 @@
+{
+  "key": "publish-pricing-modes",
+  "kind": "help",
+  "file": "help/publish-pricing-modes.json",
+  "meta": {
+    "id": "P02",
+    "slug": "publish-pricing-modes",
+    "title": "普通、自定义、极速上架有什么区别？",
+    "summary": "三种方式使用同一套上架表单，区别只在价格比例的约束；具体金额以提交前服务端报价为准。",
+    "category": "publish",
+    "audience": ["owner"],
+    "keywords": ["普通", "自定义", "极速", "比例", "定价", "上架方式", "价格"],
+    "updatedAt": "2026-10-06",
+    "related": ["publish-prepare", "fees-overview"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-同一表单不同价格约束",
+    "quote": "content-金额以报价页为准"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "同一表单不同价格约束", "children": [{ "text": "同一表单，不同价格约束" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "普通：价格比例按平台计价规则计算。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "自定义：在平台允许的范围内自行设定比例，超出范围无法提交。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "极速：从极速入口进入时使用该模式给定的比例类型约束，适合希望按平台既定方式快速上架的号主。" }] },
+      { "type": "p", "children": [{ "text": "三种方式填写的账号资料与图片要求相同，不存在三套上架条件。" }] },
+      { "type": "h2", "id": "金额以报价页为准", "children": [{ "text": "金额以报价页为准" }] },
+      { "type": "p", "children": [{ "text": "每种方式的具体金额与比例在提交前由服务端按当前规则版本计算并展示，你确认后才冻结生效；规则更新后，受影响的上架需要重新报价和确认，历史已确认内容不会被覆盖。" }] }
+    ]
+  }
+}

@@ -46,37 +46,23 @@ export function HelpArticlePager({ prev, next }: { prev: HelpNavArticle | null; 
   if (!prev && !next) return null;
   return (
     <nav className="help-pager" aria-label="上一篇 / 下一篇">
-      {prev ? (
+      {prev && (
         <Link className="help-pager-link help-pager-link--prev" href={`/help/${prev.slug}`} rel="prev">
-          <div className="help-pager-icon-box" aria-hidden="true">
-            <ArrowLeft size={16} className="help-pager-arrow" />
-          </div>
-          <div className="help-pager-copy">
-            <div className="help-pager-header">
-              <span className="help-pager-dir">上一篇</span>
-              <kbd className="help-pager-kbd" aria-hidden="true">←</kbd>
-            </div>
+          <ArrowLeft size={16} aria-hidden="true" />
+          <span>
+            <span className="help-pager-dir">上一篇</span>
             <span className="help-pager-title">{prev.title}</span>
-          </div>
+          </span>
         </Link>
-      ) : (
-        <span className="help-pager-link help-pager-link--placeholder" aria-hidden="true" />
       )}
-      {next ? (
+      {next && (
         <Link className="help-pager-link help-pager-link--next" href={`/help/${next.slug}`} rel="next">
-          <div className="help-pager-copy">
-            <div className="help-pager-header">
-              <span className="help-pager-dir">下一篇</span>
-              <kbd className="help-pager-kbd" aria-hidden="true">→</kbd>
-            </div>
+          <span>
+            <span className="help-pager-dir">下一篇</span>
             <span className="help-pager-title">{next.title}</span>
-          </div>
-          <div className="help-pager-icon-box" aria-hidden="true">
-            <ArrowRight size={16} className="help-pager-arrow" />
-          </div>
+          </span>
+          <ArrowRight size={16} aria-hidden="true" />
         </Link>
-      ) : (
-        <span className="help-pager-link help-pager-link--placeholder" aria-hidden="true" />
       )}
     </nav>
   );

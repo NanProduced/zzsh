@@ -1,0 +1,74 @@
+{
+  "key": "fees-refund-status",
+  "kind": "help",
+  "file": "help/fees-refund-status.json",
+  "meta": {
+    "id": "F05",
+    "slug": "fees-refund-status",
+    "title": "显示应退款，为什么还没到账？",
+    "summary": "应退表示平台已确认退款责任；退款需经支付渠道处理，受理与到账分别记录，提前结算有 7 天等待期。",
+    "category": "fees",
+    "audience": ["renter"],
+    "keywords": ["退款", "应退", "到账", "没到账", "退款进度", "退押金", "原路退回"],
+    "updatedAt": "2026-10-06",
+    "related": ["fees-settlement", "fees-early-end", "withdraw-status"],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-先给结论",
+    "timeline": "content-退款的时间线",
+    "states": "content-常见状态怎么理解",
+    "help": "content-长时间未到账怎么办"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "先给结论", "children": [{ "text": "先给结论" }] },
+      { "type": "p", "children": [{ "text": "「应退」表示平台已确认应退金额并生成退款责任，不代表支付渠道已经到账。退款按原路退回付款渠道，渠道处理完成后才到账。" }] },
+      { "type": "h2", "id": "退款的时间线", "children": [{ "text": "退款的时间线" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 1, "children": [{ "text": "结算生效后，正常结算自动发起原路退款。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 2, "children": [{ "text": "不足 70% 的提前结算，在客服复核通过、结算生效满 7 天后自动发起。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 3, "children": [{ "text": "退款发起后由支付渠道处理，平台分别记录受理与到账结果。" }] },
+      { "type": "h2", "id": "常见状态怎么理解", "children": [{ "text": "常见状态怎么理解" }] },
+      {
+        "type": "table",
+        "children": [
+          {
+            "type": "tr",
+            "children": [
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "状态" }] }] },
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "含义" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "待发起" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "已确认应退，退款尚未执行（可能仍在提前结算的 7 天等待期，也可能尚未发起处理）" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "处理中" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "已发起退款，等待支付渠道返回结果" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "结果待核对" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "渠道暂未返回明确结果，平台核实中；不会因此重复退款" }] }] }
+            ]
+          }
+        ]
+      },
+      { "type": "p", "children": [{ "text": "退款即使失败，也仍是平台的退款责任，平台会继续处理或重新发起；它不会转成你的可提现余额，退款只按原路退回付款渠道。" }] },
+      { "type": "h2", "id": "长时间未到账怎么办", "children": [{ "text": "长时间未到账怎么办" }] },
+      { "type": "p", "children": [{ "text": "请保留订单编号，通过站内联系平台客服，说明订单与退款情况，由客服核实当前处理进度。" }] }
+    ]
+  }
+}

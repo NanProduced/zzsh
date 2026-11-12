@@ -1,0 +1,113 @@
+{
+  "key": "account-register-login",
+  "kind": "help",
+  "file": "help/account-register-login.json",
+  "meta": {
+    "id": "A01",
+    "slug": "account-register-login",
+    "title": "手机号注册、验证码和密码如何登录？",
+    "summary": "手机号加短信验证码即可注册并登录，密码是可选的便捷方式；昵称不是登录名。",
+    "category": "account",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "注册",
+      "登录",
+      "验证码",
+      "手机号",
+      "密码",
+      "昵称"
+    ],
+    "updatedAt": "2026-10-19",
+    "related": [
+      "account-recovery",
+      "account-realname-vs-face",
+      "platform-upgrade-records"
+    ],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "register": "content-注册",
+    "login": "content-登录方式",
+    "legacy": "content-旧平台用户"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "注册",
+        "children": [
+          {
+            "text": "注册"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "输入手机号获取短信验证码，验证并同意协议后即完成注册并直接登录，不要求设置密码。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "登录方式",
+        "children": [
+          {
+            "text": "登录方式"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "手机号 + 短信验证码：任何账号都可以使用。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "手机号 + 密码：仅设置过密码的账号可用；新设置或重置的密码至少 12 位。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "昵称可以随时修改，仅用于展示，不参与登录；登录不区分昵称。支持多设备同时登录，可在账号安全页查看并退出其他设备的会话。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "旧平台用户",
+        "children": [
+          {
+            "text": "旧平台用户"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "已接入的原平台账户可使用原手机号按登录页提供的方式登录，已承接的订单与资产关系在个人中心查看；原密码验证成功后会完成安全升级，不要求先更换密码。原记录暂未显示时，可查看平台升级说明或联系平台客服核实，不必重新注册账户。"
+          }
+        ]
+      }
+    ]
+  }
+}

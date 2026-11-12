@@ -1,0 +1,164 @@
+{
+  "key": "membership-benefits",
+  "kind": "help",
+  "file": "help/membership-benefits.json",
+  "meta": {
+    "id": "M01",
+    "slug": "membership-benefits",
+    "title": "会员成长档位与礼遇如何影响费用？",
+    "summary": "成长档位按近90天有效成长积分划分，黑金为累计资格；押金减免与价格优惠只来自已发布政策或生效礼遇，具体以下单确认页的本人报价为准。",
+    "category": "membership",
+    "audience": [
+      "renter"
+    ],
+    "keywords": [
+      "会员",
+      "成长",
+      "档位",
+      "礼遇",
+      "押金",
+      "优惠"
+    ],
+    "updatedAt": "2026-10-19",
+    "related": [
+      "fees-overview",
+      "rental-check-before-order",
+      "invitation-earnings",
+      "platform-upgrade-records"
+    ],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "tiers": "content-成长档位与门槛",
+    "grace": "content-保级与重新定档",
+    "benefits": "content-权益与专属礼遇",
+    "notes": "content-注意"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "成长档位与门槛",
+        "children": [
+          {
+            "text": "成长档位与门槛"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "近90天有效成长积分门槛：普通 0、银卡 5,000、金卡 10,000、铂金 20,000、钻石 40,000；未完成结算的消费不计入。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "黑金会员·终身：累计有效成长积分达到 50,000 即可获得，可直接累计达成，不要求先达到钻石；停止消费不会让已确认的黑金资格失效。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "消费退出90天窗口只减少近90天积分，不减少累计成长；退款更正按服务端实际结果调整对应口径，消费汇总后取整再换算积分。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "保级与重新定档",
+        "children": [
+          {
+            "text": "保级与重新定档"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "档位随结算实时重算。积分不足原档门槛时进入7天保级期，期间保留原档权益；保级缺口与截止日期以个人中心展示为准，到期按当时积分重新定档，消费不会顺延截止时间。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "权益与专属礼遇",
+        "children": [
+          {
+            "text": "权益与专属礼遇"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "等级权益以平台已发布政策为准；政策未发布时页面显示「具体政策待公布」，不会以测试或示意内容代替。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "专属礼遇由平台人工核发，适用范围与起止时间以生效记录为准；审批通过不等于已享受，待生效与历史礼遇在详情中单独说明。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "押金减免只影响租客押金，与号主信用保证金分开；是否免押以生效资格为准，不从会员档位名称推导。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "注意",
+        "children": [
+          {
+            "text": "注意"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "页面没有展示的权益不作承诺；资源价格与押金金额以下单确认页为你计算的本人报价为准，帮助说明不改变订单金额。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "邀请佣金与会员消费优惠是两回事；邀请收益的适用条件、计算与入账见相关说明。"
+          }
+        ]
+      }
+    ]
+  }
+}

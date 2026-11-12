@@ -11,7 +11,7 @@ import {
 } from "../src/content/content-seed";
 
 type ItemRow = { id: string; type: string; gameId: string | null; revision: string; sortOrder: number };
-type VersionRow = { id: string; itemId: string; sequence: number; state: string; title: string; summary: string; body: string; coverMediaId: string | null; revision: string; publishedAt: Date | null; publishedByAdminId: string | null };
+type VersionRow = { id: string; itemId: string; sequence: number; state: string; title: string; summary: string; body: string; coverMediaId: string | null; revision: string; publishedAt: Date | null; publishedByAdminId: string | null; payload: unknown; updateSettings?: unknown };
 type CarouselRow = { id: string; slotCode: string; mediaId: string; imageAlt: string; title: string; description: string; linkUrl: string | null; enabled: boolean; sortOrder: number; startsAt: Date | null; endsAt: Date | null; createdByAdminId: string };
 
 class Stub {
@@ -48,10 +48,12 @@ class Stub {
     }
     if (text.startsWith(`INSERT INTO "zzsh_content"."content_version"`)) {
       // The insert keeps sequence as a SQL literal; parameters start at id.
+      // P2：公告/资讯正文存 payload（plate），body 为纯文本投影；update_settings 一并落库。
       this.versions.set(String(values[0]), {
         id: String(values[0]), itemId: String(values[1]), sequence: 1, state: "DRAFT",
         title: String(values[2]), summary: String(values[3]), body: String(values[4]), coverMediaId: values[5] as string | null,
         revision: "1", publishedAt: null, publishedByAdminId: null,
+        payload: values[7] ? JSON.parse(String(values[7])) : null, updateSettings: values[8] ? JSON.parse(String(values[8])) : undefined,
       });
       return { rows: [], rowCount: 1 };
     }

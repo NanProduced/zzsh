@@ -1,0 +1,154 @@
+{
+  "key": "platform-upgrade-records",
+  "kind": "help",
+  "file": "help/platform-upgrade-records.json",
+  "meta": {
+    "id": "A04",
+    "slug": "platform-upgrade-records",
+    "title": "平台升级后，怎样查原来的订单、余额和账号？",
+    "summary": "从个人中心查找已接入的订单、钱包流水与出租账号；原记录暂未显示或状态待确认时，带原编号联系平台客服核实。",
+    "category": "account",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "平台升级",
+      "迁移",
+      "历史订单",
+      "原余额",
+      "期初",
+      "旧号",
+      "旧平台",
+      "收藏",
+      "记录不见了"
+    ],
+    "updatedAt": "2026-10-19",
+    "related": [
+      "account-register-login",
+      "fees-refund-status",
+      "withdraw-status",
+      "invitation-earnings"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "where": "content-先到个人中心查找",
+    "numbers": "content-账号编号与公开状态",
+    "meaning": "content-金额与权益怎样理解",
+    "missing": "content-原记录暂未显示怎么办"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "先到个人中心查找",
+        "children": [
+          {
+            "text": "先到个人中心查找"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "订单：在「租入订单」「出租订单」按自己的交易身份查看已接入记录，原订单仍保留原单号。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "余额与收益：在「我的钱包」查看余额和流水，在「邀请与佣金」查看收益。「期初余额」是承接进钱包的原余额；标为「已含期初」的历史记录不会再重复增加余额。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "账号与收藏：在「出租账号」「我的收藏」查看已显示的关联记录。市场默认只列当前可租账号，不能单凭市场列表判断自己的账号或收藏是否丢失。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "账号编号与公开状态",
+        "children": [
+          {
+            "text": "账号编号与公开状态"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "公开查询账号时，请使用页面显示的账号编号。订单号可用于核对对应订单；其他编号可交给客服核实关联。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "可公开查看不等于当前可租。已租、待付款占用或普通下架的账号仍可能保留公开资料，能否下单以详情与本人报价为准；封禁、撤回公开或未公开资料，不会因为原订单或收藏而额外开放。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "金额与权益怎样理解",
+        "children": [
+          {
+            "text": "金额与权益怎样理解"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "原订单继续按原来确定的规则与记录处理，不用新会员价格重新计算。原退款金额记录不代表当前应退责任或已经到账，应退金额与到账结果分别查看订单进度。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "钱包可用与可提现分别核定；金额、档位或积分显示尚未确认不代表零。会员档位和礼遇以会员中心的已核定记录为准，原平台人工等级不自动等同新成长档位或新礼遇。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "原记录暂未显示怎么办",
+        "children": [
+          {
+            "text": "原记录暂未显示怎么办"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "本说明不表示全部历史数据都已完成承接。暂未显示、资料待核或金额尚未确认，不能直接判断为零或记录丢失。请保留原订单或账号编号、发生时间和页面状态，通过站内联系平台客服核实。"
+          }
+        ]
+      }
+    ]
+  }
+}

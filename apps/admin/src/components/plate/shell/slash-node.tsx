@@ -3,8 +3,7 @@
 // groups and imports. Menu items are filtered by the preset whitelist
 // (BLOCK_TYPES in @zzsh/content/plate): notice has no headings/table/code/hr,
 // legal has no code/callout/toggle and disc lists only, internal adds todo/toc.
-// Images are intentionally absent: they need a mediaId/imageId from the media
-// library (P1a), which the slash menu cannot mint. Chinese labels + keywords.
+// The host can supply a document image picker. Chinese labels + keywords.
 import * as React from 'react';
 
 import type { PlateEditor, PlateElementProps } from 'platejs/react';
@@ -15,6 +14,7 @@ import {
   Heading2Icon,
   Heading3Icon,
   Heading4Icon,
+  ImagePlus,
   LightbulbIcon,
   LinkIcon,
   ListIcon,
@@ -48,32 +48,44 @@ type Item = {
   requires: string[];
   keywords?: string[];
   label: string;
+  desc: string;
+  kbd?: string;
   inline?: boolean;
 };
 
+const HEADING_ITEMS: Item[] = [
+  { icon: <Heading2Icon />, desc: '章节标题', kbd: '##', keywords: ['subtitle', 'h2', 'biaoti'], label: '标题 2', value: KEYS.h2, requires: ['h2'] },
+  { icon: <Heading3Icon />, desc: '小节标题', kbd: '###', keywords: ['subtitle', 'h3', 'biaoti'], label: '标题 3', value: KEYS.h3, requires: ['h3'] },
+  { icon: <Heading4Icon />, desc: '子小节标题', kbd: '####', keywords: ['subtitle', 'h4', 'biaoti'], label: '标题 4', value: KEYS.h4, requires: ['h4'] },
+];
+
+const LIST_ITEMS: Item[] = [
+  { icon: <ListIcon />, desc: '无序符号列表', kbd: '-', keywords: ['unordered', 'ul', '-', 'wuxu'], label: '无序列表', value: KEYS.ul, requires: ['p'] },
+  { icon: <ListOrdered />, desc: '自动编号列表', kbd: '1.', keywords: ['ordered', 'ol', '1', 'youxu'], label: '有序列表', value: KEYS.ol, requires: ['p'] },
+  { icon: <Square />, desc: '可勾选的待办', kbd: '[]', keywords: ['checklist', 'task', 'checkbox', '[]', 'daiban'], label: '待办列表', value: KEYS.listTodo, requires: ['p'] },
+];
+
 const BASIC_ITEMS: Item[] = [
-  { icon: <PilcrowIcon />, keywords: ['paragraph', 'text', 'duanluo'], label: '段落', value: KEYS.p, requires: ['p'] },
-  { icon: <Heading2Icon />, keywords: ['subtitle', 'h2', 'biaoti'], label: '标题 2', value: KEYS.h2, requires: ['h2'] },
-  { icon: <Heading3Icon />, keywords: ['subtitle', 'h3', 'biaoti'], label: '标题 3', value: KEYS.h3, requires: ['h3'] },
-  { icon: <Heading4Icon />, keywords: ['subtitle', 'h4', 'biaoti'], label: '标题 4', value: KEYS.h4, requires: ['h4'] },
-  { icon: <ListIcon />, keywords: ['unordered', 'ul', '-', 'wuxu'], label: '无序列表', value: KEYS.ul, requires: ['p'] },
-  { icon: <ListOrdered />, keywords: ['ordered', 'ol', '1', 'youxu'], label: '有序列表', value: KEYS.ol, requires: ['p'] },
-  { icon: <Square />, keywords: ['checklist', 'task', 'checkbox', '[]', 'daiban'], label: '待办列表', value: KEYS.listTodo, requires: ['p'] },
-  { icon: <ChevronRightIcon />, keywords: ['collapsible', 'expandable', 'zhedie'], label: '折叠', value: KEYS.toggle, requires: ['toggle'] },
-  { icon: <Code2 />, keywords: ['```', 'daima'], label: '代码块', value: KEYS.codeBlock, requires: ['code_block', 'code_line'] },
-  { icon: <Table />, keywords: ['biaoge'], label: '表格', value: KEYS.table, requires: ['table', 'tr', 'td'] },
-  { icon: <Quote />, keywords: ['citation', 'blockquote', 'quote', '>', 'yinyong'], label: '引用', value: KEYS.blockquote, requires: ['blockquote'] },
-  { icon: <LightbulbIcon />, keywords: ['note', 'tishi'], label: '提示', value: KEYS.callout, requires: ['callout'] },
-  { icon: <MinusIcon />, keywords: ['divider', 'hr', 'fenge'], label: '分割线', value: KEYS.hr, requires: ['hr'] },
+  { icon: <PilcrowIcon />, desc: '普通正文段落', keywords: ['paragraph', 'text', 'duanluo', '段落'], label: '文本', value: KEYS.p, requires: ['p'] },
+  { icon: <Quote />, desc: '引用或摘录', kbd: '>', keywords: ['citation', 'blockquote', 'quote', '>', 'yinyong'], label: '引用', value: KEYS.blockquote, requires: ['blockquote'] },
+  { icon: <LightbulbIcon />, desc: '提示或警告框', keywords: ['note', 'tishi'], label: '提示', value: KEYS.callout, requires: ['callout'] },
+  { icon: <ChevronRightIcon />, desc: '可展开/收起的内容', keywords: ['collapsible', 'expandable', 'zhedie'], label: '折叠', value: KEYS.toggle, requires: ['toggle'] },
+  { icon: <Code2 />, desc: '等宽代码片段', kbd: '```', keywords: ['```', 'daima'], label: '代码块', value: KEYS.codeBlock, requires: ['code_block', 'code_line'] },
+  { icon: <Table />, desc: '行列结构化数据', keywords: ['biaoge'], label: '表格', value: KEYS.table, requires: ['table', 'tr', 'td'] },
+  { icon: <MinusIcon />, desc: '视觉分隔线', kbd: '---', keywords: ['divider', 'hr', 'fenge'], label: '分割线', value: KEYS.hr, requires: ['hr'] },
 ];
 
 const ADVANCED_ITEMS: Item[] = [
-  { icon: <TableOfContentsIcon />, keywords: ['toc', 'mulu'], label: '目录', value: KEYS.toc, requires: ['toc'] },
+  { icon: <TableOfContentsIcon />, desc: '按标题生成页内目录', keywords: ['toc', 'mulu'], label: '目录', value: KEYS.toc, requires: ['toc'] },
 ];
 
 const INLINE_ITEMS: Item[] = [
-  { icon: <LinkIcon />, keywords: ['link', 'url', 'lianjie'], label: '链接', value: KEYS.link, requires: [], inline: true },
+  { icon: <LinkIcon />, desc: '插入超链接', keywords: ['link', 'url', 'lianjie'], label: '链接', value: KEYS.link, requires: [], inline: true },
 ];
+
+const IMAGE_ITEM: Item = { icon: <ImagePlus />, desc: '上传 PNG、JPEG 或 WebP', keywords: ['image', 'tupian'], label: '图片', value: KEYS.img, requires: ['img'] };
+
+export const PlateImagePicker = React.createContext<((blockId: string) => void) | undefined>(undefined);
 
 export function slashItemsFor(preset: PlatePreset, items: Item[]): Item[] {
   const blocks = new Set(BLOCK_TYPES[preset]);
@@ -89,48 +101,54 @@ export function slashItemsFor(preset: PlatePreset, items: Item[]): Item[] {
 export function SlashInputElement(
   props: PlateElementProps<TComboboxInputElement>
 ) {
-  const { editor, element } = props;
+  const { editor, element, path } = props;
   const preset = usePluginOption({ key: KEYS.slashInput }, 'preset') as PlatePreset;
+  const pickImage = React.useContext(PlateImagePicker);
+  const blockId = editor.children[path[0]!]?.id;
 
   const groups = React.useMemo(() => {
-    const basic = slashItemsFor(preset, BASIC_ITEMS);
-    const advanced = slashItemsFor(preset, ADVANCED_ITEMS);
-    const inline = slashItemsFor(preset, INLINE_ITEMS);
+    const basic = [BASIC_ITEMS[0]!, HEADING_ITEMS[0]!, ...(pickImage ? [IMAGE_ITEM] : []), ...HEADING_ITEMS.slice(1), ...LIST_ITEMS, BASIC_ITEMS[1]!];
     return [
-      { group: '基础块', items: basic },
-      { group: '高级块', items: advanced },
-      { group: '行内', items: inline },
+      { group: '基本区块', items: slashItemsFor(preset, basic) },
+      { group: '更多区块', items: slashItemsFor(preset, [...BASIC_ITEMS.slice(2), ...ADVANCED_ITEMS, ...INLINE_ITEMS]) },
     ].filter(({ items }) => items.length > 0);
-  }, [preset]);
+  }, [pickImage, preset]);
 
   const onSelect = (editor: PlateEditor, item: Item) => {
-    if (item.inline) insertInlineElement(editor, item.value);
+    if (item.value === KEYS.img) {
+      if (typeof blockId === 'string') pickImage?.(blockId);
+    } else if (item.inline) insertInlineElement(editor, item.value);
     else insertBlock(editor, item.value, { upsert: true });
   };
 
   return (
     <PlateElement {...props} as="span">
       <InlineCombobox element={element} trigger="/">
-        <InlineComboboxInput />
+        <InlineComboboxInput className="plate-slash-input" placeholder="输入以搜索" aria-label="搜索区块" />
 
-        <InlineComboboxContent>
+        <InlineComboboxContent className="plate-slash-menu">
           <InlineComboboxEmpty>没有匹配的块</InlineComboboxEmpty>
 
           {groups.map(({ group, items }) => (
             <InlineComboboxGroup key={group}>
-              <InlineComboboxGroupLabel>{group}</InlineComboboxGroupLabel>
+              <InlineComboboxGroupLabel className="plate-slash-group-label">{group}</InlineComboboxGroupLabel>
 
               {items.map((item) => (
                 <InlineComboboxItem
                   key={item.value}
                   value={item.value}
                   onClick={() => onSelect(editor, item)}
+                  focusEditor={item.value !== KEYS.img}
                   label={item.label}
                   group={group}
-                  keywords={item.keywords}
+                  keywords={[item.desc, ...(item.keywords ?? [])]}
+                  className="plate-slash-item"
                 >
-                  <div className="mr-2 text-muted-foreground">{item.icon}</div>
-                  {item.label}
+                  <span className="plate-slash-row">
+                    <span className="plate-slash-icon" aria-hidden="true">{item.icon}</span>
+                    <span className="plate-slash-label">{item.label}</span>
+                    {item.kbd ? <kbd className="plate-slash-kbd">{item.kbd}</kbd> : null}
+                  </span>
                 </InlineComboboxItem>
               ))}
             </InlineComboboxGroup>

@@ -20,7 +20,22 @@ export function findPhoneClue(value: string): { phone: string; exact: boolean } 
   return {phone:digits.length===13&&digits.startsWith('86')?digits.slice(2):digits,exact:EXACT_PHONE_VALUE.test(normalized.trim())};
 }
 
+export const CONTENT_WORKSPACES = {
+  "content-help": { path: "/content/help", title: "帮助中心", surface: "help" },
+  "content-updates": { path: "/content/updates", title: "平台动态", surface: "updates" },
+  "content-legal": { path: "/content/legal", title: "协议条款", surface: "legal" },
+  "content-pages": { path: "/content/pages", title: "用户站展示", surface: "pages" },
+  "content-media": { path: "/content/media", title: "图片素材", surface: "media" },
+} as const;
+
+export type ContentWorkspaceKind = keyof typeof CONTENT_WORKSPACES;
+
+export function isContentWorkspaceKind(kind: string): kind is ContentWorkspaceKind {
+  return Object.hasOwn(CONTENT_WORKSPACES, kind);
+}
+
 export type WorkspaceRouteKind =
+  | ContentWorkspaceKind
   | "workbench"
   | "support"
   | "support-mine"
@@ -55,6 +70,8 @@ export type WorkspaceRouteKind =
   | "media-review"
   | "avatar-review"
   | "content"
+  | "docs"
+  | "docs-object"
   | "orders"
   | "order-object"
   | "resource-object"
@@ -87,7 +104,7 @@ const DETAIL_TAB_TYPES: Partial<Record<WorkspaceRouteKind, string>> = {
   "user-object": "用户", "listing-object": "供给账号", "order-object": "订单",
   "resource-object": "资源账号", "finance-document": "资金单据", "finance-user": "用户资金", "distribution-participant": "分销商",
 };
-const GENERIC_DETAIL_TITLES = new Set(["审批详情", "账号供给详情", "资源账号", "资金单据", "用户资金", "分销商详情"]);
+const GENERIC_DETAIL_TITLES = new Set(["审批详情", "账号供给详情", "资源账号", "资金单据", "用户资金", "分销商详情", "文档详情"]);
 
 export function tabPresentation(tab: WorkspaceTab, tabs: WorkspaceTab[]) {
   const type = DETAIL_TAB_TYPES[tab.kind];
@@ -146,6 +163,7 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   "avatar-review": { id: "avatar-review", title: "头像审核", path: "/avatar-reviews", closable: true, kind: "avatar-review" },
   orders: { id: "orders", title: "订单", path: "/orders", closable: true, kind: "orders" },
   content: { id: "content", title: "内容管理", path: "/content", closable: true, kind: "content" },
+  docs: { id: "docs", title: "内部文档", path: "/docs", closable: true, kind: "docs" },
 };
 
 export function sanitizeTabQuery(query: Record<string, string> | URLSearchParams): Record<string, string> {
@@ -261,6 +279,14 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
   const financeObject=/^\/finance\/(documents|users)\/([^/]+)$/.exec(path);
   if(financeObject){let objectId="INVALID_REFERENCE";try{objectId=decodeURIComponent(financeObject[2]!);}catch{}const kind=financeObject[1]==="documents"?"finance-document":"finance-user";return {kind,objectType:kind,objectId,tabId:kind+":"+objectId,path,title:kind==="finance-document"?"资金单据":"用户资金"};}
   if (path === "/content") return { kind: "content", tabId: "content", path: "/content", title: "内容管理" };
+  const contentKind = (Object.keys(CONTENT_WORKSPACES) as ContentWorkspaceKind[]).find((kind) => CONTENT_WORKSPACES[kind].path === path);
+  if (contentKind) return { kind: contentKind, tabId: contentKind, path, title: CONTENT_WORKSPACES[contentKind].title };
+  if (path === "/docs") return { kind: "docs", tabId: "docs", path: "/docs", title: "内部文档" };
+  const docsObject = path.match(/^\/docs\/([^/]+)$/);
+  if (docsObject) {
+    let objectId = ""; try { objectId = decodeURIComponent(docsObject[1] ?? ""); } catch { /* Invalid IDs follow the existing unknown-route path. */ }
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "docs-object", objectType: "doc", objectId, tabId: "docs", path, title: "内部文档" };
+  }
   return { kind: "unknown", tabId: WORKBENCH_TAB_ID, path: "/workbench", title: "工作台" };
 }
 
@@ -283,7 +309,7 @@ export function tabFromLocation(pathname: string, search = ""): WorkspaceTab {
   let financePath = legacyFinanceQuery ? "/finance/search" : distributionPath;
   if (['/finance/search','/finance/records','/finance/records/history'].includes(financePath)) { if(query.source==='LEGACY')financePath='/finance/records/history';delete query.source;delete query.operation; }
   const parsed = parseWorkspacePath(financePath);
-  const base = LIST_TABS[parsed.tabId];
+  const base = parsed.kind === "docs-object" ? undefined : LIST_TABS[parsed.tabId];
   if (base) return { ...base, query };
   return {
     id: parsed.tabId,
@@ -310,6 +336,11 @@ export function changesSettingsContent(current: WorkspaceTab, next: WorkspaceTab
   return current.kind === "settings" && next.kind === "settings" && current.id === next.id
     && ((current.query.section ?? "appearance") !== (next.query.section ?? "appearance")
       || (current.query.preview === "1") !== (next.query.preview === "1"));
+}
+
+export function changesWorkspaceContent(current: WorkspaceTab, next: WorkspaceTab): boolean {
+  return changesSettingsContent(current, next) || current.id === "docs" && next.id === "docs"
+    && (current.objectId !== next.objectId || (current.query.view === "trash") !== (next.query.view === "trash"));
 }
 
 export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boolean {
@@ -345,10 +376,19 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "avatar-review") return has("profile.avatar.review") || nav.isBoss;
   if (kind === "orders" || kind === "order-object") return true;
   if (kind === "content") return has("content.platform.read") || has("content.read") || nav.isBoss;
+  if (kind === "content-help") return nav.isBoss || has("content.platform.read") || has("content.help.read") || has("content.read");
+  if (kind === "content-updates") return nav.isBoss || has("content.platform.read") || has("content.read");
+  if (kind === "content-legal") return nav.isBoss || ["content.platform.read", "content.platform.edit", "content.platform.publish", "content.fixed.submit", "content.fixed.publish"].some(has);
+  if (kind === "content-pages" || kind === "content-media") return nav.isBoss || has("content.platform.read");
+  if (kind === "docs" || kind === "docs-object") return has("docs.internal.read") || nav.isBoss;
+  // P0b 预览：导航与开关/权限门禁在 page-content 内判定（受限说明 / 403），此处放行以便渲染门禁文案。
   return false;
 }
 
 export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTab[] {
+  if (next.id === "docs") {
+    return tabs.some((tab) => tab.id === next.id) ? tabs.map((tab) => tab.id === next.id ? next : tab) : [...tabs, next];
+  }
   if (next.kind === "listing-object" || next.kind === "resource-object") {
     const route = parseWorkspacePath(next.path);
     if (route.kind === "listing-object") next = { ...next, id: route.tabId, kind: route.kind, path: route.path, objectType: route.objectType, objectId: route.objectId };
@@ -365,7 +405,7 @@ export function upsertTab(tabs: WorkspaceTab[], next: WorkspaceTab): WorkspaceTa
   if(next.kind.startsWith("finance-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?next:tab):[...tabs,next];
   if(next.kind.startsWith("distribution-"))return tabs.some(tab=>tab.id===next.id)?tabs.map(tab=>tab.id===next.id?{...next,query:{...tab.query,...next.query}}:tab):[...tabs,next];
   if (next.kind === "users" || next.kind === "user-object") return tabs.some(tab => tab.id === next.id) ? tabs.map(tab => tab.id === next.id ? next : tab) : [...tabs, next];
-  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "avatar-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "orders" || next.kind === "support-mine" || next.kind === "support-overview" || next.kind === "support-patrol" || next.kind === "support-settings" || next.kind === "support-management") {
+  if (next.kind === "admins" || next.kind === "roles" || next.kind === "approvals" || next.kind === "audit" || next.kind === "operation-log" || next.kind === "account" || next.kind === "workbench" || next.kind === "support" || next.kind === "membership-growth" || next.kind === "distribution-policy" || next.kind === "catalog" || next.kind === "gunsmith" || next.kind === "rules" || next.kind === "media-review" || next.kind === "avatar-review" || next.kind === "listing-review" || next.kind === "content" || next.kind === "docs" || next.kind === "orders" || next.kind === "support-mine" || next.kind === "support-overview" || next.kind === "support-patrol" || next.kind === "support-settings" || next.kind === "support-management") {
     const existing = tabs.find((tab) => tab.id === next.id);
     if (existing) return tabs.map((tab) => (tab.id === next.id ? { ...existing, ...next, query: { ...existing.query, ...next.query } } : tab));
     return [...tabs, next];
@@ -425,16 +465,17 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
   try {
     const parsed = JSON.parse(raw) as PersistedWorkspaceTabs;
     if (parsed.adminUserId !== adminUserId || !Array.isArray(parsed.tabs)) return null;
-    const stored = parsed.tabs.filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string");
+    const stored = parsed.tabs.filter((tab) => tab && typeof tab.id === "string" && typeof tab.path === "string" && tab.path !== "/content-defaults-preview");
     let normalized: WorkspaceTab[] = [];
-    const normalizeDistribution = (tab: WorkspaceTab) => {
-      if (!tab.kind?.startsWith("distribution-")) return tab;
+    const normalizeRoute = (tab: WorkspaceTab) => {
+      if (isContentWorkspaceKind(tab.kind)) return { ...tab, title: CONTENT_WORKSPACES[tab.kind].title };
+      if (!tab.kind?.startsWith("distribution-") && tab.kind !== "docs" && tab.kind !== "docs-object") return tab;
       const next = tabFromLocation(tab.path, new URLSearchParams(tab.query ?? {}).toString());
       return tab.kind === "distribution-participant" ? { ...next, title: tab.title } : next;
     };
     let restoredActiveId = parsed.activeId;
     for (const tab of stored) {
-      let candidate = normalizeDistribution(tab);
+      let candidate = normalizeRoute(tab);
       if (candidate.kind === "finance-lookup" || ['finance-records','finance-record-history'].includes(candidate.kind) && (candidate.query?.source||candidate.query?.operation)) candidate = tabFromLocation(candidate.kind==='finance-lookup'?'/finance/records':candidate.path, new URLSearchParams(candidate.query ?? {}).toString());
       if (tab.id === parsed.activeId) restoredActiveId = candidate.id;
       if (candidate.kind === "support-management" || candidate.id === "support-management" || candidate.path === "/support/overview" || candidate.path === "/support/management" || candidate.title === "运营看板" || candidate.title === "客服管理") {
@@ -442,10 +483,13 @@ export function restoreTabs(adminUserId: string, nav: NavPermission): { tabs: Wo
       }
       if (candidate.kind === "support-overview") candidate = { ...candidate, title: "客服统计" };
       const clean = { ...candidate, query: sanitizePersistedTabQuery(candidate.query ?? {}) };
-      normalized = clean.kind === "listing-object" || clean.kind === "resource-object" || clean.kind === "support-overview" || clean.kind?.startsWith("distribution-") ? upsertTab(normalized, clean) : [...normalized, clean];
+      normalized = clean.id === "docs" || clean.kind === "listing-object" || clean.kind === "resource-object" || clean.kind === "support-overview" || clean.kind?.startsWith("distribution-") ? upsertTab(normalized, clean) : [...normalized, clean];
     }
     const active = stored.find(tab => tab.id === parsed.activeId);
-    if (active && (active.kind === "listing-object" || active.kind === "resource-object" || active.kind?.startsWith("distribution-"))) normalized = upsertTab(normalized, { ...normalizeDistribution(active), query: sanitizePersistedTabQuery(normalizeDistribution(active).query ?? {}) });
+    if (active && (active.kind === "docs" || active.kind === "docs-object" || active.kind === "listing-object" || active.kind === "resource-object" || active.kind?.startsWith("distribution-"))) {
+      const normalizedActive = normalizeRoute(active);
+      normalized = upsertTab(normalized, { ...normalizedActive, query: sanitizePersistedTabQuery(normalizedActive.query ?? {}) });
+    }
     const tabs = filterTabsByPermission(normalized, nav);
     const parsedActiveId = parsed.activeId === "support-management" ? "support-overview" : restoredActiveId;
     const activeRoute = active && (active.kind === "listing-object" || active.kind === "resource-object") ? parseWorkspacePath(active.path).tabId : parsedActiveId;

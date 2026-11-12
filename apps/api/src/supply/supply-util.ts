@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
-import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import { API_V1_ERROR_CODES, type ApiV1ErrorDetailCode } from "../contracts/api-v1";
 import { SecurityApiError } from "../auth/security-core";
 import { assertGameScopeUsable, readAdminGameScope, scopeAllowsGame } from "../auth/admin-scope";
 import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse } from "../auth/auth-security";
@@ -30,8 +30,8 @@ export function retiredSkinCategory(): SecurityApiError {
   return new SecurityApiError(410, API_V1_ERROR_CODES.SKIN_CATEGORY_RETIRED, "旧皮肤分类已退役，请刷新页面并按皮肤类型筛选");
 }
 
-export function notFound(): SecurityApiError {
-  return new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found");
+export function notFound(detail?: { path: string; code: ApiV1ErrorDetailCode }): SecurityApiError {
+  return new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", detail ? [detail] : undefined);
 }
 
 export function conflict(message = "Request conflicts with current state"): SecurityApiError {

@@ -17,10 +17,10 @@ export function listHelpArticlesByCategory(category: AnyHelpCategoryId, articles
 /** 首页推荐问题：人工挑选，不伪称热门或阅读数 */
 export const featuredSlugs = [
   "rental-getting-started",
-  "rental-check-before-order",
+  "publish-prepare",
   "fees-early-end",
   "fees-refund-status",
-  "publish-prepare",
+  "rental-check-before-order",
   "account-recovery",
 ] as const;
 

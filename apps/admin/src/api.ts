@@ -686,6 +686,8 @@ export type ContentDraftSummary = {
   title: string;
   summary: string;
   body: string;
+  /** P2 plate 合同正文：{ format:"plate", schemaVersion:1, document, mediaIds, anchorAliases? }；body 为服务端纯文本投影。 */
+  payload?: { format?: string; schemaVersion?: number; document?: import("@zzsh/content/plate").PlateDocumentEnvelope; mediaIds?: string[]; anchorAliases?: Record<string, string> } | null;
   updateSettings?: import('@zzsh/content/updates').UpdateSettings;
   bodyMedia?: Record<string, string | null>;
   coverMediaId: string | null;
@@ -840,7 +842,7 @@ export function isStepUpBody(body: Record<string, unknown> | undefined): boolean
   return !!body && typeof body.totpCode === "string" && typeof body.password === "string";
 }
 
-export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT" | "DELETE", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
+export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   const verb = method ?? (body === undefined ? "GET" : "POST");
   const stepUp = verb !== "GET" && isStepUpBody(body);

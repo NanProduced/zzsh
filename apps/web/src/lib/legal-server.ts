@@ -1,3 +1,4 @@
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
 import type { LegalDocId } from "@/content/legal/documents";
 import { isHttpOrigin } from "@/lib/user-proxy";
 
@@ -14,6 +15,8 @@ export type LegalDocumentView =
         docType: "PLATFORM_TERMS" | "PLATFORM_PRIVACY";
         title: string;
         body: string;
+        bodyFormat?: "text" | "plate";
+        bodyDocument?: PlateDocumentEnvelope | null;
         digest: string;
         effectiveAt: string;
       };

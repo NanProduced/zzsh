@@ -7,7 +7,6 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import "@zzsh/ui/content-document.css";
 
 import { AuthLayout } from "./components/auth-layout";
 import { BrandLogo } from "./components/brand-logo";

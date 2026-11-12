@@ -1,0 +1,294 @@
+{
+  "key": "account-realname-vs-face",
+  "kind": "help",
+  "file": "help/account-realname-vs-face.json",
+  "meta": {
+    "id": "A03",
+    "slug": "account-realname-vs-face",
+    "title": "平台实名与游戏人脸验证有什么区别？",
+    "summary": "平台实名用于确认交易资格，游戏人脸是腾讯游戏的安全机制；两者互不相同，租号上号触发人脸时需要号主配合。",
+    "category": "account",
+    "audience": [
+      "renter",
+      "owner"
+    ],
+    "game": "三角洲行动",
+    "keywords": [
+      "实名",
+      "人脸",
+      "人脸识别",
+      "认证",
+      "腾讯",
+      "高危",
+      "异地",
+      "扫码"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "rental-getting-started",
+      "issue-during-rental",
+      "publish-account-safety"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "difference": "content-两种验证不是一回事",
+    "face-tips": "content-遇到游戏人脸验证怎么办",
+    "security-note": "content-安全提醒"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "两种验证不是一回事",
+        "children": [
+          {
+            "text": "两种「验证」不是一回事"
+          }
+        ]
+      },
+      {
+        "type": "table",
+        "children": [
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": ""
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "平台实名核验"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "th",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "游戏人脸验证"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "由谁提供"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "洲洲商行平台"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "腾讯游戏安全机制"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "用途"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "确认账号主体的交易资格（含成年人核验）"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "游戏侧判定高风险登录时的身份确认"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "何时出现"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "注册、下单等交易环节"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "td",
+                "children": [
+                  {
+                    "type": "p",
+                    "children": [
+                      {
+                        "text": "租用期间游戏检测到异常登录环境时"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "遇到游戏人脸验证怎么办",
+        "children": [
+          {
+            "text": "遇到游戏人脸验证怎么办"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "游戏人脸二维码的有效期很短（约 10 秒），截图后再扫通常来不及。建议由号主与租客实时配合：一方展示二维码，另一方用另一台设备即时扫码，或通过视频通话对准画面扫码。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "出现「高危」「异地」等提示时，按游戏内指引处理；多次无法完成时，在订单群联系客服协商，不要反复尝试导致账号被进一步限制。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "安全提醒",
+        "children": [
+          {
+            "text": "安全提醒"
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "注意",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "平台客服不会在群内索要你的平台登录密码或短信验证码；任何人以「验证」为名索要这些信息都应视为可疑。"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

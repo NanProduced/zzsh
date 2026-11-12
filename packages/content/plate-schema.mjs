@@ -43,7 +43,7 @@ export function marksFor(preset) {
 
 function linkOk(url, preset) {
   if (!isText(url)) return false;
-  if (url.startsWith("https://")) return true;
+  if (url.startsWith("https://") || /^#[\p{L}\p{N}_.:%-]+$/u.test(url)) return true;
   if (url.startsWith("/") && !url.startsWith("//")) return true;
   return preset === "internal" && /^doc:[A-Za-z0-9_-]+$/.test(url);
 }
@@ -156,8 +156,8 @@ export function validatePlateDocument(doc, { preset, mode = "draft" } = {}) {
         }
         continue;
       }
-      if (key === "alt") {
-        if (type !== "img" || !isText(node.alt) || node.alt.length > 500) add(`${path}.alt`, "ATTR_NOT_ALLOWED", "alt only on img, string <= 500");
+      if (key === "alt" || key === "caption") {
+        if (type !== "img" || !isText(node[key]) || node[key].length > 500) add(`${path}.${key}`, "ATTR_NOT_ALLOWED", `${key} only on img, string <= 500`);
         continue;
       }
       add(`${path}.${key}`, "ATTR_NOT_ALLOWED", `attribute ${key} not allowed on ${type}`);
@@ -166,7 +166,7 @@ export function validatePlateDocument(doc, { preset, mode = "draft" } = {}) {
       stats.media += 1;
       if (stats.media > MAX_MEDIA) add(path, "MEDIA_NOT_ALLOWED", `more than ${MAX_MEDIA} images`);
       const alt = isText(node.alt) ? node.alt : "";
-      stats.chars += alt.length;
+      stats.chars += alt.length + (isText(node.caption) ? node.caption.length : 0);
       stats.projection += alt;
       return alt;
     }
@@ -335,6 +335,7 @@ export function toPlateEnvelope(value, preset) {
       if (typeof node[key] === "string" && node[key]) out[key] = node[key];
       else return [];
       if (typeof node.alt === "string") out.alt = node.alt.slice(0, 500);
+      if (typeof node.caption === "string" && node.caption) out.caption = node.caption.slice(0, 500);
       out.children = [{ text: "" }];
       return [out];
     }

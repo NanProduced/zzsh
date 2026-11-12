@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { Pool } from "pg";
 import { assertBusinessMigrationPrefix } from "../src/database/business-migrations";
 import { withTransaction } from "../src/auth/security-core";
-import { createLegalDraft, sealLegalDocument } from "../src/legal/legal-documents";
+import { legalDigest } from "../src/legal/legal-documents";
 
 type Result = { status: number; body: any; authenticated: boolean; cookieIssued: boolean; userId?: string };
 export async function runAuthLegalChecks(o: {
@@ -30,9 +30,19 @@ export async function runAuthLegalChecks(o: {
     (SELECT count(*)::int FROM zzsh_auth_user.session WHERE "userId"=$1) AS sessions,
     (SELECT count(*)::int FROM zzsh_content.document_acceptance WHERE user_id=$1) AS accepts`, [userId])).rows[0];
   const initial = await counts(); assert.deepEqual(initial, { sessions: 1, accepts: 0 });
+  // P3a 起生效只能经「固定文书发布」审批（DRAFT→PENDING→SEALED）。这里只是回归
+  // fixture 的种子行：直接写入已封存合成文书，不创建任何审批申请或决定。
   const publish = (docType: string) => withTransaction(o.migration, async client => {
-    const draft = await createLegalDraft(client, o.adminId, { docType, title: "Synthetic regression document", body: "Synthetic regression fixture only." });
-    return sealLegalDocument(client, o.adminId, draft.id, draft.revision);
+    const id = `legal_fixture_${docType.toLowerCase()}`;
+    const body = "Synthetic regression fixture only.";
+    const digest = legalDigest(body);
+    await client.query(
+      `INSERT INTO "zzsh_content"."legal_document_version"
+        ("id", "doc_type", "title", "body", "digest", "status", "effective_at", "created_by_admin_id", "sealed_by_admin_id", "sealed_at")
+       VALUES ($1, $2, 'Synthetic regression document', $3, $4, 'SEALED', clock_timestamp(), $5, $5, clock_timestamp())`,
+      [id, docType, body, digest, o.adminId],
+    );
+    return { id, digest };
   });
   const terms = await publish("PLATFORM_TERMS");
   for (const path of ["/sign-in/phone-number", "/sign-in/identifier"]) {

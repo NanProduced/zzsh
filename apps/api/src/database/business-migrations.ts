@@ -11,7 +11,7 @@ import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
-const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
+const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order", "zzsh_docs"] as const;
 
 function quoteIdentifier(value: string): string {
   if (!IDENTIFIER.test(value)) throw new Error("runtime database user must be a safe identifier");
@@ -286,8 +286,8 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_content.legal_document_version') AS relation`)).rows[0]?.relation) {
     await resetRuntimeTablePrivileges(pool, "zzsh_content.legal_document_version", "PUBLIC", { select: false });
     await resetRuntimeTablePrivileges(pool, "zzsh_content.legal_document_version", runtimeUser);
-    await pool.query(`GRANT INSERT(id,doc_type,title,body,digest,effective_at,created_by_admin_id) ON zzsh_content.legal_document_version TO ${runtimeUser};
-      GRANT UPDATE(title,body,digest,status,revision,effective_at,updated_at,sealed_by_admin_id,sealed_at) ON zzsh_content.legal_document_version TO ${runtimeUser}`);
+    await pool.query(`GRANT INSERT(id,doc_type,title,body,digest,effective_at,created_by_admin_id,body_format,body_document,approval_request_id,status,sealed_by_admin_id,sealed_at) ON zzsh_content.legal_document_version TO ${runtimeUser};
+      GRANT UPDATE(title,body,digest,status,revision,effective_at,updated_at,sealed_by_admin_id,sealed_at,body_format,body_document,approval_request_id) ON zzsh_content.legal_document_version TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_content.document_acceptance') AS relation`)).rows[0]?.relation) {
     await resetRuntimeTablePrivileges(pool, "zzsh_content.document_acceptance", "PUBLIC", { select: false });
@@ -508,6 +508,39 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+  await configureDocsLibraryPrivileges(pool, runtimeRole);
+  const discardGuideDraft = "zzsh_content.discard_guide_draft(text,text,bigint)";
+  if ((await pool.query("SELECT to_regprocedure($1) AS fn", [discardGuideDraft])).rows[0]?.fn) {
+    await pool.query(`GRANT EXECUTE ON FUNCTION ${discardGuideDraft} TO ${runtimeUser}`);
+  }
+}
+
+/**
+ * P1a internal documentation library plus P1b discussions. Reads and writes
+ * follow the content block (SELECT/INSERT/UPDATE, no TRUNCATE), but the 30-day
+ * trash purge needs DELETE on every doc_* table, so DELETE is granted per table
+ * after the content-style reset. An absent schema is allowed on older databases;
+ * a partial one is refused (0205 adds doc_discussion / doc_comment).
+ */
+export async function configureDocsLibraryPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const tables = ["doc_node", "doc_version", "doc_image", "doc_version_image", "doc_discussion", "doc_comment"] as const;
+  const present = (await pool.query(
+    `SELECT count(*)::int AS count FROM unnest($1::text[]) AS t(name) WHERE to_regclass('zzsh_docs.' || name) IS NOT NULL`,
+    [[...tables]],
+  )).rows[0]?.count;
+  if (!Number.isInteger(present)) throw new Error("Docs library privilege inventory is unavailable");
+  if (present === 0) return;
+  if (present !== tables.length) throw new Error("Docs library schema is incomplete; runtime privileges not finalized");
+  await pool.query(`GRANT USAGE ON SCHEMA "zzsh_docs" TO ${role}`);
+  for (const table of tables) {
+    const relation = `zzsh_docs.${table}`;
+    await resetRuntimeTablePrivileges(pool, relation, "PUBLIC", { select: false });
+    await resetRuntimeTablePrivileges(pool, relation, role);
+    await pool.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${relation} TO ${role};
+      REVOKE TRUNCATE ON TABLE ${relation} FROM ${role}`);
+  }
+  await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_docs" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${role}`);
 }
 
 /** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */

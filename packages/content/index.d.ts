@@ -1,15 +1,11 @@
-export type ContentBlock =
-  | { type: "paragraph"; text: string }
-  | { type: "list"; ordered?: boolean; items: readonly string[] }
-  | { type: "callout"; tone: "info" | "warning"; text: string }
-  | { type: "table"; caption?: string; columns: readonly string[]; rows: readonly (readonly string[])[] }
-  | { type: "image"; mediaId: string; alt: string; caption?: string }
-  | { type: "link"; text: string; href: string };
-export type ContentSection = { id: string; title: string; blocks: readonly ContentBlock[] };
+import type { PlateDocumentEnvelope } from "./plate-schema.d.mts";
+
 export type HelpCategory = "rental" | "publish" | "fees" | "account" | "after-sale" | "membership" | "agreement";
-export type DocumentBody =
-  | { format?: "blocks"; schemaVersion?: 1; sections: readonly ContentSection[]; markdown?: never; mediaIds?: never; anchorAliases?: never }
-  | { format: "markdown"; schemaVersion: 1; markdown: string; mediaIds: readonly string[]; anchorAliases?: Readonly<Record<string, string>>; sections?: never };
+// guide / notice 正文唯一格式：plate。mediaIds 由服务端从 document 重算。
+export type DocumentBody = {
+  format: "plate"; schemaVersion: 1; document: PlateDocumentEnvelope;
+  mediaIds: readonly string[]; anchorAliases?: Readonly<Record<string, string>>;
+};
 export type GuideResource = {
   kind: "guide";
   id: string;
@@ -58,9 +54,9 @@ export type ResourceDefinition = {
   recommendedSize?: string; businessRelated?: boolean;
   minWidth?: number; minHeight?: number; aspectTolerance?: number;
 };
-export const DEFAULT_GUIDES: readonly GuideResource[];
 export const RESOURCE_DEFINITIONS: readonly ResourceDefinition[];
 export const DEFAULT_RESOURCES: Readonly<Record<string, ContentResource>>;
+export const NOTICE_PLACEMENT_KEYS: readonly string[];
 export const RESOURCE_SCHEMA: "content-resource.v1";
 export const MAX_RESOURCE_BYTES: number;
 export function validateResource(key: string, value: unknown): ContentResource;

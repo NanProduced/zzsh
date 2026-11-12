@@ -11,6 +11,7 @@ import { PlateElement, type PlateElementProps } from "platejs/react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 
 export function CodeBlockElement(props: PlateElementProps<TCodeBlockElement>) {
   const { element } = props;
@@ -40,21 +41,25 @@ function CopyButton({ value }: { value: () => string }) {
   }, [hasCopied]);
 
   return (
-    <Button
-      type="button"
-      size="icon"
-      variant="ghost"
-      className="size-6 text-muted-foreground hover:text-foreground"
-      aria-label={hasCopied ? "已复制" : "复制代码"}
-      title={hasCopied ? "已复制" : "复制代码"}
-      onClick={() => {
-        if (!navigator.clipboard) return;
-        void navigator.clipboard.writeText(value());
-        setHasCopied(true);
-      }}
-    >
-      {hasCopied ? <Check className="size-3.5" aria-hidden="true" /> : <Copy className="size-3.5" aria-hidden="true" />}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="size-6 text-muted-foreground hover:text-foreground"
+          aria-label={hasCopied ? "已复制" : "复制代码"}
+          onClick={() => {
+            if (!navigator.clipboard) return;
+            void navigator.clipboard.writeText(value());
+            setHasCopied(true);
+          }}
+        >
+          {hasCopied ? <Check className="size-3.5" aria-hidden="true" /> : <Copy className="size-3.5" aria-hidden="true" />}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{hasCopied ? "已复制" : "复制代码"}</TooltipContent>
+    </Tooltip>
   );
 }
 

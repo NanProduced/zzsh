@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { AdminFinanceView } from "../views/admin-finance-view";
 import { FinanceDashboardView } from "../views/finance-dashboard";
 import { FinanceChannels } from "../views/finance-channels";
@@ -29,9 +30,13 @@ import { DistributionEarningsPage, DistributionOverviewPage, DistributionPartici
 
 import { AdminOrderChainView, AdminResourceReadView } from "../views/admin-order-chain-view";
 
-import { parseWorkspacePath, type WorkspaceTab } from "./tab-model";
+import { CONTENT_WORKSPACES, isContentWorkspaceKind, parseWorkspacePath, type WorkspaceTab } from "./tab-model";
 import { DashboardPage } from "./dashboard/dashboard-page";
 import { Button } from "@/components/ui/button";
+
+// P0b 临时预览页：懒加载，避免把默认内容 manifest 拉进无关工作区的加载链。
+// P1a 内部文档库：懒加载，Plate 编辑运行时只进 docs 分包。
+const DocsView = lazy(() => import("../views/docs/docs-view").then((m) => ({ default: m.DocsView })));
 
 export function WorkspacePageContent({
   tab,
@@ -235,8 +240,27 @@ export function WorkspacePageContent({
   if (tab.kind === "avatar-review") {
     return <AvatarReviewView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} refreshNonce={refreshNonce} />;
   }
-  if (tab.kind === "content") {
-    return <ContentView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} refreshNonce={refreshNonce} tab={tab} onQueryChange={onQueryChange} onOpenPath={onOpenPath} />;
+  const contentPage = isContentWorkspaceKind(tab.kind) ? CONTENT_WORKSPACES[tab.kind] : undefined;
+  if (tab.kind === "content" || contentPage) {
+    return <ContentView key={[tab.id,snapshot.adminUserId,snapshot.session.id,snapshot.permissions.slice().sort().join(",")].join("|")} snapshot={snapshot} surface={contentPage?.surface} onDirtyChange={onDirtyChange} onWriteLockChange={onWriteLockChange} refreshNonce={refreshNonce} tab={tab} onQueryChange={onQueryChange} onOpenPath={onOpenPath} />;
+  }
+  if (tab.kind === "docs" || tab.kind === "docs-object") {
+    if (!snapshot.security.isBoss && !snapshot.permissions.includes("docs.internal.read")) {
+      return <div role="alert" className="p-6 text-sm text-destructive">没有权限</div>;
+    }
+    return (
+      <Suspense fallback={<div className="p-6 text-sm text-muted-foreground" role="status">文档库加载中…</div>}>
+        <DocsView
+          key={[snapshot.adminUserId, snapshot.session.id, snapshot.permissions.slice().sort().join(",")].join("|")}
+          snapshot={snapshot}
+          tab={tab}
+          refreshNonce={refreshNonce}
+          onOpenPath={onOpenPath}
+          onQueryChange={onQueryChange}
+          onDirtyChange={onDirtyChange}
+        />
+      </Suspense>
+    );
   }
   if (tab.kind === "orders" || tab.kind === "order-object") {
     const fromUser = tab.kind === "order-object" && tab.query.fromUserId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromUserId) && (snapshot.security.isBoss || snapshot.permissions.includes("user.directory.read")) ? tab.query.fromUserId : null;

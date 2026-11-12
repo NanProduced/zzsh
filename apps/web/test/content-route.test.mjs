@@ -62,8 +62,9 @@ test('footer detail uses the public proxy and rejects unsafe payloads',async()=>
 
 test('resource reads use bounded five-item pages and no-store for every cursor request',async()=>{
   const {fetchContentResources}=await import('../src/lib/content-public.ts');
-  const {DEFAULT_GUIDES}=await import('@zzsh/content');
-  const entries=DEFAULT_GUIDES.slice(0,6).map(guide=>({schema:'content-resource.v1',key:`guide:${guide.slug}`,source:'BUILTIN',state:'available',payload:guide,media:[],version:null}));
+  const {validateResource}=await import('@zzsh/content');
+  const guidePayload=(i)=>validateResource(`guide:page-guide-${i}`,{kind:'guide',id:`P0${i}`,slug:`page-guide-${i}`,title:`分页指南${i}`,summary:'摘要',category:'rental',audience:['renter'],keywords:['分页'],updatedAt:'2026-10-06',related:[],contactCta:false,format:'plate',schemaVersion:1,document:{format:'plate',schemaVersion:1,preset:'help',value:[{type:'p',children:[{text:`正文${i}`}]}]},mediaIds:[]});
+  const entries=Array.from({length:6},(_,i)=>({schema:'content-resource.v1',key:`guide:page-guide-${i}`,source:'BUILTIN',state:'available',payload:guidePayload(i),media:[],version:null}));
   const calls=[];
   const fetcher=async(url,options)=>{
     calls.push({url:new URL(url,'http://127.0.0.1'),options});

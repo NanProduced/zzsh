@@ -1,7 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
-import { DEFAULT_GUIDES, DEFAULT_RESOURCES, MAX_RESOURCE_BYTES, validateResource, type ContentResource } from "@zzsh/content";
+import { DEFAULT_RESOURCES, MAX_RESOURCE_BYTES, validateResource, type ContentResource } from "@zzsh/content";
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
 import {
   prepareResourceDraft, replaceResourceMedia, requireResourceMedia, restoreContentDraft, saveContentDraft, saveContentMediaDraft,
   type ContentItemRow, type ContentVersionRow,
@@ -14,14 +15,21 @@ const MEDIA_ID = `med_${"a".repeat(32)}`;
 const OTHER_MEDIA = `med_${"b".repeat(32)}`;
 const NOW = new Date("2026-10-28T00:00:00Z");
 
-function markdownResource(markdown: string): ContentResource {
-  const { sections: _sections, format: _format, schemaVersion: _schemaVersion, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _aliases, ...metadata } = DEFAULT_GUIDES[0]!;
-  return { ...metadata, format: "markdown", schemaVersion: 1, markdown, mediaIds: [] };
+// guide / notice 正文唯一格式 plate；测试夹具直接构造合法 Plate 文档。
+const GUIDE_META = { id: "R01", slug: "rental-getting-started", title: "租号入门", summary: "摘要", category: "rental", audience: ["renter"], keywords: ["租号"], updatedAt: "2026-10-06", related: [], contactCta: true };
+const pNode = (text: string) => ({ type: "p", children: [{ text }] });
+const imgNode = (mediaId: string) => ({ type: "img", mediaId, alt: "插图", children: [{ text: "" }] });
+const helpDocument = (value: unknown[]): PlateDocumentEnvelope => ({ format: "plate", schemaVersion: 1, preset: "help", value }) as PlateDocumentEnvelope;
+function guideResource(value: unknown[], mediaIds: string[] = []): ContentResource {
+  return validateResource(KEY, { kind: "guide", ...GUIDE_META, format: "plate", schemaVersion: 1, document: helpDocument(value), mediaIds });
 }
-
-function legacyResource(): ContentResource {
-  const { format: _format, schemaVersion: _schemaVersion, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _aliases, sections: _sections, ...metadata } = DEFAULT_GUIDES[0]!;
-  return { ...metadata, sections: [{ id: "old-steps", title: "原版步骤", blocks: [{ type: "paragraph", text: "旧版本的原始规则，不能自动改写。" }] }] };
+function noticeDocument(text: string): PlateDocumentEnvelope {
+  return { format: "plate", schemaVersion: 1, preset: "notice", value: [pNode(text)] } as PlateDocumentEnvelope;
+}
+/** 这些用例只操作 RESOURCE 版本，payload 必为带 kind 的内容资源。 */
+function resourcePayload(version: ContentVersionRow): ContentResource {
+  if (!version.payload || !("kind" in version.payload)) throw new Error("expected a resource payload");
+  return version.payload;
 }
 
 class ContentStore {
@@ -72,40 +80,45 @@ class ContentStore {
   };
 }
 
-test("Markdown draft keeps unsupported original text and derives image references from the AST", async () => {
-  const original = `<div>原文必须保留</div>\n\n![插图][image]\n\n[image]: media://${MEDIA_ID}\n\n\`\`\`txt\nmedia://${OTHER_MEDIA}\n\`\`\``;
-  const prepared = await prepareResourceDraft(KEY, { ...markdownResource(original), mediaIds: [OTHER_MEDIA] });
-  assert.ok("markdown" in prepared);
-  assert.equal(prepared.markdown, original);
-  assert.deepEqual(prepared.mediaIds, [MEDIA_ID]);
+test("plate draft keeps the document and derives image references from it, ignoring a forged list", async () => {
+  const prepared = await prepareResourceDraft(KEY, guideResource([pNode("原文必须保留"), imgNode(MEDIA_ID)], [OTHER_MEDIA]));
+  assert.equal(prepared.kind, "guide");
+  assert.deepEqual(prepared.mediaIds, [MEDIA_ID], "mediaIds are recomputed from the document, not trusted from the caller");
   const store = new ContentStore();
   await requireResourceMedia(store.client(), prepared, false);
-  assert.equal(store.statements.length, 0, "saving unsupported draft text does not resolve or expose media");
-  await assert.rejects(() => requireResourceMedia(store.client(), prepared, true, KEY), /正文未发布/);
+  assert.equal(store.statements.length, 0, "saving a draft does not resolve or expose media");
+  await requireResourceMedia(store.client(), prepared, true, KEY);
+  assert.ok(store.statements.some(sql => sql.includes("FOR SHARE")), "public eligibility is locked until publishing commits");
+});
+
+test("sections / markdown payloads are rejected; only plate is accepted", () => {
+  const base = { kind: "guide", ...GUIDE_META, format: "plate", schemaVersion: 1, document: helpDocument([pNode("正文")]), mediaIds: [] };
+  assert.throws(() => validateResource(KEY, { ...base, sections: [{ id: "x", title: "t", blocks: [] }] }), /sections|markdown|plate/);
+  assert.throws(() => validateResource(KEY, { ...base, markdown: "# 标题" }), /sections|markdown|plate/);
+  assert.throws(() => validateResource(KEY, { ...base, format: "markdown" }), /plate/);
+  assert.throws(() => guideResource([{ type: "p", children: [{ type: "a", url: "javascript:alert(1)", children: [{ text: "领取" }] }] }]), /正文未通过校验/);
 });
 
 test("publishing rechecks referenced/unknown/revoked media with a locked qualification map", async () => {
   const store = new ContentStore();
-  const unknown = await prepareResourceDraft(KEY, markdownResource(`![图][x]\n\n[x]: media://${OTHER_MEDIA}`));
-  await assert.rejects(() => requireResourceMedia(store.client(), unknown, true, KEY), /正文未发布/);
-  const valid = await prepareResourceDraft(KEY, markdownResource(`![图](media://${MEDIA_ID})`));
+  const unknown = guideResource([imgNode(OTHER_MEDIA)]);
+  await assert.rejects(() => requireResourceMedia(store.client(), unknown, true, KEY), /Only platform content media/);
+  const valid = guideResource([imgNode(MEDIA_ID)]);
   await requireResourceMedia(store.client(), valid, true, KEY);
-  assert.ok(store.statements.some(sql => sql.includes("FOR SHARE")), "public eligibility is locked until publishing commits");
+  assert.ok(store.statements.some(sql => sql.includes("FOR SHARE")));
   store.media[0]!.accessClass = "PRIVATE_REVIEW";
-  await assert.rejects(() => requireResourceMedia(store.client(), valid, true, KEY), /正文未发布/);
-  const unsafeLink = await prepareResourceDraft(KEY, markdownResource("[领取][x]\n\n[x]: javascript:alert(1)"));
-  await assert.rejects(() => requireResourceMedia(store.client(), unsafeLink, true, KEY), /正文未发布/);
+  await assert.rejects(() => requireResourceMedia(store.client(), valid, true, KEY), /approved and publicly displayable/);
 });
 
-test("compact notice limits block publication while the original oversized draft remains saveable", async () => {
+test("compact notice text is accepted while an oversized notice fails validation", async () => {
   const key = "placement:PUBLISH_SAFE_BOX";
-  const source = "简短说明".repeat(400);
-  const draft = await prepareResourceDraft(key, { kind: "notice", title: "安全箱说明", format: "markdown", schemaVersion: 1, markdown: source, mediaIds: [] });
-  assert.ok("markdown" in draft);
-  assert.equal(draft.markdown, source);
+  const oversized = { kind: "notice", title: "安全箱说明", format: "plate", schemaVersion: 1, document: noticeDocument("简短说明".repeat(400)), mediaIds: [] };
+  assert.throws(() => validateResource(key, oversized), /TEXT_TOO_LONG/);
+  const draft = await prepareResourceDraft(key, { kind: "notice", title: "安全箱说明", format: "plate", schemaVersion: 1, document: noticeDocument("简短说明"), mediaIds: [] });
+  assert.equal(draft.kind, "notice");
   const store = new ContentStore();
   await requireResourceMedia(store.client(), draft, false, key);
-  await assert.rejects(() => requireResourceMedia(store.client(), draft, true, key), /正文未发布/);
+  await requireResourceMedia(store.client(), draft, true, key);
 });
 
 test("media-only replacements preserve fixed metadata and reject added fields or changed positions", () => {
@@ -134,16 +147,17 @@ test("media draft saves require the current item revision and generic payload sa
   await assert.rejects(() => saveContentDraft(store.client(), store.item.id, "draft", "2", { payload: DEFAULT_RESOURCES["placement:FOLLOW"]! }), /media-only/);
   const saved = await saveContentMediaDraft(store.client(), store.item.id, "draft", "2", { qrMediaId: MEDIA_ID });
   assert.equal(saved.item.revision, "3");
-  assert.equal(saved.version.payload?.kind, "contact");
-  if (saved.version.payload?.kind === "contact") assert.equal(saved.version.payload.qrMediaId, MEDIA_ID);
+  const payload = resourcePayload(saved.version);
+  assert.equal(payload.kind, "contact");
+  if (payload.kind === "contact") assert.equal(payload.qrMediaId, MEDIA_ID);
 });
 
-test("restore retains a replaced draft as history and copies the selected blocks snapshot without conversion", async () => {
+test("restore retains a replaced draft as history and copies the selected plate snapshot without conversion", async () => {
   const store = new ContentStore();
-  const original = legacyResource();
+  const original = guideResource([pNode("旧版本的原始规则，不能自动改写。")]);
   const source = store.version("published", original, "PUBLISHED", 1);
   source.body = "旧兼容列中的副本，历史不能被改写。";
-  const draft = store.version("draft", markdownResource("未发布但应保留的原稿"), "DRAFT", 2);
+  const draft = store.version("draft", guideResource([pNode("未发布但应保留的原稿")]), "DRAFT", 2);
   store.versions = [source, draft];
   const before = JSON.stringify(source);
   await assert.rejects(() => restoreContentDraft(store.client(), "admin", store.item.id, "published", "1"), /Content changed/);
@@ -153,14 +167,14 @@ test("restore retains a replaced draft as history and copies the selected blocks
   assert.equal(JSON.stringify(store.versions.find(v => v.id === "published")), before);
   assert.deepEqual(restored.version.payload, original);
   assert.equal(restored.version.body, source.body, "restoration preserves the source compatibility fields without deriving or truncating canonical payload text");
-  assert.equal("markdown" in restored.version.payload!, false);
+  assert.equal(resourcePayload(restored.version).kind, "guide");
   assert.equal(restored.version.sequence, 3);
 });
 
 test("public payload and metadata are selected from the same published version, never the newer draft", async () => {
   const store = new ContentStore();
-  const published = store.version("published", { ...DEFAULT_GUIDES[0]!, title: "公开标题" }, "PUBLISHED", 1);
-  const draft = store.version("draft", markdownResource("新的未公开正文"), "DRAFT", 2);
+  const published = store.version("published", { ...guideResource([pNode("公开正文")]), title: "公开标题" }, "PUBLISHED", 1);
+  const draft = store.version("draft", guideResource([pNode("新的未公开正文")]), "DRAFT", 2);
   store.versions = [published, draft];
   const resource = await readPublicResource(store.client(), KEY);
   assert.equal(resource.version?.id, "published");
@@ -200,7 +214,7 @@ test("an explicit CAS restore of the saved legacy carousel draft rebuilds fixed 
   if (template.kind !== "carousel") return;
   const legacy = { ...template, slides: [{ ...template.slides[0]!, id: "old_random_slot", mediaId: MEDIA_ID }] };
   const draft = store.version("legacy-draft", legacy, "DRAFT", 1);
-  const foreign = { ...store.version("foreign-version", DEFAULT_GUIDES[0]!, "SUPERSEDED", 1), itemId: "cnt_other" };
+  const foreign = { ...store.version("foreign-version", guideResource([pNode("外部版本")]), "SUPERSEDED", 1), itemId: "cnt_other" };
   store.versions = [draft, foreign];
   const images = { slides: template.slides.map(slide => ({ id: slide.id, mediaId: MEDIA_ID, mobileMediaId: null })) };
   await assert.rejects(() => saveContentMediaDraft(store.client(), store.item.id, draft.id, "2", images), /not automatically mapped/);
@@ -209,15 +223,16 @@ test("an explicit CAS restore of the saved legacy carousel draft rebuilds fixed 
   const restored = await restoreContentDraft(store.client(), "admin", store.item.id, draft.id, "2");
   assert.equal(store.versions.find(version => version.id === draft.id)?.state, "SUPERSEDED");
   assert.deepEqual(store.versions.find(version => version.id === draft.id)?.payload, legacy, "unmapped legacy media remains in history");
-  assert.equal(restored.version.payload?.kind, "carousel");
-  if (restored.version.payload?.kind !== "carousel") return;
-  assert.deepEqual(restored.version.payload.slides.map(slide => slide.id), ["delta", "protection", "accounts"]);
-  assert.ok(restored.version.payload.slides.every(slide => slide.mediaId === null), "no guessed mapping from random legacy IDs");
+  const restoredPayload = resourcePayload(restored.version);
+  assert.equal(restoredPayload.kind, "carousel");
+  if (restoredPayload.kind !== "carousel") return;
+  assert.deepEqual(restoredPayload.slides.map(slide => slide.id), ["delta", "protection", "accounts"]);
+  assert.ok(restoredPayload.slides.every(slide => slide.mediaId === null), "no guessed mapping from random legacy IDs");
   const publicResource = await readPublicResource(store.client(), "placement:HOME_HERO");
   assert.equal(publicResource.version, null);
   assert.equal(publicResource.state, "available", "archived unpublished drafts do not mark builtin content withdrawn");
   const saved = await saveContentMediaDraft(store.client(), store.item.id, restored.version.id, store.item.revision, images);
-  assert.equal(saved.version.payload?.kind, "carousel");
+  assert.equal(resourcePayload(saved.version).kind, "carousel");
 });
 
 test("resource pages cap both scopes at five, bind cursors to that limit and fit the Web BFF byte ceiling", () => {
@@ -231,13 +246,14 @@ test("resource pages cap both scopes at five, bind cursors to that limit and fit
   assert.equal(resourcePage(new URLSearchParams({ cursor })).after, KEY);
   assert.throws(() => resourcePage(new URLSearchParams({ cursor, limit: "4" })), /Cursor/);
 
-  const ids = Array.from({ length: 300 }, (_, i) => `A${":".repeat(121)}${i.toString(16).padStart(6, "0")}`);
-  const candidate = { ...markdownResource(ids.map(id => `![图](media://${id})`).join("\n\n")), mediaIds: ids };
-  assert.ok("markdown" in candidate);
-  candidate.markdown += "x".repeat(MAX_RESOURCE_BYTES - 32 - Buffer.byteLength(JSON.stringify(candidate)));
-  const payload = validateResource(KEY, candidate);
+  const ids = Array.from({ length: 300 }, (_, i) => `med_${i.toString(16).padStart(32, "0")}`);
+  const images = ids.map(imgNode);
+  const base = guideResource([pNode("正文"), ...images]);
+  const padding = "x".repeat(MAX_RESOURCE_BYTES - Buffer.byteLength(JSON.stringify(base)) - 128);
+  const payload = validateResource(KEY, guideResource([pNode(padding), ...images]));
+  assert.equal(payload.kind === "guide" && payload.mediaIds.length, 300);
   const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
-  assert.ok(payloadBytes > MAX_RESOURCE_BYTES - 128 && payloadBytes <= MAX_RESOURCE_BYTES);
+  assert.ok(payloadBytes > MAX_RESOURCE_BYTES - 512 && payloadBytes <= MAX_RESOURCE_BYTES);
   const item = { schema: "content-resource.v1", key: KEY, source: "MANAGED", state: "available", version: { id: "published", sequence: 1, publishedAt: NOW.toISOString() }, payload,
     media: ids.map(id => ({ id, url: `/api/v1/content/media/${encodeURIComponent(id)}/content` })) };
   const bytes = Buffer.byteLength(JSON.stringify({ items: Array.from({ length: 5 }, () => item), limit: 5, nextCursor: null }));

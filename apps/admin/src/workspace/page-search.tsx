@@ -21,6 +21,7 @@ import {
   MessagesSquareIcon,
   NetworkIcon,
   NewspaperIcon,
+  NotebookPenIcon,
   PackageIcon,
   PaletteIcon,
   ScaleIcon,
@@ -55,12 +56,15 @@ import {
 import { EmptyState } from "@/components/empty-state";
 
 import {
+  CONTENT_ICONS,
   filterSearchablePages,
   normalizeSearchString,
   scorePageMatch,
   type SearchableWorkspacePage,
 } from "./nav-config";
 import {
+  isContentWorkspaceKind,
+  parseWorkspacePath,
   tabPresentation,
   tabHref,
   WORKBENCH_TAB_ID,
@@ -103,6 +107,11 @@ function getPageIcon(path: string): LucideIcon {
   if (path === "/supply/reviews" || path.startsWith("/supply/reviews/")) return UserCheckIcon;
   if (path === "/supply/media") return ImageIcon;
   if (path === "/content") return NewspaperIcon;
+  if (path.startsWith("/content/")) {
+    const route = parseWorkspacePath(path.split("?")[0]!);
+    if (isContentWorkspaceKind(route.kind)) return CONTENT_ICONS[route.kind];
+  }
+  if (path === "/docs" || path.startsWith("/docs/")) return NotebookPenIcon;
   if (path === "/finance/period") return CalculatorIcon;
   if (path === "/finance" || path.startsWith("/finance/")) return WalletIcon;
   if (path === "/orders" || path.startsWith("/orders/")) return ShoppingBagIcon;

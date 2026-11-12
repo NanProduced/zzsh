@@ -4,6 +4,8 @@ import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./ad
 import { isAllGamesScope, scopeAllowsGame, type AdminGameScope } from "./admin-scope";
 import { entitlementPricingSummary, entitlementStateAt, isTotalDiscountContract } from "./membership-growth";
 import { ORDER_COMPENSATION_OPERATION, parseCompensationPayload } from '../finance/order-compensation-contract';
+import { FIXED_DOCUMENT_PUBLISH_OPERATION, FIXED_DOCUMENT_PUBLISH_PERMISSION, FIXED_DOCUMENT_SUBMIT_PERMISSION } from "../legal/fixed-document-contract";
+import { fixedDocumentView, loadFixedDocumentFacts } from "../legal/fixed-document-projection";
 
 export const APPROVAL_TEST_OPERATION = "approval.test.execute";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
@@ -17,7 +19,7 @@ export const APPROVAL_EXECUTION_MODE = {
 } as const;
 
 export type ApprovalExecutionMode = (typeof APPROVAL_EXECUTION_MODE)[keyof typeof APPROVAL_EXECUTION_MODE];
-export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "compensation" | "test";
+export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "compensation" | "content" | "test";
 
 export type ApprovalOperationRegistration = {
   operationCode: string;
@@ -41,6 +43,7 @@ const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
   { operationCode: "membership.entitlement.revoke", businessType: "membership", title: "撤销会员礼遇权益", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: SETTLEMENT_ADJUST_OPERATION, businessType: "settlement", title: "人工调整订单结算", executionMode: SOURCE, testOnly: false, permissionStage: null },
   { operationCode: ORDER_COMPENSATION_OPERATION, businessType: "compensation", title: "订单全额包赔赔偿", executionMode: GENERIC, testOnly: false, permissionStage: "DECIDE" },
+  { operationCode: FIXED_DOCUMENT_PUBLISH_OPERATION, businessType: "content", title: "固定文书发布", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
   { operationCode: APPROVAL_TEST_OPERATION, businessType: "test", title: "本地非资金测试动作", executionMode: GENERIC, testOnly: true, permissionStage: null },
 ];
 
@@ -60,6 +63,8 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
   if (operationCode === ORDER_COMPENSATION_OPERATION) return stage === "REQUEST" ? ADMIN_PERMISSION.orderCompensationRequest : ADMIN_PERMISSION.orderCompensationApprove;
   if (operationCode === "distribution.policy.publish") return "personal.distribution.policy.manage";
+  // 固定文书发布：运营 / BOSS 提交与批准（含自批），客服不能改；批准即执行，决定与执行同一权限。
+  if (operationCode === FIXED_DOCUMENT_PUBLISH_OPERATION) return stage === "REQUEST" ? FIXED_DOCUMENT_SUBMIT_PERMISSION : FIXED_DOCUMENT_PUBLISH_PERMISSION;
   if (!operationCode.startsWith("membership.")) return null;
   // 会员权益政策：提交用运营预设的 draft，批准/执行仍用 Boss 专属 publish（配合 membershipDecisionRequiresBoss）。
   if (operationCode === "membership.benefit.policy.publish") return stage === "REQUEST" ? ADMIN_PERMISSION.membershipPolicyDraft : ADMIN_PERMISSION.membershipPolicyPublish;
@@ -85,7 +90,7 @@ export function approvalDecisionRequiresTotp(operationCode: string): boolean {
 
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */
 export function membershipOperationRequiresGameScope(operationCode: string): boolean {
-  return operationCode !== "membership.benefit.policy.publish" && operationCode !== "distribution.policy.publish";
+  return operationCode !== "membership.benefit.policy.publish" && operationCode !== "distribution.policy.publish" && operationCode !== FIXED_DOCUMENT_PUBLISH_OPERATION;
 }
 
 export type ApprovalRequestFacts = {
@@ -628,18 +633,20 @@ export async function projectApprovalBusinesses(
   const objectStates = new Map<string, ApprovalObjectState>();
   const membership = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "membership");
   const settlements = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "settlement");
+  const content = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "content");
   const unknown = rows.filter((row) => {
     const registration = approvalRegistration(row.operationCode);
-    return !registration || (registration.businessType !== "membership" && registration.businessType !== "settlement");
+    return !registration || (registration.businessType !== "membership" && registration.businessType !== "settlement" && registration.businessType !== "content");
   });
 
-  const [entitlements, policies, settlementRows, executions, reversalEarnings, compensationProofs] = await Promise.all([
+  const [entitlements, policies, settlementRows, executions, reversalEarnings, compensationProofs, fixedFacts] = await Promise.all([
     loadEntitlements(client, membership),
     loadPolicies(client, membership),
     loadSettlements(client, settlements),
-    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution", "compensation"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
+    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution", "compensation", "content"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
     loadReversalEarnings(client, unknown.filter(row => row.operationCode === "distribution.earning.reverse")),
     loadCompensationProofs(client, unknown.filter(row => row.operationCode === ORDER_COMPENSATION_OPERATION)),
+    loadFixedDocumentFacts(client, content),
   ]);
   const gameIds = new Set<string>();
   for (const row of membership) {
@@ -659,6 +666,7 @@ export async function projectApprovalBusinesses(
 
   for (const row of membership) views.set(row.id, membershipView(row, viewer, games, entitlements, policies, executions, asOf));
   for (const row of settlements) views.set(row.id, settlementView(row, viewer, games, settlementRows));
+  for (const row of content) views.set(row.id, await fixedDocumentView(row, viewer, fixedFacts, executions.get(row.id)));
   for (const row of unknown) {
     const registration = approvalRegistration(row.operationCode);
     const base: Record<string, unknown> = {

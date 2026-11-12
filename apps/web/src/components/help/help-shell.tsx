@@ -34,7 +34,8 @@ export function HelpShell({
       if (!isBackgroundKeyboardEvent(event)) return;
       const focusSearch = () => {
         const input = document.querySelector<HTMLElement>('.help-hero-search input[type="search"]') ?? document.querySelector<HTMLElement>('form.site-search input[type="search"]');
-        input?.focus({ preventScroll: true });
+        if (input?.getClientRects().length) input.focus({ preventScroll: !input.closest(".help-hero-search") });
+        else document.querySelector<HTMLElement>(".site-search-toggle")?.click();
       };
       if (event.key === "/" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
         event.preventDefault();
@@ -78,6 +79,7 @@ export function HelpShell({
       searchInputLabel="搜索帮助文档"
       searchPlaceholder="搜索帮助文档"
       searchCompactPlaceholder="搜索帮助文档"
+      searchMode={home ? "hidden" : initialQuery ? "standard" : "compact-mobile"}
     >
       {children}
     </ServiceShell></div>

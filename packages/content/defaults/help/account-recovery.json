@@ -1,0 +1,136 @@
+{
+  "key": "account-recovery",
+  "kind": "help",
+  "file": "help/account-recovery.json",
+  "meta": {
+    "id": "A02",
+    "slug": "account-recovery",
+    "title": "忘记密码或手机号不能用了怎么办？",
+    "summary": "用已验证的手机号或邮箱验证码重置密码；换绑手机号需要旧号或已验证邮箱配合；都不可用时走人工恢复。",
+    "category": "account",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "忘记密码",
+      "找回密码",
+      "手机号丢了",
+      "换绑",
+      "重置密码",
+      "人工恢复",
+      "邮箱"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "account-register-login"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "password": "content-忘记密码",
+    "phone": "content-更换手机号",
+    "manual": "content-两种渠道都不可用"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "忘记密码",
+        "children": [
+          {
+            "text": "忘记密码"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "在登录入口选择找回密码，通过已验证手机号或已绑定邮箱接收验证码后即可重置。重置成功后，其他设备上的旧会话会失效，需要重新登录。"
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "说明",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "未绑定或未验证的邮箱不能用于找回密码；先在账号安全页完成邮箱绑定验证，之后才能作为找回渠道。"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "更换手机号",
+        "children": [
+          {
+            "text": "更换手机号"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "方式一：旧手机号验证码 + 新手机号验证码。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "方式二：已绑定验证邮箱验证码 + 新手机号验证码。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "新号码如果已被其他账户占用会被拒绝，不会合并两个账户；换绑后原号码不能再登录，你的订单、余额等归属不变。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "两种渠道都不可用",
+        "children": [
+          {
+            "text": "两种渠道都不可用"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "旧手机号停用且没有可用邮箱时，请联系平台客服进入人工恢复流程。人工恢复需要独立的身份核验，客服不能直接跳过归属确认帮你换绑。"
+          }
+        ]
+      }
+    ]
+  }
+}

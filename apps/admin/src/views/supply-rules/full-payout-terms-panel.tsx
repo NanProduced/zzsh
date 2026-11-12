@@ -5,7 +5,7 @@ import { adminRequest, friendlyError, type FullPayoutTermsRecord } from "../../a
 import { Button } from "../../components/ui/button";
 import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
-import { RulesMarkdownField } from "./rules-markdown-field";
+import { Textarea } from "../../components/ui/textarea";
 import { SupplySelect } from "../../components/supply/supply-select";
 
 type TermsDetail = FullPayoutTermsRecord & { body: string };
@@ -98,7 +98,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, isBoss = false
       <Field label="条款版本"><Input value={policyVersion} disabled={busy !== null} onChange={event => setPolicyVersion(event.target.value)} /></Field>
       <Field label="告知版本"><Input value={newDisclosure} disabled={busy !== null} onChange={event => setNewDisclosure(event.target.value)} /></Field>
       <Field label="标题"><Input value={newTitle} disabled={busy !== null} onChange={event => setNewTitle(event.target.value)} /></Field>
-      <div className="sm:col-span-2"><RulesMarkdownField label="条款正文" hint="支持 Markdown，最多 20000 字节（约 6600 个汉字）" height={360} value={newBody} disabled={busy !== null} onChange={setNewBody} /></div>
+      <div className="sm:col-span-2"><Field label="条款正文" hint="纯文本，最多 20000 字节（约 6600 个汉字）"><Textarea aria-label="条款正文" value={newBody} disabled={busy !== null} onChange={event => setNewBody(event.target.value)} className="min-h-60 text-xs leading-relaxed" /></Field></div>
       <div className="sm:col-span-2"><Button type="button" disabled={!canEdit || busy !== null} onClick={() => void create()}>{busy === "create" ? "创建中…" : "创建包赔条款草稿"}</Button></div>
     </div> : null}
     <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -109,7 +109,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, isBoss = false
       <MutedDetails><p>编号 {detail.policyRef} · 版本 {detail.policyVersion} · 告知 {detail.disclosureVersion}</p></MutedDetails>
       <Field label="标题"><Input value={title} disabled={detail.status !== "DRAFT" || busy !== null} onChange={event => setTitle(event.target.value)} /></Field>
       {detail.status === "DRAFT" ? <Field label="告知版本号"><Input value={disclosureVersion} disabled={busy !== null} onChange={event => setDisclosureVersion(event.target.value)} /></Field> : null}
-      <RulesMarkdownField label="条款正文" hint={detail.status === "DRAFT" ? "支持 Markdown" : "已提交，只读"} height={360} value={body} disabled={detail.status !== "DRAFT" || busy !== null} onChange={setBody} />
+      <Field label="条款正文" hint={detail.status === "DRAFT" ? "纯文本" : "已提交，只读"}><Textarea aria-label="条款正文" value={body} disabled={detail.status !== "DRAFT" || busy !== null} onChange={event => setBody(event.target.value)} className="min-h-60 text-xs leading-relaxed" /></Field>
       {detail.status === "DRAFT" ? <div className="flex flex-wrap gap-2">
         <Button type="button" disabled={!canEdit || busy !== null} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</Button>
         <Button type="button" variant="secondary" disabled={!canEdit || busy !== null} onClick={() => void seal()}>{busy === "seal" ? "提交中…" : "提交发布"}</Button>

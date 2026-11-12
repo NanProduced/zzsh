@@ -36,6 +36,7 @@ const SECTION_LABELS: Record<string, string> = {
   "membership.entitlement": "会员权益",
   content: "游戏内容",
   "content.platform": "平台内容",
+  "docs.internal": "内部文档",
   credit: "用户信用",
   "credit.guarantee": "号主保证金",
   "approval.template": "审批模板",
@@ -49,6 +50,7 @@ const GROUPS: Array<{ id: string; label: string; description: string; match: (co
   { id: "support", label: "客服履约", description: "咨询接待、订单群和人工履约。", match: (code) => code.startsWith("im.") },
   { id: "supply", label: "供给与账号", description: "账号、目录、审核、规则和供给处置。", match: (code) => code.startsWith("supply.") },
   { id: "content", label: "运营内容", description: "平台内容、游戏内容和发布。", match: (code) => code.startsWith("content.") },
+  { id: "docs", label: "内部文档", description: "内部文档库的读取、评论与管理。", match: (code) => code.startsWith("docs.") },
   { id: "finance", label: "资金与财务", description: "财务汇总、单据和账务读取。", match: (code) => code.startsWith("finance.") },
   { id: "risk", label: "风控与审批", description: "信用、保证金、审批模板和审批处理。", match: (code) => code.startsWith("credit.") || code.startsWith("approval.") },
   { id: "distribution", label: "分配策略", description: "订单与个人分配策略。", match: (code) => code.startsWith("personal.") },
@@ -70,7 +72,7 @@ export function permissionLabel(permission: AdminPermissionCatalogEntry): string
 /** 展示顺序：查看 → 新建/编辑 → 配置/授予 → 处置/执行。只影响排列，不参与任何授权判断。 */
 const ACTION_RANK: Record<string, number> = {
   read: 0, view: 0, lookup: 0,
-  create: 1,
+  create: 1, comment: 1,
   update: 2, edit: 2,
   configure: 3, manage: 3,
   review: 4,

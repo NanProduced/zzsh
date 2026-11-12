@@ -10,15 +10,16 @@ import {
   recordDocumentAcceptance,
   recordPlatformAcceptances,
   readCurrentLegalDocument,
-  sealLegalDocument,
+  sealLegalDocumentByApproval,
+  submitLegalDocument,
   verifyPlatformLegalAcceptance,
 } from "../src/legal/legal-documents";
 
 function doc(docType: "PLATFORM_TERMS" | "PLATFORM_PRIVACY", id: string, body: string) {
   return {
-    id, docType, title: id, body, digest: legalDigest(body), status: "SEALED",
+    id, docType, title: id, body, bodyFormat: "text" as const, bodyDocument: null, digest: legalDigest(body), status: "SEALED",
     revision: "2", effectiveAt: "2026-10-30T00:00:00.000Z", sealedAt: "2026-10-30T00:00:00.000Z",
-    createdAt: "2026-10-30T00:00:00.000Z",
+    approvalRequestId: null, createdAt: "2026-10-30T00:00:00.000Z",
   };
 }
 
@@ -58,7 +59,9 @@ test("legal acceptance refs are strict and digest-bound", () => {
   }
   const set = parsePlatformLegalAcceptance({ terms: { versionId: terms.id, digest: terms.digest }, privacy: { versionId: privacy.id, digest: privacy.digest } });
   assert.deepEqual(set?.terms, { versionId: terms.id, digest: terms.digest });
-  assert.throws(() => parsePlatformLegalAcceptance({ terms: { versionId: terms.id, digest: terms.digest } }));
+  // 按份同意：只提交变更的那份也合法，空提交与未知字段仍被拒。
+  assert.deepEqual(parsePlatformLegalAcceptance({ privacy: { versionId: privacy.id, digest: privacy.digest } }), { privacy: { versionId: privacy.id, digest: privacy.digest } });
+  assert.throws(() => parsePlatformLegalAcceptance({}));
   assert.throws(() => parsePlatformLegalAcceptance({ ...set, extra: true }));
 });
 
@@ -132,13 +135,32 @@ test("order/settlement acceptance rejects unknown document types and sources", a
   }));
 });
 
-test("sealing a draft records the server time and rejects a stale revision", async () => {
+test("submitting a draft binds the approval request and sealing only happens through that request", async () => {
+  const body = "提前结算告知合成正文";
+  const draft = {
+    id: "legal_early", docType: "EARLY_SETTLEMENT" as const, title: "提前结算告知", body, bodyFormat: "text" as const,
+    bodyDocument: null, digest: legalDigest(body), status: "DRAFT" as const, revision: "2", effectiveAt: null,
+    sealedAt: null, approvalRequestId: null, createdAt: "2026-10-30T00:00:00.000Z",
+  };
+  let current: typeof draft | { status: string; approvalRequestId: string | null; effectiveAt: string | null; sealedAt: string | null } = draft;
   const client = fakeClient([
-    (sql) => sql.includes("FOR UPDATE") && sql.includes("legal_document_version") ? [{ ...terms, status: "DRAFT", effectiveAt: null, sealedAt: null }] : undefined,
-    (sql) => sql.includes("SET \"status\" = 'SEALED'") ? [{ ...terms, effectiveAt: "2026-10-30T01:00:00.000Z", sealedAt: "2026-10-30T01:00:00.000Z" }] : undefined,
+    (sql) => sql.includes("FOR UPDATE") && sql.includes("legal_document_version") ? [current] : undefined,
+    (sql) => { if (!sql.includes("SET \"status\" = 'PENDING'")) return undefined; current = { ...draft, status: "PENDING", approvalRequestId: "approval_req_1" }; return [current]; },
+    (sql) => { if (!sql.includes("SET \"status\" = 'SEALED'")) return undefined; current = { ...draft, status: "SEALED", effectiveAt: "2026-10-30T01:00:00.000Z", sealedAt: "2026-10-30T01:00:00.000Z", approvalRequestId: "approval_req_1" }; return [current]; },
   ]);
-  const sealed = await sealLegalDocument(client, "admin_1", terms.id, "2");
+  const pending = await submitLegalDocument(client, draft.id, "2", "approval_req_1");
+  assert.equal(pending.status, "PENDING");
+  assert.equal(pending.approvalRequestId, "approval_req_1");
+  const submitCall = client.calls.find(call => call.sql.includes("SET \"status\" = 'PENDING'"));
+  assert.deepEqual(submitCall?.values, [draft.id, "approval_req_1"]);
+  // 只有绑定本申请的 PENDING 行可被封存；别的申请号一律拒绝。
+  await assert.rejects(() => sealLegalDocumentByApproval(client, "admin_1", draft.id, "approval_req_other", new Date()), /another approval request/);
+  const sealed = await sealLegalDocumentByApproval(client, "admin_1", draft.id, "approval_req_1", "2026-10-30T01:00:00.000Z");
   assert.equal(sealed.status, "SEALED");
   assert.equal(sealed.effectiveAt, "2026-10-30T01:00:00.000Z");
-  await assert.rejects(() => sealLegalDocument(client, "admin_1", terms.id, "1"), /changed/);
+  // 已封存行不能再提交，也不能再被任何申请封存。
+  await assert.rejects(() => submitLegalDocument(client, draft.id, "2", "approval_req_2"), /already submitted or sealed/);
+  const draftOnly = fakeClient([(sql) => sql.includes("FOR UPDATE") && sql.includes("legal_document_version") ? [draft] : undefined]);
+  await assert.rejects(() => sealLegalDocumentByApproval(draftOnly, "admin_1", draft.id, "approval_req_1", new Date()), /not pending approval/);
+  assert.equal(draftOnly.calls.filter(call => call.sql.startsWith("UPDATE")).length, 0);
 });

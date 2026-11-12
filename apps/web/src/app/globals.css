@@ -1938,6 +1938,9 @@ html[data-theme="dark"] .account-card--grid .breakdown-total-val--unconfirmed {
 .auth-page-footer { padding: 18px 20px 26px; color: var(--color-text-muted); text-align: center; font-size: 11px; }
 .auth-page-title { margin: 0 0 18px; font: 400 30px/1.25 "Smiley Sans",sans-serif; }
 .auth-page-session-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.legal-doc-card { width: min(100%, 840px); min-width: 0; }
+.legal-doc-meta { margin-bottom: 24px; color: var(--color-text-secondary); }
+.legal-doc-published p + p { margin-top: 1em; }
 .auth-page-card .auth-unavailable { display: grid; gap: 10px; }
 .auth-page-links { margin: 20px 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.7; }
 .auth-page-links a { color: var(--color-accent-brand-ink); text-underline-offset: 3px; }

@@ -7,7 +7,7 @@ import * as React from 'react';
 
 import type { DropdownMenuProps } from '@radix-ui/react-dropdown-menu';
 
-import { MoreHorizontalIcon } from 'lucide-react';
+import { Check, MoreHorizontalIcon } from 'lucide-react';
 import { useEditorRef } from 'platejs/react';
 
 import { PALETTE, type PlatePreset } from '@zzsh/content/plate';
@@ -18,6 +18,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 
@@ -58,14 +59,16 @@ export function MoreToolbarButton({
     colors.map((token) => (
       <DropdownMenuItem
         key={`${mark}-${token}`}
+        className="plate-color-option"
         onSelect={() => applyColor(mark, token)}
       >
         <span
-          className="size-3.5 rounded-full border border-border"
+          className="plate-color-swatch"
           style={{ background: `var(--plate-${token})` }}
           aria-hidden="true"
         />
         {COLOR_LABELS[token] ?? token}
+        {editor.api.marks()?.[mark] === token ? <Check className="ml-auto" size={13} aria-hidden="true" /> : null}
       </DropdownMenuItem>
     ));
 
@@ -78,13 +81,14 @@ export function MoreToolbarButton({
       </DropdownMenuTrigger>
 
       <DropdownMenuContent
-        className="ignore-click-outside/toolbar flex max-h-[500px] min-w-[180px] flex-col overflow-y-auto"
+        className="plate-color-menu ignore-click-outside/toolbar"
         align="start"
       >
         <DropdownMenuGroup>
           <DropdownMenuLabel className="text-muted-foreground text-xs">文字颜色</DropdownMenuLabel>
           {swatches('color')}
         </DropdownMenuGroup>
+        <DropdownMenuSeparator />
         <DropdownMenuGroup>
           <DropdownMenuLabel className="text-muted-foreground text-xs">背景颜色</DropdownMenuLabel>
           {swatches('backgroundColor')}
