@@ -153,7 +153,12 @@ globalThis.fetch = async (input, init = {}) => {
   const pathname = url.pathname;
   requests.push({ path: `${pathname}${url.search}`, method: init.method ?? "GET" });
   if (pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
-  if (pathname.endsWith("/im/presence/heartbeat")) return json({ ok: true });
+  if (pathname.endsWith("/im/presence/connect")) return json({ ok: true, reason: "CLAIMED", version: 1, stateRevision: 1 });
+  if (pathname.endsWith("/im/presence/heartbeat")) return json({
+    ok: true, dispatchable: true, reason: null, disconnectedSince: null, dispatchPaused: false,
+    stateRevision: 1, today: { seconds: 0, sessions: 0, users: 0 },
+    serverTime: "2026-11-12T00:00:00.000000Z",
+  });
   if (pathname.endsWith("/im/presence")) return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", activeLoad: 0, version: 1 });
   if (/\/im\/consultations\/[^/]+\/read$/.test(pathname)) {
     return fixture.readStatus === 200 ? json({ adminReadAt: "2026-10-29T02:05:00.000Z" }) : failure(fixture.readStatus);

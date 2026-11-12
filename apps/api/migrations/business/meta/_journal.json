@@ -1380,6 +1380,13 @@
       "when": 1794335180087,
       "tag": "0196_owner_payout_fee",
       "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1794335180088,
+      "tag": "0197_support_presence_lifecycle",
+      "breakpoints": true
     }
   ]
 }

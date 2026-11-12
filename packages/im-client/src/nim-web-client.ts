@@ -1,5 +1,6 @@
 import {
   ImLifecycleSupersededError,
+  markImDisposeFailure,
   type ImClientContext,
   type ImClientFactory,
   type ImClientHandle,
@@ -13,6 +14,22 @@ export { encodeOrderStageCard, parseOrderStageCard, type OrderStageCard, type Or
 export { NIM_RECEIPT_PENDING, NimReceiptActionError, type NimReceiptStatus } from "./message-receipts.ts";
 
 export type NimWebConnectionState = "DISCONNECTED" | "CONNECTING" | "CONNECTED" | "RECONNECTING" | "KICKED" | "AUTH_FAILED";
+export class NimLoginTerminalError extends Error {
+  readonly state: "KICKED" | "AUTH_FAILED";
+  constructor(state: "KICKED" | "AUTH_FAILED", cause: unknown) {
+    super(state === "KICKED" ? "NIM login was kicked" : "NIM login authentication failed", { cause });
+    this.name = "NimLoginTerminalError";
+    this.state = state;
+  }
+}
+export type NimConnectionEventKind = "DISCONNECTED" | "LOGIN_FAILED" | "KICKED" | "LOGOUT";
+export type NimConnectionDetails = {
+  kind?: NimConnectionEventKind;
+  errorCode?: number;
+  kickedReason?: number;
+  kickedReasonDesc?: string;
+  kickedClientType?: number;
+};
 type NimListener = (...args: unknown[]) => void;
 
 export type NimMessageReplySummary = { messageId: string; senderId: string; text?: string };
@@ -361,7 +378,7 @@ export type NimWebClientLike = {
   readonly accountId: string;
   readonly transport?: "nim" | "local-fake";
   getConnectionState(): NimWebConnectionState;
-  onConnectionStateChange(listener: (state: NimWebConnectionState) => void): () => void;
+  onConnectionStateChange(listener: (state: NimWebConnectionState, details?: NimConnectionDetails) => void): () => void;
   onMessages(listener: (messages: NimMessageLike[]) => void): () => void;
   getMessageHistory(conversationId: string, limit?: number, before?: NimMessageLike, authorize?: NimMessageAuthorization): Promise<NimMessageLike[]>;
   sendText(conversationId: string, text: string, authorize?: NimMessageAuthorization): Promise<NimMessageLike>;
@@ -410,6 +427,7 @@ type NimLoginServiceLike = {
   off: (eventName: string, listener: NimListener) => void;
   login: (accountId: string, token: string, options?: Record<string, unknown>) => Promise<void>;
   logout: () => Promise<void>;
+  getKickedOfflineDetail?: () => unknown;
 };
 
 export type NimInstanceLike = {
@@ -467,6 +485,19 @@ function validateOptions(options: NimWebClientOptions): void {
   if (options.linkUrl) { const parsed = new URL(options.linkUrl); if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new TypeError("NIM linkUrl must be a valid http(s) URL"); }
 }
 function mapConnectStatus(status: unknown): NimWebConnectionState | undefined { return status === 0 ? "DISCONNECTED" : status === 1 ? "CONNECTED" : status === 2 ? "CONNECTING" : status === 3 ? "RECONNECTING" : undefined; }
+function numericCode(value: unknown): number | undefined {
+  const code = value && typeof value === "object" ? (value as { code?: unknown }).code : undefined;
+  return typeof code === "number" && Number.isInteger(code) ? code : undefined;
+}
+function kickedDetails(value: unknown): NimConnectionDetails {
+  const detail = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    kind: "KICKED",
+    ...(typeof detail.reason === "number" && Number.isInteger(detail.reason) ? { kickedReason: detail.reason } : {}),
+    ...(typeof detail.reasonDesc === "string" && detail.reasonDesc ? { kickedReasonDesc: detail.reasonDesc } : {}),
+    ...(typeof detail.clientType === "number" && Number.isInteger(detail.clientType) ? { kickedClientType: detail.clientType } : {}),
+  };
+}
 function messageClientIdOf(message: unknown): string {
   const id = (message as { messageClientId?: unknown } | null)?.messageClientId;
   if (typeof id !== "string" || !id.trim()) throw new Error("NIM image message ID is unavailable");
@@ -690,9 +721,11 @@ export class NimWebClient implements NimWebClientLike {
   private readonly messageAuthorization?: NimMessageAuthorization;
   private readonly messageEventHandler?: NimListener;
   private state: NimWebConnectionState = "DISCONNECTED";
+  private terminalState: "KICKED" | "AUTH_FAILED" | undefined;
   private loggedIn = false;
   private disposed = false;
-  private readonly listeners = new Set<(state: NimWebConnectionState) => void>();
+  private disposal: Promise<void> | undefined;
+  private readonly listeners = new Set<(state: NimWebConnectionState, details?: NimConnectionDetails) => void>();
   private readonly messageListeners = new Set<(messages: NimMessageLike[]) => void>();
   private readonly eventHandlers: Array<[string, NimListener]> = [];
   private readonly messageEventHandlers: Array<[string, NimListener]> = [];
@@ -710,8 +743,26 @@ export class NimWebClient implements NimWebClientLike {
     const loginService = nim.V2NIMLoginService; this.messageService = nim.V2NIMMessageService;
     const bind = (eventName: string, handler: (...args: unknown[]) => void) => { const guarded = context.onCurrent(handler); loginService.on(eventName, guarded); this.eventHandlers.push([eventName, guarded]); };
     bind("onConnectStatus", (status) => { const next = mapConnectStatus(status); if (next) this.setState(next); });
-    bind("onLoginStatus", (status) => { if (status === 2) this.setState("CONNECTING"); if (status === 0 && this.state !== "KICKED" && this.state !== "AUTH_FAILED") this.setState("DISCONNECTED"); });
-    bind("onLoginFailed", () => this.setState("AUTH_FAILED")); bind("onKickedOffline", () => this.setState("KICKED")); bind("onDisconnected", () => this.setState("DISCONNECTED")); bind("onConnectFailed", () => this.setState("RECONNECTING"));
+    bind("onLoginStatus", (status) => {
+      if (status === 2) this.setState("CONNECTING");
+      if (status === 0 && !this.terminalState) this.setState("DISCONNECTED", { kind: "LOGOUT" });
+    });
+    bind("onLoginFailed", (error) => {
+      if (this.terminalState) return;
+      const code = numericCode(error);
+      this.terminalState = "AUTH_FAILED";
+      this.setState("AUTH_FAILED", { kind: "LOGIN_FAILED", ...(code === undefined ? {} : { errorCode: code }) });
+    });
+    bind("onKickedOffline", (detail) => {
+      // An explicit kick outranks an earlier auth failure: it must stop the
+      // automatic retry path and must not be overwritten by a later login event.
+      if (this.terminalState === "KICKED") return;
+      this.terminalState = "KICKED";
+      const fallback = loginService.getKickedOfflineDetail?.();
+      this.setState("KICKED", kickedDetails(detail ?? fallback));
+    });
+    bind("onDisconnected", (error) => this.setState("DISCONNECTED", { kind: "DISCONNECTED", ...(numericCode(error) === undefined ? {} : { errorCode: numericCode(error) }) }));
+    bind("onConnectFailed", (error) => this.setState("RECONNECTING", { kind: "DISCONNECTED", ...(numericCode(error) === undefined ? {} : { errorCode: numericCode(error) }) }));
     if (this.messageService) {
       const bindMessage = (eventName: string, normalize: (value: unknown) => NimMessageLike | null) => {
         const guarded = context.onCurrent((values: unknown) => {
@@ -741,7 +792,7 @@ export class NimWebClient implements NimWebClientLike {
     }
   }
   getConnectionState(): NimWebConnectionState { return this.state; }
-  onConnectionStateChange(listener: (state: NimWebConnectionState) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
+  onConnectionStateChange(listener: (state: NimWebConnectionState, details?: NimConnectionDetails) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   onMessages(listener: (messages: NimMessageLike[]) => void): () => void { this.messageListeners.add(listener); return () => this.messageListeners.delete(listener); }
   conversationIdForPeer(peerAccountId: string): string { const peer = requireNonBlank(peerAccountId, "NIM peer account ID"); if (!this.nim.V2NIMConversationIdUtil) throw new Error("NIM conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.p2pConversationId(peer); }
   conversationIdForTeam(teamId: string): string { const id = requireNonBlank(teamId, "NIM team ID"); if (!this.nim.V2NIMConversationIdUtil?.teamConversationId) throw new Error("NIM team conversation utility is unavailable"); return this.nim.V2NIMConversationIdUtil.teamConversationId(id); }
@@ -954,9 +1005,27 @@ export class NimWebClient implements NimWebClientLike {
     this.assertCurrent();
     return this.sendMediaMessage(id, messageClientId, options, params);
   }
-  async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
+  async login(options: NimWebClientOptions): Promise<void> { this.assertCurrent(); const loginOptions: Record<string, unknown> = { authType: options.tokenProvider ? 1 : 0, forceMode: options.forceMode ?? false }; if (options.retryCount !== undefined) loginOptions.retryCount = options.retryCount; if (options.timeout !== undefined) loginOptions.timeout = options.timeout; if (options.tokenProvider) loginOptions.tokenProvider = async () => { this.assertCurrent(); const token = await options.tokenProvider?.(this.accountId); this.assertCurrent(); return requireNonBlank(token ?? "", "NIM token provider result"); }; this.terminalState = undefined; this.setState("CONNECTING"); await this.nim.V2NIMLoginService.login(this.accountId, options.token ?? "", loginOptions); this.assertCurrent(); this.loggedIn = true; this.setState(mapConnectStatus(this.getSdkConnectStatus()) ?? "CONNECTED"); }
   async logout(): Promise<void> { if (!this.loggedIn || this.disposed) return; await this.nim.V2NIMLoginService.logout(); this.loggedIn = false; this.setState("DISCONNECTED"); }
-  async dispose(): Promise<void> { if (this.disposed) return; this.disposed = true; this.pendingImages.clear(); this.pendingTexts.clear(); this.pendingMedia.clear(); for (const done of this.conversationSyncWaiters.splice(0)) done(); this.receipts?.close(); for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } } this.eventHandlers.length = 0; for (const [eventName, handler] of this.messageEventHandlers) { try { this.messageService?.off(eventName, handler); } catch { /* cleanup continues */ } } this.messageEventHandlers.length = 0; for (const [eventName, handler] of this.conversationEventHandlers) { try { this.nim.V2NIMConversationService?.off?.(eventName, handler); } catch { /* cleanup continues */ } } this.conversationEventHandlers.length = 0; this.messageListeners.clear(); if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; } try { await this.nim.destroy(); } finally { this.listeners.clear(); } }
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposed = true;
+    this.disposal = Promise.resolve().then(async () => {
+      this.pendingImages.clear(); this.pendingTexts.clear(); this.pendingMedia.clear();
+      for (const done of this.conversationSyncWaiters.splice(0)) done();
+      this.receipts?.close();
+      for (const [eventName, handler] of this.eventHandlers) { try { this.nim.V2NIMLoginService.off(eventName, handler); } catch { /* cleanup continues */ } }
+      this.eventHandlers.length = 0;
+      for (const [eventName, handler] of this.messageEventHandlers) { try { this.messageService?.off(eventName, handler); } catch { /* cleanup continues */ } }
+      this.messageEventHandlers.length = 0;
+      for (const [eventName, handler] of this.conversationEventHandlers) { try { this.nim.V2NIMConversationService?.off?.(eventName, handler); } catch { /* cleanup continues */ } }
+      this.conversationEventHandlers.length = 0;
+      this.messageListeners.clear();
+      if (this.loggedIn) { try { await this.nim.V2NIMLoginService.logout(); } catch { /* destroy still runs */ } this.loggedIn = false; }
+      try { await this.nim.destroy(); } finally { this.listeners.clear(); }
+    });
+    return this.disposal;
+  }
   private assertCurrent(): void { if (this.disposed) throw new Error("NIM client is disposed"); if (!this.context.isCurrent()) throw new ImLifecycleSupersededError(); }
   private reportReceipt(message:NimMessageLike,action:"sent"|"hidden"):void {
     this.receipts?.record({kind:"receipt",action,message:{messageClientId:message.messageClientId,messageServerId:message.messageServerId??"",conversationId:message.conversationId,senderId:message.senderId,createTime:message.createTime,messageType:message.messageType??0}});
@@ -1014,7 +1083,16 @@ export class NimWebClient implements NimWebClientLike {
     }
   }
   private getSdkConnectStatus(): unknown { return (this.nim.V2NIMLoginService as NimLoginServiceLike & { getConnectStatus?: () => unknown }).getConnectStatus?.(); }
-  private setState(next: NimWebConnectionState): void { if (this.disposed || this.state === next) return; this.state = next; for (const listener of this.listeners) listener(next); }
+  private setState(next: NimWebConnectionState, details?: NimConnectionDetails): void {
+    if (this.disposed || (this.state === next && details === undefined)) return;
+    // KICKED/AUTH_FAILED are terminal until an explicit login attempt. A later
+    // onConnectStatus/onDisconnected must not turn a kicked page back into a
+    // normal reconnect loop that fights the new client.
+    if (this.terminalState && next !== this.terminalState) return;
+    if (next === "KICKED" || next === "AUTH_FAILED") this.terminalState = next;
+    this.state = next;
+    for (const listener of this.listeners) listener(next, details);
+  }
 }
 
 export function createNimWebClientFactory(options: NimWebClientOptions, sdkLoader: NimSdkLoader = loadNimSdk): ImClientFactory<NimWebClient> {
@@ -1027,7 +1105,28 @@ export function createNimWebClientFactory(options: NimWebClientOptions, sdkLoade
     const nim = sdk.getInstance({ appkey: requireNonBlank(options.appKey, "NIM app key"), apiVersion: "v2", debugLevel: options.debugLevel ?? DEFAULT_DEBUG_LEVEL, enableV2CloudConversation: options.enableCloudConversation === true }, Object.keys(loginConfig).length ? loginConfig : undefined);
     const accountId = options.accountId === undefined ? context.identity : requireNonBlank(options.accountId, "NIM account ID");
     const client = new NimWebClient(context, nim, accountId, options.messageAuthorization,options);
-    try { await client.login(options); if (!context.isCurrent()) throw new ImLifecycleSupersededError(); return { client, dispose: () => client.dispose() }; } catch (error) { await client.dispose(); throw error; }
+    context.onCancel?.(() => client.dispose());
+    try {
+      await client.login(options);
+      if (!context.isCurrent()) throw new ImLifecycleSupersededError();
+      const state = client.getConnectionState();
+      if (state === "KICKED" || state === "AUTH_FAILED") throw new NimLoginTerminalError(state, undefined);
+      return { client, dispose: () => client.dispose() };
+    } catch (error) {
+      const state = client.getConnectionState();
+      try {
+        await client.dispose();
+      } catch (cleanupError) {
+        const failure = state === "KICKED" || state === "AUTH_FAILED"
+          ? new NimLoginTerminalError(state, new AggregateError([error, cleanupError], "NIM login and cleanup failed"))
+          : cleanupError instanceof Error ? cleanupError : new Error("NIM login cleanup failed", { cause: cleanupError });
+        throw markImDisposeFailure(failure);
+      }
+      if (context.isCurrent() && (state === "KICKED" || state === "AUTH_FAILED")) {
+        throw error instanceof NimLoginTerminalError ? error : new NimLoginTerminalError(state, error);
+      }
+      throw error;
+    }
   };
 }
 
@@ -1052,7 +1151,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
   private loggedIn = false;
   private pollTimer: number | undefined;
   private polling = false;
-  private readonly listeners = new Set<(state: NimWebConnectionState) => void>();
+  private readonly listeners = new Set<(state: NimWebConnectionState, details?: NimConnectionDetails) => void>();
   private readonly messageListeners = new Set<(messages: NimMessageLike[]) => void>();
   private readonly known = new Map<string, Map<string, string>>();
   private readonly latestSeen = new Map<string, number>();
@@ -1070,7 +1169,7 @@ export class LocalFakeNimWebClient implements NimWebClientLike {
 
   getConnectionState(): NimWebConnectionState { return this.state; }
 
-  onConnectionStateChange(listener: (state: NimWebConnectionState) => void): () => void {
+  onConnectionStateChange(listener: (state: NimWebConnectionState, details?: NimConnectionDetails) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }

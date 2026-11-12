@@ -205,6 +205,10 @@ function requestHeaders(request: NodeRequest, requestId: string, adminOrigin: st
   // 因此拿不到命令身份。显式非法值必须拒绝，不能丢弃后作为无key命令执行。
   const commandId = adminSecurityCommandId(request.headers);
   if (commandId) headers.set("idempotency-key", commandId);
+  // Strict IM writes/token issuance are bound to the tab that owns the server
+  // connection slot; the API validates it against the authenticated session.
+  const connectionId = headerValue(request.headers["x-zzsh-connection-id"]);
+  if (connectionId) headers.set("x-zzsh-connection-id", connectionId);
   return headers;
 }
 
@@ -685,7 +689,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
   const imGetOnly = path === "/im/aftersales" || path === "/im/token" || path === "/im/identities" || path === "/im/support-overview" || path === "/im/yunxin-conversations" || path === "/im/my-support-statistics"
     || path === "/im/handovers" || path === "/im/audit/conversations" || path === "/im/transfer-targets"
     || path === "/im/message-access" || imImage || imMedia || imReadSub || imLegacyOrder;
-  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead || path === "/im/presence/heartbeat" || imAuditTakeover;
+  const imPostOnly = Boolean(imAction) || /^\/im\/aftersales\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\/(claim|contact|resolve)$/.test(path) || imOrderRead
+    || path === "/im/presence/heartbeat" || path === "/im/presence/connect" || path === "/im/presence/release" || path === "/im/presence/connection" || path === "/im/presence/locked-heartbeat" || imAuditTakeover;
   const imPathAllowed = imGetOrPost || imGetOnly || imPostOnly || path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings";
   const imMethodAllowed = path === "/im/presence" || path === "/im/support-settings" || path === "/im/read-copy-settings"
     ? method === "GET" || method === "PUT"

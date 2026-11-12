@@ -2,8 +2,23 @@ import type { PoolClient } from "pg";
 import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess } from "../auth/admin-authorization";
 import { orderDispatchLockKey } from "../order/payment-confirmation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
+import {
+  SUPPORT_LOST_SECONDS,
+  supportDispatchablePresenceSql,
+  supportStrictOnlinePresenceSql,
+} from "./support-presence-policy";
 
-export type SupportCandidate = { adminUserId: string; adminName: string; accountId: string; allGames: boolean; gameIds: string[]; complaint: boolean };
+export type SupportCandidate = {
+  adminUserId: string;
+  adminName: string;
+  accountId: string;
+  allGames: boolean;
+  gameIds: string[];
+  complaint: boolean;
+  connectionState?: string;
+  lastConfirmedAt?: string | null;
+  disconnectedSince?: string | null;
+};
 
 /**
  * 每客服同时占用的接待上限默认值。
@@ -65,18 +80,32 @@ export async function lockSupportMutation(client: PoolClient, appId: string, use
 }
 
 /** Read only after lockSupportMutation. Mapping ownership is checked, not merely its status. */
-export async function readEligibleSupport(client: PoolClient, appId: string, locked: LockedSupportRoster): Promise<SupportCandidate[]> {
+export async function readEligibleSupport(
+  client: PoolClient,
+  appId: string,
+  locked: LockedSupportRoster,
+  mode: "DISPATCHABLE" | "STRICT" = "DISPATCHABLE",
+  sessionId?: string,
+  connectionId?: string,
+): Promise<SupportCandidate[]> {
   if (!locked || locked.client !== client || locked.appId !== appId) throw new Error("Candidate read requires this transaction's locked roster");
-  const rows = (await client.query<{ adminUserId: string; adminName: string; accountId: string; identityMarker: string }>(
-    `SELECT p.admin_user_id AS "adminUserId",u.name AS "adminName",m.account_id AS "accountId",m.identity_marker AS "identityMarker"
+  const presenceSql = mode === "STRICT" ? supportStrictOnlinePresenceSql("p") : supportDispatchablePresenceSql("p");
+  const rows = (await client.query<{
+    adminUserId: string; adminName: string; accountId: string; identityMarker: string;
+    connectionState: string; lastConfirmedAt: Date | string | null; disconnectedSince: Date | string | null;
+  }>(
+    `SELECT p.admin_user_id AS "adminUserId",u.name AS "adminName",m.account_id AS "accountId",m.identity_marker AS "identityMarker",
+            p.connection_state AS "connectionState",p.last_confirmed_at AS "lastConfirmedAt",p.disconnected_since AS "disconnectedSince"
      FROM zzsh_iam.im_support_presence p JOIN zzsh_iam.admin_security s ON s.admin_user_id=p.admin_user_id
      JOIN zzsh_auth_admin."user" u ON u.id=p.admin_user_id
      JOIN zzsh_auth_admin."session" a ON a."id"=p.auth_session_id AND a."userId"=p.admin_user_id
        AND a.locked=false AND a."expiresAt">clock_timestamp()
      JOIN zzsh_iam.im_identity_mapping m ON m.provider='yunxin' AND m.app_id=p.app_id AND m.realm='admin'
        AND m.identity_kind='ADMIN' AND m.platform_subject_id=p.admin_user_id AND m.status='READY'
-     WHERE p.app_id=$1 AND p.admin_user_id=ANY($2::text[]) AND s.status='ACTIVE' AND NOT u.suspended AND p.availability='AVAILABLE'
-       AND p.connection_state='CONNECTED' AND p.last_connected_at>clock_timestamp()-interval '2 minutes'`, [appId, locked.ids])).rows;
+     WHERE p.app_id=$1 AND p.admin_user_id=ANY($2::text[]) AND s.status='ACTIVE' AND NOT u.suspended
+       AND ($3::text IS NULL OR p.auth_session_id=$3)
+       AND ($4::text IS NULL OR p.connection_id=$4)
+       AND ${presenceSql}`, [appId, locked.ids, sessionId ?? null, connectionId ?? null])).rows;
   const result: SupportCandidate[] = [];
   for (const row of rows) {
     const key = { provider: "yunxin" as const, appId, realm: "admin", kind: "ADMIN" as const, platformSubjectId: row.adminUserId };
@@ -86,17 +115,17 @@ export async function readEligibleSupport(client: PoolClient, appId: string, loc
     const scopes = locked.scopes.filter((s) => s.admin_user_id === row.adminUserId);
     const allGames = access!.isBoss || locked.scopeModes.some((s) => s.admin_user_id === row.adminUserId && s.mode === "ALL_GAMES");
     const complaint = Boolean(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportComplaint));
-    result.push({ ...row, allGames, gameIds: scopes.map((s) => s.game_id), complaint });
+    result.push({
+      ...row,
+      allGames,
+      gameIds: scopes.map((s) => s.game_id),
+      complaint,
+      lastConfirmedAt: row.lastConfirmedAt instanceof Date ? row.lastConfirmedAt.toISOString() : row.lastConfirmedAt,
+      disconnectedSince: row.disconnectedSince instanceof Date ? row.disconnectedSince.toISOString() : row.disconnectedSince,
+    });
   }
   return result;
 }
-
-/** 与 readEligibleSupport 同一在线口径；候选名单之外的 presence 不参与排队原因统计。 */
-const SUPPORT_READY_PRESENCE = `p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-    AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'
-    AND EXISTS (SELECT 1 FROM zzsh_auth_admin."session" a
-                 WHERE a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
-                   AND a.locked = false AND a."expiresAt" > clock_timestamp())`;
 
 /**
  * Online, eligible and (for complaints) complaint-authorized agents are candidates.
@@ -105,16 +134,23 @@ const SUPPORT_READY_PRESENCE = `p."availability" = 'AVAILABLE' AND p."connection
  */
 export async function reserveSupportCandidateOutcome(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
   candidates: SupportCandidate[], targetAdminId?: string, _concurrencyLimit?: number | null,
-  _enforceCapacity = false): Promise<SupportReserveOutcome> {
+  _enforceCapacity = false, mode: "DISPATCHABLE" | "STRICT" = "DISPATCHABLE", sessionId?: string,
+  connectionId?: string): Promise<SupportReserveOutcome> {
   // No hard capacity gate: the business assigns every paid order/new consultation
   // to an online eligible agent and keeps active_load as a display statistic only.
   const eligible = candidates.filter((c) => (!targetAdminId || c.adminUserId === targetAdminId)
     && (kind !== "COMPLAINT" || c.complaint));
   const field = kind === "ORDER" ? "last_order_assigned_at" : "last_consultation_assigned_at";
+  const presenceSql = mode === "STRICT" ? supportStrictOnlinePresenceSql("p") : supportDispatchablePresenceSql("p");
   const selected = (await client.query<{ admin_user_id: string }>(`SELECT p."admin_user_id" FROM zzsh_iam.im_support_presence p
-    WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${SUPPORT_READY_PRESENCE}
+    WHERE p."app_id" = $1 AND p."admin_user_id" = ANY($2::text[]) AND ${presenceSql}
+      AND ($3::text IS NULL OR p."auth_session_id" = $3)
+      AND ($4::text IS NULL OR p."connection_id" = $4)
+      AND EXISTS (SELECT 1 FROM zzsh_auth_admin."session" a
+                   WHERE a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+                     AND a.locked = false AND a."expiresAt" > clock_timestamp())
     ORDER BY p."${field}" ASC NULLS FIRST, p."admin_user_id" LIMIT 1`,
-  [appId, eligible.map((c) => c.adminUserId)])).rows[0];
+  [appId, eligible.map((c) => c.adminUserId), sessionId ?? null, connectionId ?? null])).rows[0];
   if (!selected) return { candidate: null, reason: "NO_ONLINE_STAFF" };
   await client.query(`UPDATE zzsh_iam.im_support_presence SET ${field}=clock_timestamp(),"updated_at"=clock_timestamp()
     ${kind === "ORDER" ? "" : ",active_load=active_load+1"} WHERE app_id=$1 AND admin_user_id=$2`, [appId, selected.admin_user_id]);
@@ -122,44 +158,163 @@ export async function reserveSupportCandidateOutcome(client: PoolClient, appId: 
 }
 
 export async function reserveSupportCandidate(client: PoolClient, appId: string, kind: "ORDER" | "SERVICE" | "COMPLAINT",
-  candidates: SupportCandidate[], targetAdminId?: string, concurrencyLimit?: number | null): Promise<SupportCandidate | null> {
-  return (await reserveSupportCandidateOutcome(client, appId, kind, candidates, targetAdminId, concurrencyLimit)).candidate;
+  candidates: SupportCandidate[], targetAdminId?: string, concurrencyLimit?: number | null,
+  mode: "DISPATCHABLE" | "STRICT" = "DISPATCHABLE", sessionId?: string, connectionId?: string): Promise<SupportCandidate | null> {
+  return (await reserveSupportCandidateOutcome(client, appId, kind, candidates, targetAdminId, concurrencyLimit, false, mode, sessionId, connectionId)).candidate;
 }
 
+export type SupportReapOptions = {
+  lostSeconds?: number;
+};
+
 /**
- * CS-M1 僵尸接线区间：超过 3 分钟无心跳的未结束区间以最后心跳截断，并把仍显示
- * CONNECTED 的 presence 降级为 DISCONNECTED。只关闭本人区间；若同一客服已有更新
- * 的未结束区间则不动 presence。调用方持有 App 调度闸门与同一事务。
+ * The dispatch tick's single session sweep:
+ * - an expired owning auth session ends at its expiry time;
+ * - a revoked/missing owning session ends at the last confirmed liveness;
+ * - a 30-minute silent agent ends at the last confirmed liveness (LOST).
+ * Every close re-checks the session owner so a newer takeover is never touched.
  */
-export async function reapStaleSupportSessions(
+export async function reapSupportPresenceSessions(
   client: PoolClient,
   appId: string,
-  staleSeconds = 180,
+  options: SupportReapOptions = {},
 ): Promise<{ sessions: number; presences: number }> {
-  if (!Number.isSafeInteger(staleSeconds) || staleSeconds < 1) throw new Error("Invalid stale session window");
-  const row = (await client.query<{ sessions: string | number; presences: string | number }>(
-    `WITH stale AS (
-       UPDATE "zzsh_iam"."im_support_presence_session"
-          SET "ended_at" = "last_heartbeat_at", "end_reason" = 'STALE'
-        WHERE "app_id" = $1 AND "ended_at" IS NULL
-          AND "last_heartbeat_at" < clock_timestamp() - ($2::int * interval '1 second')
-       RETURNING "admin_user_id"
-     ), disconnected AS (
+  const lostSeconds = options.lostSeconds ?? SUPPORT_LOST_SECONDS;
+  if (!Number.isSafeInteger(lostSeconds) || lostSeconds < 1) throw new Error("Invalid lost session window");
+
+  const expired = await client.query<{ sessions: string | number; presences: string | number }>(
+    `WITH expired AS (
+       SELECT p."app_id", p."admin_user_id", p."auth_session_id",
+              GREATEST(
+                COALESCE(s."started_at", a."expiresAt"),
+                LEAST(a."expiresAt", COALESCE(p."last_confirmed_at", s."started_at", a."expiresAt"))
+              ) AS "ended_at"
+         FROM "zzsh_auth_admin"."session" a
+         JOIN "zzsh_iam"."im_support_presence" p ON a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+         LEFT JOIN "zzsh_iam"."im_support_presence_session" s
+           ON s."app_id" = p."app_id" AND s."admin_user_id" = p."admin_user_id" AND s."ended_at" IS NULL
+        WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE'
+          AND a."expiresAt" <= clock_timestamp()
+        FOR UPDATE OF a, p
+     ), closed AS (
+       UPDATE "zzsh_iam"."im_support_presence_session" s
+          SET "ended_at" = expired."ended_at", "end_reason" = 'SESSION_EXPIRED'
+         FROM expired
+        WHERE s."app_id" = expired."app_id" AND s."admin_user_id" = expired."admin_user_id"
+          AND s."ended_at" IS NULL
+        RETURNING s."admin_user_id"
+     ), cleared AS (
        UPDATE "zzsh_iam"."im_support_presence" p
-          SET "connection_state" = 'DISCONNECTED',
+          SET "availability" = 'OFF_DUTY',
+              "connection_state" = 'DISCONNECTED',
+              "auth_session_id" = NULL,
+              "connection_id" = NULL,
+              "connection_expires_at" = NULL,
+              "dispatch_paused" = false,
+              "disconnected_since" = NULL,
               "version" = p."version" + 1,
+              "state_revision" = p."state_revision" + 1,
               "updated_at" = clock_timestamp()
-        WHERE p."app_id" = $1 AND p."connection_state" IN ('CONNECTED','RECONNECTING')
-          AND p."admin_user_id" IN (SELECT "admin_user_id" FROM stale)
-          AND NOT EXISTS (
-            SELECT 1 FROM "zzsh_iam"."im_support_presence_session" s
-             WHERE s."app_id" = p."app_id" AND s."admin_user_id" = p."admin_user_id" AND s."ended_at" IS NULL
-          )
-       RETURNING p."admin_user_id"
+         FROM expired
+        WHERE p."app_id" = expired."app_id" AND p."admin_user_id" = expired."admin_user_id"
+          AND p."auth_session_id" = expired."auth_session_id"
+        RETURNING p."admin_user_id"
      )
-     SELECT (SELECT count(*)::int FROM stale) AS "sessions",
-            (SELECT count(*)::int FROM disconnected) AS "presences"`,
-    [appId, staleSeconds],
-  )).rows[0];
-  return { sessions: Number(row?.sessions ?? 0), presences: Number(row?.presences ?? 0) };
+     SELECT (SELECT count(*)::int FROM closed) AS "sessions",
+            (SELECT count(*)::int FROM cleared) AS "presences"`,
+    [appId],
+  );
+
+  const revoked = await client.query<{ sessions: string | number; presences: string | number }>(
+    `WITH orphan AS (
+       SELECT p."app_id", p."admin_user_id", p."auth_session_id",
+              GREATEST(COALESCE(p."last_confirmed_at", s."started_at", clock_timestamp()), s."started_at") AS "ended_at"
+         FROM "zzsh_iam"."im_support_presence" p
+         LEFT JOIN "zzsh_iam"."im_support_presence_session" s
+           ON s."app_id" = p."app_id" AND s."admin_user_id" = p."admin_user_id" AND s."ended_at" IS NULL
+        WHERE p."app_id" = $1 AND p."availability" = 'AVAILABLE'
+          AND (p."auth_session_id" IS NULL OR NOT EXISTS (
+            SELECT 1 FROM "zzsh_auth_admin"."session" a
+             WHERE a."id" = p."auth_session_id" AND a."userId" = p."admin_user_id"
+               AND a."expiresAt" > clock_timestamp()))
+        FOR UPDATE OF p
+     ), closed AS (
+       UPDATE "zzsh_iam"."im_support_presence_session" s
+          SET "ended_at" = orphan."ended_at",
+              "end_reason" = CASE WHEN orphan."auth_session_id" IS NULL THEN 'LOST' ELSE 'REVOKED' END
+         FROM orphan
+        WHERE s."app_id" = orphan."app_id" AND s."admin_user_id" = orphan."admin_user_id"
+          AND s."ended_at" IS NULL
+        RETURNING s."admin_user_id"
+     ), cleared AS (
+       UPDATE "zzsh_iam"."im_support_presence" p
+          SET "availability" = 'OFF_DUTY',
+              "connection_state" = 'DISCONNECTED',
+              "auth_session_id" = NULL,
+              "connection_id" = NULL,
+              "connection_expires_at" = NULL,
+              "dispatch_paused" = false,
+              "disconnected_since" = NULL,
+              "version" = p."version" + 1,
+              "state_revision" = p."state_revision" + 1,
+              "updated_at" = clock_timestamp()
+         FROM orphan
+        WHERE p."app_id" = orphan."app_id" AND p."admin_user_id" = orphan."admin_user_id"
+          AND p."auth_session_id" IS NOT DISTINCT FROM orphan."auth_session_id"
+        RETURNING p."admin_user_id"
+     )
+     SELECT (SELECT count(*)::int FROM closed) AS "sessions",
+            (SELECT count(*)::int FROM cleared) AS "presences"`,
+    [appId],
+  );
+
+  const lost = await client.query<{ sessions: string | number; presences: string | number }>(
+    `WITH lost AS (
+       SELECT s."id" AS "session_id", s."app_id", s."admin_user_id",
+              GREATEST(COALESCE(p."last_confirmed_at", s."started_at"), s."started_at") AS "ended_at"
+         FROM "zzsh_iam"."im_support_presence" p
+         JOIN "zzsh_iam"."im_support_presence_session" s
+           ON p."app_id" = s."app_id" AND p."admin_user_id" = s."admin_user_id"
+        WHERE s."app_id" = $1 AND s."ended_at" IS NULL
+          AND p."availability" = 'AVAILABLE'
+          AND COALESCE(p."last_confirmed_at", s."started_at")
+              <= clock_timestamp() - ($2::int * interval '1 second')
+        FOR UPDATE OF p, s
+     ), closed AS (
+       UPDATE "zzsh_iam"."im_support_presence_session" s
+          SET "ended_at" = lost."ended_at", "end_reason" = 'LOST'
+         FROM lost
+        WHERE s."id" = lost."session_id"
+        RETURNING s."admin_user_id"
+     ), cleared AS (
+       UPDATE "zzsh_iam"."im_support_presence" p
+          SET "availability" = 'OFF_DUTY',
+              "connection_state" = 'DISCONNECTED',
+              "auth_session_id" = NULL,
+              "connection_id" = NULL,
+              "connection_expires_at" = NULL,
+              "dispatch_paused" = false,
+              "disconnected_since" = NULL,
+              "version" = p."version" + 1,
+              "state_revision" = p."state_revision" + 1,
+              "updated_at" = clock_timestamp()
+         FROM lost
+        WHERE p."app_id" = lost."app_id" AND p."admin_user_id" = lost."admin_user_id"
+          AND p."auth_session_id" IS NOT NULL
+        RETURNING p."admin_user_id"
+     )
+     SELECT (SELECT count(*)::int FROM closed) AS "sessions",
+            (SELECT count(*)::int FROM cleared) AS "presences"`,
+    [appId, lostSeconds],
+  );
+
+  const total = (row: { sessions: string | number; presences: string | number } | undefined) => ({
+    sessions: Number(row?.sessions ?? 0),
+    presences: Number(row?.presences ?? 0),
+  });
+  const parts = [total(expired.rows[0]), total(revoked.rows[0]), total(lost.rows[0])];
+  return {
+    sessions: parts.reduce((sum, part) => sum + part.sessions, 0),
+    presences: parts.reduce((sum, part) => sum + part.presences, 0),
+  };
 }

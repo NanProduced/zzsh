@@ -222,11 +222,13 @@ test("a failing consultation tick is logged and cannot change the dispatch outco
 });
 
 test("wake bursts while the consultation tick is running stay on one dispatch", async () => {
-  const { pool, connects } = countingPool();
+  const { pool } = countingPool();
   const worker = new OrderDispatchLifecycle();
   const entered = deferred(), release = deferred(), finished = deferred();
   let ticks = 0;
+  let results = 0;
   worker.start({ pool, appId: "app_test", batchLimit: 1, intervalMs: 600000,
+    onResult: () => { results++; },
     consultationTick: async () => {
       ticks++;
       if (ticks === 1) { entered.resolve(); await release.promise; finished.resolve(); }
@@ -235,10 +237,10 @@ test("wake bursts while the consultation tick is running stay on one dispatch", 
   worker.wake();
   worker.wake();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(connects(), 1, "the consultation tick stays inside the single in-flight slot");
+  assert.equal(results, 1, "the consultation tick stays inside the single in-flight slot");
   release.resolve();
   await finished.promise;
   await worker.beforeApplicationShutdown();
-  assert.equal(connects(), 1);
+  assert.equal(results, 1);
   assert.equal(ticks, 1);
 });

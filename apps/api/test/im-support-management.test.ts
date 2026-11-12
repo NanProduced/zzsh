@@ -6,20 +6,12 @@ import { test } from "node:test";
 import { handleAdminBff, type AdminBffOptions } from "../src/bff/admin-bff";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import {
-  PRESENCE_SESSION_CLOSE_SQL,
-  PRESENCE_SESSION_OPEN_SQL,
-  heartbeatOwnPresence,
-  presenceSessionAction,
-  presenceSessionEndReason,
   readAdminMessageAccess,
   recordConfirmedConsultationMessage,
-  readOwnPresence,
   supportManagerIdentityKey,
   takeoverConsultation,
   takeoverDecision,
 } from "../src/im/consultation";
-import { reapStaleSupportSessions } from "../src/im/support-dispatch";
-import { clearSupportPresenceForSession } from "../src/im/support-presence-session";
 import {
   decodeSupportAuditCursor,
   encodeSupportAuditCursor,
@@ -88,6 +80,10 @@ function adminContextHandler(input: {
     if (sql.includes("WITH role_permissions AS")) return { rows: permissions.map((permissionCode) => ({ permissionCode })) };
     const extra = input.extras?.(sql, values);
     if (extra) return extra;
+    if (sql.includes(`"end_reason" = 'SESSION_EXPIRED'`) || sql.includes(`"end_reason" = 'LOST'`) || sql.includes(`"end_reason" = 'REVOKED'`)) {
+      return { rows: [{ sessions: 0, presences: 0 }] };
+    }
+    if (sql.includes('FROM "zzsh_iam"."im_support_presence"') && sql.includes("FOR UPDATE")) return { rows: [] };
     throw new Error("Unexpected SQL in support management test: " + sql);
   };
 }
@@ -175,23 +171,6 @@ test("management read and takeover permissions stay separate", () => {
   assert.doesNotThrow(() => requireSupportAuditTakeover(adminAccess(["im.support.management.read", "im.support.audit.takeover"], true)));
 });
 
-test("presence session transitions classify every end reason without double-opening", () => {
-  assert.equal(presenceSessionAction("AVAILABLE", "CONNECTED"), "OPEN");
-  assert.equal(presenceSessionAction("AVAILABLE", "RECONNECTING"), "KEEP");
-  assert.equal(presenceSessionAction("AVAILABLE", "CONNECTING"), "KEEP");
-  assert.equal(presenceSessionAction("PAUSED", "CONNECTED"), "CLOSE");
-  assert.equal(presenceSessionAction("OFF_DUTY", "DISCONNECTED"), "CLOSE");
-  assert.equal(presenceSessionEndReason("PAUSED", "CONNECTED"), "PAUSED");
-  assert.equal(presenceSessionEndReason("PAUSED", "DISCONNECTED"), "PAUSED");
-  assert.equal(presenceSessionEndReason("OFF_DUTY", "CONNECTED"), "OFF_DUTY");
-  assert.equal(presenceSessionEndReason("AVAILABLE", "KICKED"), "DISCONNECTED");
-  assert.equal(presenceSessionEndReason("AVAILABLE", "CONNECTED"), null);
-  assert.equal(presenceSessionEndReason("AVAILABLE", "RECONNECTING"), null);
-  assert.match(PRESENCE_SESSION_OPEN_SQL, /ON CONFLICT \("app_id", "admin_user_id"\) WHERE "ended_at" IS NULL DO NOTHING/);
-  assert.match(PRESENCE_SESSION_CLOSE_SQL, /"ended_at" = clock_timestamp\(\), "end_reason" = \$3/);
-  assert.match(PRESENCE_SESSION_CLOSE_SQL, /"ended_at" IS NULL/);
-});
-
 test("0125 creates one open interval per admin and records both permissions", () => {
   const sql = readFileSync(resolve("migrations/business/0125_im_support_management.sql"), "utf8");
   assert.match(sql, /CREATE UNIQUE INDEX IF NOT EXISTS "im_support_presence_session_open_unique"[\s\S]*?WHERE "ended_at" IS NULL/);
@@ -216,110 +195,17 @@ test("0125 creates one open interval per admin and records both permissions", ()
   assert.doesNotMatch(acl, /GRANT[^;\n]*DELETE[^;\n]*"im_support_(presence_session|handover)"/);
 });
 
-test("today seconds intersect the Beijing day and truncate STALE at the last heartbeat", async () => {
+test("today seconds intersect the Beijing day and use trusted liveness for open intervals", async () => {
   const f = fakePool((sql, values) => {
     assert.deepEqual(values, [APP_ID, "admin_a", "2026-10-29", "2026-10-29"]);
     assert.match(sql, /Asia\/Shanghai/);
-    assert.match(sql, /LEAST\(COALESCE\(s\."ended_at", CASE WHEN s\."last_heartbeat_at"/);
-    assert.match(sql, /THEN s\."last_heartbeat_at" ELSE clock_timestamp\(\) END\), b\.day_end\)/);
+    assert.match(sql, /LEFT JOIN "zzsh_iam"\."im_support_presence" p/);
+    assert.match(sql, /LEAST\(COALESCE\(s\."ended_at", p\."last_confirmed_at", s\."started_at"\), b\.day_end\)/);
     assert.match(sql, /e\."event_type" IN \('ASSIGNED', 'CLAIMED', 'TRANSFERRED'\)/);
     assert.match(sql, /e\."event_type" = 'CLOSED' AND e\."actor_type" = 'admin'/);
     return { rows: [{ seconds: "5400", sessions: 4, users: 3 }] };
   });
   assert.deepEqual(await readSupportToday(f.pool as never, APP_ID, "admin_a", "2026-10-29"), { seconds: 5400, sessions: 4, users: 3 });
-});
-
-test("stale reaper closes at the last heartbeat, disconnects only when no newer interval exists", async () => {
-  const f = fakePool((sql, values) => {
-    assert.deepEqual(values, [APP_ID, 180]);
-    assert.match(sql, /SET "ended_at" = "last_heartbeat_at", "end_reason" = 'STALE'/);
-    assert.match(sql, /clock_timestamp\(\) - \(\$2::int \* interval '1 second'\)/);
-    assert.match(sql, /"connection_state" = 'DISCONNECTED'/);
-    assert.match(sql, /"version" = p\."version" \+ 1/);
-    assert.match(sql, /NOT EXISTS \([\s\S]*s\."ended_at" IS NULL/);
-    return { rows: [{ sessions: 2, presences: 1 }] };
-  });
-  assert.deepEqual(await reapStaleSupportSessions(f.pool as never, APP_ID), { sessions: 2, presences: 1 });
-});
-
-test("presence read extends the existing projection with today's counts", async () => {
-  const f = fakePool(adminContextHandler({
-    boss: true,
-    extras: (sql) => {
-      if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
-        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 2, version: 7, authSessionId: "session_a" }] };
-      }
-      if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) {
-        return { rows: [{ seconds: 120, sessions: 2, users: 1 }] };
-      }
-      return null;
-    },
-  }));
-  const presence = await readOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext);
-  assert.deepEqual(presence, {
-    adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED",
-    lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 2, version: 7,
-    ownedByAnotherSession: false, unbound: false,
-    today: { seconds: 120, sessions: 2, users: 1 },
-  });
-});
-
-test("locking a session clears only its own presence and closes its reception interval", async () => {
-  const f = fakePool((sql, values) => {
-    assert.match(sql, /"auth_session_id" = \$2/);
-    assert.match(sql, /"auth_session_id" = NULL/);
-    assert.match(sql, /"end_reason" = 'FORCED'/);
-    assert.deepEqual(values, ["admin_a", "session_a"]);
-    return { rows: [{ presence: "1", sessions: "1" }] };
-  });
-  assert.deepEqual(await clearSupportPresenceForSession(f.pool as never, "admin_a", "session_a"), { presence: true, sessions: 1 });
-});
-
-test("presence exposes that another browser session owns the single row", async () => {
-  const f = fakePool(adminContextHandler({
-    boss: true,
-    extras: (sql) => {
-      if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
-        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 0, version: 8, authSessionId: "session_b" }] };
-      }
-      if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) return { rows: [{ seconds: 0, sessions: 0, users: 0 }] };
-      return null;
-    },
-  }));
-  const presence = await readOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext);
-  assert.equal(presence.ownedByAnotherSession, true);
-});
-
-test("a pre-0184 presence row is exposed as unbound instead of auto-online", async () => {
-  const f = fakePool(adminContextHandler({
-    boss: true,
-    extras: (sql) => {
-      if (sql.includes('FROM "zzsh_iam"."im_support_presence" WHERE "app_id"')) {
-        return { rows: [{ adminUserId: "admin_a", availability: "AVAILABLE", connectionState: "CONNECTED", lastConnectedAt: "2026-10-29T01:00:00.000Z", activeLoad: 0, version: 9, authSessionId: null }] };
-      }
-      if (sql.includes("im_support_presence_session") && sql.includes("LEAST")) return { rows: [{ seconds: 0, sessions: 0, users: 0 }] };
-      return null;
-    },
-  }));
-  const presence = await readOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext);
-  assert.equal(presence.availability, "AVAILABLE");
-  assert.equal(presence.unbound, true);
-  assert.equal(presence.ownedByAnotherSession, false);
-});
-
-test("heartbeat only advances an open interval while the admin is available and connected", async () => {
-  const f = fakePool(adminContextHandler({
-    boss: true,
-    extras: (sql, values) => {
-      assert.match(sql, /"availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'/);
-      assert.match(sql, /"auth_session_id" = \$3/);
-      assert.equal((values as unknown[])[2], "session_a");
-      assert.match(sql, /AND EXISTS \(SELECT 1 FROM p\)/);
-      return { rows: [{ presence: true, session: true, serverTime: "2026-10-29T08:00:00.000000Z" }] };
-    },
-  }));
-  assert.deepEqual(await heartbeatOwnPresence({ pool: f.pool, appId: APP_ID } as never, adminContext),
-    { ok: true, serverTime: "2026-10-29T08:00:00.000000Z" });
 });
 
 function overviewHandler(state: {
@@ -720,7 +606,7 @@ test("takeover is idempotent for the current owner and rejects non-active consul
   const transfer = source.slice(source.indexOf("async function beginTransfer"), source.indexOf("async function transferWithScope"));
   assert.match(transfer, /state" IN \('PENDING', 'RUNNING', 'UNKNOWN'\)/);
   assert.match(transfer, /WHERE "app_id" = \$1 AND "id" = \$2 AND "message_scope_state" = 'READY'/);
-  assert.match(source.slice(source.indexOf("export async function takeoverConsultation"), source.indexOf("export async function closeConsultation")), /beginTransfer\([^)]*"TAKEOVER"\)/);
+  assert.match(source.slice(source.indexOf("export async function takeoverConsultation"), source.indexOf("export async function closeConsultation")), /beginTransfer\([^)]*"TAKEOVER"[^)]*\)/);
 });
 
 test("takeover on an already-owned consultation performs no second write", async () => {
@@ -791,6 +677,10 @@ test("admin BFF forwards the new support-management routes with strict methods",
   assert.equal((await run("/im/yunxin-conversations")).status, 401);
   assert.equal((await run("/im/yunxin-conversations", "POST")).status, 404);
   assert.equal((await run("/im/presence/heartbeat", "POST")).status, 503);
+  assert.equal((await run("/im/presence/connect", "POST")).status, 503);
+  assert.equal((await run("/im/presence/release", "POST")).status, 503);
+  assert.equal((await run("/im/presence/connection", "POST")).status, 503);
+  assert.equal((await run("/im/presence/release", "GET")).status, 404);
   assert.equal((await run("/im/audit/consultations/im_consult_1/takeover", "POST")).status, 503);
   assert.equal((await run("/im/support-overview", "POST")).status, 404);
   assert.equal((await run("/im/handovers", "POST")).status, 404);
@@ -843,8 +733,10 @@ test("queue eligibility uses the dispatch online predicate and rejects a mismatc
   assert.equal(overview.totals.onDutyCount, 0, "an online presence without a valid identity/permission is not counted");
   const eligibleSql = f.calls.find(({ sql }) => sql.includes('m."status" = \'READY\''))!.sql;
   assert.match(eligibleSql, /p\."availability" = 'AVAILABLE'/);
-  assert.match(eligibleSql, /p\."connection_state" = 'CONNECTED'/);
-  assert.match(eligibleSql, /p\."last_connected_at" > clock_timestamp\(\) - interval '2 minutes'/);
+  assert.match(eligibleSql, /p\."dispatch_paused" = false/);
+  assert.match(eligibleSql, /p\."connection_state" NOT IN \('KICKED', 'AUTH_FAILED'\)/);
+  assert.match(eligibleSql, /LEAST\(p\."disconnected_since", p\."last_confirmed_at"\)/);
+  assert.match(eligibleSql, /interval '120 seconds'/);
   assert.match(eligibleSql, /s\."status" = 'ACTIVE'/);
   assert.match(eligibleSql, /NOT u\."suspended"/);
 });

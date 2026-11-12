@@ -1,7 +1,7 @@
 import { Injectable, Logger, type BeforeApplicationShutdown } from "@nestjs/common";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, withTransaction } from "../auth/security-core";
-import { lockSupportMutation, readEligibleSupport, reapStaleSupportSessions, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
+import { lockSupportMutation, readEligibleSupport, reapSupportPresenceSessions, reserveSupportCandidate, type SupportCandidate } from "./support-dispatch";
 
 export type DispatchResult = { assigned: string[]; more: boolean };
 
@@ -42,15 +42,22 @@ export async function assignWaitingOrders(client: PoolClient, appId: string, sta
   return { assigned, more: (await pendingOrders(client, appId, staff, 1)).length > 0 };
 }
 
-export async function dispatchPaidOrders(pool: Pool, appId: string, batchLimit = 10): Promise<DispatchResult> {
+export async function dispatchPaidOrders(pool: Pool, appId: string, batchLimit = 10, onMaintenanceFailure?: () => void): Promise<DispatchResult> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(appId)) throw new Error("Invalid dispatch App");
-  return withTransaction(pool, async (client) => {
+  const result = await withTransaction(pool, async (client) => {
     const locked = await lockSupportMutation(client, appId);
-    const result = await assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
-    // CS-M1：周期 tick 同时收敛无心跳接线区间；失败由 worker 统一记录，不回滚派单。
-    await reapStaleSupportSessions(client, appId);
-    return result;
+    return assignWaitingOrders(client, appId, await readEligibleSupport(client, appId, locked), batchLimit);
   });
+  // Maintenance is deliberately outside the assignment transaction: a reaper
+  // failure must never roll back orders that were already assigned.
+  try {
+    await withTransaction(pool, (client) => reapSupportPresenceSessions(client, appId));
+  } catch {
+    onMaintenanceFailure?.();
+    // Lazy convergence on reads/heartbeats remains the fallback when the periodic
+    // sweep is unavailable.
+  }
+  return result;
 }
 
 export type OrderDispatchOptions = { pool: Pool; appId: string; batchLimit: number; intervalMs: number;
@@ -76,7 +83,9 @@ export class OrderDispatchLifecycle implements BeforeApplicationShutdown {
   wake(): void {
     if (!this.options || this.inFlight) return;
     const options = this.options;
-    const work = dispatchPaidOrders(options.pool, options.appId, options.batchLimit).then((result) => this.observe("RESULT", () => options.onResult?.(result)), (error: unknown) => {
+    const work = dispatchPaidOrders(options.pool, options.appId, options.batchLimit, () => {
+      this.logger.error(JSON.stringify({ event: "im.support.presence.sweep_failed" }));
+    }).then((result) => this.observe("RESULT", () => options.onResult?.(result)), (error: unknown) => {
       const raw = (error as { code?: string } | null)?.code;
       const code = raw === "55P03" ? "LOCK_BUSY" : raw === "40P01" ? "DEADLOCK" : "DISPATCH_FAILED";
       if (options.onFailure) return this.observe("FAILURE", () => options.onFailure!(code));

@@ -5,6 +5,8 @@ export type ImClientContext = {
   generation: number;
   isCurrent: () => boolean;
   onCurrent: <Args extends unknown[]>(callback: (...args: Args) => void) => (...args: Args) => void;
+  /** Register a real cancellation for work that is still opening (e.g. SDK login). */
+  onCancel?: (callback: () => void | Promise<void>) => void;
 };
 
 export type ImClientFactory<T> = (context: ImClientContext) => ImClientHandle<T> | Promise<ImClientHandle<T>>;
@@ -12,6 +14,19 @@ export type ImClientLifecycleSnapshot = { state: "idle" | "opening" | "ready"; i
 
 export class ImLifecycleSupersededError extends Error {
   constructor() { super("IM client lifecycle operation was superseded"); this.name = "ImLifecycleSupersededError"; }
+}
+
+/** A factory marks a rejected pending open when SDK cleanup itself failed. */
+export const IM_DISPOSE_FAILED = Symbol.for("zzsh.im.dispose-failed");
+
+export function markImDisposeFailure<T extends Error>(error: T, cause?: unknown): T {
+  Object.defineProperty(error, IM_DISPOSE_FAILED, { value: true, configurable: true });
+  if (cause !== undefined) Object.defineProperty(error, "cause", { value: cause, configurable: true });
+  return error;
+}
+
+export function isImDisposeFailure(value: unknown): boolean {
+  return Boolean(value && (value as { [IM_DISPOSE_FAILED]?: boolean })[IM_DISPOSE_FAILED]);
 }
 
 type ActiveClient<T> = { identity: string; generation: number; handle: ImClientHandle<T> };
@@ -34,7 +49,9 @@ export class ImClientLifecycle<T> {
   private generation = 0;
   private active: ActiveClient<T> | undefined;
   private pending: PendingClient<T> | undefined;
+  private pendingCancel: (() => void | Promise<void>) | undefined;
   private disposal = Promise.resolve();
+  private disposeFailure: unknown;
 
   constructor(factory: ImClientFactory<T>) { this.factory = factory; }
 
@@ -45,6 +62,7 @@ export class ImClientLifecycle<T> {
   }
 
   open(identity: string): Promise<T> {
+    if (this.disposeFailure) return Promise.reject(this.disposeFailure);
     const normalized = normalizeIdentity(identity);
     if (this.active?.identity === normalized) return Promise.resolve(this.active.handle.client);
     if (this.pending?.identity === normalized) return this.pending.promise.then((handle) => handle.client);
@@ -57,13 +75,24 @@ export class ImClientLifecycle<T> {
       onCurrent: <Args extends unknown[]>(callback: (...args: Args) => void) => (...args: Args) => {
         if (this.isCurrent(generation)) callback(...args);
       },
+      onCancel: (callback) => {
+        if (this.isCurrent(generation)) this.pendingCancel = callback;
+        else void Promise.resolve().then(callback).catch(() => undefined);
+      },
     };
     const promise = (async () => {
       await previousDisposal;
       if (generation !== this.generation) throw new ImLifecycleSupersededError();
       const handle = assertHandle(await this.factory(context));
-      if (generation !== this.generation) { await handle.dispose(); throw new ImLifecycleSupersededError(); }
+      if (generation !== this.generation) {
+        try { await handle.dispose(); }
+        catch (error) {
+          throw markImDisposeFailure(error instanceof Error ? error : new Error("IM client disposal failed", { cause: error }));
+        }
+        throw new ImLifecycleSupersededError();
+      }
       this.active = { identity: normalized, generation, handle };
+      this.pendingCancel = undefined;
       return handle;
     })();
     this.pending = { identity: normalized, generation, promise };
@@ -76,13 +105,41 @@ export class ImClientLifecycle<T> {
   private isCurrent(generation: number): boolean { return generation === this.generation && (this.active?.generation === generation || this.pending?.generation === generation); }
 
   private invalidate(): Promise<void> {
+    if (this.disposeFailure) return Promise.reject(this.disposeFailure);
     this.generation += 1;
+    const cancel = this.pendingCancel;
+    this.pendingCancel = undefined;
+    const pending = this.pending;
     this.pending = undefined;
+    const cancellation = cancel ? Promise.resolve().then(cancel).catch((error) => {
+      const failure = isImDisposeFailure(error) ? error : markImDisposeFailure(error instanceof Error ? error : new Error("IM client cancellation failed", { cause: error }));
+      this.disposeFailure = failure;
+      throw failure;
+    }) : Promise.resolve();
     const active = this.active;
     this.active = undefined;
-    if (!active) return this.disposal;
-    const dispose = async () => { await active.handle.dispose(); };
-    this.disposal = this.disposal.then(dispose, dispose);
+    if (!active && !pending && !cancel) return this.disposal;
+    const settle = Promise.all([
+      cancellation,
+      pending ? pending.promise.then(() => undefined, (error) => {
+        if (error && (error as { [IM_DISPOSE_FAILED]?: boolean })[IM_DISPOSE_FAILED]) {
+          this.disposeFailure = error;
+          throw error;
+        }
+        return undefined;
+      }) : Promise.resolve(),
+      active ? (async () => {
+        try { await active.handle.dispose(); }
+        catch (error) {
+          const failure = markImDisposeFailure(error instanceof Error ? error : new Error("IM client disposal failed", { cause: error }));
+          this.disposeFailure = failure;
+          throw failure;
+        }
+      })() : Promise.resolve(),
+    ]).then(() => undefined);
+    this.disposal = Promise.all([this.disposal.catch(() => undefined), settle]).then(() => undefined);
+    // A pending login rejection is expected when cancellation wins; the lock may
+    // be handed off once its dispose has settled. A failed dispose rejects close().
     return this.disposal;
   }
 }
