@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
 import useEmblaCarousel from "embla-carousel-react";
-import { Coins, LayoutGrid, List, Moon, RotateCw, SlidersHorizontal, TrendingUp, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Coins, LayoutGrid, List, Moon, RotateCw, SlidersHorizontal, TrendingUp, X } from "lucide-react";
 import { ManagedMarketBanner, ManagedMarketContact } from "@/components/content/market-content";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
@@ -615,99 +615,158 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     }
   }, [filters, isLingchenActive, navigate]);
 
-  const sortTabs = useMemo(() => [
-    {
-      id: "default",
-      label: "默认排序",
-      isActive: filters.sort === "latest",
-      direction: filters.sort === "latest" ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "latest") {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
-        }
+  const sortTabs = useMemo(() => {
+    const isLatestActive = filters.sort === "latest";
+    const isHaffActive = filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id);
+    const isMoneyActive = filters.sort === "resourceTotal";
+    const isRatioActive = filters.sort === "ratio";
+    const isAwmActive = Boolean(awmItem && filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id);
+    const isHelmetActive = Boolean(helmetItem && filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id);
+    const isArmorActive = Boolean(armorItem && filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id);
+
+    return [
+      {
+        id: "default",
+        label: "默认排序",
+        isActive: isLatestActive,
+        direction: isLatestActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "最新发布" : "最早发布",
+        title: isLatestActive
+          ? `默认排序：当前${filters.direction === "DESC" ? "最新发布优先" : "最早发布优先"}，点击切换为${filters.direction === "DESC" ? "最早发布" : "最新发布"}`
+          : "点击按最新发布排序",
+        ariaLabel: isLatestActive
+          ? `默认排序，当前${filters.direction === "DESC" ? "最新发布" : "最早发布"}，点击切换方向`
+          : "默认排序，点击激活",
+        onClick: () => {
+          if (isLatestActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
+          }
+        },
       },
-    },
-    {
-      id: "haff",
-      label: "哈夫币排序",
-      isActive: filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id),
-      direction: (filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id)) ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id)) {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
-        }
+      {
+        id: "haff",
+        label: "哈夫币排序",
+        isActive: isHaffActive,
+        direction: isHaffActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
+        title: isHaffActive
+          ? `哈夫币排序：当前从${filters.direction === "DESC" ? "高到低（多币优先）" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
+          : "点击按哈夫币从高到低排序（多币优先）",
+        ariaLabel: isHaffActive
+          ? `哈夫币排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
+          : "哈夫币排序，点击激活",
+        onClick: () => {
+          if (isHaffActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
+          }
+        },
       },
-    },
-    {
-      id: "money",
-      label: "价格排序",
-      isActive: filters.sort === "resourceTotal",
-      direction: filters.sort === "resourceTotal" ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "resourceTotal") {
-          navigate(withFilterChange(filters, { direction: filters.direction === "ASC" ? "DESC" : "ASC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "resourceTotal", direction: "ASC", coreItemId: null }));
-        }
+      {
+        id: "money",
+        label: "价格排序",
+        isActive: isMoneyActive,
+        direction: isMoneyActive ? filters.direction : null,
+        directionText: filters.direction === "ASC" ? "从低到高" : "从高到低",
+        title: isMoneyActive
+          ? `价格排序：当前从${filters.direction === "ASC" ? "低到高（便宜优先）" : "高到低"}，点击切换为从${filters.direction === "ASC" ? "高到低" : "低到高"}`
+          : "点击按价格从低到高排序（便宜优先）",
+        ariaLabel: isMoneyActive
+          ? `价格排序，当前从${filters.direction === "ASC" ? "低到高" : "高到低"}，点击切换方向`
+          : "价格排序，点击激活",
+        onClick: () => {
+          if (isMoneyActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "ASC" ? "DESC" : "ASC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "resourceTotal", direction: "ASC", coreItemId: null }));
+          }
+        },
       },
-    },
-    {
-      id: "ratio",
-      label: "比例排序",
-      isActive: filters.sort === "ratio",
-      direction: filters.sort === "ratio" ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "ratio") {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
-        }
+      {
+        id: "ratio",
+        label: "比例排序",
+        isActive: isRatioActive,
+        direction: isRatioActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
+        title: isRatioActive
+          ? `比例排序：当前从${filters.direction === "DESC" ? "高到低（高性价比优先）" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
+          : "点击按比例从高到低排序（高性价比优先）",
+        ariaLabel: isRatioActive
+          ? `比例排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
+          : "比例排序，点击激活",
+        onClick: () => {
+          if (isRatioActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
+          }
+        },
       },
-    },
-    ...(awmItem ? [{
-      id: "awm",
-      label: "AWM排序",
-      isActive: filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id,
-      direction: (filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id) ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id) {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: awmItem.id, direction: "DESC" }));
-        }
-      },
-    }] : []),
-    ...(helmetItem ? [{
-      id: "helmet",
-      label: "六头排序",
-      isActive: filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id,
-      direction: (filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id) ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id) {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: helmetItem.id, direction: "DESC" }));
-        }
-      },
-    }] : []),
-    ...(armorItem ? [{
-      id: "armor",
-      label: "六甲排序",
-      isActive: filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id,
-      direction: (filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id) ? filters.direction : null,
-      onClick: () => {
-        if (filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id) {
-          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-        } else {
-          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: armorItem.id, direction: "DESC" }));
-        }
-      },
-    }] : []),
-  ], [filters, haffItem?.id, awmItem, helmetItem, armorItem, navigate]);
+      ...(awmItem ? [{
+        id: "awm",
+        label: "AWM排序",
+        isActive: isAwmActive,
+        direction: isAwmActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
+        title: isAwmActive
+          ? `AWM排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
+          : "点击按AWM子弹从高到低排序",
+        ariaLabel: isAwmActive
+          ? `AWM排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
+          : "AWM排序，点击激活",
+        onClick: () => {
+          if (isAwmActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: awmItem.id, direction: "DESC" }));
+          }
+        },
+      }] : []),
+      ...(helmetItem ? [{
+        id: "helmet",
+        label: "六头排序",
+        isActive: isHelmetActive,
+        direction: isHelmetActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
+        title: isHelmetActive
+          ? `六头排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
+          : "点击按六级头盔从高到低排序",
+        ariaLabel: isHelmetActive
+          ? `六头排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
+          : "六头排序，点击激活",
+        onClick: () => {
+          if (isHelmetActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: helmetItem.id, direction: "DESC" }));
+          }
+        },
+      }] : []),
+      ...(armorItem ? [{
+        id: "armor",
+        label: "六甲排序",
+        isActive: isArmorActive,
+        direction: isArmorActive ? filters.direction : null,
+        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
+        title: isArmorActive
+          ? `六甲排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
+          : "点击按六级护甲从高到低排序",
+        ariaLabel: isArmorActive
+          ? `六甲排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
+          : "六甲排序，点击激活",
+        onClick: () => {
+          if (isArmorActive) {
+            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+          } else {
+            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: armorItem.id, direction: "DESC" }));
+          }
+        },
+      }] : []),
+    ];
+  }, [filters, haffItem?.id, awmItem, helmetItem, armorItem, navigate]);
   const breadcrumbs = game
     ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "租号" }]
     : [{ label: "首页", href: "/" }, { label: "三角洲行动" }, { label: "租号" }];
@@ -988,7 +1047,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
             <div className="market-sort-items" role="group" aria-label="排序维度">
               {sortTabs.map((tab) => {
                 const isDesc = tab.direction === "DESC";
-                const isAsc = tab.direction === "ASC";
                 return (
                   <button
                     key={tab.id}
@@ -996,19 +1054,22 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
                     className={`market-sort-tab ${tab.isActive ? "market-sort-tab--active" : ""}`}
                     aria-pressed={tab.isActive}
                     onClick={tab.onClick}
-                    title={`${tab.label}${
-                      tab.isActive
-                        ? isDesc
-                          ? "（当前降序，点击切换为升序）"
-                          : "（当前升序，点击切换为降序）"
-                        : "（点击按此排序）"
-                    }`}
+                    title={tab.title}
+                    aria-label={tab.ariaLabel}
                   >
-                    <span>{tab.label}</span>
-                    <span className="market-sort-arrows" aria-hidden="true">
-                      <span className={`market-sort-arrow market-sort-arrow--up ${isAsc ? "active" : ""}`}>▲</span>
-                      <span className={`market-sort-arrow market-sort-arrow--down ${isDesc ? "active" : ""}`}>▼</span>
-                    </span>
+                    <span className="market-sort-tab-label">{tab.label}</span>
+                    {tab.isActive ? (
+                      <span className={`market-sort-dir-badge market-sort-dir-badge--${isDesc ? "desc" : "asc"}`}>
+                        {isDesc ? (
+                          <ArrowDown size={12} strokeWidth={2.5} aria-hidden="true" />
+                        ) : (
+                          <ArrowUp size={12} strokeWidth={2.5} aria-hidden="true" />
+                        )}
+                        <span>{tab.directionText}</span>
+                      </span>
+                    ) : (
+                      <ArrowUpDown size={12} className="market-sort-icon-neutral" aria-hidden="true" />
+                    )}
                   </button>
                 );
               })}
