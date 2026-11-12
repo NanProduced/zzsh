@@ -90,6 +90,21 @@ test("count closure begins only after all original invitation batches imported",
   assert.equal(partial.ctx.state.phases.invitationCounts,undefined);
 });
 
+test("next-profile financial source is verified before any imported record is written",async t=>{
+  const dir=mkdtempSync(join(tmpdir(),"zzsh-finance-source-"));t.after(()=>rmSync(dir,{recursive:true}));
+  const file=join(dir,"invitation-facts.jsonl"),h=harness(),packets=h.ctx.invitationPackets;
+  const bytes=Buffer.from(packets.map(row=>JSON.stringify(row)).join("\n")+"\n");
+  writeFileSync(file,bytes);delete h.ctx.invitationPackets;h.ctx.isNextMigration=true;
+  h.ctx.domainFile=()=>file;h.ctx.readRows=()=>{throw Error("UNBOUND_READ")};
+  h.ctx.manifest.files["invitation-facts"]={rows:packets.length,sha256:createHash("sha256").update(bytes).digest("hex")};
+  await applyInvitationDomains(h.ctx,h.review,h.resource,JSON.stringify);assert.equal(h.events.length,8);
+  const changed=harness();delete changed.ctx.invitationPackets;changed.ctx.isNextMigration=true;
+  changed.ctx.domainFile=()=>file;changed.ctx.readRows=h.ctx.readRows;changed.ctx.manifest.files["invitation-facts"]=h.ctx.manifest.files["invitation-facts"];
+  writeFileSync(file,Buffer.concat([bytes,Buffer.from("\n")]));
+  await assert.rejects(applyInvitationDomains(changed.ctx,changed.review,changed.resource,JSON.stringify),/SOURCE_STREAM_CHANGED/);
+  assert.deepEqual(changed.events,[]);
+});
+
 test("failed or incomplete import and count conflicts stop without closing later batches",async()=>{
   const quarantined=harness({importQuarantine:true});await assert.rejects(applyInvitationDomains(quarantined.ctx,quarantined.review,quarantined.resource,JSON.stringify),/INVITATION_IMPORT_NOT_COMPLETE/);
   assert(!quarantined.events.includes("bind:COUNTS"));

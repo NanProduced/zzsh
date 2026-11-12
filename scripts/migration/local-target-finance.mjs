@@ -2,14 +2,19 @@ import { prepareLocalFundsPlan, assertFundsWriterCoverage,assertEmptyCoverageRec
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildNextContinuationRows } from "./local-source-adapter.mjs";
+import { buildNextContinuationRows, readBoundSourceRows } from "./local-source-adapter.mjs";
 import { requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { openingReviewResource } from "./local-target-opening.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 const micros = value => value.replace(/\.([0-9]{3})Z$/, (_, digits) => "." + digits + "000Z");
-async function arrayOf(ctx, name) { const result = []; const file = ctx.domainFile(name); if (file)
-    for await (const row of ctx.readRows(file))
-        result.push(row); return result; }
+async function arrayOf(ctx, name) {
+    const result = [], file = ctx.domainFile(name);
+    if (file) {
+        const rows = ctx.isNextMigration ? readBoundSourceRows(file, ctx.manifest.files[name]) : ctx.readRows(file);
+        for await (const row of rows) result.push(row);
+    }
+    return result;
+}
 export async function importEmptyCoverageChunk(module,client,actor,inputs,reviews,isNext){
     if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
     const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
