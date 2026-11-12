@@ -50,6 +50,17 @@ BEGIN
        OR COALESCE(NEW.details->>'coverageCount','') !~ '^([1-9]|[1-9][0-9]|[1-3][0-9]{2}|400)$' THEN
       RAISE EXCEPTION 'legacy empty finance source is invalid' USING ERRCODE='42501';
     END IF;
+  ELSIF NEW.action='finance.history.batch.imported' THEN
+    actor_prefix:='legacy-finance-migration:'; source_entity:='FINANCE_HISTORY_COVERAGE';
+    IF NEW.object_type IS DISTINCT FROM 'personal_finance_observation_coverage_batch'
+       OR NEW.object_id !~ '^history-batch-[a-f0-9]{40}$'
+       OR NEW.details->>'schema' IS DISTINCT FROM 'finance-history-batch.system.v1'
+       OR NEW.details->>'batchId' IS DISTINCT FROM NEW.object_id OR NEW.details->>'financialEffect' IS DISTINCT FROM 'NONE'
+       OR COALESCE(NEW.details->>'inputsDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'inputSha256','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'coverageCount','') !~ '^([1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$' THEN
+      RAISE EXCEPTION 'legacy finance history source is invalid' USING ERRCODE='42501';
+    END IF;
   ELSE
     RAISE EXCEPTION 'unsupported legacy system source' USING ERRCODE='42501';
   END IF;
@@ -57,7 +68,7 @@ BEGIN
      OR NEW.details->>'sourceEntity' IS DISTINCT FROM source_entity THEN
     RAISE EXCEPTION 'legacy system source identity is invalid' USING ERRCODE='42501';
   END IF;
-  IF NEW.action<>'finance.history.empty_batch.imported'
+  IF NEW.action NOT IN ('finance.history.empty_batch.imported','finance.history.batch.imported')
      AND (COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
        OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$') THEN
     RAISE EXCEPTION 'legacy system source tuple is invalid' USING ERRCODE='42501';

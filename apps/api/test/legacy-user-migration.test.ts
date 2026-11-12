@@ -14,7 +14,7 @@ import {
   type LegacyOwnerMigrationInput,
 } from "../src/supply/legacy-user-migration";
 import { planLegacyContactProjections, type LegacyContactProjection } from "../src/legacy-load/legacy-contact-projection";
-import { systemUserMigrationId, withSystemUserMigrationBatch, systemFinanceMigrationId, withSystemFinanceRecoveryBatch, authorizeSystemEmptyFinanceMigration } from "../src/legacy-load/system-user-migration";
+import { systemUserMigrationId, withSystemUserMigrationBatch, systemFinanceMigrationId, withSystemFinanceRecoveryBatch, authorizeSystemFinanceMigration } from "../src/legacy-load/system-user-migration";
 
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const MOBILE = "19900000001";
@@ -347,7 +347,7 @@ test("read-only system recovery rejects a changed transaction",async()=>{
     sourceDatasetSha256,target,fenceEpochSha256:"e".repeat(64),requestId:"recovery",assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
   const source={inputsDigest:"a".repeat(64),inputSha256:"b".repeat(64),cutoff:"2026-01-01T00:00:00.000Z"};
   await assert.rejects(withSystemFinanceRecoveryBatch(asClient(fake),actor,async()=>{
-    fake.systemTransactionId="different";await authorizeSystemEmptyFinanceMigration(asClient(fake),actor,source,true);
+    fake.systemTransactionId="different";await authorizeSystemFinanceMigration(asClient(fake),actor,source,true);
   }),/transaction changed/);
 });
 

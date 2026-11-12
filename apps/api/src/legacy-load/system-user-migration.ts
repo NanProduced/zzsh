@@ -7,7 +7,7 @@ type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyI
 export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
 export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
-export type EmptyFinanceSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
+export type FinanceMigrationSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
 
 export function systemUserMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
   if (typeof sourceDatasetSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceDatasetSha256) || !target
@@ -68,7 +68,7 @@ export type SystemFinanceMigrationActor = Readonly<{
   target: MigrationTarget;
   fenceEpochSha256: string;
   assertMigrationFence: (client: PoolClient) => Promise<void>;
-  assertSourceEvidence: (source: EmptyFinanceSource) => Promise<void>;
+  assertSourceEvidence: (source: FinanceMigrationSource) => Promise<void>;
 }>;
 
 export function systemFinanceMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
@@ -178,11 +178,13 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, read
       (SELECT count(*)=3 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.personal_finance_observation_coverage'),
         to_regclass('zzsh_order.personal_finance_observation'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
       AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()')
-        AND position('legacy-finance-migration:' IN p.prosrc)>0 AND position('finance.history.empty_batch.imported' IN p.prosrc)>0)
+        AND position('legacy-finance-migration:' IN p.prosrc)>0 AND position('finance.history.empty_batch.imported' IN p.prosrc)>0
+        AND position('finance.history.batch.imported' IN p.prosrc)>0)
       AND NOT EXISTS (SELECT 1 FROM (VALUES
         (c.oid,'history_coverage_guard',7,'zzsh_order.guard_finance_history_coverage()',false),
         (c.oid,'history_coverage_immutable',27,'zzsh_order.finance_immutable()',false),
         (c.oid,'history_coverage_read_revision',5,'zzsh_order.finance_history_coverage_read_revision()',true),
+        (to_regclass('zzsh_order.personal_finance_observation'),'finance_observation_immutable',27,'zzsh_order.finance_immutable()',false),
         (to_regclass('zzsh_order.personal_finance_observation'),'a_history_subject_lock',7,'zzsh_order.lock_finance_history_subject()',false)
       ) required(relation,name,kind,fn,definer) WHERE NOT EXISTS (
         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation
@@ -273,7 +275,7 @@ export function authorizeSystemOrderMigration(client: PoolClient, actor: SystemO
     throw forbidden("Legacy system order source is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
 }
-export function authorizeSystemEmptyFinanceMigration(client: PoolClient, actor: SystemFinanceMigrationActor, source: EmptyFinanceSource, readOnly = false): Promise<void> {
+export function authorizeSystemFinanceMigration(client: PoolClient, actor: SystemFinanceMigrationActor, source: FinanceMigrationSource, readOnly = false): Promise<void> {
   if (actor.kind !== "SYSTEM_FINANCE_MIGRATION" || !/^[a-f0-9]{64}$/.test(source.inputsDigest)
       || !/^[a-f0-9]{64}$/.test(source.inputSha256) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(source.cutoff)
       || !Number.isFinite(Date.parse(source.cutoff))) throw forbidden("Legacy system finance source is invalid");

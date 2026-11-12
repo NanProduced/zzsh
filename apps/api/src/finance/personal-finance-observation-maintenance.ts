@@ -6,7 +6,7 @@ import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} fr
 import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,authorizeMaintenanceBatch,closeMaintenanceBatch,isReviewedFinanceMaintenanceEndpoint,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
 import {OBSERVATION_ENTITIES,prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
-import {authorizeSystemEmptyFinanceMigration,systemFinanceMigrationId,type SystemFinanceMigrationActor} from '../legacy-load/system-user-migration';
+import {authorizeSystemFinanceMigration,systemFinanceMigrationId,type SystemFinanceMigrationActor} from '../legacy-load/system-user-migration';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type ObservationImportInput={coverage:ObservationCoverageInput;observations:Record<string,unknown>[]};
@@ -183,7 +183,7 @@ async function emptyReceiptFacts(client:PoolClient,actor:Actor,plans:ReturnType<
  });
 }
 
-async function lockReviewedEmptySubjects(client:PoolClient,plans:ReturnType<typeof emptyPlans>,r:Pick<ObservationImportReview,'cutoff'>,scopeKey:string){
+async function lockReviewedHistorySubjects(client:PoolClient,plans:ReturnType<typeof emptyPlans>,r:Pick<ObservationImportReview,'cutoff'>,scopeKey:string){
  await client.query(`/* finance empty original key locks */ SELECT pg_advisory_xact_lock(hashtextextended(k,0)) FROM unnest($1::text[]) WITH ORDINALITY keys(k,n) ORDER BY n`,[plans.map(p=>JSON.stringify(['supply-idempotency',scopeKey,p.plan.key]))]);
  const subjects=[...new Set(plans.map(p=>p.plan.coverage.userId))].sort();
  if((await client.query(`/* finance empty subject locks */ SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,[subjects])).rowCount!==subjects.length)throw conflict('Empty batch subject is not mapped');
@@ -206,7 +206,7 @@ export async function importReviewedEmptyFinanceObservationBatch(client:PoolClie
  if(bound.emptyBatchDigest!==sha(canonicalize(inputs)))throw invalid('Empty batch differs from its exact internal review');
  const r=await authorize(client,actor,scope,inputs[0]!);
  const scopeKey=JSON.stringify(['admin',actor.userId,operation,null]);
- await lockReviewedEmptySubjects(client,plans,r,scopeKey);
+ await lockReviewedHistorySubjects(client,plans,r,scopeKey);
  const original=await emptyReceiptFacts(client,actor,plans,r,true),fresh=original.filter(p=>p.knowledge==='UNKNOWN');
  await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);
  if(fresh.length){
@@ -229,6 +229,7 @@ export async function recoverReviewedEmptyFinanceObservationBatch(client:PoolCli
 
 export const COMPACT_EMPTY_COVERAGE_VERSION='BATCH_V2';
 const compactEmptyOperation='finance.history.empty_batch.import.v1';
+const systemHistoryOperation='finance.history.batch.import.v1';
 export function compactEmptyFinanceBatchProof(inputs:ObservationImportInput[],r:Pick<ObservationImportReview,'ref'|'attempt'|'actor'|'resource'|'inputSha256'|'cutoff'>,requestId:string){
  if(!r||r.resource?.migrationProfile!=='LOCAL_MIGRATION_NEXT_V1'||!/^\d+$/.test(r.resource.systemIdentifier??'')||!/^[a-f0-9]{24}$/.test(r.resource.nonce??'')||!Number.isSafeInteger(r.resource.oid)||r.resource.oid<=0
   ||![r.ref,r.attempt,r.actor?.userId,r.actor?.sessionId,requestId].every(value=>typeof value==='string'&&identifier.test(value))||!digest.test(r.inputSha256)
@@ -260,6 +261,23 @@ export function systemCompactEmptyFinanceBatchProof(inputs:ObservationImportInpu
  return{batchId,body,fingerprint:sha(canonicalize([compactEmptyOperation,batchId,body]))};
 }
 
+/** Non-empty history preserves every source observation but records one receipt per frozen batch. */
+export function systemFinanceHistoryBatchProof(inputs:ObservationImportInput[],actor:SystemFinanceMigrationActor){
+ if(actor.kind!=='SYSTEM_FINANCE_MIGRATION'||actor.id!==systemFinanceMigrationId(actor.sourceDatasetSha256,actor.target)
+  ||typeof actor.requestId!=='string'||!identifier.test(actor.requestId)||!Array.isArray(inputs)||inputs.length<1||inputs.length>500)
+  throw invalid('System finance history batch is invalid');
+ const plans=inputs.map(planFinanceObservations),first=inputs[0]!.coverage;
+ if(plans.some(plan=>plan.coverage.sourceCount===0)||new Set(plans.map(plan=>plan.coverage.id)).size!==plans.length
+  ||inputs.some(input=>input.coverage.inputSha256!==first.inputSha256||input.coverage.cutoff!==first.cutoff))
+  throw invalid('System finance history batch source differs');
+ const value={schema:'finance-history-batch.system.v1',sourceSystem:'legacy_mysql_restore',sourceEntity:'FINANCE_HISTORY_COVERAGE',
+  sourceDatasetSha256:actor.sourceDatasetSha256,migrationRunDigest:actor.id.slice('legacy-finance-migration:'.length),
+  inputsDigest:sha(canonicalize(inputs)),inputSha256:first.inputSha256,cutoff:first.cutoff,coverageCount:inputs.length,requestId:actor.requestId,
+  target:{systemIdentifier:actor.target.systemIdentifier,oid:actor.target.databaseOid,nonce:actor.target.nonce},financialEffect:'NONE' as const};
+ const batchId='history-batch-'+sha(canonicalize(value)).slice(0,40),body={...value,batchId};
+ return{batchId,body,fingerprint:sha(canonicalize([systemHistoryOperation,batchId,body]))};
+}
+
 export type SystemEmptyReceiptBaseline=Readonly<{kind:'SYSTEM_EMPTY_RECEIPT_BASELINE'}>;
 const systemEmptyBaselines=new WeakMap<object,{client:PoolClient;actor:SystemFinanceMigrationActor;binding:string;
  fence:SystemFinanceMigrationActor['assertMigrationFence'];source:SystemFinanceMigrationActor['assertSourceEvidence']}>();
@@ -270,16 +288,25 @@ function systemFinanceBinding(actor:SystemFinanceMigrationActor){
 /** One scan per exclusive migration fence; business writers must stay disconnected until it is released. */
 export async function bindSystemEmptyReceiptBaseline(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],readOnly=false):Promise<SystemEmptyReceiptBaseline>{
  const proof=systemCompactEmptyFinanceBatchProof(inputs,actor),source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
- await authorizeSystemEmptyFinanceMigration(client,actor,source,readOnly);
+ return bindSystemFinanceReceiptBaseline(client,actor,source,readOnly);
+}
+export async function bindSystemHistoryReceiptBaseline(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],readOnly=false):Promise<SystemEmptyReceiptBaseline>{
+ const proof=systemFinanceHistoryBatchProof(inputs,actor),source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ return bindSystemFinanceReceiptBaseline(client,actor,source,readOnly);
+}
+async function bindSystemFinanceReceiptBaseline(client:PoolClient,actor:SystemFinanceMigrationActor,source:{inputsDigest:string;inputSha256:string;cutoff:string},readOnly:boolean):Promise<SystemEmptyReceiptBaseline>{
+ await authorizeSystemFinanceMigration(client,actor,source,readOnly);
  const currentScope=JSON.stringify(['system',actor.id,compactEmptyOperation,null]);
+ const currentHistoryScope=JSON.stringify(['system',actor.id,systemHistoryOperation,null]);
  const row=(await client.query(`/* finance system old receipt baseline */ WITH relevant AS MATERIALIZED (
   SELECT scope_key FROM zzsh_supply.idempotency_record WHERE position('"finance.history.import"' IN scope_key)>0
-    OR position('"finance.history.empty_batch.import.v1"' IN scope_key)>0)
-  SELECT EXISTS(SELECT 1 FROM relevant WHERE (scope_key::jsonb->>0='admin' AND scope_key::jsonb->>2 IN ('finance.history.import','finance.history.empty_batch.import.v1'))
+    OR position('"finance.history.empty_batch.import.v1"' IN scope_key)>0 OR position('"finance.history.batch.import.v1"' IN scope_key)>0)
+  SELECT EXISTS(SELECT 1 FROM relevant WHERE (scope_key::jsonb->>0='admin' AND scope_key::jsonb->>2 IN ('finance.history.import','finance.history.empty_batch.import.v1','finance.history.batch.import.v1'))
     OR (scope_key::jsonb->>0='system' AND (scope_key::jsonb->>2='finance.history.import'
-      OR (scope_key::jsonb->>2='finance.history.empty_batch.import.v1' AND scope_key<>$1)))) AS conflicts`,[currentScope])).rows[0];
+      OR (scope_key::jsonb->>2='finance.history.empty_batch.import.v1' AND scope_key<>$1)
+      OR (scope_key::jsonb->>2='finance.history.batch.import.v1' AND scope_key<>$2)))) AS conflicts`,[currentScope,currentHistoryScope])).rows[0];
  if(typeof row?.conflicts!=='boolean'||row.conflicts)throw conflict('Existing finance history receipts require review');
- await authorizeSystemEmptyFinanceMigration(client,actor,source,readOnly);
+ await authorizeSystemFinanceMigration(client,actor,source,readOnly);
  const token=Object.freeze({kind:'SYSTEM_EMPTY_RECEIPT_BASELINE' as const});
  systemEmptyBaselines.set(token,{client,actor,binding:systemFinanceBinding(actor),fence:actor.assertMigrationFence,source:actor.assertSourceEvidence});return token;
 }
@@ -343,17 +370,17 @@ async function readSystemCompactEmptyBatch(client:PoolClient,actor:SystemFinance
 export async function importSystemCompactEmptyFinanceObservationBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
  inputs=copy(inputs);const plans=emptyPlans(inputs),proof=systemCompactEmptyFinanceBatchProof(inputs,actor);
  const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
- await authorizeSystemEmptyFinanceMigration(client,actor,source);
+ await authorizeSystemFinanceMigration(client,actor,source);
  assertSystemEmptyReceiptBaseline(client,actor,baseline);
  const oldScope=JSON.stringify(['system',actor.id,operation,null]);
- await lockReviewedEmptySubjects(client,plans,{cutoff:proof.body.cutoff},oldScope);
+ await lockReviewedHistorySubjects(client,plans,{cutoff:proof.body.cutoff},oldScope);
  const result=await withIdempotency(client,{realm:'system',principalId:actor.id,operation:compactEmptyOperation},proof.batchId,proof.fingerprint,
   async replay=>{const previous=await readSystemCompactEmptyBatch(client,actor,plans,proof,true);if((replay!==null)!==(previous.knowledge==='KNOWN'))throw conflict('Compact empty batch receipt is inconsistent');},
   async()=>{await setAuditContext(client,'system',actor.id,undefined,actor.requestId);await insertEmptyCoverages(client,plans);
    await recordAudit(client,{actorType:'system',actorId:actor.id,legacyMigrationManifestSha256:actor.sourceDatasetSha256,
     requestId:actor.requestId,action:'finance.history.empty_batch.imported',objectType:'personal_finance_observation_coverage_batch',
     objectId:proof.batchId,outcome:'SUCCESS',details:proof.body});return{status:200,body:proof.body};});
- await authorizeSystemEmptyFinanceMigration(client,actor,source);
+ await authorizeSystemFinanceMigration(client,actor,source);
  return{status:result.status,body:{coverageCount:plans.length,created:result.replayed?0:plans.length,replayed:result.replayed?plans.length:0,
   financialEffect:'NONE' as const,batchId:proof.batchId}};
 }
@@ -362,10 +389,10 @@ export async function importSystemCompactEmptyFinanceObservationBatch(client:Poo
 export async function recoverSystemCompactEmptyFinanceObservationBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
  inputs=copy(inputs);const plans=emptyPlans(inputs),proof=systemCompactEmptyFinanceBatchProof(inputs,actor);
  const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
- await authorizeSystemEmptyFinanceMigration(client,actor,source,true);
+ await authorizeSystemFinanceMigration(client,actor,source,true);
  assertSystemEmptyReceiptBaseline(client,actor,baseline);
  const result=await readSystemCompactEmptyBatch(client,actor,plans,proof);
- await authorizeSystemEmptyFinanceMigration(client,actor,source,true);
+ await authorizeSystemFinanceMigration(client,actor,source,true);
  return{knowledge:result.knowledge,batchId:proof.batchId,receipt:result.knowledge==='KNOWN'?result.receipt:null,financialEffect:'NONE' as const};
 }
 
@@ -375,7 +402,7 @@ export async function importReviewedCompactEmptyFinanceObservationBatch(client:P
  inputs=copy(inputs);const bound=binding(scope),plans=emptyPlans(inputs);
  if(bound.emptyBatchDigest!==sha(canonicalize(inputs)))throw invalid('Compact empty batch differs from its exact review');
  const r=await authorize(client,actor,scope,inputs[0]!),proof=compactEmptyFinanceBatchProof(inputs,r,actor.requestId),oldScope=JSON.stringify(['admin',actor.userId,operation,null]);
- await lockReviewedEmptySubjects(client,plans,r,oldScope);
+ await lockReviewedHistorySubjects(client,plans,r,oldScope);
  const result=await withIdempotency(client,{realm:'admin',principalId:actor.userId,operation:compactEmptyOperation},proof.batchId,proof.fingerprint,
   async replay=>{const previous=await readCompactEmptyBatch(client,actor,plans,proof,true);if((replay!==null)!==(previous.knowledge==='KNOWN'))throw conflict('Compact empty batch receipt is inconsistent');},
   async()=>{await setAuditContext(client,'admin',actor.userId,actor.sessionId,actor.requestId);await insertEmptyCoverages(client,plans);
@@ -396,6 +423,82 @@ export async function recoverReviewedCompactEmptyFinanceObservationBatch(client:
  const r=await authorize(client,actor,scope,inputs[0]!,true),proof=compactEmptyFinanceBatchProof(inputs,r,actor.requestId),result=await readCompactEmptyBatch(client,actor,plans,proof);
  await authorize(client,actor,scope,inputs[0]!,true);
  return{knowledge:result.knowledge,batchId:proof.batchId,receipt:result.receipt,financialEffect:'NONE' as const};
+}
+
+type FinanceHistoryPlan=ReturnType<typeof planFinanceObservations>;
+function historyFactRows(plans:FinanceHistoryPlan[],prior:Map<string,Record<string,any>>){
+ const observationRows:any[]=[],coverageRows:any[]=[];
+ for(const plan of plans){const c=plan.coverage;
+  for(const o of plan.observations){
+   const found=prior.get(c.sourceSystem+'|'+c.sourceEntity+'|'+o.sourceId);
+   if(found){if(!exactObservation(found,o))throw conflict('Original observation changed; reconciliation required');continue;}
+   observationRows.push({id:o.id,user_id:o.userId,basis_id:null,source_kind:o.sourceKind,source_type:'LEGACY_MYSQL',source_system:o.sourceSystem,legacy_user_id:o.legacyUserId,source_entity:o.sourceEntity,source_id:o.sourceId,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,source_event_at:o.sourceEventAt,included_in_opening:false,snapshot:o.snapshot});
+  }
+  coverageRows.push({id:c.id,user_id:c.userId,source_system:c.sourceSystem,legacy_user_id:c.legacyUserId,source_kind:c.sourceKind,source_entity:c.sourceEntity,source_cutoff:c.cutoff,input_sha256:c.inputSha256,identity_digest:c.identityDigest,source_count:c.sourceCount,imported_count:c.importedCount,isolated_count:c.isolatedCount,source_set_digest:c.sourceSetDigest,imported_set_digest:c.importedSetDigest,isolated_set_digest:c.isolatedSetDigest,body_digest:c.bodyDigest,source_canonical:c.canonical});
+ }
+ return{observationRows,coverageRows};
+}
+async function insertHistoryFacts(client:PoolClient,{observationRows,coverageRows}:ReturnType<typeof historyFactRows>){
+ if(!coverageRows.length)return;
+ if(observationRows.length)await client.query(`/* finance history batch observations */ INSERT INTO zzsh_order.personal_finance_observation(id,user_id,basis_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,source_event_at,included_in_opening,snapshot)
+  SELECT x.id,x.user_id,x.basis_id,x.source_kind,x.source_type,x.source_system,x.legacy_user_id,x.source_entity,x.source_id,x.source_digest,x.source_canonical,x.source_event_at::timestamptz,x.included_in_opening,x.snapshot::jsonb
+  FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,basis_id text,source_kind text,source_type text,source_system text,legacy_user_id text,source_entity text,source_id text,source_digest text,source_canonical text,source_event_at text,included_in_opening boolean,snapshot jsonb)
+  ORDER BY x.user_id COLLATE "C",x.id COLLATE "C"`,[JSON.stringify(observationRows)]);
+ await client.query(`/* finance history batch coverage */ INSERT INTO zzsh_order.personal_finance_observation_coverage(id,user_id,source_system,legacy_user_id,source_kind,source_entity,source_cutoff,input_sha256,identity_digest,source_count,imported_count,isolated_count,source_set_digest,imported_set_digest,isolated_set_digest,body_digest,source_canonical)
+  SELECT x.id,x.user_id,x.source_system,x.legacy_user_id,x.source_kind,x.source_entity,x.source_cutoff::timestamptz,x.input_sha256,x.identity_digest,x.source_count,x.imported_count,x.isolated_count,x.source_set_digest,x.imported_set_digest,x.isolated_set_digest,x.body_digest,x.source_canonical
+  FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,source_system text,legacy_user_id text,source_kind text,source_entity text,source_cutoff text,input_sha256 text,identity_digest text,source_count integer,imported_count integer,isolated_count integer,source_set_digest text,imported_set_digest text,isolated_set_digest text,body_digest text,source_canonical text)
+  ORDER BY x.user_id COLLATE "C",x.id COLLATE "C"`,[JSON.stringify(coverageRows)]);
+}
+async function existingHistoryBatch(client:PoolClient,plans:FinanceHistoryPlan[]){
+ const keys=plans.flatMap(plan=>plan.observations.map(o=>({source_system:plan.coverage.sourceSystem,source_entity:plan.coverage.sourceEntity,source_id:o.sourceId})));
+ if(!keys.length)return new Map<string,Record<string,any>>();
+ const rows=(await client.query(`/* finance history batch existing observations */ SELECT o.* FROM jsonb_to_recordset($1::jsonb) x(source_system text,source_entity text,source_id text)
+  JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=x.source_system AND o.source_entity=x.source_entity AND o.source_id=x.source_id`,[JSON.stringify(keys)])).rows;
+ return new Map<string,Record<string,any>>(rows.map(row=>[row.source_system+'|'+row.source_entity+'|'+row.source_id,row]));
+}
+async function readSystemHistoryBatch(client:PoolClient,actor:SystemFinanceMigrationActor,plans:ReturnType<typeof emptyPlans>,proof:ReturnType<typeof systemFinanceHistoryBatchProof>,lock=false){
+ const ids=plans.map(row=>row.plan.coverage.id),scopeKey=JSON.stringify(['system',actor.id,systemHistoryOperation,null]);
+ const oldAudits=(await client.query(`SELECT object_id FROM zzsh_iam.audit_event WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=ANY($1::text[]) LIMIT 1`,[ids])).rows;
+ if(oldAudits.length)throw conflict('Finance history batch overlaps individual import evidence');
+ const coverage=await readCompactCoverage(client,plans),prior=await existingHistoryBatch(client,plans.map(row=>row.plan));
+ const audit=(await client.query(`SELECT actor_type,actor_id,session_id,request_id,details,to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest
+  FROM zzsh_iam.audit_event e WHERE action='finance.history.batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=$1 AND outcome='SUCCESS'`,[proof.batchId])).rows;
+ const receipt=(await client.query(`SELECT request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2${lock?' FOR UPDATE':''}`,[scopeKey,proof.batchId])).rows;
+ if(!receipt.length){if(coverage.length||audit.length||prior.size)throw conflict('Finance history batch has partial original evidence');return{knowledge:'UNKNOWN' as const};}
+ const byId=new Map(coverage.map(row=>[row.id,row])),expected=plans.flatMap(row=>row.plan.observations);
+ if(receipt.length!==1||receipt[0].request_fingerprint!==proof.fingerprint||receipt[0].response_status!==200||receipt[0].publish_required!==false
+  ||canonicalize(receipt[0].response_body)!==canonicalize(proof.body)||audit.length!==1||audit[0].actor_type!=='system'
+  ||audit[0].actor_id!==actor.id||audit[0].session_id!==null||audit[0].request_id!==actor.requestId||audit[0].source_manifest!==actor.sourceDatasetSha256
+  ||canonicalize(audit[0].details)!==canonicalize(proof.body)||byId.size!==plans.length||prior.size!==expected.length
+  ||plans.some(({plan})=>{const c=plan.coverage,row=byId.get(c.id);return !row||row.user_id!==c.userId||row.source_kind!==c.sourceKind
+    ||row.source_count!==c.sourceCount||row.imported_count!==c.importedCount||row.isolated_count!==c.isolatedCount
+    ||row.actual_count!==String(c.importedCount)||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical
+    ||plan.observations.some(o=>{const found=prior.get(c.sourceSystem+'|'+c.sourceEntity+'|'+o.sourceId);return !found||!exactObservation(found,o);});}))
+  throw conflict('Finance history batch original evidence differs');
+ return{knowledge:'KNOWN' as const,receipt:{status:200,body:proof.body}};
+}
+
+/** System-owned source facts only; no balance, ledger or channel operation is performed. */
+export async function importSystemFinanceHistoryBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
+ inputs=copy(inputs);const proof=systemFinanceHistoryBatchProof(inputs,actor),plans=inputs.map(input=>({input,plan:planFinanceObservations(input)})).sort((a,b)=>a.plan.coverage.id<b.plan.coverage.id?-1:a.plan.coverage.id>b.plan.coverage.id?1:0);
+ const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ await authorizeSystemFinanceMigration(client,actor,source);assertSystemEmptyReceiptBaseline(client,actor,baseline);
+ await lockReviewedHistorySubjects(client,plans,{cutoff:proof.body.cutoff},JSON.stringify(['system',actor.id,operation,null]));
+ const result=await withIdempotency(client,{realm:'system',principalId:actor.id,operation:systemHistoryOperation},proof.batchId,proof.fingerprint,
+  async replay=>{const previous=await readSystemHistoryBatch(client,actor,plans,proof,true);if((replay!==null)!==(previous.knowledge==='KNOWN'))throw conflict('Finance history batch receipt is inconsistent');},
+  async()=>{await setAuditContext(client,'system',actor.id,undefined,actor.requestId);await insertHistoryFacts(client,historyFactRows(plans.map(row=>row.plan),new Map()));
+   await recordAudit(client,{actorType:'system',actorId:actor.id,legacyMigrationManifestSha256:actor.sourceDatasetSha256,requestId:actor.requestId,
+    action:'finance.history.batch.imported',objectType:'personal_finance_observation_coverage_batch',objectId:proof.batchId,outcome:'SUCCESS',details:proof.body});
+   return{status:200,body:proof.body};});
+ await authorizeSystemFinanceMigration(client,actor,source);
+ return{status:result.status,body:{coverageCount:plans.length,created:result.replayed?0:plans.length,replayed:result.replayed?plans.length:0,financialEffect:'NONE' as const,batchId:proof.batchId}};
+}
+export async function recoverSystemFinanceHistoryBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
+ inputs=copy(inputs);const proof=systemFinanceHistoryBatchProof(inputs,actor),plans=inputs.map(input=>({input,plan:planFinanceObservations(input)}));
+ const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ await authorizeSystemFinanceMigration(client,actor,source,true);assertSystemEmptyReceiptBaseline(client,actor,baseline);
+ const result=await readSystemHistoryBatch(client,actor,plans,proof);await authorizeSystemFinanceMigration(client,actor,source,true);
+ return{knowledge:result.knowledge,batchId:proof.batchId,receipt:result.knowledge==='KNOWN'?result.receipt:null,financialEffect:'NONE' as const};
 }
 
 /** 批级资金历史写入：整批 4 条 jsonb_to_recordset 语句（observation / coverage / audit / receipt），
@@ -432,11 +535,7 @@ export async function importReviewedFinanceObservationsBatchOn(client:PoolClient
    [[...new Set(earnings.map(p=>p.plan.coverage.userId))],cutoffs[0]])).rows[0];
   if(typeof differs?.differs!=='boolean'||differs.differs)throw conflict('Earnings coverage and original opening cutoffs differ');
  }
- const keyRows=pairs.flatMap(p=>p.plan.observations.map(o=>({source_system:p.plan.coverage.sourceSystem,source_entity:p.plan.coverage.sourceEntity,source_id:o.sourceId})));
- const prior=new Map<string,Record<string,any>>();
- if(keyRows.length){const rows=(await client.query(`/* finance history batch existing observations */ SELECT o.* FROM jsonb_to_recordset($1::jsonb) x(source_system text,source_entity text,source_id text)
-   JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=x.source_system AND o.source_entity=x.source_entity AND o.source_id=x.source_id`,
-  [JSON.stringify(keyRows)])).rows;for(const row of rows)prior.set(row.source_system+'|'+row.source_entity+'|'+row.source_id,row);}
+ const prior=await existingHistoryBatch(client,pairs.map(row=>row.plan));
  const receipts=await client.query(`/* finance history batch original receipts */ SELECT key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,pairs.map(p=>p.plan.key)]);
  const receiptByKey=new Map<string,Record<string,any>>(receipts.rows.map((row:any)=>[row.key,row]));
  for(const {input,plan,scope} of pairs){
@@ -446,27 +545,14 @@ export async function importReviewedFinanceObservationsBatchOn(client:PoolClient
   if((await recoverReviewedFinanceObservations(client,actor,input,scope)).knowledge!=='KNOWN')throw conflict('Historical batch original receipt is unavailable');
  }
  const fresh=pairs.filter(p=>!receiptByKey.has(p.plan.key));
- const observationRows:any[]=[],coverageRows:any[]=[],auditRows:any[]=[],receiptRows:any[]=[];
+ const facts=historyFactRows(fresh.map(row=>row.plan),prior),auditRows:any[]=[],receiptRows:any[]=[];
  for(const {input,plan,scope} of fresh){
   const c=plan.coverage,r=binding(scope).review;
-  for(const o of plan.observations){
-   const found=prior.get(c.sourceSystem+'|'+c.sourceEntity+'|'+o.sourceId);
-   if(found){if(!exactObservation(found,o))throw conflict('Original observation changed; reconciliation required');continue;}
-   observationRows.push({id:o.id,user_id:o.userId,basis_id:null,source_kind:o.sourceKind,source_type:'LEGACY_MYSQL',source_system:o.sourceSystem,legacy_user_id:o.legacyUserId,source_entity:o.sourceEntity,source_id:o.sourceId,source_digest:o.sourceDigest,source_canonical:o.sourceCanonical,source_event_at:o.sourceEventAt,included_in_opening:false,snapshot:o.snapshot});
-  }
-  coverageRows.push({id:c.id,user_id:c.userId,source_system:c.sourceSystem,legacy_user_id:c.legacyUserId,source_kind:c.sourceKind,source_entity:c.sourceEntity,source_cutoff:c.cutoff,input_sha256:c.inputSha256,identity_digest:c.identityDigest,source_count:c.sourceCount,imported_count:c.importedCount,isolated_count:c.isolatedCount,source_set_digest:c.sourceSetDigest,imported_set_digest:c.importedSetDigest,isolated_set_digest:c.isolatedSetDigest,body_digest:c.bodyDigest,source_canonical:c.canonical});
   auditRows.push({id:'audit_'+randomUUID().replaceAll('-',''),object_id:c.id,details:{bodyDigest:plan.bodyDigest,inputSha256:c.inputSha256,coverageBodyDigest:c.bodyDigest,subjectId:c.userId,sourceKind:c.sourceKind,sourceCount:c.sourceCount,importedCount:c.importedCount,isolatedCount:c.isolatedCount,approvalRef:r.ref,attempt:r.attempt,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt,financialEffect:'NONE'}});
   receiptRows.push({key:plan.key,fingerprint:fingerprintRequest(operation,c.id,input),body:{coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:c.importedCount,isolatedCount:c.isolatedCount,financialEffect:'NONE'}});
  }
- if(coverageRows.length){
-  if(observationRows.length)await client.query(`/* finance history batch observations */ INSERT INTO zzsh_order.personal_finance_observation(id,user_id,basis_id,source_kind,source_type,source_system,legacy_user_id,source_entity,source_id,source_digest,source_canonical,source_event_at,included_in_opening,snapshot)
-   SELECT x.id,x.user_id,x.basis_id,x.source_kind,x.source_type,x.source_system,x.legacy_user_id,x.source_entity,x.source_id,x.source_digest,x.source_canonical,x.source_event_at::timestamptz,x.included_in_opening,x.snapshot::jsonb
-   FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,basis_id text,source_kind text,source_type text,source_system text,legacy_user_id text,source_entity text,source_id text,source_digest text,source_canonical text,source_event_at text,included_in_opening boolean,snapshot jsonb)
-   ORDER BY x.user_id COLLATE "C",x.id COLLATE "C"`,[JSON.stringify(observationRows)]);
-  await client.query(`/* finance history batch coverage */ INSERT INTO zzsh_order.personal_finance_observation_coverage(id,user_id,source_system,legacy_user_id,source_kind,source_entity,source_cutoff,input_sha256,identity_digest,source_count,imported_count,isolated_count,source_set_digest,imported_set_digest,isolated_set_digest,body_digest,source_canonical)
-   SELECT x.id,x.user_id,x.source_system,x.legacy_user_id,x.source_kind,x.source_entity,x.source_cutoff::timestamptz,x.input_sha256,x.identity_digest,x.source_count,x.imported_count,x.isolated_count,x.source_set_digest,x.imported_set_digest,x.isolated_set_digest,x.body_digest,x.source_canonical
-   FROM jsonb_to_recordset($1::jsonb) x(id text,user_id text,source_system text,legacy_user_id text,source_kind text,source_entity text,source_cutoff text,input_sha256 text,identity_digest text,source_count integer,imported_count integer,isolated_count integer,source_set_digest text,imported_set_digest text,isolated_set_digest text,body_digest text,source_canonical text)
-   ORDER BY x.user_id COLLATE "C",x.id COLLATE "C"`,[JSON.stringify(coverageRows)]);
+ if(facts.coverageRows.length){
+  await insertHistoryFacts(client,facts);
   await client.query(`/* finance history batch audit */ INSERT INTO zzsh_iam.audit_event(id,actor_type,actor_id,session_id,action,object_type,object_id,outcome,request_id,reason,occurred_at,details)
    SELECT x.id,'admin',$2,$3,'finance.history.imported','personal_finance_observation_coverage',x.object_id,'SUCCESS',$4,NULL,clock_timestamp(),x.details
    FROM jsonb_to_recordset($1::jsonb) x(id text,object_id text,details jsonb) ORDER BY x.object_id COLLATE "C"`,[JSON.stringify(auditRows),actor.userId,actor.sessionId,actor.requestId]);
@@ -474,5 +560,5 @@ export async function importReviewedFinanceObservationsBatchOn(client:PoolClient
    SELECT $2,x.key,x.fingerprint,200,x.body,false FROM jsonb_to_recordset($1::jsonb) x(key text,fingerprint text,body jsonb) ORDER BY x.key COLLATE "C"`,[JSON.stringify(receiptRows),scopeKey]);
  }
  await closeMaintenanceBatch(client,actor,binding(pairs[0]!.scope).review);
- return{status:200,body:{coverageCount:pairs.length,created:fresh.length,replayed:pairs.length-fresh.length,observations:observationRows.length,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt,financialEffect:'NONE'}};
+ return{status:200,body:{coverageCount:pairs.length,created:fresh.length,replayed:pairs.length-fresh.length,observations:facts.observationRows.length,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt,financialEffect:'NONE'}};
 }

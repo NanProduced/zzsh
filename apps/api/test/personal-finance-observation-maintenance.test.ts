@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
 import {prepareHistoricalObservation} from '../src/finance/personal-finance-read';
-import {bindReviewedFinanceObservationAdmission,bindReviewedFinanceObservationAdmissionBatch,importReviewedFinanceObservationsBatch,importReviewedFinanceObservationsBatchOn,planFinanceObservations,recoverReviewedFinanceObservations,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
+import {bindReviewedFinanceObservationAdmission,bindReviewedFinanceObservationAdmissionBatch,importReviewedFinanceObservationsBatch,importReviewedFinanceObservationsBatchOn,planFinanceObservations,recoverReviewedFinanceObservations,systemFinanceHistoryBatchProof,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
+import {systemFinanceMigrationId} from '../src/legacy-load/system-user-migration';
 
 const actor={userId:'fixture_boss',sessionId:'fixture_session',requestId:'fixture_request'};
 const resource={host:'127.0.0.1' as const,port:55432 as const,database:'zzsh_test_order_history',oid:42,owner:'fixture_owner',marker:'zzsh:order-reservation-test:v1',role:'fixture_owner',roleOid:43};
@@ -51,6 +52,15 @@ function fixture(){
 test('observation plan closes source rows and exact cutoff/digest without a wallet effect',()=>{
  const i=input(),p=planFinanceObservations(i);assert.equal(p.observations.length,1);assert.equal(p.observations[0]?.includedInOpening,false);
  for(const change of [(v:ObservationImportInput)=>{v.observations=[];},(v:ObservationImportInput)=>{v.observations[0]!.sourceUserId=99;},(v:ObservationImportInput)=>{v.observations[0]!.sourceStatus=9;},(v:ObservationImportInput)=>{v.coverage.imported[0]!.sourceDigest='c'.repeat(64);}]){const v=structuredClone(i);change(v);assert.throws(()=>planFinanceObservations(v));}
+});
+test('system history batch freezes the exact non-empty source, identity and target',()=>{
+ const target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},dataset='b'.repeat(64);
+ const actor={kind:'SYSTEM_FINANCE_MIGRATION' as const,id:systemFinanceMigrationId(dataset,target),sourceDatasetSha256:dataset,target,fenceEpochSha256:'c'.repeat(64),requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ const i=input(),proof=systemFinanceHistoryBatchProof([i],actor);
+ assert.deepEqual(systemFinanceHistoryBatchProof([i],actor),proof);assert.equal(proof.body.financialEffect,'NONE');
+ assert.throws(()=>systemFinanceHistoryBatchProof([i,i],actor));assert.throws(()=>systemFinanceHistoryBatchProof([input(true)],actor));
+ const changed=structuredClone(i);changed.observations[0]!.fee='0.33';assert.throws(()=>systemFinanceHistoryBatchProof([changed],actor));
+ assert.throws(()=>systemFinanceHistoryBatchProof([i],{...actor,target:{...target,databaseOid:'4'}}));
 });
 test('opaque reviewed import is idempotent, preserves exact source and does not credit or initialize',async()=>{
  const f=fixture(),i=input(),scope=await bindReviewedFinanceObservationAdmission(f.client,actor,review(i));
