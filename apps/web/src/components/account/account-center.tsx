@@ -9,6 +9,7 @@ import {
   ClipboardList,
   Crown,
   FileText,
+  Gamepad2,
   House,
   LayoutGrid,
   RefreshCw,
@@ -834,12 +835,18 @@ export function OrderSummaryCard({
               const orderHref = orderUrl(party, "", undefined, order.id, order.source?.origin);
               const facts = orderAmountFacts(order, party);
               const loginMethod = order.listingFacts?.attributeDisplay?.loginMethod;
+              const safeBox = order.listingFacts?.attributeDisplay?.safeBox;
+              const title = orderAccountTitle(order);
               return (
                 <Link key={orderItemKey(order)} className="account-order-row" href={orderHref} scroll={false}>
+                  <div className={`account-order-row-icon is-${party}`} aria-hidden="true">
+                    {rental ? <Gamepad2 size={20} /> : <House size={20} />}
+                  </div>
                   <div className="account-order-row-main">
                     <div className="account-order-row-badges">
                       {loginMethod ? <span className="account-order-login-tag">{loginMethod}</span> : null}
-                      <strong className="account-order-row-title">{orderAccountTitle(order)}</strong>
+                      {safeBox ? <span className="account-order-safebox-tag">{safeBox}</span> : null}
+                      <strong className="account-order-row-title" title={title}>{title}</strong>
                     </div>
                     <div className="account-order-row-meta">
                       {order.accountDisplayNo ? <span className="account-order-acc-no">账号 {order.accountDisplayNo}</span> : null}
@@ -851,7 +858,7 @@ export function OrderSummaryCard({
                   </div>
                   <div className="account-order-row-money">
                     <span className="account-order-row-money-caption">{facts.caption}</span>
-                    <strong className="account-order-row-money-value">{facts.main}</strong>
+                    <strong className={`account-order-row-money-value${facts.main === "未记录" ? " is-unrecorded" : ""}`}>{facts.main}</strong>
                     {facts.secondary.length ? <span className="account-order-row-money-sub">{facts.secondary.join(" · ")}</span> : null}
                   </div>
                   <div className="account-order-row-end">
@@ -868,6 +875,97 @@ export function OrderSummaryCard({
         ) : null}
       </div>
     </article>
+  );
+}
+
+export function AccountRecentOrdersPanel({
+  scope,
+  renterRefreshVersion,
+  ownerRefreshVersion,
+  renterOrders = [],
+  ownerOrders = [],
+  onRenterStatusChange,
+  onOwnerStatusChange,
+}: {
+  scope: string;
+  renterRefreshVersion: number;
+  ownerRefreshVersion: number;
+  renterOrders?: Order[];
+  ownerOrders?: Order[];
+  onRenterStatusChange: (status: "loading" | "ready" | "error", items: Order[], hasMore: boolean) => void;
+  onOwnerStatusChange: (status: "loading" | "ready" | "error", items: Order[], hasMore: boolean) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<OrderParty>("renter");
+  const rental = activeTab === "renter";
+  const moreHref = accountSectionHref(rental ? "rentals" : "leased", { view: "overview" });
+  const moreText = rental ? "全部租入订单" : "全部出租订单";
+
+  return (
+    <section className="account-overview-orders-container" aria-label="最近订单看板">
+      <div className="account-orders-tab-header">
+        <div className="account-orders-tabs" role="tablist" aria-label="订单角色切换">
+          <button
+            type="button"
+            role="tab"
+            id="tab-renter-orders"
+            aria-selected={rental}
+            aria-controls="panel-renter-orders"
+            className={`account-orders-tab-btn ${rental ? "is-active" : ""}`}
+            onClick={() => setActiveTab("renter")}
+          >
+            <FileText size={16} aria-hidden="true" />
+            <span>我的租入</span>
+            <span className="account-orders-tab-role-tag">买家视角</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-owner-orders"
+            aria-selected={!rental}
+            aria-controls="panel-owner-orders"
+            className={`account-orders-tab-btn ${!rental ? "is-active" : ""}`}
+            onClick={() => setActiveTab("owner")}
+          >
+            <House size={16} aria-hidden="true" />
+            <span>我的出租</span>
+            <span className="account-orders-tab-role-tag">号主视角</span>
+          </button>
+        </div>
+        <Link className="account-orders-tab-more" href={moreHref} scroll={false}>
+          <span>{moreText}</span>
+          <ChevronRight size={14} aria-hidden="true" />
+        </Link>
+      </div>
+
+      <div className="account-overview-orders-panels">
+        <div
+          id="panel-renter-orders"
+          role="tabpanel"
+          aria-labelledby="tab-renter-orders"
+          className={`account-orders-panel-wrap ${rental ? "is-active" : "is-hidden"}`}
+        >
+          <OrderSummaryCard
+            party="renter"
+            scope={scope}
+            refreshVersion={renterRefreshVersion}
+            onStatusChange={onRenterStatusChange}
+          />
+        </div>
+        <div
+          id="panel-owner-orders"
+          role="tabpanel"
+          aria-labelledby="tab-owner-orders"
+          className={`account-orders-panel-wrap ${!rental ? "is-active" : "is-hidden"}`}
+        >
+          <OrderSummaryCard
+            party="owner"
+            scope={scope}
+            refreshVersion={ownerRefreshVersion}
+            onStatusChange={onOwnerStatusChange}
+          />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1006,24 +1104,19 @@ export function AccountOverview({
         }))}
       />
 
-      <div className="account-overview-orders-row">
-        <OrderSummaryCard
-          party="renter"
-          scope={scope}
-          refreshVersion={orderRefresh.renter}
-          onStatusChange={(status, items, hasMore) =>
-            setRenterOrderSummary({ scope, status, items, hasMore })
-          }
-        />
-        <OrderSummaryCard
-          party="owner"
-          scope={scope}
-          refreshVersion={orderRefresh.owner}
-          onStatusChange={(status, items, hasMore) =>
-            setOwnerOrderSummary({ scope, status, items, hasMore })
-          }
-        />
-      </div>
+      <AccountRecentOrdersPanel
+        scope={scope}
+        renterRefreshVersion={orderRefresh.renter}
+        ownerRefreshVersion={orderRefresh.owner}
+        renterOrders={currentRenterOrders}
+        ownerOrders={currentOwnerOrders}
+        onRenterStatusChange={(status, items, hasMore) =>
+          setRenterOrderSummary({ scope, status, items, hasMore })
+        }
+        onOwnerStatusChange={(status, items, hasMore) =>
+          setOwnerOrderSummary({ scope, status, items, hasMore })
+        }
+      />
     </div>
   );
 }
