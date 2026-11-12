@@ -102,7 +102,8 @@ export type ContentItemRow = {
   gameName: string | null;
   sortOrder: number;
   revision: string;
-  createdByAdminId: string;
+  createdByAdminId: string | null;
+  source?: "SYSTEM_INITIAL" | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -121,16 +122,19 @@ export type ContentVersionRow = {
   revision: string;
   publishedAt: Date | null;
   publishedByAdminId: string | null;
+  source?: "SYSTEM_INITIAL" | null;
   createdAt: Date;
   updatedAt: Date;
 };
 
 const ITEM_FIELDS = `i."id", i."type", i."resource_key" AS "resourceKey", i."game_id" AS "gameId", g."name" AS "gameName", i."sort_order" AS "sortOrder",
-  i."revision"::text AS "revision", i."created_by_admin_id" AS "createdByAdminId", i."created_at" AS "createdAt", i."updated_at" AS "updatedAt"`;
+  i."revision"::text AS "revision", CASE WHEN to_jsonb(i)->>'system_initial_sha256' IS NULL THEN i."created_by_admin_id" END AS "createdByAdminId",
+  CASE WHEN to_jsonb(i)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source, i."created_at" AS "createdAt", i."updated_at" AS "updatedAt"`;
 
 const VERSION_FIELDS = `v."id", v."item_id" AS "itemId", v."sequence", v."state", v."title", v."summary", v."body", v."payload", CASE WHEN v."update_settings"->'homePopup' = 'false'::jsonb THEN v."update_settings" - 'homePopup' ELSE v."update_settings" END AS "updateSettings",
   v."cover_media_id" AS "coverMediaId", v."revision"::text AS "revision", v."published_at" AS "publishedAt",
-  v."published_by_admin_id" AS "publishedByAdminId", v."created_at" AS "createdAt", v."updated_at" AS "updatedAt"`;
+  CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NULL THEN v."published_by_admin_id" END AS "publishedByAdminId",
+  CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source, v."created_at" AS "createdAt", v."updated_at" AS "updatedAt"`;
 
 export async function loadContentItem(client: PoolClient, itemId: string, forUpdate = false): Promise<ContentItemRow | null> {
   const result = await client.query<ContentItemRow>(

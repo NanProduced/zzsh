@@ -120,18 +120,18 @@ export async function bootstrapLegalDocuments(client: PoolClient, input: { actor
     await client.query(
       `INSERT INTO "zzsh_content"."legal_document_version"
         ("id", "doc_type", "title", "body", "body_format", "body_document", "digest", "status",
-         "effective_at", "created_by_admin_id", "sealed_by_admin_id", "sealed_at")
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'SEALED', $8::timestamptz, $9, $9, $8::timestamptz)`,
+         "effective_at", "created_by_admin_id", "sealed_by_admin_id", "sealed_at", "system_initial_sha256")
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'SEALED', $8::timestamptz, $9, $9, $8::timestamptz, $10)`,
       [entry.seed.versionId, entry.seed.docType, entry.title, entry.body, entry.seed.format,
-        entry.document ? JSON.stringify(entry.document) : null, entry.digest, effectiveAt, actorAdminId],
+        entry.document ? JSON.stringify(entry.document) : null, entry.digest, effectiveAt, actorAdminId, manifestDigest],
     );
   }
   await recordAudit(client, {
-    actorType: "system", actorId: actorAdminId, action: "CONTENT_BOOTSTRAPPED",
+    actorType: "system", action: "CONTENT_BOOTSTRAPPED",
     objectType: "legal_bootstrap", objectId: manifestDigest, outcome: "SUCCESS", requestId: input.requestId,
     reason: "first-deploy legal documents",
     details: {
-      manifestDigest, created: verified.length, effectiveAt: effectiveAt.toISOString(),
+      manifestDigest, compatibilityBossRef: actorAdminId, created: verified.length, effectiveAt: effectiveAt.toISOString(),
       items: verified.map(entry => ({ key: entry.seed.key, docType: entry.seed.docType, versionId: entry.seed.versionId, digest: entry.digest, bodyFormat: entry.seed.format })),
       earlySettlementDigest: legalDigest(newEarlySettlementDisclosure().body),
     },

@@ -34,8 +34,9 @@ export type HelpTreeNodeRow = {
   resourceKey: string | null;
   sortKey: string;
   revision: string;
-  createdByAdminId: string;
-  updatedByAdminId: string;
+  createdByAdminId: string | null;
+  updatedByAdminId: string | null;
+  source?: "SYSTEM_INITIAL" | null;
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
@@ -46,7 +47,9 @@ export type HelpTreeNodeRow = {
 
 const NODE_FIELDS = `"id", "parent_id" AS "parentId", "depth", "kind", "title", "description", "icon_key" AS "iconKey",
   "resource_key" AS "resourceKey", "sort_key" AS "sortKey", "revision"::text AS "revision",
-  "created_by_admin_id" AS "createdByAdminId", "updated_by_admin_id" AS "updatedByAdminId",
+  CASE WHEN to_jsonb(help_tree_node)->>'system_initial_sha256' IS NULL THEN "created_by_admin_id" END AS "createdByAdminId",
+  CASE WHEN to_jsonb(help_tree_node)->>'system_initial_sha256' IS NULL OR revision>1 THEN "updated_by_admin_id" END AS "updatedByAdminId",
+  CASE WHEN to_jsonb(help_tree_node)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source,
   "created_at" AS "createdAt", "updated_at" AS "updatedAt", "deleted_at" AS "deletedAt",
   "deleted_by_admin_id" AS "deletedByAdminId", "delete_batch_id" AS "deleteBatchId", "pre_delete_state" AS "preDeleteState"`;
 

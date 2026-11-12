@@ -54,7 +54,7 @@
 - `price`（`fixedFeeRates`、`haffRule`、`lines`、`fundingPolicy`）、`termOptions`、`agreement`（标题与正文）和 `fullPayoutTerms`（标题、正文和资金政策引用）。沿用规则草稿的格式和校验；哈夫币用 `haff-ratio-v3`，三个出租方式均提供费率。
 - `memberDeposits`：五个会员等级各自的 `tenantDeposit`，可附 `depositAllowanceCents`；`unifiedPricing` 使用管理端 `membership-unified-pricing.v1` 的统一折扣和礼遇范围格式。
 
-入口绑定原文件摘要和首版记录，原包可重放；已有租赁或会员配置时拒绝新初始化。它不建立 Boss 会话或审批，也不开放固定费交易。具体费率、价格、折扣和条款必须由经营方提供。
+入口绑定原文件摘要和首版记录，原包可重放；已有租赁或会员配置时拒绝新初始化。固定费与 Plate 默认内容、法务首装共用只允许迁移属主写入的系统来源标记；初始 Boss 外键仅作兼容引用，读取不将其显示为操作人。既有未标记记录不据此反填。首装不建立 Boss 会话或审批，也不开放固定费交易。具体价格、费率、折扣和条款必须由经营方提供；三个手续费率均不得超过 92%，给 8% 包赔费留足毛收入。
 
 ## 内容与对外材料
 

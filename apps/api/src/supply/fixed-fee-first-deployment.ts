@@ -1,3 +1,4 @@
+import { setSystemInitialSource } from "../database/system-initial-source";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { recordAudit } from "../auth/security-core";
@@ -72,13 +73,17 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   const previous = (await client.query(`SELECT a.object_id AS "releaseId",a.details,
     r.id IS NOT NULL AND m.id IS NOT NULL AS bound FROM zzsh_iam.audit_event a
     LEFT JOIN zzsh_supply.rule_release r ON r.id=a.object_id AND r.game_id=$2 AND r.generation=1
-      AND r.price_version_id=a.details->>'priceVersionId'
+      AND r.price_version_id=a.details->>'priceVersionId' AND r.system_initial_sha256=$4
+      AND EXISTS(SELECT 1 FROM zzsh_supply.price_version p JOIN zzsh_supply.full_payout_terms_version f ON f.id=p.full_payout_terms_version_id
+        WHERE p.id=r.price_version_id AND p.system_initial_sha256=$4 AND f.system_initial_sha256=$4)
+      AND EXISTS(SELECT 1 FROM zzsh_supply.term_version t WHERE t.id=r.term_version_id AND t.system_initial_sha256=$4)
+      AND EXISTS(SELECT 1 FROM zzsh_supply.agreement_version ag WHERE ag.id=r.agreement_version_id AND ag.system_initial_sha256=$4)
     LEFT JOIN zzsh_iam.membership_growth_policy m ON m.id=a.details->>'membershipPolicyId'
       AND m.rule_release_id=r.id AND m.price_version_id=r.price_version_id AND m.version=1
       AND m.source_ref=$3 AND m.approval_request_id IS NULL AND m.approved_by_admin_id IS NULL
     WHERE a.actor_type='system' AND a.outcome='SUCCESS'
       AND a.action='supply.rules.first_fixed_fee.initialized' AND a.request_id=$1`,
-  [requestId, gameId, "initial-fixed-fee:" + expectedSha256])).rows;
+  [requestId, gameId, "initial-fixed-fee:" + expectedSha256, expectedSha256])).rows;
   if (previous.length === 1 && previous[0]?.bound === true
     && previous[0].details?.packageSha256 === expectedSha256 && previous[0].details.gameId === gameId) {
     const result = await initializeFixedFeePricing(client, { gameId, priceVersionId: previous[0].details.priceVersionId, effectiveAt, requestId });
@@ -95,6 +100,7 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   if (game.releaseId !== null || existing?.occupied !== false || previous.length) throw conflict("已有租赁或会员配置，未覆盖");
   // Use the reserved Boss for version provenance. The migration creates no session or approval.
   await assertContentBootstrapBoss(client, boss);
+  await setSystemInitialSource(client, expectedSha256);
   const payout = await createFullPayoutTermsDraft(client, boss, true, gameId, fullPayoutTerms);
   await sealVersion(client, boss, true, "full_payout_terms_version", payout.id, "0");
   const { id: priceVersionId } = await createPriceDraft(client, boss, true, gameId, "PERCENT", price.fixedFeeRates);
@@ -108,8 +114,8 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   const agreementVersion = await createAgreementDraft(client, boss, true, gameId, requiredString(agreement, "title", 120), requiredString(agreement, "body", 20_000));
   await sealVersion(client, boss, true, "agreement_version", agreementVersion.id, "1");
   const releaseId = newSupplyId("release");
-  await client.query(`INSERT INTO zzsh_supply.rule_release(id,game_id,price_version_id,term_version_id,agreement_version_id,generation,activated_by_admin_id)
-    VALUES($1,$2,$3,$4,$5,1,$6)`, [releaseId, gameId, priceVersionId, term.id, agreementVersion.id, boss]);
+  await client.query(`INSERT INTO zzsh_supply.rule_release(id,game_id,price_version_id,term_version_id,agreement_version_id,generation,activated_by_admin_id,system_initial_sha256)
+    VALUES($1,$2,$3,$4,$5,1,$6,$7)`, [releaseId, gameId, priceVersionId, term.id, agreementVersion.id, boss, expectedSha256]);
   await client.query("UPDATE zzsh_supply.game SET current_release_id=$2,updated_at=clock_timestamp() WHERE id=$1", [gameId, releaseId]);
   const sealed = await assertSealedRuleRelease(client, releaseId, priceVersionId);
   if (!sealed.fixedFeeRates || sealed.enabledModes.length !== 3) throw invalid("首次价格必须明确配置普通、自定义和极速");
@@ -129,7 +135,8 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
     VALUES($1,1,'APPROVED',$2,$3,$4,$5,'membership-growth-v1',$6::jsonb,$7)`,
   [membershipPolicyId, effectiveAt, releaseId, priceVersionId, sourceRef, JSON.stringify(policy), sha256Hex(canonicalize(policy))]);
   const result = await initializeFixedFeePricing(client, { gameId, priceVersionId, effectiveAt, requestId });
+  await setSystemInitialSource(client, null);
   await recordAudit(client, { actorType: "system", action: "supply.rules.first_fixed_fee.initialized", objectType: "rule_release",
-    objectId: releaseId, outcome: "SUCCESS", requestId, details: { packageSha256: expectedSha256, gameId, priceVersionId, membershipPolicyId } });
+    objectId: releaseId, outcome: "SUCCESS", requestId, details: { packageSha256: expectedSha256, gameId, priceVersionId, membershipPolicyId, compatibilityBossRef: boss } });
   return { ...result, releaseId, packageSha256: expectedSha256 };
 }

@@ -60,15 +60,17 @@ export async function listRules(
   const release = await client.query(
     `SELECT r."id", r."game_id" AS "gameId", r."price_version_id" AS "priceVersionId", r."term_version_id" AS "termVersionId",
             r."agreement_version_id" AS "agreementVersionId", r."generation"::text AS "generation",
-            r."activated_by_admin_id" AS "activatedByAdminId", r."activated_at" AS "activatedAt"
+            CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NULL THEN r."activated_by_admin_id" END AS "activatedByAdminId",
+            CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "activationSource", r."activated_at" AS "activatedAt"
        FROM "zzsh_supply"."rule_release" r
       WHERE r."game_id" = $1 ORDER BY r."generation" DESC LIMIT 1`,
     [gameId],
   );
   const priceVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."mode", v."status", v."commission_rate"::text AS "commissionRate",
-            v."haff_rule" AS "haffRule", v."fixed_fee_rates" AS "fixedFeeRates", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
-            v."funding_policy" AS "fundingPolicy", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
+            v."haff_rule" AS "haffRule", to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
+            v."funding_policy" AS "fundingPolicy", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
+            CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
        FROM "zzsh_supply"."price_version" v
       WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
     [gameId],
@@ -82,7 +84,8 @@ export async function listRules(
     [gameId],
   );
   const termVersions = await client.query(
-    `SELECT v."id", v."game_id" AS "gameId", v."status", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
+    `SELECT v."id", v."game_id" AS "gameId", v."status", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
+            CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
        FROM "zzsh_supply"."term_version" v WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
     [gameId],
   );
@@ -95,7 +98,8 @@ export async function listRules(
   );
   const agreementVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."title", v."body", v."digest", v."status", v."revision"::text AS "revision",
-            v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt"
+            v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
+            CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
        FROM "zzsh_supply"."agreement_version" v WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
     [gameId],
   );
@@ -112,7 +116,9 @@ export async function listRules(
     termVersions: termVersions.rows,
     termOptions: termOptions.rows,
     agreementVersions: agreementVersions.rows,
-    fullPayoutTermsVersions: (await client.query(`SELECT id,policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE game_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20`,[gameId])).rows,
+    fullPayoutTermsVersions: (await client.query(`SELECT id,policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt",
+      CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source
+      FROM zzsh_supply.full_payout_terms_version v WHERE game_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20`,[gameId])).rows,
     depositCatalog: (await client.query<{ catalog: unknown }>(`
       SELECT jsonb_build_object(
         'catalogRevision', g.catalog_revision::text,
