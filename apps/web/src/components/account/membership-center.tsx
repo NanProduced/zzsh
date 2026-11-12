@@ -60,6 +60,9 @@ const COMPARISON_LABEL_TO_TIER: Record<string, TrackTier> = {
   金卡会员: "GOLD",
   铂金会员: "PLATINUM",
   钻石会员: "DIAMOND",
+  黑金会员: "BLACK_GOLD",
+  "黑金会员 · 终身": "BLACK_GOLD",
+  "黑金会员·终身": "BLACK_GOLD",
 };
 
 const ENTITLEMENT_STATE_LABELS: Record<EntitlementState, string> = {

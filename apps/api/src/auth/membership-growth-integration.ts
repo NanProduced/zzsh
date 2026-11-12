@@ -621,13 +621,35 @@ function policySummaries(policyPayload: Record<string, unknown> | null, policyVe
   };
   const deposit = depositLabel(current);
   const modesReady = policyModesReady(current, enabledModes);
+  const formatPayableRatioDiscount = (ratio: string): string => {
+    const match = /^(0|1)(?:\.(\d{1,8}))?$/.exec(ratio);
+    if (!match) return "按完整报价择优";
+    const scaled = BigInt(`${match[1]}${(match[2] ?? "").padEnd(8, "0")}`);
+    if (scaled === 100_000_000n) return "原价无折扣";
+    const hundredths = (scaled + 50_000n) / 100_000n;
+    const zheWhole = hundredths / 100n;
+    const zheFraction = (hundredths % 100n).toString().padStart(2, "0").replace(/0+$/, "");
+    return `账号租金 ${zheWhole}${zheFraction ? `.${zheFraction}` : ""} 折`;
+  };
+  const pricingLabel = (config: Record<string, unknown> | undefined, isComparison: boolean) => {
+    if (!config) return isComparison ? "价格方案未就绪" : "价格方案暂不可用";
+    if (!policyModesReady(config, enabledModes)) return isComparison ? "价格方案未就绪" : "价格方案暂不可用";
+    const pricing = isObject(config.pricing) ? config.pricing : {};
+    for (const mode of enabledModes ?? ["ordinary", "custom", "fast"]) {
+      const contract = pricing[mode];
+      if (contract && isObject(contract) && contract.kind === "TOTAL_DISCOUNT" && typeof contract.payableRatio === "string" && contract.payableRatio) {
+        return formatPayableRatioDiscount(contract.payableRatio);
+      }
+    }
+    return isComparison ? "完整方案可比价" : "按完整报价择优";
+  };
   const benefits = [
     { label: "租客押金", value: deposit, ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
-    { label: "租赁价格", value: modesReady ? "按完整报价择优" : "价格方案暂不可用", ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
+    { label: "租赁价格", value: pricingLabel(current, false), ...(policyVersion ? { sourceVersion: policyVersion } : {}) },
   ];
   const comparison = NORMAL_GROWTH_TIERS.map((candidate) => {
     const item = isObject(tiers[candidate]) ? tiers[candidate] : undefined;
-    return { tier: tierLabel(candidate), deposit: depositLabel(item), pricing: policyModesReady(item, enabledModes) ? "完整方案可比价" : "价格方案未就绪" };
+    return { tier: tierLabel(candidate), deposit: depositLabel(item), pricing: pricingLabel(item, true) };
   });
   return { benefits, comparison };
 }
