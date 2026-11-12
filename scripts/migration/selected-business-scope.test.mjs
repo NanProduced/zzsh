@@ -1,30 +1,32 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, legacyListedProofVersion, legacyListedSourceForReadback, legacyListedTargetMatches, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { sourceContinuation } from './local-source-adapter.mjs';
 
 const account = (id, over = {}) => ({ id, status: "4", is_delete: "0", user_id: "u1", no: id, price_tenant: "100.00",
-  extra_goods_total_price_tenant: "30.00", deposit_amount: "50.00", rental_days: "10", default_consume_type: "1", ...over });
+  extra_goods_total_price_tenant: "30.00", deposit_amount: "50.00", rental_days: "10", default_consume_type: "1", game_id: "1", update_time: "1700000000", ...over });
 const order = (id, accountId, over = {}) => ({ id, accounts_id: accountId, pay_is: "0", user_id: "u1", sale_user_id: "u2", order_sn: "order-"+id, ...over });
 const pay = (orderId, payIs, over = {}) => ({ id: "p" + orderId, order_id: orderId, order_type: "1", pay_is: payIs, ...over });
 
 function independentlyCheckedFixture(planSource) {
-  const data = { users: [{id:'u1'},{id:'u2'}], accounts: [account('a1',{status:'3'}),account('a2'),account('a3')],
+  const data = { games: [{id:'1',game_name:'三角洲行动',is_delete:'0'},{id:'2',game_name:'其他游戏',is_delete:'0'}],
+    users: [{id:'u1'},{id:'u2'}], accounts: [account('a1',{status:'3'}),account('a2'),account('a3')],
     orders: [order('o1','a2',{pay_is:'1'}),order('o2','a2'),order('o3','a1')],
     pays: [pay('o1','1'),pay('o2','0'),pay('o3','0')], refunds: [{id:'r1',user_id:'u1',order_type:'order',order_id:'o1',order_sn:'order-o1'}] };
   const scope = planSelectedBusinessScope(planSource ?? data), sourceSha='a'.repeat(64);
   const population = summarizePopulationScope(data,'SELECTED_BUSINESS_SCOPE',selectedScopeFilter(scope),sourceSha);
   const source = {status:'CAPTURED_READ_ONLY',rollbackConfirmed:true,clientClosed:true,
-    files:Object.fromEntries(Object.entries(data).map(([domain,rows])=>[domain,{file:'source-'+domain,rows:rows.length}]))};
-  const files={users:{file:'target-users'},accounts:{file:'target-accounts'},orders:{file:'target-orders'},quarantine:{file:'quarantine'}};
+    files:Object.fromEntries(Object.entries(data).map(([domain,rows])=>[domain,{file:'source-'+domain,rows:rows.length,sha256:createHash('sha256').update(JSON.stringify(rows)).digest('hex')}]))};
+  const files={users:{file:'target-users'},accounts:{file:'target-accounts',sha256:'b'.repeat(64)},orders:{file:'target-orders'},quarantine:{file:'quarantine'}};
   const targetRows={users:data.users.map(({id:sourceId})=>({sourceId})),accounts:scope.write.accounts.map(sourceId=>{const raw=data.accounts.find(row=>row.id===sourceId);return {sourceId,ownerLegacyId:raw.user_id,sourceStatus:raw.status,sourceDeleted:raw.is_delete==='1',businessNo:raw.no,
+    gameCode:'delta',sourceUpdatedAt:sourceId==='a1'?'2023-11-14T22:13:20.000Z':null,
     snapshot:sourceId==='a1'?{schema:'legacy-listing-read-v1',resourceNo:raw.no,haffRentYuan:raw.price_tenant,goodsYuan:raw.extra_goods_total_price_tenant,depositYuan:raw.deposit_amount,termDays:raw.rental_days,dailyHaffBase:'10000000'}:null};}),orders:scope.write.orders.map(sourceId=>({sourceId})),quarantine:[]};
   const rows=Object.fromEntries(Object.entries(data).map(([name,value])=>['source-'+name,value]));
   Object.assign(rows,{'target-users':targetRows.users,'target-accounts':targetRows.accounts,'target-orders':targetRows.orders,quarantine:targetRows.quarantine});
-  const dataset={sourceReceiptSha256:sourceSha,population,populationSha256:createHash('sha256').update(JSON.stringify(population)).digest('hex'),selectedScope:scope,selectedScopeSha256:selectedScopeDigest(scope),
+  const dataset={sourceReceiptSha256:sourceSha,gameBindings:{'1':'delta'},population,populationSha256:createHash('sha256').update(JSON.stringify(population)).digest('hex'),selectedScope:scope,selectedScopeSha256:selectedScopeDigest(scope),
     domains:{users:{source:data.users.length,ready:data.users.length,isolated:0},accounts:{source:scope.write.accounts.length,ready:scope.write.accounts.length,isolated:0},orders:{source:scope.write.orders.length,ready:scope.write.orders.length,isolated:0}},files};
   const readRows=async(_dir,meta,visit)=>{for(const row of rows[meta.file]??[])visit(row);};
   return {data,source,dataset,rows,readRows};
@@ -37,18 +39,97 @@ test('independent selected-scope check proves paid orders, listed accounts and t
   assert.deepEqual(proof.users,{captured:2,retained:2,excluded:0,ready:2,isolated:0});
   assert.deepEqual(proof.accounts,{captured:3,retained:2,excluded:1,ready:2,isolated:0});
   assert.deepEqual(proof.orders,{captured:3,retained:1,excluded:2,ready:1,isolated:0});
-  assert.deepEqual(proof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'});
+  assert.equal(proof.legacyListed.status,'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN');
+  assert.equal(proof.legacyListed.sourceCount,1);assert.equal(proof.legacyListed.delta.readyWithSnapshot,1);
+  assert.equal(proof.legacyListed.unknownGame.sourceCount,0);
   assert.equal(proof.sourceConnections,0);assert.equal(proof.targetConnections,0);assert.equal(proof.targetWrites,0);
 });
 
 test('listed account source partition keeps missing snapshots and quarantined accounts visible',async()=>{
   const missing=independentlyCheckedFixture();missing.rows['target-accounts'][0].snapshot=null;
   const missingProof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...missing});
-  assert.deepEqual(missingProof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:0,readyWithoutSnapshot:1,isolated:0,status:'SOURCE_REVIEW_REQUIRED'});
+  assert.equal(missingProof.legacyListed.status,'SOURCE_REVIEW_REQUIRED');assert.equal(missingProof.legacyListed.delta.readyWithoutSnapshot,1);
   const isolated=independentlyCheckedFixture();isolated.rows['target-accounts'].shift();isolated.rows.quarantine.push({domain:'accounts',sourceId:'a1'});
   isolated.dataset.domains.accounts.ready--;isolated.dataset.domains.accounts.isolated++;
   const isolatedProof=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...isolated});
-  assert.deepEqual(isolatedProof.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:0,readyWithoutSnapshot:0,isolated:1,status:'SOURCE_REVIEW_REQUIRED'});
+  assert.equal(isolatedProof.legacyListed.status,'SOURCE_REVIEW_REQUIRED');assert.equal(isolatedProof.legacyListed.delta.isolated,1);
+});
+
+test('listed source game classification requires the same captured game dictionary and never guesses an unknown game',async()=>{
+  const wrongBinding=independentlyCheckedFixture();wrongBinding.dataset.gameBindings={'2':'delta'};
+  const unbound=(await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...wrongBinding})).legacyListed;
+  assert.equal(unbound.status,'SOURCE_REVIEW_REQUIRED');assert.equal(unbound.delta,null);assert.equal(unbound.unknownGame.sourceCount,1);
+
+  const unknown=independentlyCheckedFixture();unknown.rows['source-accounts'][0].game_id='missing';
+  unknown.rows['target-accounts'].shift();unknown.rows.quarantine.push({domain:'accounts',sourceId:'a1'});
+  unknown.dataset.domains.accounts.ready--;unknown.dataset.domains.accounts.isolated++;
+  const review=(await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...unknown})).legacyListed;
+  assert.equal(review.delta.sourceCount,0);assert.equal(review.unknownGame.sourceCount,1);assert.equal(review.status,'SOURCE_REVIEW_REQUIRED');
+
+  const other=independentlyCheckedFixture();other.rows['source-accounts'][0].game_id='2';
+  other.rows['target-accounts'].shift();other.rows.quarantine.push({domain:'accounts',sourceId:'a1'});
+  other.dataset.domains.accounts.ready--;other.dataset.domains.accounts.isolated++;
+  const isolated=(await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...other})).legacyListed;
+  assert.equal(isolated.otherGames.sourceCount,1);assert.equal(isolated.unknownGame.sourceCount,0);assert.equal(isolated.status,'SOURCE_REVIEW_REQUIRED');
+  assert.equal(isolated.otherGames.isolated,1);assert.equal(isolated.delta.status,'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN');
+  const empty=createHash('sha256').update('').digest('hex');
+  const deltaTarget={scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',sourceProofSha256:createHash('sha256').update(JSON.stringify(isolated)).digest('hex'),
+    expectedMapped:0,verifiedMapped:0,missingTarget:0,missingSnapshot:0,published:0,expectedMappedIdsSha256:empty,verifiedMappedIdsSha256:empty,
+    missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
+  assert.equal(legacyListedTargetMatches(isolated,deltaTarget,isolated.binding),true);
+
+  const drift=independentlyCheckedFixture();drift.rows['target-accounts'][0].gameCode='other';
+  await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...drift}),/SELECTED_SCOPE_ACCOUNT_GAME_BINDING_MISMATCH/);
+  const time=independentlyCheckedFixture();time.rows['target-accounts'][0].sourceUpdatedAt='2023-11-15T22:13:20.000Z';
+  await assert.rejects(verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...time}),/SELECTED_SCOPE_ACCOUNT_SNAPSHOT_MISMATCH/);
+});
+
+test('a listed target passes only when its source-bound Delta key set and facts all match',async()=>{
+  const f=independentlyCheckedFixture(),source=(await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f})).legacyListed;
+  const empty=createHash('sha256').update('').digest('hex');
+  const target={scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',
+    sourceProofSha256:createHash('sha256').update(JSON.stringify(source)).digest('hex'),
+    expectedMapped:1,verifiedMapped:1,missingTarget:0,missingSnapshot:0,published:0,
+    expectedMappedIdsSha256:source.delta.readyMappedIdsSha256,verifiedMappedIdsSha256:source.delta.readyWithSnapshotIdsSha256,
+    missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
+  assert.equal(legacyListedTargetMatches(source,target,source.binding),true);
+  for(const change of [t=>{t.missingTarget=1;},t=>{t.missingSnapshot=1;},t=>{t.published=1;},t=>{t.verifiedMapped=0;},
+    t=>{t.expectedMappedIdsSha256='0'.repeat(64);},t=>{t.verifiedMappedIdsSha256='1'.repeat(64);},t=>{t.sourceProofSha256='2'.repeat(64);}]){
+    const changed=structuredClone(target);change(changed);assert.equal(legacyListedTargetMatches(source,changed,source.binding),false);
+  }
+  assert.equal(legacyListedTargetMatches(source,target,{...source.binding,sourceAccountsSha256:'f'.repeat(64)}),false);
+  const unknown=structuredClone(source);unknown.status='SOURCE_REVIEW_REQUIRED';unknown.unknownGame.sourceCount=1;
+  assert.equal(legacyListedTargetMatches(unknown,target,unknown.binding),false);
+});
+
+test('a proven empty listed set differs from an unknown game and historical proof shapes remain reproducible',async()=>{
+  const f=independentlyCheckedFixture();f.data.accounts[0].status='4';
+  const scope=planSelectedBusinessScope(f.data);f.dataset.selectedScope=scope;f.dataset.selectedScopeSha256=selectedScopeDigest(scope);
+  f.dataset.population=summarizePopulationScope(f.data,'SELECTED_BUSINESS_SCOPE',selectedScopeFilter(scope),f.dataset.sourceReceiptSha256);
+  f.dataset.populationSha256=createHash('sha256').update(JSON.stringify(f.dataset.population)).digest('hex');
+  f.rows['target-accounts'].shift();f.dataset.domains.accounts.source--;f.dataset.domains.accounts.ready--;
+  const source=(await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...f})).legacyListed;
+  const empty=createHash('sha256').update('').digest('hex');
+  assert.equal(source.status,'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN');assert.equal(source.delta.sourceCount,0);
+  const target={scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',sourceProofSha256:createHash('sha256').update(JSON.stringify(source)).digest('hex'),
+    expectedMapped:0,verifiedMapped:0,missingTarget:0,missingSnapshot:0,published:0,expectedMappedIdsSha256:empty,verifiedMappedIdsSha256:empty,
+    missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
+  assert.equal(legacyListedTargetMatches(source,target,source.binding),true);
+
+  const old=independentlyCheckedFixture();old.rows['target-accounts'][0].sourceUpdatedAt=null;
+  const v1=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...old,listedProofVersion:1});
+  assert.deepEqual(v1.legacyListed,{scope:'ALL_CAPTURED_GAMES',sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'});
+  const v0=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...old,listedProofVersion:0});
+  assert.equal(Object.hasOwn(v0,'legacyListed'),false);
+  assert.equal(legacyListedProofVersion(v0),0);assert.equal(legacyListedProofVersion(v1),1);assert.equal(legacyListedProofVersion({legacyListed:source}),2);
+  const current=await verifySelectedPopulationFiles({datasetDir:'dataset',sourceDir:'source',...old});
+  assert.equal(current.legacyListed.status,'SOURCE_REVIEW_REQUIRED');assert.equal(current.legacyListed.delta.readyWithoutSnapshot,1);
+  let scans=0;const oldBytes=JSON.stringify(v1);
+  const recomputed=await legacyListedSourceForReadback(v1,async()=>{scans++;return current;});
+  assert.equal(recomputed.origin,'RECOMPUTED_FROM_BOUND_SOURCE');assert.equal(scans,1);assert.equal(JSON.stringify(v1),oldBytes);
+  const reused=await legacyListedSourceForReadback({legacyListed:source},async()=>{scans++;return current;});
+  assert.equal(reused.origin,'CHECKPOINT_BOUND_V2');assert.equal(scans,1);
+  await assert.rejects(legacyListedSourceForReadback(v0,async()=>({})),/LEGACY_LISTED_SOURCE_PROOF_UNAVAILABLE/);
 });
 
 test('independent selected-scope check refuses omitted users and non-order source exclusions',async()=>{

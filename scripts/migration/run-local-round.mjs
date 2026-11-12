@@ -12,6 +12,7 @@ import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDepend
 import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyDisplayCaptureInputs } from "./local-source-adapter.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { legacyListedProofVersion, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { digestInlineGrowthLog, openGrowthPackageReader } from "./local-growth-packages.mjs";
 
 const args = process.argv.slice(2), option = name => {
@@ -217,7 +218,8 @@ if (inspect) {
     if (!input.resume && expected.dataset.identityProfiles && expected.dataset.population?.mode === 'SELECTED_BUSINESS_SCOPE') {
       const { elapsedMs, ...recorded } = receipt.population?.sourceVerification ?? {};
       assert(receipt.population?.mode === 'SELECTED_BUSINESS_SCOPE' && Number.isSafeInteger(elapsedMs) && elapsedMs >= 0, 'ROUND_SOURCE_SCOPE_VERIFICATION_REQUIRED');
-      const current = await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: expected.dataset, source });
+      const current = await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: expected.dataset, source,
+        listedProofVersion: legacyListedProofVersion(recorded) });
       assert.deepEqual(recorded, current, 'ROUND_SOURCE_SCOPE_VERIFICATION_CHANGED');
       setSourceReadiness(current);
     }
@@ -230,7 +232,7 @@ if (inspect) {
   }
   let lineage;
   if (input.resume) try { lineage = readResumeLineage(expected); } catch { /* report missing parent proof below */ }
-  const completion = assessArtifacts(output, { input, inputSha256, actorProof, receipt, expected,
+  const completion = assessArtifacts(output, { input, inputSha256, actorProof, receipt, expected, requireCurrentLegacyListed: false,
     ...(lineage ? { checkpointInput: lineage.previousInput, checkpointActorProof: lineage.previousActorProof, requireStageAcks: false } : {}) });
   if (input.resume && !lineage) { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RESUME_LINEAGE_UNCONFIRMED"); }
   if(populationIssue){completion.status='INCOMPLETE';completion.dataset='INCOMPLETE';completion.issues.unshift('ROUND_POPULATION_SCOPE_UNCONFIRMED');}
@@ -255,7 +257,10 @@ if (inspect) {
   } catch { completion.status = 'INCOMPLETE'; completion.growth = 'INCOMPLETE'; completion.issues.unshift('ROUND_GROWTH_APPROVAL_LOG_UNCONFIRMED'); }
   if (input.retryEvidence) try { readNoWriteRetry(); } catch { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_RETRY_LINEAGE_UNCONFIRMED"); }
   if (bootstrapStatus !== "PASS") { completion.status = "INCOMPLETE"; completion.issues.unshift("ROUND_BOOTSTRAP_EVIDENCE_UNCONFIRMED"); }
-  console.log(JSON.stringify({ status: completion.status, bootstrap: bootstrapStatus, ...(bootstrapReason ? { bootstrapReason } : {}), ...completion, assessmentScope: "DATASET_AND_GROWTH", externalReadiness, evidenceOnly: true, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
+  console.log(JSON.stringify({ status: completion.status, bootstrap: bootstrapStatus, ...(bootstrapReason ? { bootstrapReason } : {}), ...completion,
+    assessmentScope: input.target?.migrationProfile === NEXT_MIGRATION_PROFILE ? "HISTORICAL_DATASET_AND_GROWTH" : "DATASET_AND_GROWTH",
+    ...(input.target?.migrationProfile === NEXT_MIGRATION_PROFILE ? { currentLegacyListed: { status: "NOT_ASSESSED", reason: "HISTORICAL_RECEIPT_ONLY" } } : {}),
+    externalReadiness, evidenceOnly: true, targetConnections: 0, credentialReads: 0, targetWrites: 0 }));
   if (completion.status !== "COMPLETE") process.exitCode = 1;
   process.exit();
 }
@@ -297,7 +302,10 @@ pinned(input.dictionary, "receipt.json");
 assert.equal(m.sourceReceiptSha256, input.source.sha256);
 if (!input.resume && populationAudit.mode === "SELECTED_BUSINESS_SCOPE") {
   const scopeStarted = performance.now();
-  populationAudit.sourceVerification = { ...await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: m, source }),
+  const priorCheckpoint = join(out, "loader", "checkpoint.json");
+  const priorScope = sameDirectoryResume && existsSync(priorCheckpoint) ? read(priorCheckpoint).sourceScopeVerification : null;
+  populationAudit.sourceVerification = { ...await verifySelectedPopulationFiles({ datasetDir: privatePath(input.dataset.path), sourceDir: privatePath(input.source.path), dataset: m, source,
+      listedProofVersion: legacyListedProofVersion(priorScope) }),
     elapsedMs: Math.round(performance.now() - scopeStarted) };
   setSourceReadiness(populationAudit.sourceVerification);
 }
@@ -612,6 +620,19 @@ try {
     assert(result.rollbackConfirmed && result.lockReleased && result.connectionsClosed);
     if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
       assert(result.resource?.migrationProfile === NEXT_MIGRATION_PROFILE && result.targetFence === "HELD_UNTIL_ROLLBACK", "ROUND_TARGET_READBACK_FENCE_UNCONFIRMED");
+    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+      const listed = result.legacyListedSource, recorded = read(checkpoint)?.sourceScopeVerification?.legacyListed;
+      const binding = { sourceReceiptSha256: m.sourceReceiptSha256, sourceAccountsSha256: source.files?.accounts?.sha256 ?? null,
+        sourceGamesSha256: source.files?.games?.sha256 ?? null, datasetAccountsSha256: m.files?.accounts?.sha256 ?? null,
+        gameBindingsSha256: sha(JSON.stringify(m.gameBindings ?? {})) };
+      const checkpointV2 = recorded?.schema === "zzsh.legacy-listed-source-scope.v2";
+      externalReadiness.legacyListed = { ...(listed ?? {}), targetStatus: result.legacyListedTarget?.status ?? "NOT_ASSESSED" };
+      assert(result.legacyListedTarget?.status === "MAPPED_HISTORICAL_NOT_PUBLISHED"
+        && result.legacyListedSourceOrigin === (checkpointV2 ? "CHECKPOINT_BOUND_V2" : "RECOMPUTED_FROM_BOUND_SOURCE")
+        && (!checkpointV2 || JSON.stringify(listed) === JSON.stringify(recorded))
+        && legacyListedTargetMatches(listed, result.legacyListedTarget, binding), "ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED");
+      assert(listed.status === "SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN", "ROUND_LEGACY_LISTED_SOURCE_REVIEW_REQUIRED");
+    }
     if (input.legal) assert(result.rentalReference?.status === "TARGET_CONFIG_VERIFIED" && result.rentalReference.businessReceiptSha256 === input.bootstrapEvidence.business.sha256
       && result.rentalReference.targetDigest === bootstrapEvidence.rentalReference.targetDigest && result.rentalReference.runtimeAccess === "VERIFIED"
       && result.rentalReference.runtimeRollbackConfirmed === true && result.rentalReference.runtimeClosed === true, "ROUND_RENTAL_REFERENCE_READBACK_UNCONFIRMED");
