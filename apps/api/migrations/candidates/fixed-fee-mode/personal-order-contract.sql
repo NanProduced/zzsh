@@ -275,16 +275,17 @@ BEGIN
     )
   THEN RAISE EXCEPTION 'fixed fee original item prices invalid' USING ERRCODE='40001'; END IF;
 
+  -- div truncates the exact rational result; numeric / can round before the final cent rounding.
   WITH rows AS (
     SELECT q,q->>'itemId' AS item_id,
-      CASE WHEN q->>'pricingKind'='HAFF_RATIO' THEN round((q->>'quantity')::numeric*10000/(1000000*ratio_value))
-      ELSE round((q->>'quantity')::numeric*(q#>>'{buyerUnitAmount,amount}')::numeric*100/(q->>'unitQuantity')::numeric) END AS base,
+      CASE WHEN q->>'pricingKind'='HAFF_RATIO' THEN div((q->>'quantity')::numeric*20000+1000000*ratio_value,2000000*ratio_value)
+      ELSE div((q->>'quantity')::numeric*(q#>>'{buyerUnitAmount,amount}')::numeric*200+(q->>'unitQuantity')::numeric,2*(q->>'unitQuantity')::numeric) END AS base,
       (q#>>'{buyerAmount,amount}')::numeric*100 AS buyer,
       (q#>>'{ownerAmount,amount}')::numeric*100 AS owner,
       (q#>>'{platformAmount,amount}')::numeric*100 AS platform
     FROM jsonb_array_elements(quote->'lines') q
   ), totals AS (SELECT *,sum(base) OVER () AS total FROM rows), shares AS (
-    SELECT *,round(total*rate) AS fee,CASE WHEN total=0 THEN 0 ELSE floor(base*round(total*rate)/total) END AS share,
+    SELECT *,round(total*rate) AS fee,CASE WHEN total=0 THEN 0 ELSE div(base*round(total*rate),total) END AS share,
       CASE WHEN total=0 THEN 0 ELSE mod(base*round(total*rate),total) END AS remainder FROM totals
   ), ranked AS (
     SELECT *,sum(share) OVER () AS shares,row_number() OVER (ORDER BY remainder DESC,item_id COLLATE "C") AS rank FROM shares
@@ -319,7 +320,7 @@ BEGIN
     taken:=0;
     IF weight>0 THEN
       FOR i IN 1..line_count LOOP
-        IF capacity[i]>0 THEN take[i]:=LEAST(floor(remaining*bases[i]/weight),capacity[i]);taken:=taken+take[i]; END IF;
+        IF capacity[i]>0 THEN take[i]:=LEAST(div(remaining*bases[i],weight),capacity[i]);taken:=taken+take[i]; END IF;
       END LOOP;
     END IF;
     IF taken>0 THEN
@@ -354,7 +355,7 @@ BEGIN
   raw_num:=(haff_line->>'quantity')::numeric*100;raw_den:=1000000*ratio_value;
   haff_owner:=(haff_line#>>'{ownerAmount,amount}')::numeric*100;
   haff_buyer:=(haff_line#>>'{buyerAmount,amount}')::numeric*100;
-  haff_base:=round(raw_num*100/raw_den);
+  haff_base:=div(raw_num*200+raw_den,raw_den*2);
   IF raw_num*100<haff_owner*raw_den THEN owner_num:=raw_num;owner_den:=raw_den;
   ELSE owner_num:=haff_owner;owner_den:=100;END IF;
   IF haff_buyer=haff_base THEN buyer_num:=raw_num;buyer_den:=raw_den;
