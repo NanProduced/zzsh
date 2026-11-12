@@ -63,7 +63,8 @@ export async function auditSnapshot(client: PoolClient, table: string, id: strin
   // append, and the runtime role intentionally has no UPDATE privilege on the
   // proof table. Keep row locking for mutable audit objects.
   const lock = table === "account_guarantee_proof" || table === "rule_release" || table === "pricing_policy_schedule" || table === "pricing_mode_schedule" ? "" : " FOR UPDATE";
-  const stored = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${lock}`, [id])).rows[0];
+  const fixedRates = table === "price_version" ? ", to_jsonb(audit_row)->'fixed_fee_rates' AS fixed_fee_rates" : "";
+  const stored = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")}${fixedRates} FROM zzsh_supply."${table}" audit_row WHERE id = $1${lock}`, [id])).rows[0];
   if (!stored) return null;
   const row = table === "skin" ? { ...stored } : stored;
   if (table === "skin") {

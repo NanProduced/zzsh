@@ -11,6 +11,7 @@ import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { readResourceIncomePreview } from "../src/supply/publishing";
 import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio, fixedFeeRateForMode, parseFixedFeeRates } from "../src/supply/fixed-fee";
 import { applyTotalDiscountToQuote } from "../src/auth/membership-total-discount";
+import { fullPayoutServiceFeeCents } from "../src/supply/full-payout-fee";
 import { normalizeQuote } from "../src/supply/content-hash";
 import { projectTenantPriceQuote } from "../src/supply/tenant-price-projection";
 
@@ -92,6 +93,17 @@ test("fixed fee rejects a discount deeper than the applicable fee rate", () => {
   assert.equal(fixedFeeAllowsPayableRatio("0", "1"), true);
   for (const ratio of ["", "0", "1.01", "0.123456789"]) assert.throws(() => fixedFeeAllowsPayableRatio("0.08", ratio));
   assert.throws(() => fixedFeeAllowsPayableRatio("1", "0.95"));
+});
+
+test("the 92% fee cap leaves enough for separately rounded 8% full payout", () => {
+  const atCap = { ordinary: "0.92", custom: "0.92", fast: "0.92" };
+  assert.deepEqual(parseFixedFeeRates(atCap), atCap);
+  for (const mode of ["ordinary", "custom", "fast"] as const)
+    assert.throws(() => parseFixedFeeRates({ ...atCap, [mode]: "0.92000001" }));
+  for (let gross = 0n; gross <= 25n; gross++) {
+    const fee = calculateFixedFee([{ itemId: "haff", grossCents: gross }], atCap.ordinary).feeCents;
+    assert.equal(fee + fullPayoutServiceFeeCents(gross), gross);
+  }
 });
 
 test("fixed-fee policy requires three explicit rates and selects by rental mode", () => {

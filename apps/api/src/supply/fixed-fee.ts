@@ -1,4 +1,5 @@
 import { DecimalError, divideToScale, formatDecimalExact, parseNonNegativeDecimal } from "./decimal";
+import { FULL_PAYOUT_RATE } from "./full-payout-fee";
 import type { RentalMode } from "./delta-rental";
 
 export const FIXED_FEE_ALGORITHM = "FIXED_TOTAL_V1" as const;
@@ -17,7 +18,12 @@ export function parseFixedFeeRates(value: unknown): FixedFeeRates {
   if (!value || typeof value !== "object" || Array.isArray(value)
       || Object.keys(value).sort().join(",") !== "custom,fast,ordinary") throw new DecimalError("fixed fee rates are incomplete");
   const rates = value as Record<string, unknown>;
-  const parse = (mode: RentalMode) => formatDecimalExact(fixedFeeRate(rates[mode] as string));
+  const parse = (mode: RentalMode) => {
+    const rate = fixedFeeRate(rates[mode] as string);
+    if (rate.value * FULL_PAYOUT_RATE.denominator > 10n ** BigInt(rate.scale) * (FULL_PAYOUT_RATE.denominator - FULL_PAYOUT_RATE.numerator))
+      throw new DecimalError("Fixed fee and full-payout fee cannot exceed owner gross income");
+    return formatDecimalExact(rate);
+  };
   return { ordinary: parse("ordinary"), custom: parse("custom"), fast: parse("fast") };
 }
 

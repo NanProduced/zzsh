@@ -157,14 +157,16 @@ test('fixed-fee preview rounds the whole-order service fee once',async()=>{
   assert.equal(estimate.serviceFee.amount.amount,'0.00');assert.equal(estimate.ownerNet.amount,'0.04');
 });
 
-test('fixed-fee preview does not produce a negative owner net when fees exceed gross',async()=>{
+test('fixed-fee preview refuses a stored rate above the insured policy cap',async()=>{
   const f=fixture(),input=body();f.state.schedules=true;f.rates.ordinary='0.95';
   input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};
   input.inventory=[{itemId:'haff',quantity:'47000000'},{itemId:'ammo',quantity:'0'},{itemId:'card',quantity:'0'}];
   for(const item of f.items)item.ownerUnitAmount=null;
-  const result=await f.run(input),estimate=result.body.normalEndEstimate;
-  assert.equal(result.body.totalExpectedIncome.amount,'100.00');assert.equal(estimate.state,'UNAVAILABLE');
-  assert.equal(estimate.ownerNet,null);assert.deepEqual(estimate.reasonCodes,['OWNER_INCOME_INSUFFICIENT']);
+  const result=await f.run(input);
+  assert.equal(result.statusCode,409);
+  assert.equal(result.body.error.code,'CONFLICT');
+  assert.match(result.body.error.message,/固定手续费率无法核实/);
+  assert.equal(result.body.normalEndEstimate,undefined);
 });
 
 test('an existing spread listing keeps its accepted mode when the default switches',async()=>{
