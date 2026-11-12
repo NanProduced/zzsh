@@ -1894,6 +1894,21 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     }
     return null;
   };
+  const penaltyMediaProblem = (): UiProblem | null => {
+    if (draftRef.current.attributes.ban_record === true) {
+      const penaltyCount = media.filter(
+        (item) => item.category === "PENALTY" || item.purpose === "ACCOUNT_EVIDENCE"
+      ).length;
+      if (penaltyCount === 0) {
+        return {
+          group: "media",
+          message: "请上传该账号三角洲行动所有封禁记录截图",
+          target: "publish-media-penalty",
+        };
+      }
+    }
+    return null;
+  };
   const quoteProblem = (): UiProblem | null => {
     const kd = kdProblem();
     if (kd) return kd;
@@ -1915,7 +1930,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     const pricing = pricingProblem();
     if (pricing) return pricing;
     if (options?.pricingSchema !== "haff-ratio-v2" && !draftRef.current.pricingOptionCode) return { group: "terms", message: "请选择计价方案。" };
-    return haffProblem() ?? depositProblem();
+    return haffProblem() ?? depositProblem() ?? penaltyMediaProblem();
   };
 
   const currentAmmoQuantity = () => draftRef.current.inventory.find(row => {
@@ -2025,6 +2040,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const confirmPublish = async () => {
     const declaration = declarationProblem();
     if (declaration) { locate(declaration.group, declaration.message, declaration.target); return; }
+    const penalty = penaltyMediaProblem();
+    if (penalty) { locate(penalty.group, penalty.message, penalty.target); return; }
     if (!agreementChecked) {
       locate("terms", "请先勾选确认已阅读本次条款。");
       return;
@@ -2820,18 +2837,51 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const retainedSafeBoxLabel = safeBoxDisplay?.code === currentSafeBox && safeBoxDisplay.displayName
     ? safeBoxDisplay.displayName
     : "未确认";
+  const is3x3SafeBox = (code: string, displayName?: string | null) =>
+    code === "safe_box_3x3" || (displayName?.includes("3*3") ?? false) || (displayName?.includes("3x3") ?? false);
+
+  const hasInsuranceCardFilled = draft.inventory.some((row) => {
+    const item = catalog?.items.find((item) => item.id === row.itemId) ?? supply?.version?.catalogItems?.find((item) => item.id === row.itemId);
+    const code = item?.code ?? null;
+    return (canonicalResourceCode(code) === "df_billable_top_insure_card" || code === "legacy_insurance_day") && typeof row.quantity === "string" && /^[1-9]\d*$/.test(row.quantity);
+  }) || Boolean(
+    (pendingResourceInputs["df_billable_top_insure_card"] && /^[1-9]\d*$/.test(pendingResourceInputs["df_billable_top_insure_card"]))
+    || (pendingResourceInputs["legacy_insurance_day"] && /^[1-9]\d*$/.test(pendingResourceInputs["legacy_insurance_day"]))
+  );
+
+  const is3x3SafeBoxSelected = is3x3SafeBox(currentSafeBox, safeBoxDisplay?.code === currentSafeBox ? safeBoxDisplay.displayName : safeBoxOptions.find((o) => o.code === currentSafeBox)?.displayName);
+
   const safeBoxChoiceOptions = [
-    ...(currentSafeBox && !safeBoxKnown ? [{ value: currentSafeBox, label: retainedSafeBoxLabel }] : []),
-    ...(options?.safeBoxCodes.map((code) => ({
-      value: code,
-      label: safeBoxOptions.find((option) => option.code === code)?.displayName ?? "未确认",
-    })) ?? []),
+    ...(currentSafeBox && !safeBoxKnown ? [{
+      value: currentSafeBox,
+      label: retainedSafeBoxLabel,
+      hintTooltip: is3x3SafeBox(currentSafeBox, retainedSafeBoxLabel) ? "此选项仅限赛季3x3可选" : undefined,
+      disabled: is3x3SafeBox(currentSafeBox, retainedSafeBoxLabel) && hasInsuranceCardFilled,
+      tooltip: is3x3SafeBox(currentSafeBox, retainedSafeBoxLabel) && hasInsuranceCardFilled ? "已填写九格保险体验卡，不可与顶级安全箱(3*3)同时选择（只能二选一）" : undefined,
+    }] : []),
+    ...(options?.safeBoxCodes.map((code) => {
+      const option = safeBoxOptions.find((item) => item.code === code);
+      const displayName = option?.displayName ?? "未确认";
+      const is3x3 = is3x3SafeBox(code, displayName);
+      const disabled3x3 = is3x3 && hasInsuranceCardFilled;
+      return {
+        value: code,
+        label: displayName,
+        hintTooltip: is3x3 ? "此选项仅限赛季3x3可选" : undefined,
+        disabled: disabled3x3,
+        tooltip: disabled3x3 ? "已填写九格保险体验卡，不可与顶级安全箱(3*3)同时选择（只能二选一）" : undefined,
+      };
+    }) ?? []),
   ];
+  // Owner 要求：前端隐藏“Steam国际服”上号方式选项，避免大改后端代码与枚举（勿当成 bug 移除）
+  const visibleLoginMethodOptions = loginMethodOptions.filter(
+    (option) => option.code !== "legacy_login_steam_global" && option.displayName !== "Steam国际服"
+  );
   const loginChoiceOptions = [
-    ...(currentLoginMethod && !loginMethodOptions.some((option) => option.code === currentLoginMethod)
+    ...(currentLoginMethod && !visibleLoginMethodOptions.some((option) => option.code === currentLoginMethod)
       ? [{ value: currentLoginMethod, label: "未确认" }]
       : []),
-    ...(loginMethodOptions.map((option) => ({ value: option.code, label: option.displayName ?? "未确认", icon: <LoginPlatformIcon code={option.code} /> }))),
+    ...(visibleLoginMethodOptions.map((option) => ({ value: option.code, label: option.displayName ?? "未确认", icon: <LoginPlatformIcon code={option.code} /> }))),
   ];
   const vitalityChoiceOptions = numericChoiceOptions(currentVitality, (options?.vitalityLevels ?? []).filter(level => level >= 4 && level <= 7));
   const bearChoiceOptions = numericChoiceOptions(currentBear, (options?.bearLevels ?? []).filter(level => level >= 4 && level <= 7));
@@ -3129,14 +3179,16 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       ? media.filter((item) => item.category === "PENALTY" || item.purpose === "ACCOUNT_EVIDENCE")
       : media.filter((item) => item.category !== "PENALTY" && item.purpose === "ACCOUNT_DISPLAY");
     const canUpload = !isPenalty || hasBanRecord;
+    const isPenaltyEmpty = isPenalty && hasBanRecord && rows.length === 0;
     const title = isPenalty ? (canUpload ? "封禁记录截图" : "已保留的封禁截图") : "账号展示图";
-    const desc = isPenalty ? (canUpload ? "请提供三角洲行动的封禁记录截图。" : "已有图片仍在本次资料中，可在这里查看或移除。") : "至少上传一张，第一张作为封面；可调整图片顺序。";
-    return <div className="supply-media-panel" key={category}>
-      <div className="supply-media-heading"><FileImage size={20} aria-hidden="true" /><div><h3>{title}</h3><p>{desc}</p></div>{rows.length ? <span className="publish-media-count">{rows.length} 张</span> : null}</div>
+    const desc = isPenalty ? (canUpload ? "请上传该账号三角洲行动所有封禁记录截图" : "已有图片仍在本次资料中，可在这里查看或移除。") : "至少上传一张，第一张作为封面；可调整图片顺序。";
+    return <div className="supply-media-panel" key={category} id={isPenalty ? "publish-media-penalty" : undefined}>
+      <div className="supply-media-heading"><FileImage size={20} aria-hidden="true" /><div><h3>{title}{isPenalty && hasBanRecord ? <span className="publish-required-mark">必填</span> : null}</h3><p>{desc}</p></div>{rows.length ? <span className="publish-media-count">{rows.length} 张</span> : null}</div>
       {canUpload ? <label className="supply-upload-dropzone" data-disabled={formDisabled || !gameId ? "true" : "false"} onDragOver={(event) => event.preventDefault()} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); acceptFiles(category, Array.from(event.dataTransfer.files)); }}>
         <Upload size={22} aria-hidden="true" /><span className="publish-upload-copy"><strong>选择图片或拖入此处</strong><span>PNG / JPEG / WebP · 单张 ≤ 10 MiB</span></span><span className="publish-upload-action" aria-hidden="true">选择图片</span>
         <input aria-label={isPenalty ? "上传封禁记录截图" : "上传账号展示图"} data-first-field={!isPenalty ? true : undefined} type="file" accept={MEDIA_ACCEPT_ATTRIBUTE} multiple disabled={formDisabled || !gameId} onChange={(event) => selectFiles(category, event)} />
       </label> : null}
+      {isPenaltyEmpty ? <p className="supply-field-error" role="alert" style={{ margin: "8px 0 0" }}>请上传该账号三角洲行动所有封禁记录截图</p> : null}
       <div className="supply-media-list">{rows.map((item, index) => <div key={item.id} className="supply-media-row">
         <div className="supply-media-preview">
           {!isPenalty && index === 0 ? <span className="supply-media-badge-cover">封面</span> : null}
@@ -3237,6 +3289,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               ) : null}
               <fieldset id="publish-attribute-safe-box" tabIndex={-1} className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="安全箱档位"><ManagedNoticeText contentKey="placement:PUBLISH_SAFE_BOX" /></FieldHelp></span></legend>
                 {safeBoxChoiceOptions.length ? <FormRadioGroup variant="segmented" name="safe_box_code" label="安全箱档位" required={requireNewAccountFacts} error={fieldError("attributes.safe_box_code")} value={currentSafeBox} options={safeBoxChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("safe_box_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置安全箱档位。" : "正在读取安全箱档位…"}</small>}
+                <small className="publish-choice-hint">提示：顶级安全箱(3*3)仅限赛季3x3可选，与九格保险体验卡互斥（只能二选一）。</small>
               </fieldset>
               {(["next_season_pass", "demulan_unlocked"] as const).some(key => declarationOptions?.[key]?.enabled || typeof draft.attributes[key] === "boolean") ? <div className="publish-safety-row supply-wide">
                 {(["next_season_pass", "demulan_unlocked"] as const).map(key => {
@@ -3323,6 +3376,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   <div className="supply-radio-group">
                     <FormRadioGroup variant="segmented" name="ban_record" label="封禁记录" required={requireNewAccountFacts} value={draft.attributes.ban_record as boolean | null} options={[{value:false,label:"无封禁记录"},{value:true,label:"有封禁记录"}]} disabled={formDisabled} onChange={value => changeAttribute("ban_record",value)} />
                   </div>
+                  {draft.attributes.ban_record === true ? <small className="publish-choice-hint publish-choice-hint--alert">注意：已声明有封禁记录，必须在下方“展示图片”区域上传该账号三角洲行动所有封禁记录截图。</small> : null}
                 </fieldset>
                 <fieldset id="publish-attribute-face" tabIndex={-1} className="supply-radio-field"><legend><span className="publish-account-label">人脸归属{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="人脸归属">请选择账号人脸认证是否属于号主本人；该信息由号主申报。</FieldHelp></span></legend>
                   <div className="supply-radio-group">
@@ -3374,12 +3428,30 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                       {grouped ? <p id={`measure-${key}`} className="publish-ammo-unit">按组填写 · 1组 = 60发</p> : null}
                       {durabilityRequired ? <p className="publish-resource-durability"><Info size={14} aria-hidden="true" />磨损不超过5耐久</p> : null}
                     </div>
-                    <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled||retiredInsurance} invalid={quantity!==""&&!valid} describedBy={grouped ? `measure-${key}` : undefined} onChange={raw=>{
-                      const base=raw===""?"":grouped?(BigInt(raw)*60n+remainder).toString():raw;
-                      if(item.itemId)changeInventory(item.itemId,base);else setPendingResourceInputs(previous=>({...previous,[itemCode!]:base}));
-                    }} />
+                    {insuranceExperience && is3x3SafeBoxSelected ? (
+                      <TooltipPrimitive.Provider delayDuration={180}>
+                        <TooltipPrimitive.Root>
+                          <TooltipPrimitive.Trigger asChild>
+                            <span className="publish-resource-disabled-wrapper" tabIndex={0}>
+                              <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max="999999999999999999999999" disabled={true} invalid={quantity!==""&&!valid} onChange={()=>{}} />
+                            </span>
+                          </TooltipPrimitive.Trigger>
+                          <TooltipPrimitive.Portal>
+                            <TooltipPrimitive.Content sideOffset={6} className="app-tooltip-content" side="top">
+                              已选择顶级安全箱(3*3)，不可与九格保险体验卡同时填写（只能二选一）
+                            </TooltipPrimitive.Content>
+                          </TooltipPrimitive.Portal>
+                        </TooltipPrimitive.Root>
+                      </TooltipPrimitive.Provider>
+                    ) : (
+                      <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled||retiredInsurance} invalid={quantity!==""&&!valid} describedBy={grouped ? `measure-${key}` : undefined} onChange={raw=>{
+                        const base=raw===""?"":grouped?(BigInt(raw)*60n+remainder).toString():raw;
+                        if(item.itemId)changeInventory(item.itemId,base);else setPendingResourceInputs(previous=>({...previous,[itemCode!]:base}));
+                      }} />
+                    )}
                     {grouped && valid ? <p className="publish-ammo-conversion" aria-live="polite">{ammoQuantityText(quantity)}</p> : null}
                   </div>
+                  {insuranceExperience && is3x3SafeBoxSelected ? <small className="publish-resource-conflict-hint">已选择顶级安全箱(3*3)，不可与九格保险体验卡同时填写（只能二选一）</small> : null}
                   {retiredInsurance?<small className="publish-resource-state">单位需核对：历史按张申报保留原数量和停用状态，新申报请在上方按天项目填写。</small>:null}
                   <div className="publish-resource-subtotal"><span>{ownerPreviewStale&&line?.ownerAmount?"上次预估":"本项预估"}</span><output aria-live="off">{line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:quantity===""?"未填写":!item.itemId?"待资源配置":unpriced?"价目待配置":ownerIncomePreviewPending?"计算中…":"预估暂不可用"}</output></div>
                   {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}

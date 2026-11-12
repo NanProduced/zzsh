@@ -305,3 +305,59 @@ test("mobile skin picker uses owner types instead of retired category IDs", asyn
     assert.deepEqual(harness.calls.at(-1).filters.skinGroups, [{ ownerKind: "MELEE_TYPE", ids: ["skin_melee"], match: "ANY" }]);
   } finally { await harness.unmount(); }
 });
+
+test("market filter: vitality and bear buttons reside under 基础条件, Steam international is hidden, and labels updated", async () => {
+  const customMetadata = {
+    ...metadata,
+    fields: [
+      ...metadata.fields,
+      { key: "loginMethodCodes", operator: "in", label: "登录方式", enabled: true, order: 0, options: [
+        { value: "legacy_login_wechat", label: "微信扫码" },
+        { value: "legacy_login_steam_global", label: "Steam国际服" },
+      ] },
+      { key: "vitality", operator: "gte", label: "体力", enabled: true, order: 4, levels: [4, 5, 6, 7] },
+      { key: "bear", operator: "gte", label: "负重", enabled: true, order: 5, levels: [4, 5, 6, 7] },
+    ],
+  };
+  const harness = await renderHarness({ metadata: customMetadata });
+  try {
+    const groups = [...harness.host.querySelectorAll(".market-filter-group")];
+    assert.equal(groups.length, 4);
+    const basicGroup = groups[0];
+    const secondGroup = groups[1];
+    assert.match(basicGroup.querySelector("summary").textContent, /基础条件/);
+    assert.match(secondGroup.querySelector("summary").textContent, /地区与上号时间/);
+
+    // Steam global must be filtered out
+    const loginChoices = [...basicGroup.querySelectorAll(".market-choice")].map(node => node.textContent.trim());
+    assert.ok(loginChoices.includes("微信扫码"));
+    assert.equal(loginChoices.some(label => label.includes("Steam国际服")), false, "Steam国际服 must be hidden");
+
+    // Vitality and Bear buttons must be in basicGroup, not secondGroup
+    const basicRows = [...basicGroup.querySelectorAll(".market-filter-row")];
+    const basicRowLabels = basicRows.map(r => r.querySelector(".market-filter-row-label")?.textContent?.trim());
+    assert.ok(basicRowLabels.includes("体力"));
+    assert.ok(basicRowLabels.includes("负重"));
+
+    const secondRows = [...secondGroup.querySelectorAll(".market-filter-row")];
+    const secondRowLabels = secondRows.map(r => r.querySelector(".market-filter-row-label")?.textContent?.trim());
+    assert.equal(secondRowLabels.includes("体力"), false);
+    assert.equal(secondRowLabels.includes("负重"), false);
+    assert.ok(secondRowLabels.includes("上号时间"), "serviceWindow label renamed to 上号时间");
+
+    // Buttons exist for vitality
+    const vitalityRow = basicRows.find(r => r.querySelector(".market-filter-row-label")?.textContent?.trim() === "体力");
+    assert.ok(vitalityRow);
+    const buttons = [...vitalityRow.querySelectorAll("button")];
+    assert.equal(buttons.length, 5); // 不限, ≥4, ≥5, ≥6, ≥7
+    assert.equal(buttons[0].textContent.trim(), "不限");
+    assert.equal(buttons[1].textContent.trim(), "≥4");
+    assert.equal(buttons[0].getAttribute("data-selected"), "true");
+
+    // Click ≥5
+    await React.act(async () => { buttons[2].click(); await tick(); });
+    assert.equal(harness.calls.at(-1).filters.vitality?.min, 5);
+  } finally {
+    await harness.unmount();
+  }
+});

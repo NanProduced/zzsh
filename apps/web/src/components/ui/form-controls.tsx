@@ -5,9 +5,10 @@ import { Select } from "@base-ui/react/select";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
 import * as Popover from "@radix-ui/react-popover";
+import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { DayPicker } from "react-day-picker";
 import { zhCN } from "react-day-picker/locale";
-import { CalendarDays, Check, ChevronDown, Minus, Plus } from "lucide-react";
+import { AlertCircle, CalendarDays, Check, ChevronDown, Minus, Plus } from "lucide-react";
 import "react-day-picker/style.css";
 import "./form-controls.css";
 
@@ -63,21 +64,71 @@ export function FormSelect({ label, value, options, placeholder = "请选择", d
 }
 
 export function FormRadioGroup<T extends string | number | boolean | null>({ name, label, error, errorId: externalErrorId, value, options, disabled = false, required = false, onChange, className = "", variant = "default" }: {
-  name: string; label: string; error?: string; errorId?: string; value: T; options: { value: T; label: string; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean }[]; disabled?: boolean; required?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
+  name: string; label: string; error?: string; errorId?: string; value: T; options: { value: T; label: string | ReactNode; icon?: ReactNode; description?: string; badge?: string; disabled?: boolean; tooltip?: string; hintTooltip?: string }[]; disabled?: boolean; required?: boolean; onChange: (value: T) => void; className?: string; variant?: "default" | "segmented";
 }) {
   const autoErrorId = useId();
   const errorId = externalErrorId ?? autoErrorId;
   return <RadioGroup name={name} aria-label={label} aria-required={required || undefined} aria-invalid={Boolean(error) || undefined} aria-describedby={error ? errorId : undefined} tabIndex={error ? -1 : undefined} value={value === null ? null : String(value)} disabled={disabled} onValueChange={next => {
     const option = options.find(item => String(item.value) === next);
-    if (option) onChange(option.value);
+    if (option && !option.disabled) onChange(option.value);
   }} className={`form-radio-group${variant === "segmented" ? " form-radio-group--segmented" : ""} ${className}`}>
-    {options.map(option => <label key={String(option.value)} className={`form-radio-choice${value === option.value ? " is-selected" : ""}`}>
-      <Radio.Root value={String(option.value)} disabled={option.disabled} className="form-radio-control"><Radio.Indicator className="form-radio-dot" /></Radio.Root>
-      {option.icon ? <span className="form-option-icon" aria-hidden="true">{option.icon}</span> : null}
-      <span>{option.label}{option.description ? <small>{option.description}</small> : null}</span>
-      {variant === "segmented" ? <Check size={14} className="form-segment-check" aria-hidden="true" /> : null}
-      {option.badge ? <em className="form-radio-badge">{option.badge}</em> : null}
-    </label>)}
+    {options.map(option => {
+      const choice = <label key={String(option.value)} className={`form-radio-choice${value === option.value ? " is-selected" : ""}`} title={option.tooltip}>
+        <Radio.Root value={String(option.value)} disabled={option.disabled} className="form-radio-control"><Radio.Indicator className="form-radio-dot" /></Radio.Root>
+        {option.icon ? <span className="form-option-icon" aria-hidden="true">{option.icon}</span> : null}
+        <span className="form-radio-label-wrap">
+          <span className="form-radio-label-text">
+            {option.label}
+            {option.hintTooltip && !option.disabled ? (
+              <TooltipPrimitive.Provider delayDuration={150}>
+                <TooltipPrimitive.Root>
+                  <TooltipPrimitive.Trigger asChild>
+                    <span
+                      role="button"
+                      tabIndex={-1}
+                      className="form-radio-hint-trigger"
+                      aria-label={option.hintTooltip}
+                      title={option.hintTooltip}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                      }}
+                    >
+                      <AlertCircle size={14} className="form-radio-alert-icon" aria-hidden="true" />
+                    </span>
+                  </TooltipPrimitive.Trigger>
+                  <TooltipPrimitive.Portal>
+                    <TooltipPrimitive.Content sideOffset={6} className="app-tooltip-content" side="top">
+                      {option.hintTooltip}
+                    </TooltipPrimitive.Content>
+                  </TooltipPrimitive.Portal>
+                </TooltipPrimitive.Root>
+              </TooltipPrimitive.Provider>
+            ) : null}
+          </span>
+          {option.description ? <small>{option.description}</small> : null}
+        </span>
+        {variant === "segmented" ? <Check size={14} className="form-segment-check" aria-hidden="true" /> : null}
+        {option.badge ? <em className="form-radio-badge">{option.badge}</em> : null}
+      </label>;
+      if (option.tooltip) {
+        return (
+          <TooltipPrimitive.Provider key={String(option.value)} delayDuration={180}>
+            <TooltipPrimitive.Root>
+              <TooltipPrimitive.Trigger asChild>
+                <span className="form-radio-tooltip-wrapper">{choice}</span>
+              </TooltipPrimitive.Trigger>
+              <TooltipPrimitive.Portal>
+                <TooltipPrimitive.Content sideOffset={6} className="app-tooltip-content" side="top">
+                  {option.tooltip}
+                </TooltipPrimitive.Content>
+              </TooltipPrimitive.Portal>
+            </TooltipPrimitive.Root>
+          </TooltipPrimitive.Provider>
+        );
+      }
+      return choice;
+    })}
     {error ? <span id={errorId} className="supply-field-error" role="alert" style={{gridColumn:"1 / -1"}}>{error}</span> : null}
   </RadioGroup>;
 }

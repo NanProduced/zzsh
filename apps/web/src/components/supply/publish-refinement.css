@@ -2352,3 +2352,28 @@ body:has(.publish-page-layout) .functional-main.portal-width {
     gap: 4px;
   }
 }
+
+.publish-choice-hint {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.publish-choice-hint--alert {
+  color: var(--color-status-error-ink, #c73e37);
+  font-weight: 500;
+}
+
+.publish-resource-conflict-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-status-error-ink, #c73e37);
+}
+
+.publish-resource-disabled-wrapper {
+  display: contents;
+}

@@ -2985,3 +2985,115 @@ test("publish blockers gate the button up front and split user-fixable from plat
     assert.equal(primary.getAttribute("title"), null, "no blocker reason on an unblocked button");
   } finally { await clear.close(); }
 });
+
+test("publish-form: hides Steam international from login choices (Owner requirement)", async () => {
+  const customOptions = {
+    ...optionsV1,
+    loginMethodOptions: [
+      { code: "legacy_login_wechat", displayName: "微信扫码" },
+      { code: "legacy_login_steam_global", displayName: "Steam国际服" },
+    ],
+  };
+  const p = await probe({
+    accountId: "account_1",
+    options: customOptions,
+    mine: () => supplyOf(declaration()),
+  });
+  try {
+    await p.render();
+    const loginField = p.host.querySelector("#publish-attribute-login");
+    assert.ok(loginField);
+    const labels = [...loginField.querySelectorAll(".form-radio-choice")].map(node => node.textContent.trim());
+    assert.ok(labels.some(l => l.includes("微信扫码")));
+    assert.equal(labels.some(l => l.includes("Steam国际服")), false, "Steam国际服 must be hidden");
+  } finally {
+    await p.close();
+  }
+});
+
+test("publish-form: 3x3 safe box displays season 3x3 hint and mutual exclusion with 九格保险体验卡", async () => {
+  const customCatalog = {
+    ...catalog,
+    items: [
+      ...catalog.items,
+      { id: "item_insure", code: "df_billable_top_insure_card", name: "九格保险体验卡", unit: "DAY", quantityScale: 0, required: false },
+    ],
+  };
+  const customOptions = {
+    ...optionsV1,
+    safeBoxCodes: ["safe_box_2x2", "safe_box_3x3"],
+    safeBoxOptions: [
+      { code: "safe_box_2x2", displayName: "标准安全箱(2*2)" },
+      { code: "safe_box_3x3", displayName: "顶级安全箱(3*3)" },
+    ],
+  };
+  // Case A: When 3x3 safe box is selected, 九格保险体验卡 stepper is disabled with conflict hint
+  const p1 = await probe({
+    accountId: "account_1",
+    catalogValue: customCatalog,
+    options: customOptions,
+    mine: () => supplyOf(declaration({ attributes: { safe_box_code: "safe_box_3x3" } })),
+  });
+  try {
+    await p1.render();
+    const safeBoxField = p1.host.querySelector("#publish-attribute-safe-box");
+    assert.ok(safeBoxField);
+    const hintTrigger = safeBoxField.querySelector(".form-radio-hint-trigger");
+    assert.ok(hintTrigger, "exclamation icon trigger must exist");
+    assert.match(hintTrigger.getAttribute("aria-label"), /此选项仅限赛季3x3可选/);
+    assert.match(safeBoxField.textContent, /顶级安全箱\(3\*3\)仅限赛季3x3可选，与九格保险体验卡互斥/);
+
+    const card = p1.host.querySelector('[data-resource-code="df_billable_top_insure_card"]');
+    assert.ok(card);
+    const stepperInput = card.querySelector('input[type="text"], input[inputmode="numeric"]');
+    assert.ok(stepperInput);
+    assert.equal(stepperInput.disabled, true);
+    assert.match(card.textContent, /已选择顶级安全箱\(3\*3\)，不可与九格保险体验卡同时填写/);
+  } finally {
+    await p1.close();
+  }
+
+  // Case B: When 九格保险体验卡 has positive quantity, 3x3 safe box option is disabled
+  const p2 = await probe({
+    accountId: "account_1",
+    catalogValue: customCatalog,
+    options: customOptions,
+    mine: () => supplyOf(declaration({
+      attributes: { safe_box_code: "safe_box_2x2" },
+      inventory: [{ itemId: "item_insure", quantity: "3" }],
+    })),
+  });
+  try {
+    await p2.render();
+    const safeBoxField = p2.host.querySelector("#publish-attribute-safe-box");
+    const choices = [...safeBoxField.querySelectorAll(".form-radio-choice")];
+    const choice3x3 = choices.find(c => c.textContent.includes("3*3"));
+    assert.ok(choice3x3);
+    assert.ok(choice3x3.getAttribute("title")?.includes("已填写九格保险体验卡，不可与顶级安全箱(3*3)同时选择"));
+  } finally {
+    await p2.close();
+  }
+});
+
+test("publish-form: ban record requires penalty screenshot upload with prompt and blocks quote", async () => {
+  const p = await probe({
+    accountId: "account_1",
+    mine: () => supplyOf(completeDeclaration({
+      attributes: { ban_record: true },
+      mediaBindings: [],
+    })),
+  });
+  try {
+    await p.render();
+    const penaltyPanel = p.host.querySelector("#publish-media-penalty");
+    assert.ok(penaltyPanel, "penalty upload panel is displayed");
+    assert.match(penaltyPanel.textContent, /必填/);
+    assert.match(penaltyPanel.textContent, /请上传该账号三角洲行动所有封禁记录截图/);
+
+    // Clicking quote button should trigger problem on media and not call server
+    await p.clickButton("确认上架");
+    assert.equal(p.calls.some(c => c.op === "quote"), false, "cannot quote without penalty screenshot");
+  } finally {
+    await p.close();
+  }
+});
