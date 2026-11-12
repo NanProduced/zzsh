@@ -1,0 +1,270 @@
+/* Focused order action dialog: the page keeps the summary, this owns the form. */
+.order-action-dialog {
+  position: fixed;
+  z-index: 102;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(88vh, 860px);
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: 16px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+}
+.order-action-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 14px; border-bottom: 1px solid var(--color-border-subtle); }
+.order-action-dialog-title { margin: 0; font-size: 19px; font-weight: 700; line-height: 1.35; }
+.order-action-dialog-description { margin: 3px 0 0; color: var(--color-text-secondary); font-size: 12.5px; line-height: 1.5; }
+.order-action-dialog-close { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--color-border-subtle); border-radius: 10px; color: var(--color-text-secondary); background: transparent; cursor: pointer; }
+.order-action-dialog-close:hover { color: var(--color-text-primary); background: var(--color-bg-card-hover); }
+.order-action-dialog-close:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.order-action-dialog-body { overflow: auto; padding: 18px 20px 20px; }
+.order-aftersale-dialog { width: min(720px, calc(100vw - 32px)); }
+.order-aftersale-dialog .order-aftersale { padding: 0; border: 0; background: transparent; }
+.order-aftersale-dialog .order-aftersale > h2 { display: none; }
+.order-aftersale-dialog .order-aftersale > .order-muted:first-of-type { margin-top: 0; }
+.order-action-form { display: grid; gap: 14px; }
+.order-action-form > .order-trade-panel { padding: 0; border: 0; background: none; box-shadow: none; }
+.order-action-form .order-trade-heading { display: none; }
+@media (max-width: 760px) {
+  .order-action-dialog { left: 0; top: auto; bottom: 0; transform: none; width: 100%; max-height: 92dvh; border-radius: 18px 18px 0 0; border-bottom: 0; }
+  .order-action-dialog-head { padding: 16px 16px 12px; }
+  .order-action-dialog-body { padding: 14px 16px calc(20px + env(safe-area-inset-bottom)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .order-action-dialog, .order-action-dialog-close { transition: none; }
+}
+
+.payment-dialog {
+  position: fixed;
+  z-index: 101;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(560px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+  overflow: hidden;
+  border: 1px solid var(--color-border-default);
+  border-radius: 16px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.payment-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.payment-dialog-title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.payment-dialog-subtitle {
+  margin: 3px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.payment-dialog-close {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 10px;
+  color: var(--color-text-secondary);
+  background: transparent;
+  cursor: pointer;
+}
+
+.payment-dialog-close:hover { color: var(--color-text-primary); background: var(--color-bg-card-hover); }
+.payment-dialog-close:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+
+.payment-dialog-body {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  padding: 20px 22px 22px;
+  overflow: auto;
+}
+
+.payment-dialog-hero {
+  display: grid;
+  gap: 4px;
+  padding: 18px 20px;
+  border: 1px solid color-mix(in srgb, var(--color-accent-brand) 24%, var(--color-border-subtle));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--color-accent-brand) 7%, var(--color-bg-card));
+}
+
+.payment-dialog-hero-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+
+.payment-dialog-hero-label {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.payment-dialog-hero-amount {
+  color: var(--color-text-primary);
+  font-size: clamp(32px, 6vw, 40px);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+}
+
+.payment-dialog-hero-sub {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.payment-dialog-summary {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0 2px;
+}
+
+.payment-dialog-summary > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.payment-dialog-summary > div:last-child { border-bottom: 0; }
+.payment-dialog-summary dt { color: var(--color-text-secondary); font-size: 13px; }
+.payment-dialog-summary dd { margin: 0; color: var(--color-text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.payment-dialog-summary dd:last-child { text-align: right; }
+
+.payment-dialog-footnote {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* The payment state machine owns the controls; the dialog only gives the primary task a clear floor. */
+.payment-dialog .order-payment-embedded { display: grid; gap: 12px; }
+.payment-dialog .order-payment-embedded > .order-trade-actions {
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: 14px;
+}
+.payment-dialog .order-payment-embedded .order-trade-actions .button.primary {
+  width: 100%;
+  min-height: 48px;
+  font-size: 15px;
+}
+.payment-dialog .order-payment-embedded .order-trade-actions .button.secondary,
+.payment-dialog .order-payment-embedded .order-trade-actions .button.quiet {
+  justify-self: center;
+  min-height: 34px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+.payment-dialog .order-payment-embedded .order-trade-actions .button.secondary:hover,
+.payment-dialog .order-payment-embedded .order-trade-actions .button.quiet:hover {
+  color: var(--color-text-primary);
+  background: var(--color-bg-card-hover);
+}
+.payment-dialog .order-payment-methods { margin-top: 2px; }
+.payment-dialog .order-payment-method { min-height: 56px; }
+
+.payment-dialog-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  color: var(--color-accent-brand-ink);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.payment-dialog-countdown[data-state="expired"] { color: var(--color-status-warning-ink); }
+.payment-dialog-countdown[data-state="unknown"] { color: var(--color-text-muted); font-weight: 500; }
+
+.payment-dialog .order-payment-embedded {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The desktop dialog keeps the action in flow; only the mobile sheet pins it. */
+.payment-dialog .order-payment-embedded .order-trade-actions {
+  position: static;
+  z-index: auto;
+  margin: 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--color-border-subtle);
+  background: transparent;
+}
+
+@media (max-width: 760px) {
+  .payment-dialog {
+    left: 0;
+    top: auto;
+    bottom: 0;
+    transform: none;
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: 18px 18px 0 0;
+    border-bottom: 0;
+  }
+  .payment-dialog-head { padding: 16px 16px 12px; }
+  .payment-dialog-body { gap: 12px; padding: 14px 16px calc(80px + env(safe-area-inset-bottom)); }
+  .payment-dialog-hero { padding: 15px; }
+  .payment-dialog .order-payment-embedded > .order-trade-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    margin: 0 -16px -16px;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    background: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+    backdrop-filter: blur(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .payment-dialog,
+  .payment-dialog-close {
+    transition: none;
+  }
+}
+
+/* Nested order alerts sit above the payment dialog and dim it. */
+body .ui-alert-dialog-backdrop { z-index: 110; }
+body .ui-alert-dialog { z-index: 111; }

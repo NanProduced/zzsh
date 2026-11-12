@@ -20,6 +20,7 @@ function loadTrade(session) {
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "qrcode.react") return { QRCodeSVG: () => null };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session };
+    if (name === "@/components/ui/alert-dialog") return { ConfirmAlertDialog: () => null };
     if (name === "@/components/session/identity-reset") return require(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
     if (name === "@/lib/order-client") return require(path.join(tree, "apps/web/src/lib/order-client.ts"));
     if (name === "@/lib/order-intents") return require(path.join(tree, "apps/web/src/lib/order-intents.ts"));

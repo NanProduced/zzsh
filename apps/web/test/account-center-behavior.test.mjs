@@ -97,6 +97,9 @@ function loadCenter(session) {
       return child.exports;
     }
     if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
+    if (name === "@/components/order/payment-countdown") return {
+      PaymentCountdown: () => React.createElement("span", { className: "payment-countdown" }, "支付保留"),
+    };
     if (name === "@/lib/membership-client") return requireFromTree(path.join(tree, "apps/web/src/lib/membership-client.ts"));
     if (name === "@/lib/membership-growth-client") {
       const MockGrowthError = class MembershipGrowthRequestError extends Error {
@@ -667,7 +670,7 @@ test("a late response from the previous identity cannot replace the current one"
 });
 
 test("three recent orders are rendered with their confirmed fields and deep links, and mobile tabs render", async () => {
-  const order1 = { id: "order_1", displayNo: "ORD-001", title: "三角洲突击账号", status: "PENDING_PAYMENT", createdAt: "2026-09-30 10:00" };
+  const order1 = { id: "order_1", displayNo: "ORD-001", title: "三角洲突击账号", status: "PENDING_PAYMENT", createdAt: "2026-09-30 10:00", holdUntil: "2026-10-01T08:00:00.000Z", amounts: { totalDue: { currency: "CNY", amount: "1280.00" }, rental: { currency: "CNY", amount: "1200.00" }, deposit: { currency: "CNY", amount: "80.00" } } };
   const order2 = { id: "order_2", displayNo: "ORD-002", title: "无畏契约全英雄", status: "PAID", createdAt: "2026-09-30 09:00" };
   const order3 = { id: "order_3", displayNo: "ORD-003", title: "英雄联盟全皮肤", status: "COMPLETED", createdAt: "2026-09-30 08:00" };
   const order4 = { id: "order_4", displayNo: "ORD-004", title: "第四条多余订单", status: "CANCELLED", createdAt: "2026-09-30 07:00" };
@@ -702,7 +705,17 @@ test("three recent orders are rendered with their confirmed fields and deep link
     assert.ok(pendingCard);
     assert.match(pendingCard.textContent, /近期订单提醒/);
     assert.match(pendingCard.textContent, /订单待付款/);
-    assert.match(pendingCard.textContent, /去付款/);
+    assert.match(pendingCard.textContent, /继续支付/);
+    assert.doesNotMatch(pendingCard.textContent, /去付款/);
+    const payLink = pendingCard.querySelector(".account-pending-btn");
+    const payParams = new URL(payLink.getAttribute("href"), "http://127.0.0.1:3100").searchParams;
+    assert.equal(payParams.get("view"), "rentals");
+    assert.equal(payParams.get("orderId"), "order_1");
+    assert.equal(payParams.get("pay"), "1");
+    const paymentRow = pendingCard.querySelector('.account-pending-row[data-tone="payment"]');
+    assert.ok(paymentRow);
+    assert.match(paymentRow.textContent, /待付 1,280\.00 元/);
+    assert.match(paymentRow.textContent, /支付保留/);
 
     // Mobile tabs (4 fixed buttons: overview, membership, rentals, more)
     const mobileTabs = probe.host.querySelectorAll(".account-mobile-tab-btn");
@@ -927,7 +940,7 @@ test("F4 & F5: pending tasks handles loading, errors, expired cancellations, and
     let pendingCard = probe.host.querySelector(".account-pending-card");
     assert.equal(pendingCard, null, "known empty recent tasks do not occupy a block");
 
-    // 2. F5: Owner PAID orders are not invented as delivery confirmation tasks; expiredAwaitingCancel renter orders are not shown as "去付款"
+    // 2. F5: Owner PAID orders are not invented as delivery confirmation tasks; expiredAwaitingCancel renter orders are not shown as "继续支付"
     renterItems = [
       { id: "ord_expired", displayNo: "EXP-01", title: "已过期租赁", status: "PENDING_PAYMENT", expiredAwaitingCancel: true },
       { id: "ord_valid", displayNo: "VAL-02", title: "正常待付租赁", status: "PENDING_PAYMENT" },

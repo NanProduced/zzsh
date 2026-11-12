@@ -45,7 +45,14 @@ export type OrderRow = {
   depositAmountCents: string;
   currency: string;
   termSeconds: string;
-  quoteSnapshot: InternalQuote & { contentHash?: string; quoteKind?: "ORDER_CONFIRMATION"; agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown };
+  quoteSnapshot: InternalQuote & {
+    contentHash?: string; quoteKind?: "ORDER_CONFIRMATION"; agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown;
+    /** Frozen v4 growth selection; the tier and ratio are safe to project to the renter. */
+    membershipGrowth?: { effectiveTier?: unknown; policyTier?: unknown } | null;
+    /** Older personal-quote-v1..v3 membership snapshot. */
+    membership?: { tier?: unknown } | null;
+    settlementPricing?: { payableRatio?: unknown } | null;
+  };
   title: string;
   holdUntil: string;
   paidAt: string | null;
@@ -138,6 +145,16 @@ export function orderHasPaidState(status: string, cancelReason?: string | null):
       || cancelReason === "SUPPORT_CANCELLED_REFUND");
 }
 
+/** The order's frozen membership marker. Only the tier and the payable ratio are projected; source refs and policy internals stay internal. */
+function projectMembership(snapshot: OrderRow["quoteSnapshot"]): { tier: string; payableRatio?: string } | null {
+  const tiers = new Set(["STANDARD", "SILVER", "GOLD", "PLATINUM", "DIAMOND", "BLACK_GOLD", "VIP", "SVIP", "DISCOUNT_USER"]);
+  const rawTier = snapshot.membershipGrowth?.effectiveTier ?? snapshot.membership?.tier;
+  if (typeof rawTier !== "string" || !tiers.has(rawTier)) return null;
+  const rawRatio = snapshot.settlementPricing?.payableRatio;
+  const payableRatio = typeof rawRatio === "string" && /^(0\.\d{1,8}|1(?:\.0{1,8})?)$/.test(rawRatio) ? rawRatio : null;
+  return { tier: rawTier, ...(payableRatio ? { payableRatio } : {}) };
+}
+
 export function projectOrder(
   row: OrderRow,
   party: OrderParty,
@@ -189,7 +206,8 @@ export function projectOrder(
       ? { fundsResolution: { status: "REVIEW_REQUIRED", code: "HISTORICAL_MANUAL_CLOSE", sourceLabel: "原人工关闭，资金处理待核实" } } : {}),
   };
   if (party === "renter") {
-    return { ...base, quote: projectSnapshot("public") };
+    const membership = projectMembership(row.quoteSnapshot);
+    return { ...base, ...(membership ? { membership } : {}), quote: projectSnapshot("public") };
   }
   if (party === "owner") {
     return {
