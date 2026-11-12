@@ -73,7 +73,7 @@ import {
   updateTermDraft,
 } from "./rules";
 import { readFullPayoutTerms } from "./full-payout-terms";
-import { readPricingSchedules, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
+import { readPricingSchedules, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
@@ -1108,7 +1108,7 @@ async function handleAdminWrite(
             outcome: "SUCCESS",
             requestId,
             reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
-            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}), ...(result.details?.mediaContext ? { mediaContext: result.details.mediaContext } : {}) },
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}), ...(result.details?.mediaContext ? { mediaContext: result.details.mediaContext } : {}), ...(result.details?.pricingSchedule ? { pricingSchedule: result.details.pricingSchedule } : {}) },
           });
         }
         return { status: result.status, body: result.body };
@@ -1405,26 +1405,32 @@ async function handleAdminWrite(
   const priceScheduleMatch=/^\/games\/([^/]+)\/pricing-policy-schedules$/.exec(path);
   if(priceScheduleMatch&&method==="POST"){
     const gameId=decodeId(priceScheduleMatch[1]!),body=bodyOf(request);
-    ensureOnlyFields(body,["pricingModel","priceVersionId","expectedGeneration","effectiveAt"]);
+    ensureOnlyFields(body,["pricingModel","priceVersionId","expectedGeneration","effectiveAt","announcementVersionId"]);
     const pricingModel=requiredString(body,"pricingModel",16);
     if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
     const priceVersionId=decodeId(requiredString(body,"priceVersionId",128)),expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
     await write("supply.rules.pricing_policy_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
       const result=await (pricingModel==="FIXED_FEE"?scheduleFixedFeePrice:scheduleSpreadPrice)(client,
         {userId:actor.id,isBoss:access.isBoss},{gameId,priceVersionId,expectedGeneration,effectiveAt});
-      return {status:200,body:{...result,gameId,priceVersionId,pricingModel}};
+      await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
+      const scheduled={...result,gameId,priceVersionId,pricingModel,announcementVersionId};
+      return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
     },"supply.rules.pricing_policy_scheduled");return;
   }
   const pricingModeScheduleMatch=/^\/games\/([^/]+)\/pricing-mode-schedules$/.exec(path);
   if(pricingModeScheduleMatch&&method==="POST"){
     const gameId=decodeId(pricingModeScheduleMatch[1]!),body=bodyOf(request);
-    ensureOnlyFields(body,["pricingModel","expectedGeneration","effectiveAt"]);
+    ensureOnlyFields(body,["pricingModel","expectedGeneration","effectiveAt","announcementVersionId"]);
     const pricingModel=requiredString(body,"pricingModel",16);
     if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
     const expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
     await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
       const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt});
-      return {status:200,body:{...result,gameId,pricingModel}};
+      await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
+      const scheduled={...result,gameId,pricingModel,announcementVersionId};
+      return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
     },"supply.rules.pricing_mode_scheduled");return;
   }
   const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);

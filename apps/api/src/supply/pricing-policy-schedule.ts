@@ -274,6 +274,16 @@ export async function initializeFixedFeePricing(client:PoolClient,input:{gameId:
   return {status:"INITIALIZED" as const,priceScheduleId,modeScheduleId};
 }
 
+/** Bind the planned change to an already public version, even if the announcement is edited later. */
+export async function assertPublishedPricingAnnouncement(client: PoolClient, gameId: string, versionId: string, effectiveAt: string) {
+  const announcement = (await client.query(`SELECT v.id FROM zzsh_content.content_version v
+    JOIN zzsh_content.content_item i ON i.id=v.item_id
+    WHERE v.id=$1 AND i.type='ANNOUNCEMENT' AND (i.game_id=$2 OR i.game_id IS NULL)
+      AND v.state='PUBLISHED' AND v.published_at<=clock_timestamp() AND v.published_at<$3::timestamptz
+    FOR SHARE OF v,i`, [versionId, gameId, effectiveAt])).rows[0];
+  if (!announcement) throw conflict("请先发布适用于该游戏的调价公告");
+}
+
 /** Called only inside the existing authenticated, idempotent and audited admin write transaction. */
 export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId: string; isBoss: boolean }, input: {
   gameId: string; priceVersionId: string; expectedGeneration: string; effectiveAt: string;
