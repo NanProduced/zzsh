@@ -1,5 +1,5 @@
 import type { PoolClient } from "pg";
-import { SecurityApiError } from "../auth/security-core";
+import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
 import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
@@ -173,6 +173,60 @@ export async function assertFixedFeeMembershipChange(client: PoolClient, input: 
     const validation = validateFixedFeeTimeline(timeline);
     if (!validation.valid) throw conflict(`会员或礼遇与固定手续费政策不兼容：${validation.reason}`);
   }
+}
+
+/** The first-deployment owner supplies a sealed price; this never replaces an existing policy. */
+export async function initializeFixedFeePricing(client:PoolClient,input:{gameId:string;priceVersionId:string;effectiveAt:string;requestId:string}) {
+  const id=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  if(!input||Object.keys(input).some(key=>!["gameId","priceVersionId","effectiveAt","requestId"].includes(key))
+    ||![input.gameId,input.priceVersionId,input.requestId].every(value=>typeof value==="string"&&id.test(value)))throw invalid("Initial pricing reference is invalid");
+  let effectiveAt:string;
+  try{effectiveAt=normalizeTime(input.effectiveAt)??"";}catch{throw invalid("Initial pricing effective time is invalid");}
+  if(!effectiveAt)throw invalid("Initial pricing effective time is invalid");
+  const owner=(await client.query<{owner:boolean}>(`SELECT count(*)=2 AND COALESCE(bool_and(c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)),false) AS owner
+    FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.pricing_policy_schedule'),to_regclass('zzsh_supply.pricing_mode_schedule'))`)).rows[0];
+  if(owner?.owner!==true)throw new SecurityApiError(403,"FORBIDDEN","Initial pricing requires the schedule owner");
+  await lockFixedFeePolicyChange(client);
+  const game=(await client.query<{code:string;enabled:boolean;releaseId:string|null;now:string}>(`SELECT code,enabled,current_release_id AS "releaseId",
+    ${instantSql("clock_timestamp()")} AS now FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`,[input.gameId])).rows[0];
+  if(!game||game.code!=="delta")throw notFound();
+  if(!game.enabled||!game.releaseId)throw conflict("首次价格初始化需要已准备的游戏规则");
+  if(effectiveAt>game.now)throw invalid("首次价格生效时间不能晚于当前时间");
+  const prices=(await client.query<{id:string;pricingModel:string;priceVersionId:string;generation:string;effectiveAt:string;source:string}>(
+    `SELECT id,pricing_model AS "pricingModel",price_version_id AS "priceVersionId",generation::text AS generation,${instantSql("effective_at")} AS "effectiveAt",source
+     FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 ORDER BY generation`,[input.gameId])).rows;
+  const modes=(await client.query<{id:string;pricingModel:string;generation:string;effectiveAt:string;source:string}>(
+    `SELECT id,pricing_model AS "pricingModel",generation::text AS generation,${instantSql("effective_at")} AS "effectiveAt",source
+     FROM zzsh_supply.pricing_mode_schedule WHERE game_id=$1 ORDER BY generation`,[input.gameId])).rows;
+  if(prices.length||modes.length){
+    const price=prices.find(row=>row.pricingModel==="FIXED_FEE"&&row.generation==="1"),mode=modes.find(row=>row.generation==="1");
+    if(price?.source==="SYSTEM_INITIAL"&&price.priceVersionId===input.priceVersionId&&price.effectiveAt===effectiveAt
+      &&mode?.source==="SYSTEM_INITIAL"&&mode.pricingModel==="FIXED_FEE"&&mode.effectiveAt===effectiveAt)
+      return {status:"ALREADY_INITIALIZED" as const,priceScheduleId:price.id,modeScheduleId:mode.id};
+    throw conflict("已有价格配置或初始化不完整，未覆盖现有配置");
+  }
+  const existing=(await client.query<{native:boolean}>(`SELECT EXISTS(SELECT 1 FROM zzsh_supply.listing_publication
+    WHERE game_id=$1 AND source='OWNER_DIRECT') OR EXISTS(SELECT 1 FROM zzsh_order.rental_order WHERE game_id=$1) AS native`,[input.gameId])).rows[0];
+  if(existing?.native!==false)throw conflict("游戏已有新平台交易或发布记录，不能执行首次初始化");
+  const price=(await client.query<PriceVersion&{roundingPolicy:string}>(`SELECT id,mode,status,haff_rule AS "haffRule",fixed_fee_rates AS rates,rounding_policy AS "roundingPolicy"
+    FROM zzsh_supply.price_version WHERE id=$1 AND game_id=$2`,[input.priceVersionId,input.gameId])).rows[0];
+  if(!price||price.status!=="SEALED"||price.mode!=="PERCENT"||price.roundingPolicy!=="HALF_UP_CENT_V1"
+    ||(price.haffRule as {schema?:unknown}|null)?.schema!=="haff-ratio-v3"||!sealedEnabledRentalModes(price.haffRule))throw conflict("首次固定手续费价格版本尚未准备完整");
+  let rates:ReturnType<typeof parseFixedFeeRates>;
+  try{rates=parseFixedFeeRates(price.rates);}catch{throw conflict("首次固定手续费率无法核实");}
+  await assertPriceVersionResources(client,input.gameId,price.id,price.mode);
+  const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt,fee:{effectiveAt,generation:"1",rates,haffRule:price.haffRule}});
+  if(!timeline)throw conflict("首次固定手续费政策无法核实");
+  const validation=validateFixedFeeTimeline(timeline);
+  if(!validation.valid)throw conflict(`固定手续费与会员或礼遇配置不兼容：${validation.reason}`);
+  const priceScheduleId=newSupplyId("price_policy"),modeScheduleId=newSupplyId("pricing_mode");
+  await client.query(`INSERT INTO zzsh_supply.pricing_policy_schedule(id,game_id,pricing_model,price_version_id,generation,effective_at,source)
+    VALUES($1,$2,'FIXED_FEE',$3,1,$4::timestamptz,'SYSTEM_INITIAL')`,[priceScheduleId,input.gameId,price.id,effectiveAt]);
+  await client.query(`INSERT INTO zzsh_supply.pricing_mode_schedule(id,game_id,pricing_model,generation,effective_at,source)
+    VALUES($1,$2,'FIXED_FEE',1,$3::timestamptz,'SYSTEM_INITIAL')`,[modeScheduleId,input.gameId,effectiveAt]);
+  await recordAudit(client,{actorType:"system",action:"supply.rules.initial_pricing.created",objectType:"pricing_policy_schedule",objectId:priceScheduleId,
+    requestId:input.requestId,outcome:"SUCCESS",details:{gameId:input.gameId,priceVersionId:price.id,modeScheduleId,effectiveAt,pricingModel:"FIXED_FEE"}});
+  return {status:"INITIALIZED" as const,priceScheduleId,modeScheduleId};
 }
 
 /** Called only inside the existing authenticated, idempotent and audited admin write transaction. */
