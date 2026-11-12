@@ -13,9 +13,9 @@ const sql0118 = readFileSync(resolve("migrations/business/0118_ops_preset_accoun
 const pairs0118 = [...sql0118.matchAll(/\('(role_preset_\w+)',\s*'([a-z0-9_.]+)'\)/g)].map((m) => [m[1], m[2]] as const);
 const later = new Set<string>([...OPS_PRESET_0118_ADDITIONS,...OPS_PRESET_DISTRIBUTION_MANAGEMENT_ADDITIONS,...OPS_PRESET_COMPENSATION_ADDITIONS]);
 
-test("0114 + 0118 seed rows equal the code constants after the 0179 complaint preset change", () => {
+test("0114 + 0118 seed rows equal the current presets after later permission changes", () => {
   const supportLater = new Set<string>([...SUPPORT_PRESET_LEGACY_CONTINUATION_ADDITIONS,...SUPPORT_PRESET_COMPENSATION_ADDITIONS]);
-  const seeded = pairs.filter(([role, code]) => !(role === "role_preset_support" && code === "im.support.complaint"));
+  const seeded = pairs.filter(([role, code]) => !(role === "role_preset_support" && code === "im.support.complaint") && code !== "supply.duplicate.review");
   const expected = Object.entries(ROLE_PRESET_GRANTS).flatMap(([role, codes]) => codes.filter((c) => role === "role_preset_ops" ? !later.has(c) : !supportLater.has(c)).map((c) => [role, c] as const));
   const sort = (rows: readonly (readonly [string | undefined, string | undefined])[]) => [...rows].sort((a, b) => `${a[0]}|${a[1]}`.localeCompare(`${b[0]}|${b[1]}`));
   assert.deepEqual(sort(seeded), sort(expected));

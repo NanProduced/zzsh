@@ -56,9 +56,8 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
   return withPublicListingSnapshot(options.pool,async client=>{
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
-    // Owner decision (2026-10-18): the public market keeps the old platform status=3
-    // "listed" rows visible as read-only historical data. They never become
-    // quotable or orderable; readLegacyListing owns those guards.
+    // Retired Delta imports never enter public candidates; other admitted legacy
+    // sources remain read-only and cannot be quoted or ordered.
     if(state.legacyReadOnly){
       await validateListingQuery(client,q,state);
       const configuredLabel=state.config!.sorts.find(s=>s.key===q.sort)?.label??null;

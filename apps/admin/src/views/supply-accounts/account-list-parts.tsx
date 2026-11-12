@@ -42,7 +42,6 @@ import {
   savedKey,
   serializeSavedViews,
   suggestKind,
-  versionText,
   type SavedView,
   rowHaffText,
   rowQuoteText,
@@ -374,7 +373,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       </section>
       </>}
 
-      {v ? <Collapsible className="mt-4 border-t pt-3"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-xs text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50">版本追溯<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent className="pt-2"><dl className="grid gap-2 break-all text-xs text-muted-foreground"><div><dt>资料版本</dt><dd>{v.id}</dd></div><div><dt>内容摘要</dt><dd>{v.contentHash ?? "未提供"}</dd></div><div><dt>规则版本</dt><dd>{releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
+      {v ? <Collapsible className="mt-4 border-t pt-3"><CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-xs text-muted-foreground outline-none focus-visible:ring-3 focus-visible:ring-ring/50">资料追溯<ChevronDown className="size-3.5"/></CollapsibleTrigger><CollapsibleContent className="pt-2"><dl className="grid gap-2 break-all text-xs text-muted-foreground"><div><dt>资料标识</dt><dd>{v.id}</dd></div><div><dt>内容摘要</dt><dd>{v.contentHash ?? "未提供"}</dd></div><div><dt>规则版本</dt><dd>{releaseId ?? "未提供"}</dd></div></dl></CollapsibleContent></Collapsible> : null}
 
       {v && !imported && historical ? <Collapsible className="mt-4 border-t pt-3">
         <CollapsibleTrigger className="group flex w-full items-center justify-between rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50">迁入前记录<ChevronDown className="size-3.5 transition-transform group-data-[panel-open]:rotate-180"/></CollapsibleTrigger>
@@ -393,7 +392,7 @@ export function QuickView({ row, canRead, onClose, onOpenFull }: QuickProps) {
       </Collapsible> : null}
     </div>
     <footer className="flex flex-wrap items-center justify-end gap-2 border-t bg-background px-5 py-3">
-      {publicDefault ? <Button size="lg" variant="outline" onClick={() => setShowDraft(true)}>查看当前草稿</Button> : showDraft && publicBasis ? <Button size="lg" variant="outline" onClick={() => setShowDraft(false)}>回到对外版</Button> : null}
+      {publicDefault ? <Button size="lg" variant="outline" onClick={() => setShowDraft(true)}>查看其他资料记录</Button> : showDraft && publicBasis ? <Button size="lg" variant="outline" onClick={() => setShowDraft(false)}>回到公开资料</Button> : null}
       <Button size="lg" variant="outline" onClick={onClose}>关闭</Button>
       <Button size="lg" onClick={() => onOpenFull("situation")}>查看完整档案</Button>
     </footer>

@@ -82,7 +82,6 @@ export const OPS_PRESET_PERMISSIONS = [
   P.supplyReviewRead,
   P.supplyReviewDecide,
   P.supplyRestrict,
-  P.supplyDuplicateReview,
   P.supplyCatalogManage,
   P.supplyGunsmithManage,
   P.supplyListingFiltersManage,

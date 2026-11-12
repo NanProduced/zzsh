@@ -538,6 +538,15 @@ test("v3 detail manifest is local-only, integrity/size/cap/status/duplicate boun
   assert.throws(() => loadLegacyPublicAdmissionManifest(manifestEnv("manifest.outside.json"), dir), /PATH/);
 });
 
+test("migrated Delta accounts never regain a public detail through any legacy status", async () => {
+  for (const status of [3, 4, 5, 6] as const) {
+    const row = legacyProjectionRow({ source_status: status, source_system: "legacy_mysql_restore", source_entity: "la_rental_accounts" });
+    const admission = status === 3 ? undefined : parseLegacyPublicAdmission(v3Admission([v3Record("account_1", status, { snapshot: row.snapshot, title: row.title })]));
+    const index = admission ? new Map([["account_1", admission]]) : undefined;
+    await assert.rejects(readLegacyListing(legacyProjectionClient(row), "account_1", undefined, index), (e: any) => e.status === 404);
+  }
+});
+
 test("v3 detail only sees the matched shard record and labels 4/5/6 without an old number", async () => {
   const record = (status: 4 | 5 | 6) => v3Record("account_1", status, { snapshot: legacyProjectionRow({ source_status: status }).snapshot, title: legacyProjectionRow({ source_status: status }).title });
   const labels: Record<number, string> = { 4: "已下架", 5: "已出租", 6: "待支付占位" };
@@ -582,7 +591,7 @@ test("v3 detail SQL carries only the matched shard record and never replaces the
   const params = jsonRecordParams(detailCall.values);
   assert.equal(params.length, 1, "only the 4/5/6 branch receives admission JSON");
   assert.deepEqual(params[0]!.map(record => record.accountId), ["account_1"], "one matched record, never the whole shard");
-  assert.match(detailCall.sql, /h\.source_status=3 AND \(a\.legacy_hold='NONE' AND d\.account_id IS NULL\)\)/, "status 3 stays on its own (absent) admission");
+  assert.match(detailCall.sql, /NOT \(g\.code='delta'.*?\) AND \(\(h\.source_status=3 AND \(a\.legacy_hold='NONE' AND d\.account_id IS NULL\)\)/, "every detail branch excludes retired Delta while status 3 keeps its own admission");
   assert.match(detailCall.sql, /h\.source_status IN\(4,5,6\)/);
   // A miss sends no 4/5/6 branch at all.
   const miss = capturingLegacyClient(legacyProjectionRow({ id: "account_9", source_status: 4 }));

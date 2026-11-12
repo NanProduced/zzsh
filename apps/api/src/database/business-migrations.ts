@@ -762,6 +762,17 @@ export async function configureCreditGuaranteePrivileges(pool: Pick<Pool, "query
     REVOKE ALL ON FUNCTION zzsh_credit.guard_credit_state_update(),zzsh_credit.guard_credit_event_insert(),zzsh_order.guard_guarantee_root(),zzsh_order.guard_guarantee_event(),zzsh_order.guard_guarantee_entry(),zzsh_order.check_guarantee_batch() FROM ${role};
     GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version() TO ${role};
   `);
+  const automatic = (await pool.query<{ present: boolean; ready: boolean }>(`SELECT
+    to_regprocedure('zzsh_order.guard_auto_delisted_guarantee_refund()') IS NOT NULL AS present,
+    EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE t.tgrelid=to_regclass('zzsh_order.owner_guarantee_refund')
+        AND t.tgname='owner_guarantee_auto_refund_guard' AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
+        AND p.oid=to_regprocedure('zzsh_order.guard_auto_delisted_guarantee_refund()') AND p.proowner=c.relowner)
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_order.owner_guarantee_refund')
+        AND c.conname='owner_guarantee_refund_release_decision_shape' AND c.convalidated
+        AND position('AUTO_APPROVED' IN pg_get_constraintdef(c.oid))>0) AS ready`)).rows[0];
+  if (!automatic || automatic.present && !automatic.ready) throw new Error("Automatic guarantee refund guard is incomplete");
+  if (automatic.present) await pool.query(`GRANT INSERT(release_decision_reason,release_decision_fingerprint,release_decided_at) ON zzsh_order.owner_guarantee_refund TO ${role}`);
 }
 
 async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: string, role: string, options: { columns?: readonly string[]; select?: boolean } = {}): Promise<void> {

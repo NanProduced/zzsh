@@ -139,6 +139,7 @@ function coreStatus(order: Order): string {
   if (order.status === "CANCELLED" && order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
   if (order.status === "CANCELLED" && order.cancelReason === "USER") return "已取消 · 租客取消";
   if (order.status === "CANCELLED" && order.cancelReason === "SUPPORT_UNPAID") return "已取消 · 客服处理";
+  if (order.status === "CANCELLED" && order.cancelReason === "OWNER_DELISTED") return "已取消 · 号主下架账号";
   const stage = orderSettlementStageLabel(order);
   if (order.status === "PAID" && stage) return stage;
   return STATUS_LABELS[order.status] ?? "状态待确认";
@@ -325,7 +326,7 @@ function formatGuaranteeSummary(guarantees: CreditGuarantee[]): string {
   if (guarantees.some((g) => g.state === "REFUND_REQUESTED" || g.state === "REFUND_PROCESSING")) return "保证金退还处理中";
   if (guarantees.some((g) => g.state === "FAILED")) return "保证金状态待核";
   if (guarantees.some((g) => g.state === "UNKNOWN")) return "按出租账号查看保证金要求";
-  if (guarantees.every((g) => g.state === "REFUNDED")) return "号主保证金已原路退还";
+  if (guarantees.every((g) => g.state === "REFUNDED")) return "号主保证金退还已记录";
   if (guarantees.every((g) => g.state === "SATISFIED")) return "号主保证金已覆盖";
   if (guarantees.every((g) => g.state === "NOT_REQUIRED")) return "当前无需缴纳号主保证金";
   return "按出租账号查看保证金要求";

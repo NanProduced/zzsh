@@ -59,7 +59,7 @@ export type OrderRow = {
   remindDueAt: string | null;
   addRound: number;
   escalationState: string;
-  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | null;
+  cancelReason: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | "SUPPORT_AFTER_START_CANCELLED" | "OWNER_DELISTED" | null;
   cancelledAt: string | null;
   createdAt: string;
   lastMessageAt?: string | null;
@@ -135,7 +135,7 @@ export type OrderParty = "renter" | "owner" | "admin";
 export function orderHasPaidState(status: string, cancelReason?: string | null): boolean {
   return status === ORDER_STATUS.PAID || status === ORDER_STATUS.COMPLETED
     || status === ORDER_STATUS.CANCELLED && (cancelReason === "PRESTART_TERMINATED" || cancelReason === "MANUAL_CLOSE"
-      || cancelReason === "SUPPORT_CANCELLED_REFUND");
+      || cancelReason === "SUPPORT_CANCELLED_REFUND" || cancelReason === "SUPPORT_AFTER_START_CANCELLED");
 }
 
 export function projectOrder(

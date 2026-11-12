@@ -126,11 +126,12 @@ export function creditEventLabel(type: string, fallback: string = UNRECOGNIZED_S
  * 退还放行决定（release_policy_state）是第三条轴：只说明退还是否被放行，
  * 不代表渠道已退款，也不代表银行已到账。值集来源 `0067_credit_guarantee_contract.sql:176`。
  */
-export type GuaranteeReleasePolicyState = "OWNER_DECISION_REQUIRED" | "APPROVED" | "REJECTED";
+export type GuaranteeReleasePolicyState = "OWNER_DECISION_REQUIRED" | "APPROVED" | "AUTO_APPROVED" | "REJECTED";
 
 const guaranteeReleasePolicyLabels: Record<GuaranteeReleasePolicyState, string> = {
   OWNER_DECISION_REQUIRED: "退还等待处理",
   APPROVED: "退还已放行",
+  AUTO_APPROVED: "自动处理",
   REJECTED: "退还未放行",
 };
 

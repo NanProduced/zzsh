@@ -69,6 +69,9 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   const occupied=projectOwnerAccount({...base,rental_state:"RENTED",ao_id:"legacy-order",ao_display_no:"ORIGINAL-SN",ao_origin:"LEGACY",ao_status:"PAID",ao_legacy_deadline:"1793491200"} as any);
   assert.equal(occupied.activeOrder?.displayNo,"ORIGINAL-SN");assert.equal(occupied.activeOrder?.origin,"LEGACY");
   assert.equal(occupied.activeOrder?.rentalDeadlineAt,"2026-11-01T00:00:00.000Z");assert.equal(occupied.activeOrder?.renterName,null);
+  const retiredInRental=projectOwnerAccount({...base,rental_state:"RENTED",retired_legacy:true,ao_id:"legacy-order",ao_origin:"LEGACY",ao_status:"PAID"} as any);
+  assert.equal(retiredInRental.rentalState,"RENTED");assert.equal(retiredInRental.historicalReadOnly,true);
+  assert.ok(retiredInRental.blockers.includes("LEGACY_LISTING_RELIST_REQUIRED"));assert.equal(retiredInRental.activeOrder?.id,"legacy-order");
   assert.equal(projectOwnerAccount({...base,legacy_market:true} as any).available,false);
   const pending = projectOwnerAccount({ ...base, rental_state: "PENDING_PAYMENT", ao_id: "p1", ao_display_no: "P1", ao_status: "PENDING_PAYMENT" } as any) as any;
   assert.equal(pending.available, false);

@@ -11,7 +11,7 @@ test('R1 port: late detail A cannot replace independent object B under StrictMod
 });
 test('R1 port: changed account revision invalidates an open confirmation after refresh',async t=>{
  let revision='7';const h=await mountHarness(t,{permissions,strict:true,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl:async()=>response(data('a',revision))});await settle(h);await h.fillReason('fixture current account evidence');await h.click(h.btn('核对后确认运营限制'));await settle(h);revision='8';await h.render('admin',permissions,'a',{context:'review'},1);await settle(h);
- assert.ok(h.btn('确认施加运营限制').disabled);await h.click(h.btn('确认施加运营限制'));assert.equal(h.writes.length,0);assert.match(h.el.textContent,/原账号版本已失效/);
+ assert.ok(h.btn('确认施加运营限制').disabled);await h.click(h.btn('确认施加运营限制'));assert.equal(h.writes.length,0);assert.match(h.el.textContent,/账号资料已变化/);
 });
 test('R1 port: image revision change cannot reuse an old image confirmation',async t=>{
  let mediaRevision='2';const h=await mountHarness(t,{permissions,strict:true,initialAccountId:'a',initialQuery:{context:'situation'},fetchImpl:async()=>response(data('a','7',mediaRevision))});await settle(h);await h.click(h.btn('屏蔽图片…'));await settle(h);await h.fillReason('fixture verify bound image');await settle(h);mediaRevision='3';await h.render('admin',permissions,'a',{context:'situation'},1);await settle(h);
@@ -22,7 +22,7 @@ test('finish F1: restricted paused account confirmation preserves actual indepen
  let value=data();value.account.staff_restricted=true;value.account.owner_paused=true;value.supervision.facts={...value.supervision.facts,staffRestricted:true,ownerPaused:true,newOrders:null,reasons:['STAFF_RESTRICTED','OWNER_PAUSED','RULE_CHANGED','OCCUPANCY_UNKNOWN']};
  const h=await mountHarness(t,{permissions,strict:true,initialAccountId:'a',initialQuery:{context:'review'},fetchImpl:async(url,init)=>{if(init.method==='POST')throw new Error('offline UNKNOWN');return response(value);}});await settle(h);
  await h.click(h.el.querySelector('[role=checkbox]'));assert.equal(h.el.querySelector('[role=checkbox]').getAttribute('aria-checked'),'true','shared checkbox toggles before confirmation');await h.fillReason('fixture independent paused and blocked conditions');await h.click(h.btn('核对完成，确认解除影响'));await settle(h);
- const condition=h.el.querySelector('[data-slot="dialog-content"] section[aria-label]');assert.match(condition.textContent,/已暂停，须由号主独立恢复/);assert.match(condition.textContent,/规则已切换/);assert.match(condition.textContent,/占用状态未知/);assert.match(condition.textContent,/新单资格仍有待核依据/);const frozen=condition.textContent;
+ const condition=h.el.querySelector('[data-slot="dialog-content"] section[aria-label]');assert.match(condition.textContent,/存在旧暂停记录，请核对账号状态/);assert.match(condition.textContent,/规则已切换/);assert.match(condition.textContent,/占用状态未知/);assert.match(condition.textContent,/新单资格仍有待核依据/);const frozen=condition.textContent;
  await h.click(h.btn('确认解除运营限制'));await settle(h);value=structuredClone(value);value.supervision.facts.reasons=['GAME_UNAVAILABLE'];await h.render('admin',permissions,'a',{context:'review'},1);await settle(h);assert.equal(h.el.querySelector('[data-slot="dialog-content"] section[aria-label]').textContent,frozen);assert.equal(h.writes.length,1);
 });
 test('finish F1: draft confirmation shows missing publication and opens/cancels with zero writes',async t=>{

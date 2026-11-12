@@ -22,7 +22,7 @@
 
 旧 v1 建单路径和成功幂等重放保持；新 v2 报价在旧建单入口返回 409 `PRICING_SCHEMA_UNSUPPORTED`。会员资格、个人确认凭据及新版建单已实现，见[个人确认合同](personal-confirmation.md)。正式声明、封存资金政策与保证金依据reader及核定API已接入；资金政策页面与推荐/披露接线仍有缺口；独立包赔正文版本及签发/首次建单末端检查已具备源码合同，对应新增数据库守卫与schema须部署并完成真实边界验收，缺依赖继续拒绝，不代表正式交易闭环已可用。
 
-新账号正式核价和提交前，前后端使用同一必填矩阵：安全箱档位、段位（按需小段位）、账号等级0–60、体力4–7、负重4–7、潜水0–3、上号方式、省份/城市、可配合上号时间、绝密KD 0–100、封禁记录、人脸归属、下赛季通行证/德穆兰明确选择，以及目录必填库存。草稿可暂留空；带已验证旧来源引用的接管草稿按服务端旧路径例外。客户端负责定位首个缺失项，服务端作最终校验。
+新账号正式核价和提交前，前后端使用同一必填矩阵：安全箱档位、段位（按需小段位）、账号等级0–60、体力4–7、负重4–7、潜水0–3、上号方式、省份/城市、可配合上号时间、绝密KD 0–100、封禁记录、人脸归属、下赛季通行证/德穆兰明确选择，以及目录必填库存。草稿可暂留空；迁入的三角洲账号不再走原账号接管发布，其他游戏按各自已验证来源和服务端规则处理。客户端负责定位首个缺失项，服务端作最终校验。
 
 用户端发布页已接入现有供给API。API负责报价、资格和对象范围，前端按下列分组自由跳转，不建立另一套发布状态机；草稿、版本和生命周期仍以服务端为准。号主侧 `GET /accounts/{id}/deposit-recommendation` 只为原生DRAFT按已保存申报与生效fundingPolicy计算，返回 `recommendationSchema`、`accountId/accountRevision/versionId/versionRevision/ruleReleaseId/priceVersionId` 及规范化 `inputs`；未配置政策或输入不足时返回 `available:false` 及原因，不补猜测值。客户端核对账号、版本、规则及声明输入，号主显式采用后才填入基础租客押金，不自动改变最终计价。
 
@@ -34,9 +34,9 @@ Delta `attributes.full_payout_declaration` 可随号主声明保存为 `{schema:
 
 账号版本保留原六种生命周期状态并增加 `PUBLISHED`。号主在报价、规则接受、资格、占用和媒体技术校验均通过后，`submit` 在同一事务内切换当前版本、写入唯一不可变的 `listing_publication` 事实并返回发布结果，不调用管理员 `decide`，也不生成管理员审核人或审核时间。发布事实绑定 `accountId`、`versionId`、`ownerUserId`、`gameId`、`ruleReleaseId`、`contentHash`、真实来源/操作者和数据库 `publishedAt`；来源为 `OWNER_DIRECT` 时版本必须为 `PUBLISHED`，号主操作者非空且与账号所有者一致。
 
-历史公开版本只有能逐项匹配真实 `APPROVE` decision 的版本，才以 `LEGACY_APPROVED` 写入发布事实并继续保留 `APPROVED`、原审核人、原决定时间、hash 和 release。`SUBMITTED`、`REJECTED`、`IMPORTED_UNVERIFIED` 不因迁移或查询自动公开。暂停、运营限制、媒体隔离及恢复使用现有状态/审计，不新增发布事实，也不改变原 `publishedAt`；正文改版须重新报价、接受规则并发布新版本。
+历史公开版本只有能逐项匹配真实 `APPROVE` decision 的版本，才以 `LEGACY_APPROVED` 写入发布事实并继续保留 `APPROVED`、原审核人、原决定时间、hash 和 release。`SUBMITTED`、`REJECTED`、`IMPORTED_UNVERIFIED` 不因迁移或查询自动公开。运营限制和媒体隔离不改变原发布事实；已发布账号不支持同账号修改后重新发布，再次出租须新建账号记录。
 
-公开资料只接受两种有真实publication的有效组合：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并按入口分别核资料公开与当前可租：默认列表、个人确认/建单仍核保证金、规则和空闲；详情、精确编号和收藏允许普通下架/占用时读取最后合法公开版本，canCreateOrder=false，不读未审核草稿。主体/隐私/hash/媒体安全不放宽，见[账号可见性](account-visibility.md)；个人确认与建单另核租客会员及锁内验证。`ACCOUNT_DISPLAY` 仅要求服务端技术校验、所有权/用途绑定和公开衍生文件完整；`ACCOUNT_EVIDENCE` 始终私有，草稿、非当前绑定和隔离媒体不可由公开读取路径获取。技术合格不等于人工内容审核通过。
+公开资料只接受两种有真实publication的有效组合：`PUBLISHED + OWNER_DIRECT` 或 `APPROVED + LEGACY_APPROVED`，并按入口分别核资料公开与当前可租：默认列表、个人确认/建单仍核保证金、规则和空闲；详情、精确编号和收藏可按权限读取已占用的合法公开资料，主动下架后不再公开。未审核草稿不公开，主体/隐私/hash/媒体安全不放宽，见[账号可见性](account-visibility.md)。`ACCOUNT_DISPLAY` 须通过技术校验、所有权/用途绑定和公开衍生文件检查；`ACCOUNT_EVIDENCE` 始终私有。技术合格不等于人工内容审核通过。
 
 | 分组 | 数据/写入 | 校验与恢复 |
 |---|---|---|
@@ -101,7 +101,7 @@ publishing-catalog.ready仅表示目录与生效价目配置齐备，不代表�
 
 迟到成功回执只更新仍匹配的原主体/游戏/目标/动作/key/body/创建代次记录，不能覆盖其他意图或降级accepted。当前页面的ref、提示、恢复和解锁另须匹配原请求上下文代次及原意图；身份或对象已切换时，旧success/catch/finally不修改当前责任。恢复只消费匹配的原记录；不匹配、跨主体或无File的no-op不能当作恢复成功并解除锁。
 
-本人账号的暂停、恢复接单及撤回审核同样在发送前保留原意图。刷新后不自动重发；使用 `GET /api/v1/supply/operation-result` 查询，参数为 `operation=supply.publication.pause|resume|withdraw`、原账号 `resourceId` 和原请求 `fingerprint`，请求头保留原 `Idempotency-Key`。指纹沿用既有 `fingerprintRequest` 的原操作、目标和请求JSON元组，不重建或替换原body。接口按当前会话及账号归属校验，只返回最小回执：`UNRESOLVED` 或 `RECORDED` 与账号/版本/修订号，不透出原私有响应。未查到不等于未提交，冲突或读取失败均保留责任；确定成功后另GET本人当前账号，回读修订不得早于回执，回读失败不清意图。当前账号状态不能替代原操作回执判成功，其他发布动作仍使用原恢复入口。
+本人账号的下架与撤回审核在发送前保留原意图。刷新后不自动重发；使用 `GET /api/v1/supply/operation-result` 查询，参数为 `operation=supply.publication.delist|withdraw`、原账号 `resourceId` 和原请求 `fingerprint`，请求头保留原 `Idempotency-Key`。指纹沿用原操作、目标和请求JSON元组，不重建或替换原body。接口按当前会话及账号归属校验，只返回 `UNRESOLVED` 或 `RECORDED` 与账号/版本/修订号。未查到不等于未提交，读取失败均保留责任；确定成功后另读本人账号，回读修订不得早于回执。当前账号状态不能替代原操作回执。
 
 绝密KD输入保留原文，负值、非数字、超过100不能保存或核价；新账号正式核价/提交时要求显式0–100的KD，草稿可暂空，历史原值不静默截断或清洗。公开详情主图库、缩略图、计数、预览共用非PENALTY集合；处罚图独立公示，全部为处罚图时不冒充普通主图。
 

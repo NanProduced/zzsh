@@ -134,9 +134,9 @@ function completeDeclaration(overrides = {}) {
   const base = declaration(overrides);
   return { ...base, attributes: { ...requiredAccountFacts, ...(overrides.attributes ?? {}) } };
 }
-function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revision = "5", versionId = "version_1", schemaVersion = 1, versionRevision = "1" } = {}) {
+function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revision = "5", versionId = "version_1", schemaVersion = 1, versionRevision = "1", lifecycle = "ACTIVE" } = {}) {
   return {
-    account: { id: "account_1", game_id: "game_1", revision, current_version_id: versionId, owner_paused: false, staff_restricted: false, restriction_reason: null },
+    account: { id: "account_1", game_id: "game_1", revision, current_version_id: versionId, lifecycle, owner_paused: false, staff_restricted: false, restriction_reason: null },
     version: {
       id: versionId, schemaVersion, sequence: "1", revision: versionRevision, reviewState,
       releaseId: quote ? "release_1" : null, contentHash: quote ? "hash_1" : null,
@@ -821,8 +821,8 @@ test('an uncertain retry rejected after remount retains responsibility rather th
 
 test('pending media survives remount without storing File or upload tokens and cannot pretend to reupload',async()=>{const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),uploadMedia:()=>{throw new actualSupply.SupplyRequestError(503,{error:{code:'INTERNAL_ERROR',message:'upload unknown'}})}});try{await p.render();const input=p.host.querySelector('input[type=file]');Object.defineProperty(input,'files',{value:[new File(['valid-bytes-for-component-probe'],'show.png',{type:'image/png'})],configurable:true});await React.act(async()=>input.dispatchEvent(new p.window.Event('change',{bubbles:true})));await p.waitFor(()=>p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));const raw=p.storageDump().find(([key])=>key.startsWith('zzsh.supply-write'))[1];assert.doesNotMatch(raw,/uploadToken|valid-bytes-for-component-probe/);assert.equal(JSON.parse(raw).action,'media');await p.remount();await p.clickButton('重试当前步骤');assert.match(p.text(),/原图片文件没有保留/);assert.ok(p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));}finally{await p.close();}});
 
-test('R03: publishing cannot resolve pause/resume/withdraw by reading current account state',async()=>{
-  for(const action of ['pause','resume','withdraw'])for(const phase of ['pending','accepted']){
+test('R03: publishing cannot resolve account actions by reading current account state',async()=>{
+  for(const action of ['pause','resume','withdraw','delist'])for(const phase of ['pending','accepted']){
     const record={version:1,userId:'user_A',gameId:'game_1',accountId:'account_1',action,key:'frozen-management-key',body:{expectedRevision:'1',...(action==='withdraw'?{versionId:'version_1'}:{})},phase,uncertain:true,createdAt:new Date().toISOString(),...(phase==='accepted'?{receipt:{accountId:'account_1',revision:'2'}}:{})};
     const slot='zzsh.supply-write.v1:user_A',raw=JSON.stringify(record);let reads=0;
     const p=await probe({accountId:'account_1',mine:()=>{reads++;return supplyOf(declaration());},storageSeed:[[slot,raw]]});
@@ -1560,14 +1560,27 @@ test("notice moves focus to the first step and returns to its trigger when reope
   } finally { await p.close(); }
 });
 
-test("editing a published account explains that new orders pause", async () => {
+test("a published account cannot be edited or re-published in place", async () => {
   const p = await probe({
     accountId: "account_1", editRequested: true,
     mine: () => supplyOf(declaration(), { quote: ownerQuote, reviewState: "PUBLISHED" }),
   });
   try {
     await p.render();
-    assert.match(p.text(), /修改期间.*暂停接单|开始编辑后.*暂停接单/);
+    assert.match(p.text(), /已上架或历史账号不能修改|上架后不可修改/);
+    assert.doesNotMatch(p.text(), /开始编辑后.*暂停接单/);
+    assert.equal([...p.host.querySelectorAll("button")].some(button => ["开始修改", "编辑资料"].includes(button.textContent.trim())), false);
+    assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
+  } finally { await p.close(); }
+});
+
+test("an archived account with an old draft cannot offer editing or re-publication", async () => {
+  const p = await probe({ accountId: "account_1", editRequested: true,
+    mine: () => supplyOf(declaration(), { reviewState: "DRAFT", lifecycle: "ARCHIVED" }) });
+  try {
+    await p.render();
+    assert.match(p.text(), /此账号仅保留记录；如需出租，请重新填写上架资料/);
+    assert.equal([...p.host.querySelectorAll("button")].some(button => ["继续填写草稿", "确认上架"].includes(button.textContent.trim())), false);
     assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
   } finally { await p.close(); }
 });

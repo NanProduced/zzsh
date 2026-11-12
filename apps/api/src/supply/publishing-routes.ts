@@ -40,7 +40,6 @@ import {
   forbidden,
   headerValue,
   invalid,
-  newSupplyId,
   notFound,
   sendJson,
   sha256Hex,
@@ -59,9 +58,9 @@ import {
 } from "./listing-query";
 import {
   acceptListingRules,
-  checkAccountRevision,
   createListingDraft,
   currentVersion,
+  delistListing,
   listingCandidatePage,
   listingDetail,
   lockPublishingAccount,
@@ -76,16 +75,15 @@ import {
   restrictListing,
   reviewListing,
   saveListingDraft,
-  setOwnerPaused,
   submitListing,
   unknownSupplyGate,
   withdrawListing,
   type PublishingAccount,
 } from "./publishing";
 const ACCOUNT_ROUTE =
-  /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|pause|resume|restriction|duplicates|deposit-recommendation))?$/;
+  /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|delist|restriction|deposit-recommendation))?$/;
 const ADMIN_ROUTE =
-  /^\/listing-reviews\/([A-Za-z0-9._:-]+)(?:\/(decide|restriction|duplicates))?$/;
+  /^\/listing-reviews\/([A-Za-z0-9._:-]+)(?:\/(decide|restriction))?$/;
 async function summary(
   client: PoolClient,
   a: PublishingAccount,
@@ -447,11 +445,9 @@ export async function handlePublishingRoute(
   const permission =
     action === "restriction"
       ? "supply.restrict"
-      : action === "duplicates"
-        ? "supply.duplicate.review"
-        : action === "decide"
-          ? "supply.review.decide"
-          : "supply.review.read";
+      : action === "decide"
+        ? "supply.review.decide"
+        : "supply.review.read";
   const authorize = async (client: PoolClient, a?: PublishingAccount) => {
     if (admin) {
       await assertAdminContextInTransaction(client, context);
@@ -526,11 +522,14 @@ export async function handlePublishingRoute(
         if (historical) {
           detail.account = a;
           detail.available = false;
-          delete detail.canPrepareLegacyCancelledDraft;
           detail.blockers = [
             ...(detail.blockers as string[]),
             "HISTORICAL_VERSION",
           ];
+        }
+        if (!admin) {
+          const historicalRead = await loadLegacyHistoricalRead(client, a.id);
+          return { ...detail, historicalRead: withoutLegacyResourceNo(historicalRead) };
         }
         const history = (
           await client.query(
@@ -544,14 +543,6 @@ export async function handlePublishingRoute(
             [a.id, a.current_version_id],
           )
         ).rows[0];
-        const duplicateHints = admin
-          ? (
-              await client.query(
-                `SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`,
-                [a.id, access!.isBoss, actorId],
-              )
-            ).rows
-          : [];
         const old = previous
           ? (
               await client.query(
@@ -563,12 +554,11 @@ export async function handlePublishingRoute(
         const historicalRead = await loadLegacyHistoricalRead(client, a.id);
         return {
           ...detail,
-          historicalRead: admin ? historicalRead : withoutLegacyResourceNo(historicalRead),
+          historicalRead,
           history,
           previousDeclaration:
-            admin && old ? await readDeclaration(client, old) : null,
-          previousPresentation: admin && old ? old.presentation : null,
-          duplicateHints,
+            old ? await readDeclaration(client, old) : null,
+          previousPresentation: old ? old.presentation : null,
         };
       }
       if (!admin) {
@@ -632,8 +622,7 @@ export async function handlePublishingRoute(
       "contentHash", "fullPayoutTermsAcceptance"],
     submit: ["expectedRevision", "versionId", "releaseId", "contentHash"],
     withdraw: ["expectedRevision", "versionId", "reason"],
-    pause: ["expectedRevision", "reason"],
-    resume: ["expectedRevision", "reason"],
+    delist: ["expectedRevision"],
     decide: [
       "expectedRevision",
       "versionId",
@@ -643,16 +632,9 @@ export async function handlePublishingRoute(
       "reason",
     ],
     restriction: ["expectedRevision", "restricted", "reason"],
-    duplicates: [
-      "expectedRevision",
-      "relatedAccountId",
-      "result",
-      "evidenceRef",
-      "reason",
-    ],
   };
   if (action !== "draft") ensureOnlyFields(body, allowed[action] ?? []);
-  if (!admin && ["decide", "restriction", "duplicates"].includes(action))
+  if (!admin && ["decide", "restriction"].includes(action))
     throw forbidden();
   const operation = `supply.publication.${action}`;
   const result = await withTransaction(options.pool, async (client) => {
@@ -681,6 +663,7 @@ export async function handlePublishingRoute(
       async () => {
         const a = account!;
         const before = await summary(client, a);
+        let delisting: Awaited<ReturnType<typeof delistListing>> | undefined;
         if (action === "drafts")
           await createListingDraft(client, a, body.expectedRevision, gate);
         else if (action === "draft")
@@ -692,49 +675,13 @@ export async function handlePublishingRoute(
         else if (action === "submit")
           await submitListing(client, a, actorId, body, gate);
         else if (action === "withdraw") await withdrawListing(client, a, body);
-        else if (action === "pause" || action === "resume")
-          await setOwnerPaused(client, a, body, action === "pause", gate);
+        else if (action === "delist")
+          delisting = await delistListing(client, a, body, {userId:actorId,sessionId:context.sessionId,requestId});
         else if (action === "decide")
           await reviewListing(client, a, actorId, body, gate);
         else if (action === "restriction")
           await restrictListing(client, a, body);
-        else if (action === "duplicates") {
-          checkAccountRevision(a, body.expectedRevision);
-          if (
-            typeof body.relatedAccountId !== "string" ||
-            body.relatedAccountId === a.id ||
-            !["UNREVIEWED", "DISTINCT", "POSSIBLE_SAME"].includes(
-              String(body.result),
-            ) ||
-            typeof body.reason !== "string" ||
-            body.reason.trim().length < 2 ||
-            body.reason.length > 500 ||
-            typeof body.evidenceRef !== "string" ||
-            !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(body.evidenceRef)
-          )
-            throw invalid("请填写关联依据和人工判断");
-          const other = (
-            await client.query<PublishingAccount>(
-              `SELECT * FROM zzsh_supply.rental_account WHERE id=$1`,
-              [body.relatedAccountId],
-            )
-          ).rows[0];
-          if (!other) throw notFound();
-          await authorize(client, other);
-          if (other.game_id !== a.game_id) throw invalid("仅可关联同游戏供给");
-          await client.query(
-            `INSERT INTO zzsh_supply.duplicate_hint(id,account_id,related_account_id,evidence_ref,result,reason,reviewer_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-            [
-              newSupplyId("duplicate"),
-              a.id,
-              other.id,
-              body.evidenceRef,
-              body.result,
-              body.reason,
-              actorId,
-            ],
-          );
-        } else throw notFound();
+        else throw notFound();
         const responseAccount = (
           await client.query<PublishingAccount>(
             `SELECT * FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE`,
@@ -755,13 +702,10 @@ export async function handlePublishingRoute(
           details: {
             before,
             after,
-            ...(action === "duplicates"
-              ? {
-                  relatedAccountId: body.relatedAccountId,
-                  result: body.result,
-                  evidenceRef: body.evidenceRef,
-                }
-              : { result: "APPLIED" }),
+            result: "APPLIED", ...(delisting ? { cancelledOrderId: delisting.cancelledOrderId,
+                  guaranteeRefundState: delisting.guaranteeRefund.state,
+                  guaranteeRefundReason: delisting.guaranteeRefund.reason ?? null,
+                  guaranteeRefunds: delisting.guaranteeRefund.refunds.map(({ refundId, amountCents, status, providerState }) => ({ refundId, amountCents, status, providerState })) } : {}),
           },
         });
         const access = admin
@@ -769,7 +713,7 @@ export async function handlePublishingRoute(
           : null;
         return {
           status: 200,
-          body: await listingDetail(
+          body: { ...await listingDetail(
             client,
             responseAccount,
             admin ? "admin" : "owner",
@@ -777,7 +721,7 @@ export async function handlePublishingRoute(
             admin && !access!.permissions.has("supply.quote.internal.read")
               ? "public"
               : undefined,
-          ),
+          ), ...(delisting ? {delisting} : {}) },
         };
       },
     );

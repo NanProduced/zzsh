@@ -4,8 +4,11 @@ import { readLegacyPublishedReference } from "./legacy-published-reference";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
-import { SecurityApiError, withTransaction } from "../auth/security-core";
+import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { assertActiveInTransaction, identityAllowsProtectedTrade } from "../auth/user-identity";
+import { enqueueDelistedGuaranteeRefund } from "../credit/credit-guarantee";
+import { hasUnpaidPaymentEvidence, requireFreshPaymentSnapshot, UNPAID_PAYMENT_FACT_COLUMNS, type UnpaidPaymentFacts } from "../order/unpaid-payment-facts";
+import { readAccountOccupancyFacts } from "../order/legacy-order-occupancy";
 import {
   canonicalize,
   computeContentHash,
@@ -256,6 +259,8 @@ export type ListingGameRow = {
 export type ListingPageShared = {
   game(gameId: string): Promise<ListingGameRow | undefined>;
   rentalService(gameId: string): Promise<GameServiceState>;
+  retiredLegacy(account: PublishingAccount): Promise<boolean>;
+  primeRetiredLegacy(accountIds: readonly string[]): Promise<void>;
   fundingPolicy(
     releaseId: string,
   ): Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>;
@@ -264,11 +269,27 @@ export type ListingPageShared = {
 export function listingPageShared(client: PoolClient): ListingPageShared {
   const games = new Map<string, Promise<ListingGameRow | undefined>>();
   const services = new Map<string, Promise<GameServiceState>>();
+  const retired = new Map<string, Promise<boolean>>();
   const policies = new Map<
     string,
     Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>
   >();
   return {
+    retiredLegacy: (account) => {
+      let pending = retired.get(account.id);
+      if (!pending) { pending = isRetiredMigratedAccount(client, account); retired.set(account.id, pending); }
+      return pending;
+    },
+    primeRetiredLegacy: async (accountIds) => {
+      const ids = [...new Set(accountIds)].filter(id => !retired.has(id));
+      if (!ids.length) return;
+      const rows = (await client.query<{ account_id: string }>(`SELECT DISTINCT m.account_id
+        FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id
+        JOIN zzsh_supply.game g ON g.id=a.game_id WHERE m.account_id=ANY($1::text[]) AND g.code='delta'
+          AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts'`, [ids])).rows;
+      const found = new Set(rows.map(row => row.account_id));
+      for (const id of ids) retired.set(id, Promise.resolve(found.has(id)));
+    },
     game: (gameId) => {
       let pending = games.get(gameId);
       if (!pending) {
@@ -361,6 +382,7 @@ export function listingCandidatePage(client: PoolClient) {
         accounts.set(id, account);
         versions.set(id, account ? byAccount.get(id) ?? null : null);
       }
+      await shared.primeRetiredLegacy(pending);
       if (!withPublications) return;
       const rows = (
         await client.query<{ account_id: string }>(
@@ -500,6 +522,20 @@ function listingTitleNeedsReview(v: ListingVersion): boolean {
   return typeof v.title === "string" && (v.title.includes("历史资料待核实") || (!v.title.trim() && v.origin !== "NATIVE"));
 }
 
+export async function isRetiredMigratedAccount(client: PoolClient, a: PublishingAccount): Promise<boolean> {
+  const row = (await client.query<{retired:boolean}>(`SELECT EXISTS(
+    SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.legacy_supply_map m ON m.account_id=$1
+    WHERE g.id=$2 AND g.code='delta' AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts') AS retired`, [a.id,a.game_id])).rows[0];
+  if (!row || typeof row.retired !== "boolean") throw conflict("账号来源暂不能确认，请联系客服");
+  return row.retired;
+}
+
+async function assertUnpublishedAccount(client: PoolClient, a: PublishingAccount): Promise<void> {
+  if (await isRetiredMigratedAccount(client, a)) throw conflict("历史账号不能重新上架，请重新填写资料");
+  if ((await client.query(`SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id=$1 LIMIT 1`, [a.id])).rowCount)
+    throw conflict("已上架账号不能修改，请下架后重新填写上架资料");
+}
+
 export async function publicationBlockers(
   client: PoolClient,
   a: PublishingAccount,
@@ -528,6 +564,9 @@ export async function publicationBlockers(
           [a.game_id],
         )
       ).rows[0];
+  // Admin and market reads share this gate; page reads batch source checks, writes recheck directly.
+  if (game?.code === "delta" && await (shared && purpose !== "WRITE" ? shared.retiredLegacy(a) : isRetiredMigratedAccount(client, a)))
+    reasons.push("LEGACY_LISTING_RELIST_REQUIRED");
   if (!game?.enabled) reasons.push("GAME_UNAVAILABLE");
   if (v.review_state === "DRAFT" && v.payload && v.origin === "NATIVE" && v.payload.ruleRefs.catalogRevision !== game?.catalog_revision) reasons.push("RULE_CHANGED");
   const rentalService = shared
@@ -562,7 +601,8 @@ export async function publicationBlockers(
       reasons.push("FUNDING_UNKNOWN");
     }
   }
-  if (
+  if (a.lifecycle === "DELISTED") reasons.push("ACCOUNT_DELISTED");
+  else if (
     a.lifecycle !== "ACTIVE" ||
     a.legacy_hold !== "NONE" ||
     v.origin !== "NATIVE"
@@ -605,6 +645,7 @@ export async function assertEditable(
   if (external.rentalCompleted === true) throw conflict("RENTAL_COMPLETED");
   if (external.occupancy !== "FREE")
     throw conflict("暂不能确认账号空闲，请先处理占用状态");
+  await assertUnpublishedAccount(client, a);
 }
 export async function readAccountMediaBindings(client: PoolClient, versionId: string): Promise<ContentDeclaration["mediaBindings"]> {
   const rows = (await client.query(
@@ -662,29 +703,6 @@ export async function readDeclaration(
     mediaBindings,
   };
 }
-/** Only an in-flight imported account cancelled on this platform may return to an owner draft. */
-export async function canPrepareLegacyCancelledDraft(client: PoolClient, a: PublishingAccount): Promise<boolean> {
-  if (a.lifecycle !== "ACTIVE" || a.legacy_hold !== "UNRESOLVED" || !a.current_version_id) return false;
-  const installed=(await client.query<{ready:boolean}>(`SELECT to_regclass('zzsh_order.legacy_continuation_version') IS NOT NULL
-    AND to_regclass('zzsh_supply.legacy_listing_read_snapshot') IS NOT NULL AS ready`)).rows[0]?.ready;
-  if (installed!==true) return false;
-  return (await client.query<{eligible:boolean}>(`SELECT EXISTS(
-    SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot s
-    JOIN zzsh_supply.legacy_supply_map m ON m.account_id=s.account_id AND m.version_id=s.observation_version_id AND m.source_digest=s.source_digest
-      AND m.source_system=s.source_system AND m.source_entity=s.source_entity AND m.legacy_id=s.legacy_id
-    JOIN zzsh_order.legacy_order_read_snapshot l ON l.account_id=s.account_id AND l.owner_user_id=$3 AND l.source_pay_status=1 AND l.source_order_status IN(3,8,9)
-    JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL AND h.command='SUPPORT_CANCEL' AND h.stage=5
-    WHERE s.account_id=$1 AND s.observation_version_id=$2 AND s.source_status=5
-      AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.action='order.legacy.continuation.support_cancel' AND a.object_type='rental_order'
-        AND a.object_id=l.id AND a.outcome='SUCCESS' AND a.details->>'versionId'=h.id
-        AND (a.details->>'paymentReviewScope' IN('OPERATOR','UNAVAILABLE') OR a.details->>'paymentReviewScope'='SIMULATED'
-          AND shobj_description((SELECT oid FROM pg_database WHERE datname=current_database()),'pg_database') IN('zzsh:r07-delivery-clone:v1','zzsh:ecs-test:v1')))
-      AND NOT EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot later_order JOIN zzsh_order.legacy_continuation_version completed
-        ON completed.order_id=later_order.id AND completed.command='CONFIRM' AND completed.stage=4 AND completed.superseded_at IS NULL
-        WHERE later_order.account_id=s.account_id AND completed.created_at>=h.created_at)
-  ) AS eligible`,[a.id,a.current_version_id,a.owner_user_id])).rows[0]?.eligible===true;
-}
-
 export async function createListingDraft(
   client: PoolClient,
   a: PublishingAccount,
@@ -692,9 +710,9 @@ export async function createListingDraft(
   gate: SupplyGateReader,
 ): Promise<void> {
   checkAccountRevision(a, expected);
-  const reopenLegacy = await canPrepareLegacyCancelledDraft(client, a);
-  await assertEditable(client, a, gate, reopenLegacy);
+  await assertEditable(client, a, gate);
   const old = a.current_version_id ? await currentVersion(client, a) : null;
+  if (old && old.origin !== "NATIVE") throw conflict("历史账号不能重新上架，请重新填写资料");
   if (old?.review_state === "SUBMITTED")
     throw conflict("请先撤回正在审核的资料");
   if (old?.review_state === "DRAFT") throw conflict("已有可编辑草稿");
@@ -710,7 +728,6 @@ export async function createListingDraft(
       old?.attributes ?? {},
       old?.term_option_code ?? "",
       old?.pricing_option_code ?? "",
-      // An owner editing a migrated listing starts a normal draft, never an inherited old-price authorization.
       old?.schema_version === 3 ? 2 : old?.schema_version ?? 1,
     ],
   );
@@ -728,17 +745,12 @@ export async function createListingDraft(
         `INSERT INTO zzsh_supply.${table}(version_id,${fields}) SELECT $1,${fields} FROM zzsh_supply.${table} WHERE version_id=$2`,
         [id, old.id],
       );
-    if (reopenLegacy) await client.query(`INSERT INTO zzsh_supply.listing_skin(version_id,skin_id)
-      SELECT $1,unnest(h.skin_ids) FROM zzsh_supply.legacy_skin_holding h WHERE h.account_id=$2 AND h.observation_version_id=$3
-      ON CONFLICT(version_id,skin_id) DO NOTHING`, [id,a.id,old.id]);
   }
-  // Switching the current version to a draft blocks new rentals without changing owner intent.
   await client.query(
-    `UPDATE zzsh_supply.rental_account SET current_version_id=$1,legacy_hold=CASE WHEN $3 THEN 'NONE' ELSE legacy_hold END WHERE id=$2`,
-    [id, a.id, reopenLegacy],
+    `UPDATE zzsh_supply.rental_account SET current_version_id=$1 WHERE id=$2`,
+    [id, a.id],
   );
   a.current_version_id = id;
-  if (reopenLegacy) a.legacy_hold = "NONE";
   await bumpAccount(client, a);
 }
 const list = (
@@ -1129,6 +1141,7 @@ export async function quoteListing(
   checkAccountRevision(a, expected);
   if (a.lifecycle !== "ACTIVE") throw conflict("账号已归档，不能重新核价或上架");
   if ((await client.query(`SELECT 1 FROM zzsh_order.rental_order WHERE account_id=$1 AND status='COMPLETED' LIMIT 1`, [a.id])).rowCount) throw conflict("RENTAL_COMPLETED");
+  await assertUnpublishedAccount(client, a);
   await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   const v = await currentVersion(client, a);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
@@ -1429,6 +1442,8 @@ export async function acceptListingRules(
   body: Record<string, unknown>,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
+  if (a.lifecycle !== "ACTIVE") throw conflict("账号已结束出租，不能修改上架资料");
+  await assertUnpublishedAccount(client, a);
   await requireWritableGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   const v = await currentVersion(client, a);
   requireVersionToken(v, body);
@@ -1541,6 +1556,22 @@ async function assertMediaReady(
     return m.review_state !== "APPROVED";
   })) throw conflict("图片技术校验尚未完成，私有凭证不能公开");
 }
+/** Only an explicit, account-bound credit waiver may be frozen on publication. */
+export function publicationWaiverRevision(a: PublishingAccount, v: ListingVersion, gate: SupplyGate): string | null {
+  if (gate.occupancy !== "FREE" || !gate.reference || !["SATISFIED", "NOT_REQUIRED"].includes(gate.publisherBail))
+    throw conflict("上架资格已变化，请刷新后重试");
+  const credit = gate.creditGuarantee;
+  if (!credit) throw conflict("信用与保证金资格暂不能确认，请联系客服");
+  if (credit.accountId !== a.id || credit.ownerUserId !== a.owner_user_id || credit.gameId !== a.game_id
+    || credit.listingVersionId !== v.id || credit.releaseId !== v.rule_release_id || !v.payload?.ruleRefs || credit.priceVersionId !== v.payload.ruleRefs.priceVersionId
+    || credit.reference !== gate.reference || credit.status !== gate.publisherBail)
+    throw conflict("上架保证金依据已变化，请刷新后重试");
+  const revision = credit.status === "NOT_REQUIRED" ? credit.creditRevision : null;
+  if (credit.status === "NOT_REQUIRED" && (credit.requiredCents !== "0" || !revision || !/^[1-9]\d*$/.test(revision)))
+    throw conflict("上架免缴依据暂不能确认，请联系客服");
+  return revision;
+}
+
 export async function submitListing(
   client: PoolClient,
   a: PublishingAccount,
@@ -1549,6 +1580,8 @@ export async function submitListing(
   gate: SupplyGateReader,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
+  if (a.lifecycle !== "ACTIVE") throw conflict("账号已结束出租，不能再次上架");
+  await assertUnpublishedAccount(client, a);
   const v = await currentVersion(client, a);
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
@@ -1559,12 +1592,15 @@ export async function submitListing(
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
   await assertMediaReady(client, a, v, "direct", true);
+  // The gate has locked current credit/coverage; freeze only its explicit waiver.
+  const waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
   a.display_no = await assignAccountNumber(client, a.id);
   await client.query(
     `INSERT INTO zzsh_supply.listing_publication
-      (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_user_id,published_at)
-     VALUES($1,$2,$3,$4,$5,$6,$7,'OWNER_DIRECT','user',$8,clock_timestamp())`,
-    [newSupplyId("publication"),v.id,a.id,a.owner_user_id,a.game_id,v.rule_release_id,v.content_hash,actorId],
+      (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_user_id,published_at,
+       credit_guarantee_waived,credit_guarantee_waived_revision)
+     VALUES($1,$2,$3,$4,$5,$6,$7,'OWNER_DIRECT','user',$8,clock_timestamp(),$9,$10)`,
+    [newSupplyId("publication"),v.id,a.id,a.owner_user_id,a.game_id,v.rule_release_id,v.content_hash,actorId,waivedRevision ? true : null,waivedRevision],
   );
   await client.query(
     `UPDATE zzsh_supply.listing_version SET review_state='PUBLISHED',revision=revision+1 WHERE id=$1`,
@@ -1605,13 +1641,16 @@ export async function reviewListing(
   const reason = humanText(String(body.reason ?? "")).trim();
   if (reason.length < 2 || reason.length > 500)
     throw invalid("请填写具体审核理由");
+  let waivedRevision: string | null = null;
   if (body.decision === "APPROVE") {
+    await assertUnpublishedAccount(client, a);
     await validatePublicationAttributes(client, a, v.payload!.declaration.attributes, legacyGrading);
     await assertPublicationRentalTerm(client, v);
     const blockers = await publicationBlockers(client, a, v, gate);
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
     await assertMediaReady(client, a, v, "review", true);
+    waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
     a.display_no = await assignAccountNumber(client, a.id);
   }
   await client.query(
@@ -1633,16 +1672,17 @@ export async function reviewListing(
     );
     const publication = await client.query(
       `INSERT INTO zzsh_supply.listing_publication
-        (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_admin_id,published_at)
+        (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_admin_id,published_at,
+         credit_guarantee_waived,credit_guarantee_waived_revision)
        SELECT $1,d.version_id,v.account_id,a.owner_user_id,a.game_id,d.release_id,d.content_hash,
-              'LEGACY_APPROVED','admin',d.reviewer_admin_id,d.decided_at
+              'LEGACY_APPROVED','admin',d.reviewer_admin_id,d.decided_at,$4,$5
          FROM zzsh_supply.review_decision d
          JOIN zzsh_supply.listing_version v ON v.id=d.version_id
          JOIN zzsh_supply.rental_account a ON a.id=v.account_id
         WHERE d.version_id=$2 AND d.release_id=v.rule_release_id AND d.content_hash=v.content_hash
           AND d.decision='APPROVE' AND d.reviewer_admin_id=$3
        RETURNING id`,
-      [newSupplyId("publication"), v.id, actorId],
+      [newSupplyId("publication"), v.id, actorId, waivedRevision ? true : null, waivedRevision],
     );
     if (publication.rowCount !== 1) throw conflict("审核决定未能形成发布事实");
   } else {
@@ -1653,32 +1693,110 @@ export async function reviewListing(
   }
   await bumpAccount(client, a);
 }
-export async function setOwnerPaused(
+/** Existing order/channel facts must be resolved before a listing can be permanently removed. */
+async function assertDelistPaymentSafe(client: PoolClient, accountId: string, pendingOrderId: string | null): Promise<void> {
+  const functions = (await client.query<{ posting: boolean; prestart: boolean; support: boolean; controlled: boolean; supportZero: boolean }>(`SELECT
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.native_refund_terminal_complete(text)'),'EXECUTE'),false) AS posting,
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.native_prestart_refund_terminal_complete(text)'),'EXECUTE'),false) AS prestart,
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.support_cancellation_refund_terminal_complete(text)'),'EXECUTE'),false) AS support,
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)'),'EXECUTE'),false) AS controlled,
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.support_poststart_cancellation_complete(text)'),'EXECUTE'),false) AS "supportZero"`)).rows[0];
+  if (!functions) throw conflict("订单收款状态暂不能确认，请联系客服");
+  const checks: string[] = [];
+  if (functions.posting) checks.push("(i.payment_source='JOINPAY' AND i.basis_kind='POSTING' AND zzsh_order.native_refund_terminal_complete(i.id))");
+  if (functions.prestart) checks.push("(i.payment_source='JOINPAY' AND i.basis_kind='PRESTART_TERMINATION' AND zzsh_order.native_prestart_refund_terminal_complete(i.id))");
+  if (functions.support) checks.push("(i.payment_source='JOINPAY' AND i.basis_kind='SUPPORT_CANCELLATION' AND zzsh_order.support_cancellation_refund_terminal_complete(i.id))");
+  if (functions.controlled) checks.push("(i.payment_source='CONTROLLED' AND zzsh_order.local_controlled_refund_terminal_complete(i.id))");
+  const refunded = checks.length ? `EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i
+    WHERE i.order_id=o.id AND i.payment_confirmation_id=pc.id AND i.state='SUCCEEDED' AND i.budget_disposition='CONSUMED'
+      AND i.basis_kind IN ('PRESTART_TERMINATION','SUPPORT_CANCELLATION') AND NOT i.requires_review AND (${checks.join(" OR ")}))` : "false";
+  const zeroRefund = functions.supportZero ? `EXISTS(SELECT 1 FROM zzsh_order.support_poststart_cancellation x
+    WHERE x.order_id=o.id AND x.payment_confirmation_id=pc.id AND x.refund_cents=0
+      AND zzsh_order.support_poststart_cancellation_complete(x.id)
+      AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=pc.id))` : "false";
+  const unresolved = await client.query(`SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=$1 AND o.id IS DISTINCT FROM $2
+    AND (o.status IN ('PAID','COMPLETED') OR o.paid_confirmation_id IS NOT NULL
+      OR EXISTS(SELECT 1 FROM zzsh_order.payment_request q WHERE q.order_id=o.id)
+      OR EXISTS(SELECT 1 FROM zzsh_order.payment_confirmation q WHERE q.order_id=o.id)
+      OR EXISTS(SELECT 1 FROM zzsh_order.payment_channel_transaction q WHERE q.native_order_id=o.id))
+    AND NOT EXISTS(SELECT 1 FROM zzsh_order.payment_confirmation pc
+      JOIN zzsh_order.payment_request p ON p.order_id=o.id AND p.state='ACCEPTED'
+      JOIN zzsh_order.payment_channel_transaction t ON t.native_order_id=o.id AND t.request_id=p.id
+        AND t.channel=p.channel AND t.merchant_identity_id=p.merchant_identity_id AND t.channel_trx_no=pc.provider_transaction_id
+      WHERE pc.id=o.paid_confirmation_id AND pc.order_id=o.id AND pc.disposition='APPLIED'
+        AND pc.merchant_scope_id=p.merchant_identity_id AND pc.merchant_order_no=p.channel_order_no
+        AND pc.amount_cents=p.amount_cents AND pc.currency=p.currency
+        AND ((p.channel='JOINPAY' AND pc.source='JOINPAY' AND pc.joinpay_request_id=p.id AND pc.joinpay_anchor_id=t.id AND t.evidence_level='JOINPAY_VERIFIED'
+            AND EXISTS(SELECT 1 FROM zzsh_order.joinpay_collection_evidence e WHERE e.id=pc.joinpay_evidence_id AND e.request_id=p.id
+              AND e.event='E4' AND e.schema_outcome='VALID' AND e.signature_outcome='MATCH' AND e.binding_outcome='MATCH'
+              AND e.channel_trx_no=pc.provider_transaction_id AND e.provider_paid_at=pc.provider_paid_at))
+          OR (p.channel='CONTROLLED' AND pc.source='CONTROLLED' AND t.confirmation_id=pc.id AND t.evidence_level='CONTROLLED_TEST'))
+        AND NOT EXISTS(SELECT 1 FROM zzsh_order.payment_confirmation other WHERE other.order_id=o.id AND other.id<>pc.id)
+        AND NOT EXISTS(SELECT 1 FROM zzsh_order.payment_channel_transaction other WHERE other.native_order_id=o.id AND other.id<>t.id)
+        AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=pc.id
+          AND (i.requires_review OR i.state IN ('UNKNOWN','REVIEW_REQUIRED')
+            OR (i.state IN ('SUCCEEDED','FAILED') AND (${checks.length ? checks.join(" OR ") : "false"}) IS NOT TRUE)))
+        AND ((o.status='COMPLETED' AND EXISTS(SELECT 1 FROM zzsh_order.settlement_posting s
+          WHERE s.order_id=o.id AND s.payment_confirmation_id=pc.id AND s.captured_cents=pc.amount_cents))
+          OR (o.status='CANCELLED' AND (${refunded} OR ${zeroRefund})
+            AND NOT EXISTS(SELECT 1 FROM zzsh_order.channel_refund_intent i WHERE i.payment_confirmation_id=pc.id
+              AND i.state IN ('READY','SUBMITTING','UNKNOWN','PROCESSING','REVIEW_REQUIRED'))))) LIMIT 1`, [accountId, pendingOrderId]);
+  if (unresolved.rowCount) throw conflict("账号存在待核对的付款或退款，请先联系客服处理");
+}
+
+/** Caller holds the owner, game and account locks through the full transaction. */
+export async function delistListing(
   client: PoolClient,
   a: PublishingAccount,
   body: Record<string, unknown>,
-  paused: boolean,
-  gate: SupplyGateReader,
-): Promise<void> {
+  actor: { userId: string; sessionId: string; requestId: string },
+) {
   checkAccountRevision(a, body.expectedRevision);
-  if (paused && a.current_version_id && (await currentVersion(client, a)).origin === "LEGACY_OBSERVATION")
-    throw conflict("历史账号记录不可修改接单状态，请联系客服");
-  if (!paused) {
-    const v = await currentVersion(client, a);
-    const publication = await readListingPublication(client, a, v);
-    if (!isEffectivePublicationState(v.review_state, publication?.source) || a.staff_restricted)
-      throw conflict("请先完成资料审核或处理客服限制");
-    const blockers = await publicationBlockers(client, a, v, gate);
-    if (blockers.length) throw conflict(blockers.join(","));
-    await assertAccepted(client, a, v);
-    await assertMediaReady(client, a, v, "direct", true);
+  if (a.owner_user_id !== actor.userId) throw notFound();
+  if (a.lifecycle !== "ACTIVE") throw conflict("该账号已结束出租，不能再次下架");
+  await requireFreshPaymentSnapshot(client);
+  if (await isRetiredMigratedAccount(client, a)) throw conflict("历史账号仅保留记录，请重新填写资料上架");
+  const version = await currentVersion(client, a);
+  const publication = await readListingPublication(client, a, version);
+  if (version.origin !== "NATIVE" || !isEffectivePublicationState(version.review_state, publication?.source))
+    throw conflict("当前账号未上架或仅保留历史资料");
+  const occupancy = await readAccountOccupancyFacts(client, a.id);
+  if (occupancy.state === "UNKNOWN") throw conflict("账号订单状态暂不能确认，请联系客服");
+  if (occupancy.state === "OCCUPIED" && occupancy.kind !== "PENDING_PAYMENT")
+    throw conflict("账号已有已付款或进行中的订单，请先处理订单");
+  let cancelledOrderId: string | null = null;
+  if (occupancy.kind === "PENDING_PAYMENT") {
+    const pending = (await client.query<{ id: string }>(`SELECT id FROM zzsh_order.rental_order
+      WHERE account_id=$1 AND owner_user_id=$2 AND status='PENDING_PAYMENT' FOR UPDATE`, [a.id,a.owner_user_id])).rows;
+    if (pending.length !== 1) throw conflict("待付款订单状态已变化，请刷新后重试");
+    const paymentFacts = (await client.query<UnpaidPaymentFacts>(`SELECT ${UNPAID_PAYMENT_FACT_COLUMNS}
+      FROM zzsh_order.rental_order o WHERE o.id=$1`, [pending[0]!.id])).rows[0];
+    if (!paymentFacts || hasUnpaidPaymentEvidence(paymentFacts)) throw conflict("待付款订单的支付状态需核对，请先联系客服处理");
+    await assertDelistPaymentSafe(client, a.id, pending[0]!.id);
+    const updated = await client.query(`UPDATE zzsh_order.rental_order SET status='CANCELLED',cancel_reason='OWNER_DELISTED',
+      cancelled_at=clock_timestamp(),updated_at=clock_timestamp(),revision=revision+1
+      WHERE id=$1 AND account_id=$2 AND status='PENDING_PAYMENT' AND paid_confirmation_id IS NULL AND paid_at IS NULL`, [pending[0]!.id,a.id]);
+    if (updated.rowCount !== 1) throw conflict("待付款订单状态已变化，请刷新后重试");
+    cancelledOrderId = pending[0]!.id;
+    await recordAudit(client, { actorType:"user",actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,
+      action:"order.reservation.cancelled",objectType:"rental_order",objectId:cancelledOrderId,outcome:"SUCCESS",reason:"OWNER_DELISTED",
+      details:{before:{status:"PENDING_PAYMENT"},after:{status:"CANCELLED",cancelReason:"OWNER_DELISTED"},accountId:a.id,channelClosed:false} });
   }
-  await client.query(
-    `UPDATE zzsh_supply.rental_account SET owner_paused=$2 WHERE id=$1`,
-    [a.id, paused],
-  );
-  a.owner_paused = paused;
+  else await assertDelistPaymentSafe(client, a.id, null);
+  const remaining = await readAccountOccupancyFacts(client, a.id);
+  if (remaining.state !== "FREE") throw conflict("账号还有未处理的订单，请联系客服");
+  await client.query(`UPDATE zzsh_supply.rental_account SET lifecycle='DELISTED',owner_paused=false WHERE id=$1`, [a.id]);
+  a.lifecycle = "DELISTED";
+  a.owner_paused = false;
   await bumpAccount(client, a);
+  let guaranteeRefund: Awaited<ReturnType<typeof enqueueDelistedGuaranteeRefund>>;
+  try {
+    guaranteeRefund = await enqueueDelistedGuaranteeRefund(client, {accountId:a.id,ownerUserId:a.owner_user_id,requestId:actor.requestId});
+  } catch {
+    throw conflict("保证金退款暂不能确认，请联系客服处理后再下架");
+  }
+  if (guaranteeRefund.state === "REVIEW_REQUIRED") throw conflict("保证金退款需要核对，请联系客服处理后再下架");
+  return {cancelledOrderId,guaranteeRefund};
 }
 export async function restrictListing(
   client: PoolClient,
@@ -2036,7 +2154,9 @@ export async function listingDetail(
   }
   if (!v) {
     if (viewer === "public") throw notFound();
-    return { account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a, version: null };
+    const retiredLegacy = await isRetiredMigratedAccount(client, a);
+    return { account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a, version: null,
+      ...(retiredLegacy ? { available: false, blockers: ["LEGACY_LISTING_RELIST_REQUIRED"] } : {}) };
   }
   const observed = { gate: null as SupplyGate | null, publication: undefined as ListingPublication | null | undefined };
   // The readiness check and the public projection read the same version's media;
@@ -2183,7 +2303,6 @@ export async function listingDetail(
     ownerName,
     agreement,
     account: viewer === "owner" ? { ...a, display_no: publicAccountNumber(a.display_no) } : a,
-    ...(viewer === "owner" && v.origin === "LEGACY_OBSERVATION" ? { canPrepareLegacyCancelledDraft: observed.gate?.occupancy === "FREE" && await canPrepareLegacyCancelledDraft(client,a) } : {}),
     version: {
       schemaVersion: v.schema_version,
       id: v.id,

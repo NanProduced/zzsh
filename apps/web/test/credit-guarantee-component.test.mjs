@@ -48,7 +48,7 @@ async function mount(fetchImpl, { history = false } = {}) {
   Object.assign(globalThis, { window: browser, document: browser.document, HTMLElement: browser.HTMLElement, Element: browser.Element, Node: browser.Node, Event: browser.Event, DOMException: browser.DOMException, IS_REACT_ACT_ENVIRONMENT: true });
   // The guarantee-history read is a separate endpoint; credit-call counting tests isolate it unless opted in.
   globalThis.fetch = history ? fetchImpl : async (url, init) => String(url).includes("/api/account/wallet/guarantees") ? new Response(JSON.stringify({ error: { code: "GUARANTEE_HISTORY_UNAVAILABLE" } }), { status: 503 }) : fetchImpl(url, init);
-  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }) });
+  const module = loadTs(componentPath, { "lucide-react": icons, "next/link": ({ scroll, ...props }) => React.createElement("a", props), "./credit-center.css": {}, "../session/user-session-provider": { useUserSession: () => session, useUserSessionStore: () => store }, "../../lib/credit-guarantee-client": loadTs(clientPath), "../../lib/supply-client": loadTs(supplyClientPath), "../../lib/order-client": loadTs(orderClientPath), "@/components/ui/information": loadInformation({ "lucide-react": icons }), "@/components/ui/alert-dialog": { ConfirmAlertDialog: ({open,title,description,consequences,confirmLabel,onConfirm,busy,confirmDisabled}) => open ? React.createElement("div", {role:"dialog"}, title,description,consequences,React.createElement("button",{type:"button",onClick:onConfirm,disabled:busy||confirmDisabled},confirmLabel)) : null } });
   const host = browser.document.createElement("div"); browser.document.body.append(host);
   const root = requireFromTree("react-dom/client").createRoot(host);
   await React.act(async () => root.render(React.createElement(module.CreditCenter, { scope: "user-A:1" })));
@@ -73,6 +73,40 @@ test("credit overview uses the explicitly supported read route", async () => {
     assert.equal(result.credit.score, 70);
     assert.deepEqual(reads, [{ url: "/api/account/credit/overview", method: "GET" }]);
   } finally { globalThis.fetch = original; }
+});
+
+test("demo guarantee payment retains its original confirmation key after a lost response", async () => {
+  setupStorage(false);
+  const row = { accountId:"account-1",displayNo:"ZZ-001",gameId:"delta",versionId:"v1",priceVersionId:"p1",releaseId:"r1",baseCents:"10000",requiredCents:"500",score:70,state:"REQUIRED",reference:null };
+  let phase = "REQUIRED", confirmationCount = 0; const keys = [];
+  const mounted = await mount(async (url, init) => {
+    const target=String(url);
+    if (target.includes("/api/account/credit/overview")) return Response.json({ ...overview(),paymentMode:"SIMULATED",guarantees:[{...row,state:phase,
+      ...(phase === "PAYMENT_PENDING" ? {paymentId:"pay-1",paymentState:"REQUESTED",paymentProviderState:"NOT_AUTHORIZED",paymentAmountCents:"500",demoPaymentEligible:true} : {})}] });
+    if (target.includes("/api/account/credit/accounts/account-1/payment-intents") && !target.endsWith("/demo-confirm")) {
+      phase="PAYMENT_PENDING";return Response.json({paymentId:"pay-1",status:"REQUESTED",amountCents:"500"});
+    }
+    if (target.endsWith("/demo-confirm")) {
+      keys.push(init.headers["idempotency-key"]); confirmationCount++;
+      if (confirmationCount===1) throw Error("simulated response loss");
+      phase="SATISFIED";return Response.json({paymentId:"pay-1",status:"CONFIRMED",scope:"LOCAL_DEMO_SIMULATED",bankArrival:"UNKNOWN"});
+    }
+    return Response.json({items:[],nextCursor:null});
+  });
+  try {
+    const click = async text => {const button=[...mounted.browser.document.querySelectorAll("button")].find(item=>item.textContent.includes(text));assert.ok(button,text);await React.act(async()=>{button.click();await new Promise(setImmediate);});};
+    await click("缴纳保证金");assert.match(mounted.browser.document.body.textContent,/测试环境不会发生真实扣款/);
+    await click("模拟付款");assert.match(mounted.host.textContent,/本次操作结果暂未确认/);
+    await click("继续原请求");assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);assert.match(mounted.host.textContent,/模拟缴纳已完成/);
+  } finally {await React.act(async()=>mounted.root.unmount());await mounted.browser.happyDOM.abort();}
+});
+
+test("an unavailable guarantee channel offers no payment action", async () => {
+  setupStorage(false);const calls=[];
+  const data={...overview(),guarantees:[{accountId:"account-1",displayNo:"ZZ-001",gameId:"delta",versionId:"v1",priceVersionId:"p1",releaseId:"r1",baseCents:"10000",requiredCents:"500",score:70,state:"REQUIRED",reference:null}]};
+  const mounted=await mount(async(url,init)=>{calls.push(init.method);return String(url).includes("/api/account/credit/overview")?Response.json(data):Response.json({items:[],nextCursor:null});});
+  try {assert.match(mounted.host.textContent,/缴纳服务暂不可用，请联系客服/);assert.ok(![...mounted.host.querySelectorAll("button")].some(x=>x.textContent==="缴纳保证金"));assert.ok(calls.every(x=>x==="GET"));}
+  finally{await React.act(async()=>mounted.root.unmount());await mounted.browser.happyDOM.abort();}
 });
 
 test("credit write library still refuses a POST when the original intent cannot be persisted", async () => {

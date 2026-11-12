@@ -21,7 +21,7 @@ const getPath = new RegExp(
   `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id}|/legacy-images/${slot})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation|/legacy-images/(?:display|penalty)/${slot})?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
-  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents|games/${id}/owner-income-preview)$`,
+  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|delist)|media/upload-intents|games/${id}/owner-income-preview)$`,
 );
 const putPath = new RegExp(
   `^/(?:accounts/${id}/draft|favorites/${id}|media/uploads/${id})$`,

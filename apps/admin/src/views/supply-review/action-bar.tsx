@@ -35,7 +35,7 @@ export function SupplyActionDialog({ title, objectLabel, imageSrc, stale, unknow
       </label>
       {feedback && <StatusMessage themeAware error={feedback.kind === "error" ? feedback.message : undefined} success={feedback.kind === "success" ? feedback.message : undefined} />}
       {conflict && <Alert variant="warning"><TriangleAlert aria-hidden="true" /><AlertTitle>资料已变化，原因已保留</AlertTitle><AlertDescription>请刷新后重新核对，再决定是否继续。</AlertDescription><AlertAction><Button variant="outline" onClick={onRefresh} disabled={busy}>刷新详情</Button></AlertAction></Alert>}
-      {stale && <Alert variant="warning"><TriangleAlert aria-hidden="true" /><AlertTitle>原账号版本已失效</AlertTitle><AlertDescription>操作被拒绝或读取失败，已保留原因。请返回核对当前资料后重新发起操作。</AlertDescription><AlertAction><Button variant="outline" onClick={onRecheck} disabled={busy}>返回核对（保留原因）</Button></AlertAction></Alert>}
+      {stale && <Alert variant="warning"><TriangleAlert aria-hidden="true" /><AlertTitle>账号资料已变化</AlertTitle><AlertDescription>操作被拒绝或读取失败，已保留原因。请返回核对当前资料后重新发起操作。</AlertDescription><AlertAction><Button variant="outline" onClick={onRecheck} disabled={busy}>返回核对（保留原因）</Button></AlertAction></Alert>}
       {unknown && <Alert variant="warning" role="status"><TriangleAlert aria-hidden="true" /><AlertTitle>结果未知</AlertTitle><AlertDescription>确认按钮仅重试原操作；确认结果前不能修改原因或另发操作。</AlertDescription></Alert>}
       <DialogFooter>
         <Button variant="outline" size="lg" onClick={onClose} disabled={locked}>取消</Button>

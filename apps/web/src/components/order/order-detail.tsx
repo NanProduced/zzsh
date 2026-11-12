@@ -44,6 +44,9 @@ function attentionFor(order: Order, facts: OrderStageFacts | null, readFailed: b
     return { tone: "info", title: "等待对方确认结算", note: "你已在这一版完成操作；金额或版本变化会生成新版本并要求重新确认。", actions: [] };
   }
   if (order.status === "CANCELLED") {
+    if (order.cancelReason === "OWNER_DELISTED") return { tone: "warning", title: "号主已下架账号，订单已取消",
+      note: party === "renter" ? "请勿继续使用之前的付款码；如果已经扣款，请联系客服核对。" : "待付款订单已关闭；如租客仍通过旧付款码支付，请联系客服核对。",
+      actions: [party === "renter" ? "browse" : "manage"] };
     return {
       tone: "info",
       title: order.cancelReason === "PRESTART_TERMINATED" ? "未开租订单已终止" : order.cancelReason === "MANUAL_CLOSE" ? "客服已手动结束本单" : "账号占用已解除",
@@ -250,7 +253,7 @@ function OrderTimeline({ order, facts, party }: { order: Order; facts: OrderStag
   if (order.cancelledAt) {
     events.push({
       key: "cancelled",
-      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : order.cancelReason === "SUPPORT_UNPAID" ? "（客服处理）" : order.cancelReason === "PRESTART_TERMINATED" ? "（未开租终止）" : ""}`,
+      label: `取消${order.cancelReason === "USER" ? "（租客取消）" : order.cancelReason === "TIMEOUT" ? "（到期未支付）" : order.cancelReason === "SUPPORT_UNPAID" ? "（客服处理）" : order.cancelReason === "OWNER_DELISTED" ? "（号主下架账号）" : order.cancelReason === "PRESTART_TERMINATED" ? "（未开租终止）" : ""}`,
       time: order.cancelledAt ?? null,
       state: "closed",
     });

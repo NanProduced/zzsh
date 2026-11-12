@@ -157,11 +157,13 @@ export const supplyBlockerMessages: Record<string, string> = {
   REQUIRED_ITEM_UNPRICED: "必填物品缺少当前价目，暂不能报价",
   FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
   ACCOUNT_NOT_PUBLISHABLE: "历史异常或归档资料需先处理",
+  ACCOUNT_DELISTED: "账号已下架，如需出租请重新填写上架资料",
+  LEGACY_LISTING_RELIST_REQUIRED: "历史账号仅保留记录，如需出租请重新填写上架资料",
   PUBLISHER_BAIL_UNCONFIRMED: "暂时无法确认保证金状态，请稍后重新读取",
   OCCUPIED: "账号当前被占用",
   OCCUPANCY_UNKNOWN: "暂不能确认账号是否空闲",
   REVIEW_REQUIRED: "等待资料审核",
-  OWNER_PAUSED: "号主已暂停接单",
+  OWNER_PAUSED: "原账号状态待核，请联系客服",
   STAFF_RESTRICTED: "客服限制尚未解除",
   CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
   PUBLICATION_REQUIRED: "公开发布事实尚未形成",
@@ -419,7 +421,7 @@ export const supplyApi = {
     ),
   mine: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId), { signal }),
-  operationResult: async (action: "pause" | "resume" | "withdraw", accountId: string, body: Record<string, unknown>, key: string, signal?: AbortSignal) => {
+  operationResult: async (action: "pause" | "resume" | "withdraw" | "delist", accountId: string, body: Record<string, unknown>, key: string, signal?: AbortSignal) => {
     const operation = `supply.publication.${action}`;
     const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([operation, accountId, body])));
     const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
@@ -472,23 +474,10 @@ export const supplyApi = {
       idempotencyKey: key,
       signal,
     }),
-  setPaused: (
-    accountId: string,
-    paused: boolean,
-    expectedRevision: string,
-    key: string,
-    reason?: string,
-    signal?: AbortSignal,
-  ) =>
-    supplyRequest<MySupply>(
-      "/accounts/" + id(accountId) + (paused ? "/pause" : "/resume"),
-      {
-        method: "POST",
-        body: { expectedRevision, ...(reason ? { reason } : {}) },
-        idempotencyKey: key,
-        signal,
-      },
-    ),
+  delist: (accountId: string, expectedRevision: string, key: string, signal?: AbortSignal) =>
+    supplyRequest<MySupply>("/accounts/" + id(accountId) + "/delist", {
+      method: "POST", body: { expectedRevision }, idempotencyKey: key, signal,
+    }),
   saveDraft: (
     accountId: string,
     body: DraftInput & { expectedRevision: string },

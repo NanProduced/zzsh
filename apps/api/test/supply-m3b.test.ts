@@ -1,4 +1,5 @@
 import { runSupplyPoolChecks } from "./supply-pool-checks";
+import { syntheticPublicationCreditGate } from "./funding-authority-fixtures";
 import { admitTestDatabase, assertFreshRegressionRun, legacySkinCategoryInstalled } from "./database-test-support";
 import { runPublishingChecks } from "./supply-publishing-checks";
 import { runPricingCompatChecks } from "./supply-pricing-compat-checks";
@@ -458,7 +459,7 @@ test("M3-B foundations and M3-C publication, authorization and review behave und
       }, undefined, { testOperationsEnabled: true }),
       pool: runtimePool,
       mediaStorage,
-      testSupplyGateReader: async (client:PoolClient,a:{id:string}) => {await readProbe.run?.(client,a);return publicationGates.get(a.id) ?? {publisherBail:"UNKNOWN" as const,occupancy:"UNKNOWN" as const,reference:null};},
+      testSupplyGateReader: async (client:PoolClient,a:{id:string}) => {await readProbe.run?.(client,a);return syntheticPublicationCreditGate(client,a.id,publicationGates.get(a.id) ?? {publisherBail:"UNKNOWN",occupancy:"UNKNOWN",reference:null});},
     };
     if(RESOURCE_SET==="pricing_compat")personalFixture.runtimeAuth=authOptions;
     app = await createApp({

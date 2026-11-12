@@ -4,9 +4,10 @@ import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-se
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertSupportOrderAccess, type ManualCloseActor } from "./manual-close";
 import { lockOrderPartiesInOrder } from "./order";
+import { hasUnpaidPaymentEvidence, requireFreshPaymentSnapshot, UNPAID_PAYMENT_FACT_COLUMNS, type UnpaidPaymentFacts } from "./unpaid-payment-facts";
 
 type Facts = { id: string; accountId: string; renterUserId: string; ownerUserId: string; gameId: string;
-  status: string; revision: string; cancelReason: string | null; hasPayment: boolean; hasRequest: boolean; hasGroup: boolean };
+  status: string; revision: string; cancelReason: string | null } & UnpaidPaymentFacts;
 const missing = () => new SecurityApiError(404, "NOT_FOUND", "Order not found");
 
 async function assertSchema(client: PoolClient) {
@@ -20,19 +21,16 @@ async function assertSchema(client: PoolClient) {
 async function facts(client: PoolClient, orderId: string): Promise<Facts> {
   const row = (await client.query<Facts>(`SELECT o.id,o.account_id AS "accountId",o.renter_user_id AS "renterUserId",
     o.owner_user_id AS "ownerUserId",o.game_id AS "gameId",o.status,o.revision::text,o.cancel_reason AS "cancelReason",
-    EXISTS(SELECT 1 FROM zzsh_order.payment_confirmation p WHERE p.order_id=o.id) AS "hasPayment",
-    EXISTS(SELECT 1 FROM zzsh_order.payment_request r WHERE r.order_id=o.id) AS "hasRequest",
-    EXISTS(SELECT 1 FROM zzsh_order.im_order_group g WHERE g.order_id=o.id) AS "hasGroup"
+    ${UNPAID_PAYMENT_FACT_COLUMNS}
     FROM zzsh_order.rental_order o WHERE o.id=$1`, [orderId])).rows[0];
   if (!row) throw missing();
-  if (![row.hasPayment, row.hasRequest, row.hasGroup].every(value => typeof value === "boolean"))
-    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Payment facts are unavailable");
+  hasUnpaidPaymentEvidence(row);
   return row;
 }
 
 function eligibility(row: Facts) {
   const reason = row.status !== "PENDING_PAYMENT" ? "ORDER_NOT_PENDING"
-    : row.hasPayment || row.hasRequest || row.hasGroup ? "PAYMENT_REVIEW_REQUIRED" : null;
+    : hasUnpaidPaymentEvidence(row) ? "PAYMENT_REVIEW_REQUIRED" : null;
   return { allowed: reason === null, reason };
 }
 
@@ -48,8 +46,7 @@ export async function readSupportUnpaidCancellation(client: PoolClient, actor: M
 export async function supportCancelUnpaidOrder(client: PoolClient, actor: ManualCloseActor, input: {
   orderId: string; expectedOrderRevision: string; reason: string; requestId: string;
 }) {
-  const isolation = (await client.query("SHOW transaction_isolation")).rows[0]?.transaction_isolation;
-  if (isolation !== "read committed") throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Payment recheck requires read committed isolation");
+  await requireFreshPaymentSnapshot(client);
   const access = await lockActor(client, actor.userId);
   if (access.passwordChangeRequired) throw new SecurityApiError(403, "FORBIDDEN", "Password change required");
   await assertAdminCommandAuthorizedInTransaction(client, actor);

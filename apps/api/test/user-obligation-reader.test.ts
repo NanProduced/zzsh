@@ -69,6 +69,10 @@ test("each pending obligation is reported with its own kind", async () => {
 test("unknown or unreadable sources fail closed", async () => {
   assert.deepEqual(await readUserObligations("u", client({ installed: false }).client), { status: "UNKNOWN", obligation: "LISTING", reason: "SOURCE_NOT_INSTALLED" });
   assert.deepEqual(
+    await readUserObligations("u", client({ installed: (r) => !r.includes("zzsh_order.legacy_inflight_register") }).client),
+    { status: "UNKNOWN", obligation: "ORDER", reason: "SOURCE_NOT_INSTALLED" },
+  );
+  assert.deepEqual(
     await readUserObligations("u", client({ installed: (r) => !r.includes("zzsh_order.joinpay_withdrawal_intent") }).client),
     { status: "UNKNOWN", obligation: "WITHDRAWAL", reason: "SOURCE_NOT_INSTALLED" },
   );

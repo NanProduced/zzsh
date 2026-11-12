@@ -691,6 +691,9 @@ export function orderProgressView({ order, party, facts, readFailed, payment = n
   }
 
   if (status === "CANCELLED") {
+    if (order.cancelReason === "OWNER_DELISTED") return { ...base, tone: "warning", title: "号主已下架账号，订单已取消", owner: "暂无",
+      note: party === "renter" ? "请勿继续使用之前的付款码；如果已经扣款，请联系客服核对。" : "待付款订单已关闭；如租客仍通过旧付款码支付，请联系客服核对。",
+      primary: progressSupport, secondary: [progressRefresh] };
     const prestart = order.cancelReason === "PRESTART_TERMINATED";
     // The existing attention band already owns the one role-specific "browse/manage" next step;
     // repeating it here would give a cancelled order two competing primary exits.
