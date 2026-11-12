@@ -330,8 +330,9 @@ test("direct display bytes are authorized, decoded and hashed before OSS process
   const finalized = await finalizeMediaUpload(pool as unknown as Parameters<typeof finalizeMediaUpload>[0], actor, prepared,
     async (_client, accountId) => { assert.equal(accountId, "account_1"); });
   assert.equal(finalized.contentHash, upload.contentHash);
-  assert.deepEqual(dbWrites.filter(write => write.sql.includes("account_image_variant")).map(write => write.values.slice(0, 4)),
-    prepared.variants.map(variant => [finalized.assetId, variant.maxEdge, variant.objectKey, ossDigest(generated.get(OSS_OPTIONS.objectPrefix + variant.objectKey)!)]));
+  const variantWrite = dbWrites.find(write => write.sql.includes("account_image_variant"));
+  assert.equal(variantWrite?.values[0], finalized.assetId);
+  assert.deepEqual(JSON.parse(variantWrite?.values[1] as string), prepared.variants.map(variant => ({ ...variant, sha256: ossDigest(generated.get(OSS_OPTIONS.objectPrefix + variant.objectKey)!) })));
   assert.ok(prepared.variants.every(variant => variant.watermarkRevision === "3"));
   badCover = true;
   await assert.rejects(() => direct.generateVariants(prepared.publicHash, prepared.image, { ...policy, position: "se", logoStorageKey: logo }, () => {}), /variant is unavailable or invalid/);

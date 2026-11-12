@@ -31,6 +31,7 @@ import { OWNER_INCOME_PREVIEW_MAX_BYTES, parseOwnerIncomePreviewInput, readOwner
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
+import { attachAccountImageCdn } from "./account-image-cdn";
 import {
   assertGameScope,
   bodyOf,
@@ -199,7 +200,7 @@ export async function handlePublishingRoute(
       {
         releaseId: release.id,
         generation: release.generation,
-        ...(options.mediaStorage.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
+        ...(options.mediaStorage?.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
         termOptions,
         declarationOptions: {
           next_season_pass: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "下赛季通行证计划", type: "BOOLEAN", public: true },
@@ -263,7 +264,7 @@ export async function handlePublishingRoute(
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
           const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail);
-          if (!publicMatch[2]) return { detail };
+          if (!publicMatch[2]) return { detail: (await attachAccountImageCdn(client, [detail], options.mediaStorage?.accountImageCdn))[0]! };
           if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
           const asset = await loadMediaAsset(client, publicMatch[2]);
           const v = await readCurrentVersion(client, { ...a, current_version_id: String(detail.versionId) });
@@ -355,7 +356,7 @@ export async function handlePublishingRoute(
             values,
           )
         ).rows;
-        const items: unknown[] = [];
+        const items: Record<string, unknown>[] = [];
         let last = cursor;
         let hasMore = false;
         const page = listingCandidatePage(client);
@@ -399,7 +400,7 @@ export async function handlePublishingRoute(
         }
         if (rows.length === 200) hasMore = true;
         return {
-          items,
+          items: await attachAccountImageCdn(client, items, options.mediaStorage?.accountImageCdn),
           nextCursor: hasMore
             ? Buffer.from(
                 JSON.stringify({

@@ -60,6 +60,7 @@ import { mountAdminSelfSettingsHandlers } from "./admin-self-settings";
 import { mountAdminBffHandlers } from "../bff/admin-bff";
 import { createLocalMediaStorage, type MediaStorage } from "../supply/media";
 import { resolveMediaStorage } from "../supply/media-oss";
+import { AccountImageCdnLifecycle } from "../supply/account-image-cdn-worker";
 import { mountSystemConfigurationHandlers } from "../system/system-configuration-routes";
 import { mountAdminOverview } from "./admin-overview";
 import { mountAdminDashboard } from "./admin-dashboard";
@@ -1393,6 +1394,9 @@ export async function mountAuthHandlers(
   if (yunxinConsultation) yunxinConsultation.readPublicAccount = async (client, id) =>
     readPublicListing(client, await readPublishingAccount(client, id), supplyGateReader, legacyPublicAdmission, false, "DETAIL", legacyPublicAdmissionDetail);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
+  if (mediaStorage.accountImageCdn) {
+    app.get(AccountImageCdnLifecycle).start({ pool: options.pool, storage: mediaStorage, cdn: mediaStorage.accountImageCdn, gate: supplyGateReader });
+  }
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();
     if (!raw) return undefined;

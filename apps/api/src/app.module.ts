@@ -12,6 +12,7 @@ import { JoinpayCollectionRecoveryLifecycle } from "./order/joinpay-collection-r
 import { JoinpayFundsRecoveryLifecycle } from "./finance/joinpay-funds-recovery";
 import { JoinpayAccountObservationLifecycle } from "./finance/joinpay-account-observer";
 import { EcsDemoRefundLifecycle } from "./order/ecs-demo-refund-lifecycle";
+import { AccountImageCdnLifecycle } from "./supply/account-image-cdn-worker";
 
 @Module({})
 export class AppModule {
@@ -26,7 +27,7 @@ export class AppModule {
         ...(orderSweep ? [OrderSweepModule.register(orderSweep)] : []),
         ...(distributionDue ? [DistributionDueModule.register(distributionDue)] : []),
       ],
-      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle, JoinpayAccountObservationLifecycle, EcsDemoRefundLifecycle],
+      providers: [MessageScopeRecoveryLifecycle, OrderDispatchLifecycle, OrderTeamLifecycle, OrderImEventRecoveryLifecycle, JoinpayCollectionRecoveryLifecycle, JoinpayFundsRecoveryLifecycle, JoinpayAccountObservationLifecycle, EcsDemoRefundLifecycle, AccountImageCdnLifecycle],
     };
   }
 }

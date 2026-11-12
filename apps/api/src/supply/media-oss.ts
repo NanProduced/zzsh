@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { ConfigurationError } from "../config/config";
 import { accountMediaBrowserOrigin, createOssAccountMedia, type OssAccountMedia } from "./account-media-oss";
+import { createAccountCdnRefresh, createAccountImageCdn, loadAccountImageCdnTarget, type AccountImageCdn } from "./account-image-cdn";
 import { ALLOWED_IMAGE_MIMES, createLocalMediaStorage, MediaStorageError, STORAGE_KEY_PATTERN, type ImageMime, type MediaStorage } from "./media";
 
 export const OSS_REQUEST_TIMEOUT_MS = 30_000;
@@ -115,7 +116,7 @@ function createClient(options: OssMediaStorageOptions, credentials: OssCredentia
 export function createOssMediaStorage(
   options: OssMediaStorageOptions,
   credentials: OssCredentials,
-  deps: { createClient?: (options: OssMediaStorageOptions, credentials: OssCredentials) => OssObjectClient; accountMedia?: OssAccountMedia } = {},
+  deps: { createClient?: (options: OssMediaStorageOptions, credentials: OssCredentials) => OssObjectClient; accountMedia?: OssAccountMedia; accountImageCdn?: AccountImageCdn } = {},
 ): MediaStorage {
   const createClient = deps.createClient ?? defaultCreateClient;
   const target = Object.freeze({ bucket: options.bucket, region: options.region, endpoint: options.endpoint, objectPrefix: options.objectPrefix });
@@ -124,6 +125,7 @@ export function createOssMediaStorage(
     available: true,
     kind: "oss",
     ...(deps.accountMedia ? { accountMedia: deps.accountMedia } : {}),
+    ...(deps.accountImageCdn ? { accountImageCdn: deps.accountImageCdn } : {}),
     configuration: Object.freeze({ target, credentialMode: credentials.stsToken ? "STS" : "ACCESS_KEY", automaticCredentialRefresh: false }),
     async write(bytes, contentHash, mime) {
       if (!STORAGE_KEY_PATTERN.test(contentHash)) throw new MediaStorageError("content hash is invalid");
@@ -166,18 +168,24 @@ export function createOssMediaStorage(
 export function resolveMediaStorage(env: NodeJS.ProcessEnv, workingDirectory: string): MediaStorage {
   const kind = env.MEDIA_STORAGE?.trim() || "local";
   const browserOrigin = accountMediaBrowserOrigin(env);
+  const cdnTarget = loadAccountImageCdnTarget(env);
+  if (cdnTarget && (kind !== "oss" || (cdnTarget.mode === "serve" && !browserOrigin) || cdnTarget.origin === browserOrigin)) {
+    throw new ConfigurationError("Account CDN requires OSS with a separate CDN domain and account media processing in serve mode");
+  }
   if (browserOrigin && kind !== "oss") throw new ConfigurationError("OSS_ACCOUNT_MEDIA_DIRECT requires MEDIA_STORAGE=oss");
   if (kind === "local") return createLocalMediaStorage(join(workingDirectory, "uploads"));
   if (kind === "oss") {
     const options = loadOssMediaStorageOptions(env);
     const credentials = loadOssCredentials(env);
-    if (!browserOrigin) return createOssMediaStorage(options, credentials);
+    if (!browserOrigin && !cdnTarget) return createOssMediaStorage(options, credentials);
     const client = createClient(options, credentials);
+    const accountImageCdn = cdnTarget ? createAccountImageCdn(cdnTarget, options, client, createAccountCdnRefresh(credentials)) : undefined;
+    if (!browserOrigin) return createOssMediaStorage(options, credentials, { createClient: () => client, accountImageCdn });
     const signer = createClient(options, credentials, browserOrigin);
     const accountMedia = createOssAccountMedia(options, credentials, browserOrigin, client, (key, seconds, process) => signer.signatureUrlV4("GET", seconds, {
       queries: { "response-cache-control": "private, no-store", "response-content-disposition": "inline", ...(process ? { "x-oss-process": process } : {}) },
     }, key));
-    return createOssMediaStorage(options, credentials, { createClient: () => client, accountMedia });
+    return createOssMediaStorage(options, credentials, { createClient: () => client, accountMedia, accountImageCdn });
   }
   throw new ConfigurationError("MEDIA_STORAGE must be local or oss");
 }

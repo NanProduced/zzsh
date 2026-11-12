@@ -8,6 +8,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import type { AccountMediaVariant, OssAccountMedia } from "./account-media-oss";
+import type { AccountImageCdn } from "./account-image-cdn";
 import { readAccountWatermarkPolicy, resolveAccountImageWatermark } from "./account-image-watermark";
 import { isAccountDisplayPubliclyEligible } from "./listing-query";
 import { assertGameScope, bumpCatalogRevision, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
@@ -89,6 +90,7 @@ export type MediaStorage = {
   available: boolean;
   kind: "local" | "oss" | "unavailable";
   readonly accountMedia?: OssAccountMedia;
+  readonly accountImageCdn?: AccountImageCdn;
   readonly configuration?: Readonly<{
     target: Readonly<{ bucket: string; region: string; endpoint: string; objectPrefix: string }>;
     credentialMode: "ACCESS_KEY" | "STS";
@@ -440,13 +442,7 @@ export async function finalizeMediaUpload(
     `UPDATE "zzsh_supply"."media_upload_intent" SET "consumed_at" = clock_timestamp(), "consumed_asset_id" = $1 WHERE "id" = $2`,
     [assetId, prepared.intentId],
   );
-  for (const variant of prepared.variants) {
-    await client.query(
-      `INSERT INTO zzsh_supply.account_image_variant(asset_id, max_edge, object_key, sha256, byte_size, width, height, watermark_revision)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [assetId, variant.maxEdge, variant.objectKey, variant.sha256, variant.byteSize, variant.width, variant.height, variant.watermarkRevision],
-    );
-  }
+  await recordAccountMediaVariants(client, assetId, prepared.variants);
   return {
     assetId,
     gameId: intent.gameId,
@@ -460,6 +456,17 @@ export async function finalizeMediaUpload(
     height: prepared.image.height,
     contentHash: prepared.contentHash,
   };
+}
+
+export async function recordAccountMediaVariants(client: PoolClient, assetId: string, variants: readonly AccountMediaVariant[]): Promise<void> {
+  if (!variants.length) return;
+  await client.query(
+    `INSERT INTO zzsh_supply.account_image_variant(asset_id, max_edge, object_key, sha256, byte_size, width, height, watermark_revision)
+     SELECT $1, v."maxEdge", v."objectKey", v.sha256, v."byteSize", v.width, v.height, v."watermarkRevision"
+       FROM jsonb_to_recordset($2::jsonb) AS v("maxEdge" smallint, "objectKey" text, sha256 text, "byteSize" integer,
+         width smallint, height smallint, "watermarkRevision" bigint)`,
+    [assetId, JSON.stringify(variants)],
+  );
 }
 
 type MediaAssetRow = {

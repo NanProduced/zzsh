@@ -51,7 +51,7 @@ function stagingKey(prefix: string, intentId: string): string {
   return `${prefix}private/account-upload/${intentId}`;
 }
 
-async function readBoundedObject(storage: OssAccountObjectClient, key: string, size: number) {
+export async function readBoundedObject(storage: Pick<OSS, "getStream">, key: string, size: number) {
   const { stream, res } = await storage.getStream(key);
   const chunks: Buffer[] = [];
   let received = 0;

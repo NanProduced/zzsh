@@ -248,7 +248,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
             aria-pressed={thumbnailIndex === index}
             onClick={() => select(thumbnailIndex)}
           >
-            <DetailImage src={item.url} legacy={item.legacy} alt="" className="detail-gallery-thumb-image" />
+            <DetailImage src={item.coverUrl ?? item.url} legacy={item.legacy} alt="" className="detail-gallery-thumb-image" />
             <span className="detail-gallery-thumb-index">{thumbnailIndex + 1}</span>
           </button>
         ))}

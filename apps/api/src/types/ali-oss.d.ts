@@ -24,6 +24,7 @@ declare module "ali-oss" {
     signPostObjectPolicyV4(policy: object, date: Date): string;
     signatureUrlV4(method: "GET", expires: number, request: { queries: Record<string, string> }, name: string): Promise<string>;
     processObjectSave(source: string, target: string, process: string, bucket: string): Promise<{ status: number }>;
+    copy(target: string, source: string, bucket: string, options: { headers: Record<string, string> }): Promise<unknown>;
     delete(name: string, options?: Record<string, unknown>): Promise<{ res: unknown }>;
   }
 
