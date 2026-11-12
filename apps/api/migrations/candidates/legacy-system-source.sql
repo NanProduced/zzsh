@@ -24,7 +24,9 @@ BEGIN
        OR NEW.details#>>'{initialAvatar,created}' IS DISTINCT FROM 'true' OR NEW.details#>>'{initialAvatar,version}' IS DISTINCT FROM '1'
        OR NOT EXISTS (SELECT 1 FROM zzsh_supply.profile_avatar p WHERE p.realm='user' AND p.subject_id=NEW.object_id
          AND p.current_kind='DEFAULT' AND p.current_version=1 AND p.default_preset_id=p.current_preset_id
-         AND p.default_preset_id=NEW.details#>>'{initialAvatar,presetId}') THEN
+         AND p.default_preset_id=NEW.details#>>'{initialAvatar,presetId}')
+       OR NOT EXISTS (SELECT 1 FROM zzsh_auth_user."user" u WHERE u.id=NEW.object_id
+         AND u.image='/api/v1/profile/avatars/user/'||NEW.object_id||'/1') THEN
       RAISE EXCEPTION 'legacy user source or avatar is invalid' USING ERRCODE='42501';
     END IF;
   ELSIF NEW.action IN ('supply.legacy.account_created','supply.publication.legacy_observed','supply.legacy.read_snapshot_recorded') THEN

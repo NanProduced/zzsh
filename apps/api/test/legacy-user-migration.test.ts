@@ -47,7 +47,7 @@ function input(overrides: Partial<LegacyOwnerEvidence> = {}): LegacyOwnerMigrati
 const ACCOUNT_ID = "account-1";
 const STANDIN = "user-standin";
 
-type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean; username?: string | null; displayUsername?: string | null; updatedAt?: string };
+type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean; username?: string | null; displayUsername?: string | null; image?: string | null; updatedAt?: string };
 type CredentialRow = { id: string; userId: string; providerId: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null; legacyPasswordUpgradedAt: string | null };
 type IdentityRow = { user_id: string; account_status: string; identity_status: string; age_status: string; provider: string; provider_reference: string; verified_at: string | null };
 type MapRow = { source_system: string; source_entity: string; legacy_id: string; source_digest: string; account_id: string; version_id: string; evidence_ref: string };
@@ -211,11 +211,13 @@ class FakeClient {
       return { rows: [row as T], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')) {
+      const user=this.users.get(String(values[0]));if(user)user.image=String(values[1]);
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {
       const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: values[4] === null ? null : String(values[4]), phoneNumberVerified: values[6] === true, suspended: false,
-        ...(values.length > 5 ? { username: String(values[5]) } : {}) };
+        ...(sql.includes('"displayUsername"') ? { username: String(values[5]) } : {}),
+        ...(sql.includes('"image"') ? { image: String(values[sql.includes('"displayUsername"')?7:5]) } : {}) };
       this.users.set(row.id, row);
       return { rows: [], rowCount: 1 };
     }
@@ -325,6 +327,8 @@ test("system legacy user import binds each source and checks the batch fence on 
   assert.equal(audit.details.sourceDatasetSha256, sourceDatasetSha256);
   assert.equal(fake.audits.some(row => row.action === "profile.avatar.initialized"), false);
   assert.equal((audit.details.initialAvatar as {presetId:string}).presetId, fake.profileAvatars.get(JSON.stringify(["user",legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId)]))?.defaultPresetId);
+  assert.equal(fake.users.get(legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId))?.image,
+    `/api/v1/profile/avatars/user/${legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId)}/1`);
   let release!: () => void, firstFence = true;
   const holding = { ...actor, assertMigrationFence: async () => { if (firstFence) { firstFence = false; await new Promise<void>(resolve => { release = resolve; }); } } };
   const pending = withSystemUserMigrationBatch(asClient(fake), holding, async () => {});

@@ -6,7 +6,7 @@ import { assertAdminCommandAuthorizedInTransaction } from "../auth/admin-auth-se
 
 import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-authorization";
 import { recordAudit, setAuditContext } from "../auth/security-core";
-import { ensureInitialProfileAvatar } from "../profile/profile-avatar";
+import { avatarImagePath, ensureInitialProfileAvatar } from "../profile/profile-avatar";
 import { canonicalize } from "./content-hash";
 import { normalizeMainlandPhone } from "../auth/phone-number";
 import { lockLegacySource } from "./legacy-observation";
@@ -366,10 +366,12 @@ export async function migrateLegacyOwner(
         return { status: 200, body: { userId } };
       }
       const now = new Date();
+      const initialImage = systemActor ? avatarImagePath("user", userId, "1") : null;
       await client.query(projection
-        ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername") VALUES ($1,$2,$3,false,$4,$4,$5,$7,false,$6,$6)`
-        : `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended") VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
-        projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn, phoneNumberVerified] : [userId, evidence.nickname, email, now, phoneNumber]);
+        ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername"${systemActor ? ',"image"' : ''}) VALUES ($1,$2,$3,false,$4,$4,$5,$7,false,$6,$6${systemActor ? ',$8' : ''})`
+        : `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended"${systemActor ? ',"image"' : ''}) VALUES ($1,$2,$3,false,$4,$4,$5,false,false${systemActor ? ',$6' : ''})`,
+        projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn, phoneNumberVerified, ...(systemActor ? [initialImage] : [])]
+          : [userId, evidence.nickname, email, now, phoneNumber, ...(systemActor ? [initialImage] : [])]);
       const avatar = await ensureInitialProfileAvatar(client, "user", userId, actor.requestId, undefined, systemActor ? "LEGACY_USER_MIGRATION" : undefined);
       if (systemActor && !avatar.created) throw conflict("The legacy owner unexpectedly has an existing avatar");
       if (evidence.legacyPassword) {

@@ -129,7 +129,7 @@ async function insertProfileAvatar(
   subjectId: string,
   defaultPresetId: ProfileAvatarPresetId,
   currentPresetId: ProfileAvatarPresetId,
-  options: { actor?: ProfileAvatarActor; requestId?: string } = {},
+  options: { actor?: ProfileAvatarActor; requestId?: string; subjectImageSet?: boolean } = {},
 ): Promise<ProfileAvatarRow | null> {
   const inserted = await client.query<ProfileAvatarRow>(
     `INSERT INTO "zzsh_supply"."profile_avatar"
@@ -141,7 +141,7 @@ async function insertProfileAvatar(
   );
   const row = inserted.rows[0];
   if (!row) return null;
-  await updateSubjectImage(client, realm, subjectId, avatarImagePath(realm, subjectId, row.currentVersion));
+  if (!options.subjectImageSet) await updateSubjectImage(client, realm, subjectId, avatarImagePath(realm, subjectId, row.currentVersion));
   if (options.actor) {
     await recordAudit(client, {
       actorType: options.actor.realm,
@@ -170,7 +170,7 @@ export async function ensureInitialProfileAvatar(
 ): Promise<{ created: boolean; presetId: ProfileAvatarPresetId }> {
   if (auditInCaller && (auditInCaller !== "LEGACY_USER_MIGRATION" || realm !== "user")) throw invalid("Avatar audit context is invalid");
   const selected = presetId ?? randomPresetId();
-  const row = await insertProfileAvatar(client, realm, subjectId, selected, selected);
+  const row = await insertProfileAvatar(client, realm, subjectId, selected, selected, {subjectImageSet:auditInCaller === "LEGACY_USER_MIGRATION"});
   if (!row) {
     const winner = await loadProfileAvatar(client, realm, subjectId);
     if (!winner) throw conflict("Profile avatar state is unavailable");
