@@ -188,3 +188,15 @@ test("mixed cursor binding rejects a cursor issued under native or legacy mode",
   assert.throws(()=>decodeListingCursor(encodeListingCursor(position,legacy,key),mixed,key),(e:any)=>e.status===409);
   assert.throws(()=>decodeListingCursor(encodeListingCursor(position,mixed,key),{...mixed,ruleReleaseId:"release-2"},key),(e:any)=>e.status===409);
 });
+
+test("a mixed-market cursor cannot seek into a new effective price plan", () => {
+  const query = parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=delta&sort=resourceTotal"), "/listings");
+  const key = { keyId: "market", secret: "s".repeat(32) };
+  const revisions = { filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release" };
+  const before = mixedListingBinding(query, revisions, undefined, "spread:1");
+  const position = { id: "account-a", key: "120.05", isNull: false };
+  const cursor = encodeListingCursor(position, before, key);
+  assert.deepEqual(decodeListingCursor(cursor, before, key), position);
+  assert.throws(() => decodeListingCursor(cursor, mixedListingBinding(query, revisions, undefined, "spread:2"), key),
+    (error: unknown) => (error as { status?: number }).status === 409);
+});

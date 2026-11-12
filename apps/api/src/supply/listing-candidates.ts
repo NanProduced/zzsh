@@ -1,3 +1,4 @@
+import type { MarketPricing } from "./market-pricing";
 import { effectivePublicationStateSql, listingSearchPattern } from "./listing-query";
 import type { ListingFilters, ListingQueryV2, ServiceWindow } from "./listing-filter-contract";
 import { PUBLIC_ACCOUNT_NUMBER_PATTERN } from "./account-number";
@@ -55,18 +56,36 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
   }
   return where;
 }
+/** Both native-only and mixed markets consume the same public price and use it for seek. */
+export function candidateMarketPrice(pricing: MarketPricing | undefined, bind: (value: unknown) => string) {
+  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
+  const frozen=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
+  if (!pricing) return { from: "", key: frozen, projected: false };
+  const spread=pricing.spread ? `v.schema_version=2 AND v.payload#>>'{quoteValues,mode}'='SPREAD' AND pub.source='OWNER_DIRECT'` : "false";
+  const fixedId=pricing.ready && pricing.fixed ? bind(pricing.fixed) : "NULL::text";
+  const spreadId=pricing.ready && pricing.spread ? bind(pricing.spread) : "NULL::text";
+  const from=pricing.ready && (pricing.fixed || pricing.spread) ? `LEFT JOIN LATERAL (
+    SELECT zzsh_supply.public_market_price(v.payload,a.game_id,CASE
+      WHEN v.schema_version=4 AND pub.source='OWNER_DIRECT' THEN ${fixedId}::text
+      WHEN ${spread} THEN ${spreadId}::text END) AS market_price OFFSET 0
+  ) market ON true` : "";
+  return { from, projected: !!from,
+    key: `CASE WHEN v.schema_version=4 OR (v.payload ? 'pricingPolicy') OR (${spread})
+      THEN ${from ? "(market.market_price->>'amount')::numeric" : "NULL::numeric"} ELSE (${frozen}) END` };
+}
+
 export type ListingPosition={id:string;key:string|null;isNull:boolean};
-export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
+export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null,pricing?:MarketPricing) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${p(query.gameId)}`,...candidatePredicates(query.filters,query.q,p)];
   const publication=`pub.published_at`;
-  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
-  const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
+  const market=query.sort==="resourceTotal" ? candidateMarketPrice(pricing,p) : null;
+  const price=market?.key;
   const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
   where.push(PUBLIC_STANDARD_TIER_GUARD);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
-  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key${market?.projected?",market.market_price":""} ${PUBLIC_CANDIDATE_FROM} ${market?.from??""} WHERE ${where.join(" AND ")}) SELECT id,version_id,${market?.projected?"market_price,":""}${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
 }

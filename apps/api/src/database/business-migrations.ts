@@ -511,7 +511,13 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
   await configureFixedFeeSupportCancellationPrivileges(pool, runtimeRole);
-  await configureFixedFeePersonalPrivileges(pool, runtimeRole);  await configureDocsLibraryPrivileges(pool, runtimeRole);
+  await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+  const marketPrice = "zzsh_supply.public_market_price(jsonb,text,text)";
+  if ((await pool.query("SELECT to_regprocedure($1) AS fn", [marketPrice])).rows[0]?.fn) {
+    await pool.query(`REVOKE ALL ON FUNCTION ${marketPrice} FROM PUBLIC, ${runtimeUser};
+      GRANT EXECUTE ON FUNCTION ${marketPrice} TO ${runtimeUser}`);
+  }
+  await configureDocsLibraryPrivileges(pool, runtimeRole);
   const discardGuideDraft = "zzsh_content.discard_guide_draft(text,text,bigint)";
   if ((await pool.query("SELECT to_regprocedure($1) AS fn", [discardGuideDraft])).rows[0]?.fn) {
     await pool.query(`GRANT EXECUTE ON FUNCTION ${discardGuideDraft} TO ${runtimeUser}`);

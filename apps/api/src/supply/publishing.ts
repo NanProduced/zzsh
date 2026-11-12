@@ -1,3 +1,4 @@
+import { applyMarketPrice, marketPriceTarget, readMarketPrice, readMarketPricing, type MarketPrice, type MarketPricing } from "./market-pricing";
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
@@ -260,6 +261,7 @@ export type ListingGameRow = {
  *  reads per request removes the repeated lookups without moving any rule. */
 export type ListingPageShared = {
   game(gameId: string): Promise<ListingGameRow | undefined>;
+  marketPricing?(gameId: string): Promise<MarketPricing>;
   rentalService(gameId: string): Promise<GameServiceState>;
   retiredLegacy(account: PublishingAccount): Promise<boolean>;
   primeRetiredLegacy(accountIds: readonly string[]): Promise<void>;
@@ -270,6 +272,7 @@ export type ListingPageShared = {
 
 export function listingPageShared(client: PoolClient): ListingPageShared {
   const games = new Map<string, Promise<ListingGameRow | undefined>>();
+  const market = new Map<string, Promise<MarketPricing>>();
   const services = new Map<string, Promise<GameServiceState>>();
   const retired = new Map<string, Promise<boolean>>();
   const policies = new Map<
@@ -277,6 +280,11 @@ export function listingPageShared(client: PoolClient): ListingPageShared {
     Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>
   >();
   return {
+    marketPricing: (gameId) => {
+      let pricing = market.get(gameId);
+      if (!pricing) { pricing = readMarketPricing(client, gameId); market.set(gameId, pricing); }
+      return pricing;
+    },
     retiredLegacy: (account) => {
       let pending = retired.get(account.id);
       if (!pending) { pending = isRetiredMigratedAccount(client, account); retired.set(account.id, pending); }
@@ -349,6 +357,8 @@ export type ListingDetailPrefetch = {
   /** Answer to the publication probe, already resolved for this page. */
   hasPublication?: boolean;
   shared?: ListingPageShared;
+  marketPricing?: MarketPricing;
+  marketPrice?: MarketPrice | null;
   /** This request's public projection of one account. The admin detail path and
    *  the supervision facts path need the same account's public listing, and the
    *  projection is one expensive read; the memo serves both. A null result
@@ -2282,10 +2292,10 @@ export async function listingDetail(
   const publication = observed.publication !== undefined && publicAccount === a
     ? observed.publication
     : await readListingPublication(client, publicAccount, v);
-  const quote = v.payload
-    ? { ...(viewer === "public" ? projectTenantPriceQuote({ ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, v.payload.quoteValues) : projectDeltaQuote(
+  const quote = v.payload && viewer !== "public"
+    ? { ...projectDeltaQuote(
         { ...v.payload.quoteValues, contentHash: v.content_hash } as unknown as InternalQuote, quoteViewer,
-      )), ...(viewer === "public" ? {} : { baseRenterHaffRatioWanPerYuan: boundBaseRenterRatio(a, v) }), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
+      ), baseRenterHaffRatioWanPerYuan: boundBaseRenterRatio(a, v), ...(v.payload.ruleRefs.catalogRevision === undefined ? {} : { catalogRevision: v.payload.ruleRefs.catalogRevision }) }
     : null;
   if (viewer === "public") {
     if (!v.payload || v.payload.accountId !== a.id || v.payload.gameId !== a.game_id || computeContentHash(v.payload) !== v.content_hash) throw notFound();
@@ -2295,9 +2305,28 @@ export async function listingDetail(
     )).rowCount) throw notFound();
     if (strictReadErrors && publicationHasUnknownFacts(blockers)) throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","Public listing facts are incomplete");
     if ((mode === "RENTABLE" ? blockers : blockers.filter(reason => !READABLE_NON_RENTAL_BLOCKERS.has(reason))).length) throw notFound();
-    const availability = publicAvailability(blockers, publicAccount.current_version_id === v.id, observed.gate);
+    let availability = publicAvailability(blockers, publicAccount.current_version_id === v.id, observed.gate);
     if (mode === "RENTABLE" && availability !== "RENTABLE") throw notFound();
-    const attrs = v.payload!.declaration.attributes;
+    const payload = v.payload;
+    const attrs = payload.declaration.attributes;
+    let quote = projectTenantPriceQuote(payload.quoteValues as unknown as InternalQuote, payload.quoteValues) as
+      (ReturnType<typeof projectTenantPriceQuote> & { catalogRevision?: string }) | null;
+    let priceReason: string | null = null;
+    if (payload.schemaVersion === 2 || payload.schemaVersion === 4) {
+      const market = prefetch?.marketPricing ?? await (prefetch?.shared?.marketPricing?.(a.game_id) ?? readMarketPricing(client, a.game_id));
+      const target = marketPriceTarget(payload, market, publication?.source === "OWNER_DIRECT");
+      if (target.scheduled) {
+        const live = target.priceId && market.ready
+          ? prefetch?.marketPrice === undefined ? await readMarketPrice(client, payload, a.game_id, target.priceId) : prefetch.marketPrice
+          : null;
+        quote = quote ? applyMarketPrice(quote, live) : null;
+        if (availability === "RENTABLE" && (!quote || payload.schemaVersion === 4 || !SCHEDULED_SPREAD_ORDER_ENABLED)) {
+          availability = quote ? "UNAVAILABLE" : "UNKNOWN";
+          priceReason = quote ? "TRADE_NOT_ENABLED" : "PRICING_UNAVAILABLE";
+        }
+      }
+    }
+    if (quote && payload.ruleRefs.catalogRevision !== undefined) quote.catalogRevision = payload.ruleRefs.catalogRevision;
     const depositProjection = publicDepositProjection(quote, attrs.owner_deposit_declaration);
     if (depositProjection && quote) Object.assign(quote, depositProjection);
     const offer = projectPublicOffer({
@@ -2351,7 +2380,7 @@ export async function listingDetail(
       presentation,
       quote,
       feeDisplay: publishedListingFeeDisplay(quote),
-      availability: { state: availability, reason: publicAvailabilityReason(availability, blockers) },
+      availability: { state: availability, reason: priceReason ?? publicAvailabilityReason(availability, blockers) },
       canCreateOrder: availability === "RENTABLE",
       publishedAt: publication?.published_at?.toISOString() ?? null,
       media: publicMedia.map((m) => ({
