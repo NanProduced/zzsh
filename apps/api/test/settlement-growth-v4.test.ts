@@ -156,6 +156,24 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
  assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedHaff,confirmationDigest:signed(changedHaff)}}));
  const changedUnit=structuredClone(basis);changedUnit.items.find(item=>item.itemId==='aaa_item')!.buyerUnitAmount='0.06';
  assert.throws(()=>read({quote:{...quote,personal,settlementPricing:changedUnit,confirmationDigest:signed(changedUnit)}}));
+
+  // Build the basis from the same v5 identity, payment, and opening fields used by the real order path.
+  const existing=fixture('personal-quote-v4'),actualQuote={...quote,ruleReleaseId:'release'};
+  const actualPersonal={...existing.order.quote.personal,schema:'personal-quote-v5',pricingPolicy:personal.pricingPolicy};
+  const actualDigest=createHash('sha256').update(canonicalize({...actualPersonal,quote:actualQuote,settlementPricing:basis})).digest('hex');
+  const actualOrder={...existing.order,id:'order',quote:{...actualQuote,personal:actualPersonal,settlementPricing:basis,confirmationDigest:actualDigest}};
+  const payment={id:'payment',amountCents:'9',currency:'CNY'},opening=actualQuote.lines.map(line=>({itemId:line.itemId,quantity:line.quantity}));
+  assert.equal(current(actualOrder,payment,opening).reasons[0],'FIXED_FEE_SETTLEMENT_NOT_ENABLED');
+  const frozen=read(actualOrder),buildBasis=load(source,'buildSettlementBasis'),built=buildBasis(actualOrder,payment,opening,frozen);
+  assert(built.basis,JSON.stringify(built));assert.equal(built.basis.settlementPricing.schema,'settlement-pricing-v3');
+  const fill=load(source,'withRemaining'),filled=fill(built.basis,[{itemId:'zzz_haff',quantity:'1000000',quantityKind:'CONSUMED'},{itemId:'aaa_item',quantity:'1',quantityKind:'CONSUMED'}]);
+  assert(filled.lines,JSON.stringify(filled));
+  const fromBasis=probe(actualOrder,'opening',built.basis,filled.lines,'NORMAL','settlement');
+  assert.equal(fromBasis.ok,true,fromBasis.reasons.join(','));assert.equal(fromBasis.amounts.ownerNet.amount,'0.09');
+  assert.equal(fromBasis.amounts.platformServiceFee.amount,'0.01');assert.equal(fromBasis.amounts.membershipDiscount.amount,'0.01');
+  const wrongParty={...actualOrder,ownerUserId:'other'};
+  assert.equal(buildBasis(wrongParty,payment,opening,frozen).reasons[0],'FULL_PAYOUT_UNKNOWN');
+  assert.equal(buildBasis(actualOrder,payment,opening.slice(1),frozen).reasons[0],'OPENING_QUANTITY_MISMATCH');
 });
 
 test('manual fixed-fee proposals use the frozen fee and discount rates without changing the agreed refund',()=>{

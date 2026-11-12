@@ -304,6 +304,10 @@ function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: 
   try{settlementPricing=frozenSettlementPricing(order);}catch{return {reasons:["SETTLEMENT_PRICING_INVALID"]};}
   // shortcut: fixed-fee posting stays closed until the versioned database funding and ledger guards are installed.
   if(settlementPricing?.schema==="settlement-pricing-v3")return {reasons:["FIXED_FEE_SETTLEMENT_NOT_ENABLED"]};
+  return buildSettlementBasis(order,payment,openingLines,settlementPricing);
+}
+
+function buildSettlementBasis(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[], settlementPricing: ReturnType<typeof freezeSettlementPricing>|null): { basis: Basis } | { reasons: string[] } {
   const personal = order.quote.personal as Record<string, unknown> | undefined;
   const funding = personal?.funding as Record<string, unknown> | undefined;
   const membership = personal?.membership as Record<string, unknown> | undefined;
