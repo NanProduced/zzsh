@@ -1,7 +1,59 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGuaranteePaymentIntent, isGuaranteeRequirementFact, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
+import { createGuaranteePaymentIntent, enqueueDelistedGuaranteeRefund, isGuaranteeRequirementFact, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
+
+test("demo guarantee confirmation stays bound to the owner, original intent and result", async t => {
+  const resource = require("../src/finance/ecs-test-demo-resource");
+  const identity = require("../src/auth/user-identity");
+  const security = require("../src/auth/security-core");
+  const credit = require("../src/credit/credit-guarantee");
+  const { confirmDemoGuaranteePayment } = require("../src/credit/demo-guarantee");
+  t.mock.method(resource, "assertEcsTestDemoResource", async () => ({ reference: "demo" }));
+  t.mock.method(resource, "readEcsTestDemoRegistration", () => ({ digest: "a".repeat(64) }));
+  t.mock.method(resource, "demoFinanceScope", () => "LOCAL_DEMO_SIMULATED");
+  t.mock.method(identity, "assertUserContextInTransaction", async () => {});
+  t.mock.method(security, "recordAudit", async () => {});
+  let owner = "owner-a", status = "REQUESTED", providerState = "NOT_AUTHORIZED", receipt: unknown = null, transactionId: string | null = null;
+  t.mock.method(credit, "lockGuaranteeSubject", async () => ({ accountId: "account-a", ownerUserId: owner, lifecycle: "ACTIVE" }));
+  const calls: any[] = [];
+  t.mock.method(credit, "recordGuaranteePaymentResult", async (_: unknown, input: any) => { calls.push(input); return { status: "CONFIRMED", duplicate: calls.length > 1 }; });
+  const client = { query: async () => ({ rows: [{ status, providerState, amount: "500", merchant: "merchant-a", receipt, transactionId, eligible: true }] }) };
+  const actor = { userId: "owner-a", sessionId: "session-a", requestId: "request-a" }, demo = { kind: "LOCAL_DEMO_CLONE_FINANCE" };
+  owner = "owner-b";
+  await assert.rejects(() => confirmDemoGuaranteePayment(client, demo, actor, "account-a", "payment-a"));
+  owner = "owner-a"; status = "UNKNOWN"; providerState = "UNKNOWN";
+  await assert.rejects(() => confirmDemoGuaranteePayment(client, demo, actor, "account-a", "payment-a"));
+  assert.equal(calls.length, 0, "an unknown original result is never replaced by a simulated success");
+  status = "REQUESTED"; providerState = "NOT_AUTHORIZED";
+  const result = await confirmDemoGuaranteePayment(client, demo, actor, "account-a", "payment-a");
+  assert.equal(result.bankArrival, "UNKNOWN"); assert.equal(calls[0].receivedAmountCents, "500");
+  assert.equal(calls[0].receipt.source, "ECS_DEMO_GUARANTEE");
+  receipt = { ...calls[0].receipt }; transactionId = calls[0].providerTransactionId;
+  status = "CONFIRMED"; providerState = "CONFIRMED";
+  assert.equal((await confirmDemoGuaranteePayment(client, demo, actor, "account-a", "payment-a")).duplicate, true);
+  assert.deepEqual(calls[1], calls[0], "a replay uses the exact same original source and amount");
+  receipt = { ...calls[0].receipt, registrationDigest: "b".repeat(64) };
+  await assert.rejects(() => confirmDemoGuaranteePayment(client, demo, actor, "account-a", "payment-a"));
+  assert.equal(calls.length, 2);
+});
+
+test("demo guarantee refund never resubmits an unknown original result", async t => {
+  const resource = require("../src/finance/ecs-test-demo-resource");
+  const security = require("../src/auth/security-core");
+  const credit = require("../src/credit/credit-guarantee");
+  const { runDemoGuaranteeRefundBatch } = require("../src/credit/demo-guarantee");
+  t.mock.method(resource, "assertEcsTestDemoResource", async () => ({ reference: "demo" }));
+  t.mock.method(resource, "readEcsTestDemoRegistration", () => ({ digest: "a".repeat(64) }));
+  t.mock.method(resource, "demoFinanceScope", () => "LOCAL_DEMO_SIMULATED");
+  t.mock.method(credit, "lockGuaranteeSubject", async () => ({ lifecycle: "DELISTED" }));
+  const record = t.mock.method(credit, "recordGuaranteeRefundResult", async () => ({}));
+  const client = { query: async (sql: string) => sql.includes("ORDER BY f.created_at") ? { rows: [{ id: "refund-a" }] }
+    : { rows: [{ status: "UNKNOWN", providerState: "UNKNOWN" }] } };
+  t.mock.method(security, "withTransaction", async (_: unknown, fn: (value: unknown) => unknown) => fn(client));
+  const result = await runDemoGuaranteeRefundBatch({}, { kind: "LOCAL_DEMO_CLONE_FINANCE" });
+  assert.equal(result.completed, 0); assert.equal(record.mock.callCount(), 0);
+});
 
 test("only accounts with a guarantee fact become page rows", () => {
   const context = (state: string, extra: Record<string, unknown> = {}) => ({ state, ...extra }) as any;
@@ -95,12 +147,13 @@ import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 const guaranteeRow = (accountId: string, payload: unknown, overrides: Record<string, unknown> = {}) => ({
   accountId, ownerUserId: "user-a", gameId: "game-a", currentVersionId: `version-${accountId}`, versionId: `version-${accountId}`,
+  publicationId: `publication-${accountId}`,
   priceVersionId: "price-1", releaseId: "release-1", policy: { ...fundingPolicyFixture("NOT_REQUIRED"), policyVersion: "policy-1" },
   policyStatus: "SEALED", priceStatus: "SEALED", payload, ...overrides,
 });
 const quotePayload = (amount: string | null) => (amount === null ? { quoteValues: {} } : { quoteValues: { resourceTotal: { currency: "CNY", unit: "yuan", scale: 2, amount } } });
 const bindingRow = (requirementId = "req-1", overrides: Record<string, unknown> = {}) => ({
-  requirementId, requirementStatus: "ACTIVE", bindingBaseCents: "10000", bindingRequiredCents: "500",
+  requirementId, requirementStatus: "ACTIVE", bindingBaseCents: "10000", bindingRequiredCents: "500", bindingScore: 70,
   paymentId: `pay-${requirementId}`, paymentState: "CONFIRMED", paymentProviderState: "CONFIRMED", paymentAmountCents: "500",
   paymentObservedAmountCents: "500", paymentFinanceEventId: "event-1", paymentLedgerEntryRef: "line-1",
   confirmedCents: "500", unrecognizedPayment: false,
@@ -142,6 +195,7 @@ function guaranteeWorld(input: { credit?: { score: number; revision: string } | 
       return { rows: [...newestPerAccount((input.bindings ?? []).filter(matches), new Set(frozen.map((entry) => entry.accountId))).values()].map((facts) => ({ ...facts.row, accountId: facts.accountId })) };
     }
     if (sql.includes("a.id=ANY($1::text[])")) return { rows: Object.entries(input.rows).map(([, row]) => row) };
+    if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
     if (sql.includes("FROM zzsh_order.owner_guarantee_requirement")) {
       // The per-account reader binds the exact tuple from its first read; the fake holds the same facts.
       const [accountId, ownerUserId, priceVersionId, versionId] = args as [string, string, string, string | null];
@@ -149,7 +203,6 @@ function guaranteeWorld(input: { credit?: { score: number; revision: string } | 
         && facts.priceVersionId === priceVersionId && (facts.listingVersionId === null ? versionId === null : facts.listingVersionId === versionId));
       return { rows: [...newestPerAccount(matched).values()].map((facts) => facts.row) };
     }
-    if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
     throw new Error(`unexpected read: ${sql}`);
   } } as never;
   return { client, queries };
@@ -183,6 +236,119 @@ test("batch owner-guarantee contexts equal the per-account reader while SQL stay
   assert.equal(batchSql.length, 3, JSON.stringify(batchSql.map((sql) => sql.slice(0, 40))));
   assert.equal(batchSql.filter((sql) => sql.includes("zzsh_credit.user_credit_state")).length, 1, "owner credit is read once per page");
   assert.equal(batchSql.filter((sql) => sql.includes("DISTINCT ON (r.account_id)")).length, 1);
+});
+
+test("a re-quoted draft cannot reuse an old smaller guarantee; published basis stays frozen", async () => {
+  const world = guaranteeWorld({ credit: { score: 70, revision: "4" }, rows: {
+    draft: guaranteeRow("draft", quotePayload("200.00"), { versionState: "DRAFT" }),
+    published: guaranteeRow("published", quotePayload("200.00"), { versionState: "PUBLISHED" }),
+  }, bindings: [bindingFacts("draft", bindingRow("draft-req")), bindingFacts("published", bindingRow("published-req"))] });
+  const draft = await readGuaranteeContext(world.client as never, "draft", "user-a");
+  assert.equal(draft?.state, "UNKNOWN");
+  assert.equal(draft?.reasonCode, "GUARANTEE_BASIS_CHANGED");
+  assert.equal(draft?.requiredCents, "1000");
+  assert.equal(draft?.reference, null);
+  assert.equal((await readGuaranteeContext(world.client as never, "published", "user-a"))?.state, "SATISFIED");
+  const batch = await readGuaranteeContextsBatch(world.client as never, "user-a", ["draft", "published"]);
+  assert.equal(batch.get("draft")?.reasonCode, "GUARANTEE_BASIS_CHANGED");
+  assert.equal(batch.get("published")?.state, "SATISFIED");
+  const refunding = guaranteeWorld({ credit: { score: 70, revision: "4" }, rows: { draft: guaranteeRow("draft", quotePayload("200.00"), { versionState: "DRAFT" }) },
+    bindings: [bindingFacts("draft", bindingRow("draft-req", { refundId: "refund-a", refundState: "REQUESTED", activeRefund: true }))] });
+  const pendingRefund = await readGuaranteeContext(refunding.client as never, "draft", "user-a");
+  assert.equal(pendingRefund?.state, "REFUND_REQUESTED"); assert.equal(pendingRefund?.refundId, "refund-a");
+  const priorPrice = guaranteeWorld({ credit: { score: 70, revision: "4" }, rows: {
+    draft: guaranteeRow("draft", quotePayload("200.00"), { versionState: "DRAFT", otherOutstandingRequirementId: "old-price-requirement" }),
+  } });
+  const crossPrice = await readGuaranteeContext(priorPrice.client as never, "draft", "user-a");
+  assert.equal(crossPrice?.state, "UNKNOWN"); assert.equal(crossPrice?.reasonCode, "GUARANTEE_BASIS_CHANGED");
+  assert.equal(crossPrice?.requirementId, "old-price-requirement");
+});
+
+test("a restricted guarantee remains review-required even when the recorded payment covers it", async () => {
+  const world = guaranteeWorld({ credit: { score: 70, revision: "4" }, rows: {
+    account: guaranteeRow("account", quotePayload("100.00"), { versionState: "PUBLISHED" }),
+  }, bindings: [bindingFacts("account", bindingRow("restricted-req", { requirementStatus: "RESTRICTED" }))] });
+  const value = await readGuaranteeContext(world.client as never, "account", "user-a");
+  assert.equal(value?.state, "UNKNOWN");
+  assert.equal(value?.reasonCode, "GUARANTEE_REVIEW_REQUIRED");
+  assert.equal(value?.reference, null);
+});
+
+test("published waiver and paid guarantee retain their original eligibility when credit changes", async () => {
+  const waived = guaranteeRow("waived", quotePayload("100.00"), { versionState: "PUBLISHED", publicationWaived: true, publicationWaivedRevision: "4" });
+  const paid = guaranteeRow("paid", quotePayload("100.00"), { versionState: "PUBLISHED" });
+  const rows = { waived, paid, unknown: guaranteeRow("unknown", quotePayload("100.00"), { versionState: "PUBLISHED" }) };
+  const bindings = [bindingFacts("paid", bindingRow("paid-req"))];
+  const before = guaranteeWorld({ credit: { score: 85, revision: "4" }, rows, bindings });
+  const after = guaranteeWorld({ credit: { score: 75, revision: "5" }, rows, bindings });
+  const waivedBefore = await readGuaranteeContext(before.client as never, "waived", "user-a");
+  const waivedAfter = await readGuaranteeContext(after.client as never, "waived", "user-a");
+  assert.equal(waivedAfter?.state, "NOT_REQUIRED"); assert.equal(waivedAfter?.reference, waivedBefore?.reference);
+  const paidBefore = await readGuaranteeContext(before.client as never, "paid", "user-a");
+  const paidAfter = await readGuaranteeContext(after.client as never, "paid", "user-a");
+  assert.equal(paidAfter?.state, "SATISFIED"); assert.equal(paidAfter?.reference, paidBefore?.reference); assert.equal(paidAfter?.score, 70);
+  assert.equal((await readGuaranteeContext(after.client as never, "unknown", "user-a"))?.state, "UNKNOWN");
+  const batch = await readGuaranteeContextsBatch(after.client as never, "user-a", ["waived", "paid", "unknown"]);
+  assert.equal(batch.get("waived")?.reference, waivedAfter?.reference); assert.equal(batch.get("paid")?.reference, paidAfter?.reference);
+  assert.equal(batch.get("unknown")?.state, "UNKNOWN");
+  const unexpected = guaranteeWorld({ credit: { score: 75, revision: "5" }, rows: { waived }, bindings: [bindingFacts("waived", bindingRow("unexpected-payment"))] });
+  assert.equal((await readGuaranteeContext(unexpected.client as never, "waived", "user-a"))?.state, "UNKNOWN", "a waiver never hides a later unexpected payment");
+  const oldPayment = guaranteeWorld({ credit: { score: 75, revision: "5" }, rows: { waived: { ...waived, otherOutstandingRequirementId: "old-requirement" } } });
+  assert.equal((await readGuaranteeContext(oldPayment.client as never, "waived", "user-a"))?.state, "UNKNOWN", "a late payment on a prior draft still requires review");
+});
+
+test("delisting creates one original-payment guarantee refund and does not pretend channel success", async () => {
+  let existing: Record<string, unknown> | undefined;
+  let paymentState = "CONFIRMED", providerState = "CONFIRMED", evidenceComplete = true, unresolved = false, accountState = "DELISTED", inserts = 0, review = false;
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith("SELECT lifecycle FROM zzsh_supply.rental_account")) {
+      assert.deepEqual(args, ["account-a", "user-a"]);
+      return { rows: [{ lifecycle: accountState }] };
+    }
+    if (sql.startsWith("SELECT id FROM zzsh_order.owner_guarantee_requirement")) return { rows: [{ id: "requirement-a" }] };
+    if (sql.startsWith("SELECT\n    EXISTS")) return { rows: [{ unresolved }] };
+    if (sql.includes("FROM zzsh_order.owner_guarantee_payment p WHERE p.requirement_id")) return { rows: [{ id: "payment-a", status: paymentState, providerState, amountCents: "300", evidenceComplete }] };
+    if (sql.includes("FROM zzsh_order.owner_guarantee_refund WHERE requirement_id")) return { rows: existing ? [existing] : [] };
+    if (sql.startsWith("INSERT INTO zzsh_order.owner_guarantee_refund")) {
+      inserts++;
+      assert.equal(args[2], "payment-a"); assert.equal(args[3], "user-a"); assert.equal(args[6], "300");
+      existing = { id: args[0], paymentId: args[2], amountCents: args[6], status: "REQUESTED", providerState: "NOT_AUTHORIZED", releasePolicyState: "AUTO_APPROVED" };
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.startsWith("UPDATE zzsh_order.owner_guarantee_requirement")) { if (sql.includes("RESTRICTED")) review = true; return { rows: [], rowCount: 1 }; }
+    throw new Error(`unexpected query: ${sql}`);
+  } } as any;
+  const input = { accountId: "account-a", ownerUserId: "user-a", requestId: "request-a" };
+  const first = await enqueueDelistedGuaranteeRefund(client, input);
+  assert.equal(first.state, "REQUESTED"); assert.equal(first.refunds[0]?.amountCents, "300");
+  assert.equal(first.refunds[0]?.providerState, "NOT_AUTHORIZED");
+  const replay = await enqueueDelistedGuaranteeRefund(client, input);
+  assert.equal(replay.refunds[0]?.refundId, first.refunds[0]?.refundId); assert.equal(inserts, 1);
+  existing = undefined; paymentState = "UNKNOWN"; providerState = "UNKNOWN";
+  assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).reason, "PAYMENT_UNCERTAIN"); assert.equal(review, true); assert.equal(inserts, 1);
+  paymentState = "FAILED"; providerState = "UNKNOWN";
+  assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).reason, "PAYMENT_UNCERTAIN");
+  paymentState = "CONFIRMED"; providerState = "CONFIRMED"; evidenceComplete = false;
+  assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).reason, "PAYMENT_EVIDENCE_UNAVAILABLE");
+  evidenceComplete = true; unresolved = true; review = false;
+  assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).reason, "ACCOUNT_ORDER_REVIEW_REQUIRED"); assert.equal(review, true);
+  accountState = "ACTIVE";
+  await assert.rejects(enqueueDelistedGuaranteeRefund(client, input), /permanently delisted/);
+});
+
+test("delisting without a guarantee requirement needs the publication's explicit waiver", async () => {
+  let waived = false;
+  const client = { query: async (sql: string, args: unknown[]) => {
+    assert.deepEqual(args, ["account-a", "user-a"]);
+    if (sql.startsWith("SELECT lifecycle FROM zzsh_supply.rental_account")) return { rows: [{ lifecycle: "DELISTED" }] };
+    if (sql.startsWith("SELECT id FROM zzsh_order.owner_guarantee_requirement")) return { rows: [] };
+    if (sql.includes("p.credit_guarantee_waived IS TRUE")) return { rows: [{ waived }] };
+    throw new Error(`unexpected query: ${sql}`);
+  } } as any;
+  const input = { accountId: "account-a", ownerUserId: "user-a", requestId: "request-a" };
+  assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).state, "REVIEW_REQUIRED");
+  waived = true;
+  assert.deepEqual(await enqueueDelistedGuaranteeRefund(client, input), { state: "NONE", refunds: [] });
 });
 
 test("the batch credit-row seam neither re-reads owner credit nor invents an initialized state", async () => {

@@ -917,8 +917,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (currentContext(intent.context)) setWritePending(intent);
   };
   const recoverStoredIntent = async (initial: SupplyWriteIntent): Promise<boolean> => {
-    if (["pause", "resume", "withdraw"].includes(initial.action)) {
-      setNotice("有一笔接单状态或撤回操作待核对，请返回上架账号查询原操作结果；本页不会重发或清除它。");
+    if (["pause", "resume", "withdraw", "delist"].includes(initial.action)) {
+      setNotice("有一笔账号操作待核对，请返回上架账号查询原操作结果；本页不会重发或清除它。");
       return false;
     }
     if (identityRef.current !== initial.userId || identityStatusRef.current !== "confirmed" || gameRef.current !== initial.gameId) return false;
@@ -1053,7 +1053,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       setDraftState(nextDraft);
       setDepositInput(yuanFromCents(depositDeclarationCents(nextDraft.attributes) ?? "") ?? "");
       syncHaffInput(next);
-      setEditing(next.version.reviewState === "DRAFT");
+      setEditing(next.version.reviewState === "DRAFT" && !["ARCHIVED", "DELISTED"].includes(next.account.lifecycle ?? "") && !next.version.publication && !next.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"));
     }
     if (replaceMedia) {
       const bindings = next.version?.declaration.mediaBindings ?? [];
@@ -1378,7 +1378,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           setSupply(loaded);
           setServerSnapshot(loaded);
           selected = loaded.account.game_id;
-          setEditing(loaded.version?.reviewState === "DRAFT");
+          setEditing(loaded.version?.reviewState === "DRAFT" && !["ARCHIVED", "DELISTED"].includes(loaded.account.lifecycle ?? "") && !loaded.version.publication && !loaded.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"));
           if (loaded.version) {
             const loadedDraft = editableDeclaration(loaded.version.declaration);
             draftRef.current = loadedDraft;
@@ -1417,7 +1417,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             intentKey: "",
             uploadKey: "",
           })));
-          if (editRequested && loaded.version?.reviewState !== "SUBMITTED") setNotice("点击“开始修改”后会创建可编辑草稿；如果账号已上架，修改期间将暂停接单。");
+          if (editRequested && (["ARCHIVED", "DELISTED"].includes(loaded.account.lifecycle ?? "") || loaded.version?.origin === "LEGACY_OBSERVATION" || loaded.version?.publication || ["PUBLISHED", "APPROVED"].includes(loaded.version?.reviewState ?? "") || loaded.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"))) setNotice("已上架或历史账号不能修改；如需出租，请重新填写上架资料。");
         } else if (gameCodeProp) {
           const requested = result.games.find((game) => game.code === gameCodeProp) ?? null;
           selected = requested?.id ?? "";
@@ -1661,6 +1661,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         throw failure;
       }
       if (!currentContext(context, signal) || !(await waitForIdentity(context))) return null;
+    }
+    if (["ARCHIVED", "DELISTED"].includes(currentSupply.account.lifecycle ?? "") || currentSupply.version?.origin === "LEGACY_OBSERVATION" || currentSupply.version?.publication || ["PUBLISHED", "APPROVED"].includes(currentSupply.version?.reviewState ?? "") || currentSupply.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED")) {
+      throw new Error("已上架或历史账号不能修改，请重新填写上架资料。");
     }
     if (currentSupply.version?.reviewState !== "DRAFT") {
       const body = { expectedRevision: currentSupply.account.revision };
@@ -2319,8 +2322,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         setRecommendationBinding({ ...requestBinding, inputs: { ...requestBinding.inputs, ...(v2 ? { skinFacts: result.inputs.skinFacts } : {}) }, mismatch });
         setRecommendationAdopted(false);
         setNotice(resultAmount === null ? "推荐金额暂不可用，请重新读取；不会按零元采用。" : mismatch
-          ? "推荐结果与当前账号、版本或规则不匹配，已标记过期；请重新查看推荐押金。"
-          : `推荐押金 ${resultAmount} 元，依据当前版本资料计算；点击“采用推荐”才会填入申报。`);
+          ? "推荐结果与当前账号资料或规则不匹配，已标记过期；请重新查看推荐押金。"
+          : `推荐押金 ${resultAmount} 元，依据当前账号资料计算；点击“采用推荐”才会填入申报。`);
       } finally {
         finishRequest(controller);
       }
@@ -2501,7 +2504,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       await ensureReady(context, controller.signal, "edit", () => beginEditingWithContext(context));
       if (currentContext(context)) {
         setEditing(true);
-        setNotice("已创建可编辑草稿；提交前可继续修改资料。");
+        setNotice("草稿已准备好；提交前可继续完善资料。");
       }
     } finally {
       finishRequest(controller);
@@ -2776,7 +2779,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     onSearch: (value: string) => requestNavigation({ message: "本页还有未保存的资料。离开后，这些修改不会保留。", label: "放弃修改并离开", run: () => router.push(`/accounts?q=${encodeURIComponent(value)}`) }),
   };
 
-  const published = supply?.version?.reviewState === "PUBLISHED";
+  const published = supply?.version?.reviewState === "PUBLISHED" && !["ARCHIVED", "DELISTED"].includes(supply.account.lifecycle ?? "");
   const quoteData = supply?.version?.quote ?? null;
   const effectiveQuote = quoteData && !quoteStale ? quoteData : null;
   const payoutSelected = fullPayoutSelected(draft.attributes);
@@ -2811,6 +2814,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const breakdown = ownerQuoteBreakdown(quoteData);
   const agreement = supply?.agreement ?? options?.agreement ?? null;
   const readOnly = Boolean(accountId && !editing);
+  const mustCreateAccount = ["ARCHIVED", "DELISTED"].includes(supply?.account.lifecycle ?? "") || supply?.version?.origin === "LEGACY_OBSERVATION" || Boolean(supply?.version?.publication) || ["PUBLISHED", "APPROVED"].includes(supply?.version?.reviewState ?? "") || Boolean(supply?.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"));
   const formDisabled = identityState !== "confirmed" || !identityRef.current || readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue);
   const requireNewAccountFacts = !(typeof draft.attributes.legacy_published_reference === "string" && draft.attributes.legacy_published_reference.trim());
   const declarationOptions = options?.declarationOptions;
@@ -3219,7 +3223,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     {writePending ? <div className="supply-conflict" role="alert"><strong>结果未知</strong><p>上次写入已发出但没有收到确认。重新读取只更新服务器展示，不会解除锁定；请重试当前步骤，收到与原请求对应的确定结果后才可继续修改或发起新写入。</p><div className="supply-inline-actions"><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void retryWrite()}>重试当前步骤</button><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void refreshLatest(true)}>重新读取最新状态</button></div></div> : null}
     {!writePending && error?.status === 0 && lastRetry.current ? <div className="supply-conflict"><strong>读取未完成</strong><p>本页没有自动重复操作，请重试本次读取。</p><button type="button" className="button secondary" disabled={Boolean(busy)} onClick={() => void retryLast()}>重试读取</button></div> : null}
     {!writePending && optionsAvailability === "failed" ? <div className="supply-blockers" role="alert"><strong>出租规则读取失败</strong><p>暂不能核对报价；可先保存草稿。</p><button type="button" className="button secondary" disabled={Boolean(busy) || !gameId} onClick={() => void loadOptions(gameId)}>重试读取规则</button></div> : null}
-    {readOnly && !published ? <div className="supply-readonly" role="status"><strong>当前版本不可直接编辑</strong><span>已上架、审核中的历史版本或已退回版本会在你明确开始修改后创建新草稿。</span><button type="button" className="button secondary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : null}
+    {readOnly && !published ? <div className="supply-readonly" role="status"><strong>当前资料不可直接编辑</strong><span>{mustCreateAccount ? "此账号仅保留记录；如需出租，请重新填写上架资料。" : reviewState === "SUBMITTED" ? "资料正在审核，可返回账号详情撤回审核。" : "可以在原账号继续完善未发布的草稿。"}</span>{mustCreateAccount ? <Link href="/publish" className="button secondary">重新填写上架资料</Link> : reviewState === "SUBMITTED" ? <Link href="/account?view=accounts" className="button secondary">返回账号管理</Link> : <button type="button" className="button secondary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "继续填写草稿"}</button>}</div> : null}
     {loadingAccount ? <p className="supply-muted" role="status">正在读取账号资料…</p> : null}
     <PublishVisualBanner />
     <div className="publish-header-bar">
@@ -3693,7 +3697,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </details>
                 </div></div>
 
-                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号、版本或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前版本资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <div className="supply-recommend-result supply-recommend-result--unavailable" role="status"><AlertCircle size={14} aria-hidden="true" /><span>{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则尚未配置推荐押金依据，可自行填写押金。" : "请先补全安全箱、体力、负重、潜水与皮肤资料后再查看推荐押金。"}</span></div> : null}</div></div>
+                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金</label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-deposit-guidance"><Info size={15} aria-hidden="true" /><p>结合账号价值设置押金，不计入你的收入；推荐金额点击“采用”后填入。</p></div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result"><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号资料或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前账号资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <div className="supply-recommend-result supply-recommend-result--unavailable" role="status"><AlertCircle size={14} aria-hidden="true" /><span>{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则尚未配置推荐押金依据，可自行填写押金。" : "请先补全安全箱、体力、负重、潜水与皮肤资料后再查看推荐押金。"}</span></div> : null}</div></div>
               </section>
 
               <section className="publish-term-section publish-term-note-section">
@@ -3741,7 +3745,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           </button>
         </div>
         <div className="publish-rail-scroll" id="publish-quote-body">
-        {published ? <div className="publish-success" role="status"><Check size={20} aria-hidden="true" /><strong>已上架</strong><p>公众列表、详情与“我的上架账号”显示的是同一份发布资料。</p>{readOnly ? <p>开始编辑后，账号将暂停接单；完成修改并重新发布后，请核对接单状态。</p> : null}<div className="supply-inline-actions"><Link className="button primary" href={`/accounts/${encodeURIComponent(accountId ?? "")}`}>查看公开详情</Link><Link className="button secondary" href="/account?view=accounts">我的上架账号</Link>{readOnly ? <button type="button" className="button quiet" disabled={Boolean(busy)} onClick={() => void beginEditing()}>编辑资料</button> : null}</div></div> : <>
+        {published ? <div className="publish-success" role="status"><Check size={20} aria-hidden="true" /><strong>已上架</strong><p>公众列表、详情与“我的上架账号”显示的是同一份发布资料。</p>{readOnly ? <p>上架后不可修改；如需变更，请先在账号管理中下架，再重新填写上架资料。</p> : null}<div className="supply-inline-actions"><Link className="button primary" href={`/accounts/${encodeURIComponent(accountId ?? "")}`}>查看公开详情</Link><Link className="button secondary" href="/account?view=accounts">我的上架账号</Link></div></div> : <>
           {netEstimate ? <div className="publish-income-total"><span>预计所得</span><output aria-label="预计净所得">{netEstimate.ownerNet.amount} 元</output></div> : effectiveQuote ? (
             <div className="publish-income-total">
               <span>预计收入（扣费前）</span>
@@ -3810,6 +3814,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             {!ownerPreviewStale && ownerPreview?.depositState === "KNOWN" && ownerPreview.baseTenantDeposit ? <div className="publish-deposit-verified"><dt><Check size={12} aria-hidden="true" />符合押金要求</dt></div> : null}
             {actualPublisherRequirement !== null && actualPublisherRequirement > 0n ? <div><dt>发布保证金<small>本次规则要求</small></dt><dd>{moneyText(effectiveQuote?.publisherBailRequirement)}</dd></div> : null}
           </dl>
+          {actualPublisherRequirement !== null && actualPublisherRequirement > 0n ? <p className="publish-rail-note">请先保存草稿，再前往 <Link href="/account?view=credit">信用与保证金</Link> 查看缴纳状态。</p> : null}
           {effectiveQuote ? <small className="publish-rail-deposit-note">会员实际实付押金以下单时的个人报价为准。</small> : null}
           {effectiveQuote?.expiryDisclosures.length ? <div className="publish-rail-expiry"><strong>权益有效期</strong>{effectiveQuote.expiryDisclosures.map((item) => <p key={item.entitlementId}>{catalog?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? supply?.version?.presentation?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? "该项权益"}：{item.expiresAt ? new Date(item.expiresAt).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "长期有效"} · 本租期不保证覆盖完整有效期</p>)}</div> : null}
           {effectiveQuote && !quoteConsistent ? <div className="supply-blockers" role="alert"><strong>报价金额待核对</strong><p>本次报价的行金额与合计不一致，暂不能确认上架。</p></div> : null}
@@ -3830,7 +3835,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         </>}
         </div>
         {!published ? <div className="publish-rail-footer">
-          {readOnly ? <div className="publish-rail-readonly"><p>{reviewState === "SUBMITTED" ? "当前版本正在审核中，不能直接编辑。" : "当前版本不是可编辑草稿。"}</p><button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "开始修改"}</button></div> : <>
+          {readOnly ? <div className="publish-rail-readonly"><p>{mustCreateAccount ? "此账号不能修改或再次上架；如需出租，请重新填写上架资料。" : reviewState === "SUBMITTED" ? "当前资料正在审核中，不能直接编辑。" : "当前资料不是可编辑草稿。"}</p>{mustCreateAccount ? <Link className="button primary" href="/publish">重新填写上架资料</Link> : reviewState === "SUBMITTED" ? <Link href="/account?view=accounts" className="button secondary">返回账号管理</Link> : <button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "继续填写草稿"}</button>}</div> : <>
             {effectiveQuote ? <div className="publish-confirm">
               {quoteConsistent ? <>
                 {agreementConsent}
@@ -3839,7 +3844,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               </> : null}
               <button type="button" className="button quiet" disabled={formDisabled} onClick={() => void quote()}>重新核对报价</button>
               <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
-              {rulesAccepted ? <p className="supply-muted">条款已按当前版本确认；资料变化后需重新确认。</p> : null}
+              {rulesAccepted ? <p className="supply-muted">条款已按当前资料确认；资料变化后需重新确认。</p> : null}
             </div> : <div className="publish-rail-actions">
               {agreementConsent}
               {payoutConsent}

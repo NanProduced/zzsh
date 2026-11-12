@@ -1,5 +1,5 @@
 import type {NativeWithdrawalScope} from '../finance/native-withdrawal-resource';
-import { readUserObligations } from "./user-obligation-reader";
+import { readUserObligations, USER_LISTING_OBLIGATION_SQL, USER_ORDER_OBLIGATION_SQL } from "./user-obligation-reader";
 import { withAdminLoginTwoFactorPreference } from "./admin-login-two-factor";
 import { createAdminBruteForce, readAdminAltchaHmacKey, withAdminBruteForce, type AdminAuthThrottleStore } from "./admin-brute-force";
 import { ADMIN_CLIENT_IP_FORWARD_HEADER, parseAdminClientIpConfig, resolveAdminClientIp, type AdminClientIpConfig } from "./admin-client-ip";
@@ -970,7 +970,6 @@ export async function mountAuthHandlers(
   if (options.ecsTestDemo) {
     assertEcsTestDemoRuntimeAssembly(options.ecsTestDemo, options);
     await preflightEcsTestDemoRuntime(options.pool, options.ecsTestDemo);
-    app.get(EcsDemoRefundLifecycle).start(options.pool, options.ecsTestDemo);
   }
   if (options.localControlledPayments && options.joinpayCollection) {
     throw new ConfigurationError("Controlled and formal collection assemblies are exclusive");
@@ -1010,7 +1009,8 @@ export async function mountAuthHandlers(
   const legacyPublicAdmissionManifest=options.legacyPublicAdmissionManifest;
   if(legacyPublicAdmissionManifest) await assertLegacyPublicAdmissionManifestTarget(options.pool,legacyPublicAdmissionManifest);
   const legacyPublicAdmissionDetail=legacyPublicAdmissionManifest?.index;
-  await preflightCreditGuarantee(options.pool);
+  await preflightCreditGuarantee(options.pool, options.ecsTestDemo?.demo);
+  if (options.ecsTestDemo) app.get(EcsDemoRefundLifecycle).start(options.pool, options.ecsTestDemo, options.creditGuaranteeEnabled === true);
   const [{ betterAuth }, { drizzleAdapter }, { toNodeHandler }, { bearer, phoneNumber, twoFactor, username }, { APIError, createAuthEndpoint, createAuthMiddleware, isAPIError }, { setSessionCookie }, { hashPassword, verifyPassword }] = await Promise.all([
     import("better-auth"),
     import("@better-auth/drizzle-adapter"),
@@ -1320,9 +1320,9 @@ export async function mountAuthHandlers(
     userSmsConfiguration: options.userSmsConfiguration,
     settlementAdmission: options.joinpayCollection?.admission,
     userObligationReader: async (userId,client) => {
-      const pending=await client.query("SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1",[userId]);
+      const pending=await client.query(USER_LISTING_OBLIGATION_SQL,[userId]);
       if(pending.rowCount) return "PENDING";
-      const orderPending=await client.query("SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1",[userId]);
+      const orderPending=await client.query(USER_ORDER_OBLIGATION_SQL,[userId]);
       if(orderPending.rowCount) return "PENDING";
       return options.userObligationReader ? options.userObligationReader(userId,client) : "UNKNOWN";
     },
@@ -1465,7 +1465,8 @@ export async function mountAuthHandlers(
   };
   // Credit routes own both BFF prefixes and must be registered before the
   // generic BFF fallbacks, which otherwise turn unknown credit paths into 404.
-  mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey }, options.creditGuaranteeEnabled === true);
+  mountCreditGuaranteeRoutes(app, { ...securityOptions, listingCursorKey: options.listingCursorKey,
+    ...(options.ecsTestDemo ? { demoFinance: options.ecsTestDemo.demo } : {}) }, options.creditGuaranteeEnabled === true);
   // 退款路径先于通用Admin BFF挂载：只接管/refunds，其余请求仍交给BFF。
   mountAdminNativeRefunds(app, securityOptions, { pool: options.pool, ...(options.localFinancialSandbox || options.ecsTestDemo
     ? { refund: { localSandbox: (options.localFinancialSandbox ?? options.ecsTestDemo!).refund } }

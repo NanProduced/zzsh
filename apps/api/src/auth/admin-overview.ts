@@ -101,7 +101,9 @@ export async function readAdminOverview(
 
     if (permission(ADMIN_PERMISSION.supplyRentalAccountRead) && !emptyScope) {
       const row = (await client.query<{ total: string; published: string }>(
-        `SELECT count(*)::text AS total,count(*) FILTER(WHERE v.review_state='PUBLISHED')::text AS published
+        `SELECT count(*)::text AS total,count(*) FILTER(WHERE v.review_state='PUBLISHED' AND a.lifecycle='ACTIVE'
+          AND NOT EXISTS(SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.legacy_supply_map m ON m.account_id=a.id
+            WHERE g.id=a.game_id AND g.code='delta' AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts'))::text AS published
            FROM zzsh_supply.rental_account a LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
           WHERE ${scopeSql("a.game_id")}`, parameters.slice(0, 2),
       )).rows[0]!;

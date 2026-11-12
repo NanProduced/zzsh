@@ -167,9 +167,10 @@ async function loadSupervisionPageFacts(client: PoolClient, accountIds: string[]
     return { sources, oldNumbers, historical };
 }
 
-export function accountBusinessState(facts: { occupied: boolean; completed: boolean; ownerPaused: boolean; staffRestricted: boolean; newOrders: boolean | null; publicVisible: boolean | null; lifecycle: string | null }): SupervisionQuery["status"] | null {
+export function accountBusinessState(facts: { occupied: boolean; completed: boolean; ownerPaused: boolean; staffRestricted: boolean; newOrders: boolean | null; publicVisible: boolean | null; lifecycle: string | null; retiredLegacy?: boolean }): SupervisionQuery["status"] | null {
     if (facts.occupied) return "IN_PROGRESS";
     if (facts.completed) return "COMPLETED";
+    if (facts.lifecycle === "DELISTED" || facts.retiredLegacy) return "OFFLINE";
     if (facts.lifecycle !== "ACTIVE") return null;
     if (facts.ownerPaused || facts.staffRestricted) return "OFFLINE";
     return facts.newOrders === true && facts.publicVisible === true ? "LISTED" : null;
@@ -234,7 +235,7 @@ export async function supervisionFacts(client: PoolClient, a: PublishingAccount,
     const occupancyKind = detail.occupancyKind === "PENDING_PAYMENT" || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" ? detail.occupancyKind : null;
     const publicBasis = publicVisible ? publicListingBasis(publicRead ?? {}) : null;
     if (publicBasis) (publicBasis as Record<string, unknown>).feeSummary = quoteFeeSummary((publicRead as { quote?: Record<string, any> } | null)?.quote);
-    return { businessState: accountBusinessState({ occupied: context?.state?.occupied === true || blockers.includes("OCCUPIED"), completed: context?.state?.completed === true || legacyCompleted || blockers.includes("RENTAL_COMPLETED"), ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, newOrders, publicVisible, lifecycle: a.lifecycle ?? null }), lifecycle: a.lifecycle ?? null, publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
+    return { businessState: accountBusinessState({ occupied: context?.state?.occupied === true || blockers.includes("OCCUPIED"), completed: context?.state?.completed === true || legacyCompleted || blockers.includes("RENTAL_COMPLETED"), ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, newOrders, publicVisible, lifecycle: a.lifecycle ?? null, retiredLegacy: blockers.includes("LEGACY_LISTING_RELIST_REQUIRED") }), lifecycle: a.lifecycle ?? null, publicVisible, publicSource, publicVersionId: publicBasis?.id ?? null, publicBasis, newOrders, reasons: blockers, primaryReasonCode, ownerPaused: a.owner_paused, staffRestricted: a.staff_restricted, occupancy: !detail.version ? "UNKNOWN" : blockers.includes("OCCUPIED") ? "OCCUPIED" : blockers.includes("OCCUPANCY_UNKNOWN") ? "UNKNOWN" : "FREE", occupancyKind, sources, legacyNumbers: [...new Set([...sources.map(r => r.businessNo).filter(Boolean), ...oldNumbers])], historicalRead };
 }
 const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
@@ -724,8 +725,10 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const where = [gameScopeSql("a.game_id","$2","$1")];
         if (q.status === "IN_PROGRESS") where.push(stateSql.occupied);
         if (q.status === "COMPLETED") where.push(completedForSupervision, "NOT " + stateSql.occupied);
-        if (q.status === "OFFLINE") where.push("a.lifecycle='ACTIVE'", "(a.owner_paused OR a.staff_restricted)", "NOT " + stateSql.occupied, "NOT " + completedForSupervision);
-        if (q.status === "LISTED") where.push("a.lifecycle='ACTIVE'", "NOT a.owner_paused", "NOT a.staff_restricted", "NOT " + stateSql.occupied, "NOT " + stateSql.unknown, "NOT " + completedForSupervision, "dv.id=a.current_version_id");
+        const retiredLegacy = `EXISTS (SELECT 1 FROM zzsh_supply.game retired_game JOIN zzsh_supply.legacy_supply_map retired_map ON retired_map.account_id=a.id
+          WHERE retired_game.id=a.game_id AND retired_game.code='delta' AND retired_map.source_system='legacy_mysql_restore' AND retired_map.source_entity='la_rental_accounts')`;
+        if (q.status === "OFFLINE") where.push(`(a.lifecycle='DELISTED' OR (a.lifecycle='ACTIVE' AND (a.owner_paused OR a.staff_restricted OR ${retiredLegacy})))`, "NOT " + stateSql.occupied, "NOT " + completedForSupervision);
+        if (q.status === "LISTED") where.push("a.lifecycle='ACTIVE'", "NOT a.owner_paused", "NOT a.staff_restricted", "NOT " + retiredLegacy, "NOT " + stateSql.occupied, "NOT " + stateSql.unknown, "NOT " + completedForSupervision, "dv.id=a.current_version_id");
         if (q.gameId)
             where.push(`a.game_id=${p(q.gameId)}`);
         if (q.view === "restricted")
@@ -829,7 +832,6 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
     const originalRestrictionId = events.find(e => e.restricted === true)?.versionId;
     const originalRestriction: Record<string, any> | null = originalRestrictionId && history.some(h => h.id === originalRestrictionId) ? await listingDetail(client, { ...a, current_version_id: originalRestrictionId }, "admin", gate, quoteViewer, a, false, "RENTABLE", prefetch) : null;
     const canOrder = viewer.access.permissions.has("order.read"), orders = canOrder ? await queryAdminReadOrders(client, { adminId: viewer.adminId, isBoss: viewer.access.isBoss, internalQuote: false, authorizationKey: viewer.contextKey }, { accountId: a.id, page: 1, pageSize: 5 }) : null;
-    const duplicateHints = managementAccess ? (await client.query(`SELECT h.id,h.related_account_id,h.evidence_ref,h.result,h.reason FROM zzsh_supply.duplicate_hint h JOIN zzsh_supply.rental_account related ON related.id=h.related_account_id WHERE h.account_id=$1 AND ${gameScopeSql("related.game_id","$3","$2")}`, [a.id, viewer.access.isBoss, viewer.adminId])).rows : [];
     const changes = previous?.version && detail.version ? { previousVersionId: previous.version.id, previousSequence: previous.version.sequence, changed: canonicalize(previous.version.declaration) !== canonicalize(detail.version.declaration) } : null;
     if (managementAccess && detail.version) {
         const media = detail.version.declaration.mediaBindings;
@@ -876,6 +878,6 @@ export async function readSupervision(client: PoolClient, a: PublishingAccount, 
     }
     const legacyMediaCounts = managementAccess && detail.version?.origin === "LEGACY_OBSERVATION"
         ? await readLegacyPathCounts(client, a.id, detail.version.id) : null;
-    return { ...detail, legacyMediaCounts, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, duplicateHints, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
+    return { ...detail, legacyMediaCounts, decisions: managementAccess ? detail.decisions : [], contractVersion: SUPERVISION_READ_VERSION, contextKey: viewer.contextKey, history, previousDeclaration: previous?.version?.declaration ?? null, previousPresentation: previous?.version?.presentation ?? null, supervision: { managementAccess: managementAccess ? "READY" : "DENIED", historical, facts, changes, previousVersion: previous?.version ?? null, originalRestrictionVersion: originalRestriction?.version ?? null, restrictionHistory: { state: !managementAccess ? "DENIED" : events.length ? "KNOWN" : "NOT_RECORDED", items: events, limit: 20 }, ownerLink: viewer.access.permissions.has("user.directory.read") ? { state: "READY", userId: a.owner_user_id } : { state: "DENIED" }, orders: orders ? { state: "READY", ...orders } : { state: "DENIED", permission: "order.read" } } };
 }
 

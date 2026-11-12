@@ -61,7 +61,6 @@ export const ADMIN_PERMISSION = {
   supplyGuaranteeVerify: "supply.guarantee.verify",
   supplyGuaranteeRevoke: "supply.guarantee.revoke",
   supplyRestrict: "supply.restrict",
-  supplyDuplicateReview: "supply.duplicate.review",
   supplyGunsmithManage: "supply.gunsmith.manage",
   creditRead: "credit.read",
   creditDecide: "credit.decide",

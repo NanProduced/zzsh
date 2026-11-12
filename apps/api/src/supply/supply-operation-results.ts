@@ -37,7 +37,7 @@ const id = (value: unknown): value is string => typeof value === "string" && /^[
 export async function readUserSupplyOperationResult(client: PoolClient, userId: string, query: URLSearchParams, keyHeader: string | undefined) {
   for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported operation result query");
   const operation = query.get("operation") ?? "", accountId = query.get("resourceId"), fingerprint = query.get("fingerprint");
-  if (!["supply.publication.pause", "supply.publication.resume", "supply.publication.withdraw"].includes(operation)) throw invalid("Operation does not support result recovery", "operation");
+  if (!["supply.publication.pause", "supply.publication.resume", "supply.publication.withdraw", "supply.publication.delist"].includes(operation)) throw invalid("Operation does not support result recovery", "operation");
   if (!id(accountId)) throw invalid("Original account is required", "resourceId");
   if (!fingerprint || !/^[0-9a-f]{64}$/.test(fingerprint)) throw invalid("Original request fingerprint is required", "fingerprint");
   const key = validateIdempotencyKey(keyHeader);

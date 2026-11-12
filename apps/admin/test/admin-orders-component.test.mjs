@@ -830,6 +830,23 @@ test('CHAIN order detail separates fulfillment, business funds, JoinPay evidence
   assert.match(payment,/渠道观察/);assert.match(payment,/本站接纳/);assert.match(payment,/商户订单号/);assert.match(payment,/MERCHANT-1/);
   assert.match(payment,/本站已接纳/);assert.equal(payment.includes('已到账'),false);
 });
+test('late or other review-required payment is visible without adding a refund action', async t => {
+  const {root,node,AdminOrderChainView}=await setup(t);
+  const order={...chainOrder,id:'late-payment-order',displayNo:'LATE-PAYMENT',status:'CANCELLED',source:{origin:'NATIVE'}};
+  const base={contractVersion:'admin-order-payment-summary.v1',integration:'JOINPAY',productionPaymentCapability:false,originalRequest:null,latestTrustedObservation:null,conflicts:null,recovery:null,settlement:'NOT_INTEGRATED',unknowns:null,updatedAt:null};
+  for(const [index,payment] of [
+    {acceptance:{state:'REVIEW_REQUIRED',confirmationId:'late',reasonCode:'LATE_PAYMENT'}},
+    {acceptance:{state:'APPLIED',confirmationId:'prior',reasonCode:null},anomalies:{status:'AVAILABLE',items:[{disposition:'REVIEW_REQUIRED'}]}},
+    {acceptance:{state:'APPLIED',confirmationId:'prior',reasonCode:null},anomalies:{status:'AVAILABLE',items:[]}},
+  ].entries()){
+    globalThis.fetch=async url=>String(url).includes('readMode=combined')?response({order,paymentSummary:{...base,...payment}}):response({error:{code:'NOT_FOUND'}},404);
+    await act(async()=>root.render(createElement(AdminOrderChainView,{...chainProps(`late-payment-${index}`),objectOnly:true,initialOrderId:order.id})));
+    await until(()=>node.textContent.includes(order.displayNo));
+    await settle();
+    assert.equal(node.textContent.includes('本单付款记录需要核对'),index<2);
+    if(index<2)assert.match(node.textContent,/不代表退款已发出或到账/);
+  }
+});
 test('server progress drives opening/ending without inferring them from PAID or a cancelled status', async t => {
   const {root,node,AdminOrderChainView}=await setup(t);
   const base={...chainOrder,id:'progress-order',displayNo:'PROGRESS-ORDER',source:{origin:'NATIVE'},payment:{state:'RECORDED_PAID',recordedAt:null,recordedAmount:null}};

@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
 
-import { listMyOrders, type OrderRow } from "../src/order/order";
+import { listMyOrders, orderHasPaidState, type OrderRow } from "../src/order/order";
+
+test("cancelled paid orders keep their payment fact while delisted unpaid orders do not invent one", () => {
+  assert.equal(orderHasPaidState("CANCELLED", "SUPPORT_AFTER_START_CANCELLED"), true);
+  assert.equal(orderHasPaidState("CANCELLED", "OWNER_DELISTED"), false);
+});
 
 const money = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 2 as const });
 const unitMoney = (amount: string) => ({ currency: "CNY" as const, unit: "yuan" as const, amount, scale: 8 as const });

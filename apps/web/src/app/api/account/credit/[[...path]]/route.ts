@@ -11,6 +11,7 @@ function allowed(path: string[], method: string): boolean {
   if (method !== "POST") return false;
   return path.length === 1 && path[0] === "recovery-requests"
     || path.length === 3 && path[0] === "accounts" && path[2] === "payment-intents"
+    || path.length === 5 && path[0] === "accounts" && path[2] === "payment-intents" && path[4] === "demo-confirm"
     || path.length === 3 && path[0] === "guarantees" && path[2] === "refund-requests";
 }
 

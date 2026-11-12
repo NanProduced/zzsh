@@ -6,9 +6,32 @@ export type UserObligationFinding = { status: "PENDING" | "UNKNOWN"; obligation:
 
 const LEGACY_PROVIDER = "legacy_mysql_restore";
 const LEGACY_MIGRATION_ACTION = "user.legacy_owner.migrated";
+export const USER_LISTING_OBLIGATION_SQL = `SELECT 1 FROM zzsh_supply.rental_account a
+  JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id
+  WHERE a.owner_user_id=$1 AND a.lifecycle='ACTIVE'
+    AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED')
+    AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.legacy_supply_map m ON m.account_id=a.id
+      WHERE g.id=a.game_id AND g.code='delta' AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts') LIMIT 1`;
+export const USER_ORDER_OBLIGATION_SQL = `SELECT 1 FROM zzsh_order.rental_order
+  WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1)
+  UNION ALL SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l
+    LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
+    WHERE (l.renter_user_id=$1 OR l.owner_user_id=$1)
+      AND (COALESCE(h.stage,l.source_order_status) NOT IN (4,5) OR l.source_pay_status NOT IN (0,1))
+  UNION ALL SELECT 1 FROM zzsh_order.legacy_inflight_register r
+    WHERE (r.renter_user_id=$1 OR r.owner_user_id=$1) AND NOT EXISTS (
+      SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l
+      LEFT JOIN zzsh_order.legacy_continuation_version h ON h.order_id=l.id AND h.superseded_at IS NULL
+      WHERE l.source_system=r.source_system AND l.source_entity=r.source_entity AND l.legacy_id=r.legacy_id
+        AND l.source_digest=r.source_digest AND l.account_id=r.account_id AND l.owner_user_id=r.owner_user_id
+        AND (r.renter_user_id IS NULL OR l.renter_user_id=r.renter_user_id)
+        AND l.source_order_status=r.source_order_status AND l.source_pay_status=r.source_pay_status
+        AND COALESCE(h.stage,l.source_order_status) IN (4,5) AND l.source_pay_status IN (0,1))
+  UNION ALL SELECT 1 FROM zzsh_order.legacy_order_duty
+    WHERE counterparty_user_id=$1 AND status IN ('PENDING','MATURED') LIMIT 1`;
 const REQUIRED_RELATIONS = {
-  LISTING: ["zzsh_supply.rental_account", "zzsh_supply.listing_version"],
-  ORDER: ["zzsh_order.rental_order"],
+  LISTING: ["zzsh_supply.rental_account", "zzsh_supply.listing_version", "zzsh_supply.game", "zzsh_supply.legacy_supply_map"],
+  ORDER: ["zzsh_order.rental_order", "zzsh_order.legacy_order_read_snapshot", "zzsh_order.legacy_continuation_version", "zzsh_order.legacy_inflight_register", "zzsh_order.legacy_order_duty"],
   WALLET_BALANCE: ["zzsh_order.wallet_coverage", "zzsh_order.settlement_ledger_entry", "zzsh_iam.user_identity_state", "zzsh_iam.audit_event"],
   WITHDRAWAL: ["zzsh_order.withdrawal_intent", "zzsh_order.joinpay_withdrawal_intent"],
   DEPOSIT: ["zzsh_order.owner_guarantee_requirement", "zzsh_order.owner_guarantee_payment", "zzsh_order.owner_guarantee_refund"],
@@ -27,11 +50,11 @@ const CENTS = /^-?(0|[1-9]\d{0,30})$/;
 /** 返回 null 表示该项已确认无欠款/在途；任何无法确认的情况都返回 UNKNOWN（fail closed）。 */
 const CHECKS: Record<UserObligationKind, (client: PoolClient, userId: string) => Promise<UserObligationFinding | null>> = {
   async LISTING(client, userId) {
-    return (await exists(client, "SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1", userId))
+    return (await exists(client, USER_LISTING_OBLIGATION_SQL, userId))
       ? { status: "PENDING", obligation: "LISTING" } : null;
   },
   async ORDER(client, userId) {
-    return (await exists(client, "SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (renter_user_id=$1 OR owner_user_id=$1) LIMIT 1", userId))
+    return (await exists(client, USER_ORDER_OBLIGATION_SQL, userId))
       ? { status: "PENDING", obligation: "ORDER" } : null;
   },
   async WALLET_BALANCE(client, userId) {

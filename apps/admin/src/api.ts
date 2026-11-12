@@ -262,7 +262,7 @@ export type UserRentalAccountItem = {
   accountId: string;
   displayNo: string | null;
   game: { id: string; code: string; name: string };
-  lifecycle: "ACTIVE" | "ARCHIVED";
+  lifecycle: "ACTIVE" | "ARCHIVED" | "DELISTED";
   ownerPaused: boolean;
   staffRestricted: boolean;
   restrictionReason: string | null;
@@ -766,7 +766,7 @@ export type AdminOrder = {
   paymentOpen: boolean;
   cancelOpen: boolean;
   paidAt?: string | null;
-  cancelReason?: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | null;
+  cancelReason?: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | "SUPPORT_AFTER_START_CANCELLED" | "OWNER_DELISTED" | null;
   cancelledAt?: string | null;
   ownerUserId: string;
   renterUserId: string;
@@ -967,6 +967,7 @@ export type AdminOrderPaymentSummary = {
     providerPaidAtRaw: string | null; providerTimeZone: "UNCONFIRMED" | "EXPLICIT_OFFSET"; providerPaidAt?: string | null;
     providerTimeOffsetMinutes?: number; evidenceRef: string; observedAt: string } | null;
   acceptance: { state: "APPLIED" | "REVIEW_REQUIRED" | "PENDING" | "NONE"; confirmationId: string | null; reasonCode: string | null } | null;
+  anomalies?: { status: "AVAILABLE" | "SCHEMA_NOT_DEPLOYED"; items: Array<{ disposition: "APPLIED" | "REVIEW_REQUIRED" | null }> | null } | null;
   conflicts: { kind: "CHANNEL_STATUS_CONFLICT" | "STALE" | "LATE" | "DUPLICATE"; observedAt: string; evidenceRef: string | null }[] | null;
   recovery: { mode: "NONE" | "ORIGINAL_NUMBER_QUERY"; manualQueryOpen: false; lastAttemptAt: null; attempts: null } | null;
   settlement: "NOT_INTEGRATED"; unknowns: string[] | null; updatedAt: string | null;

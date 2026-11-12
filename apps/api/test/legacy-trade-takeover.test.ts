@@ -62,12 +62,14 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
   let stored = { ...buildLegacyTradeDeclaration(intake, catalog()).declaration!, mediaBindings: [] } as unknown as ContentDeclaration;
   if (options.native && !intake.title.trim()) stored.title = `历史资料待核实-${intake.accountId.slice(0, 8)}`;
   const version: any = { id: account.current_version_id, origin: options.native ? "NATIVE" : "LEGACY_OBSERVATION", review_state: options.native ? "DRAFT" : "IMPORTED_UNVERIFIED", attributes: stored.attributes, payload: null, content_hash: null, rule_release_id: null };
-  const controls = { priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false, reviewPermission: true, legacyReference: options.legacyReference, blockedPaths: [] as string[] };
+  // These isolated helper tests use a non-retired source; Delta retirement is checked separately.
+  const controls = { retired: false, priorOrdinary: true, sourceMismatch: false, displayMismatch: false, observationMismatch: false, authorized: true, accepted: false, formalDone: false, reviewPermission: true, legacyReference: options.legacyReference, blockedPaths: [] as string[] };
   const receipts = new Map<string, unknown>();
   const sourceUpdatedAt = new Date("2026-10-15T00:00:00Z"), extractSha256 = "e".repeat(64), evidenceRef = "FIXTURE_DISPLAY";
   const displayDigest = legacyDisplayDigest(account.id, { observationVersionId: original.source.expectedObservationVersionId, baseSourceDigest: original.source.sourceDigest, extractSha256, sourceUpdatedAt: sourceUpdatedAt.toISOString(), evidenceRef, snapshot: original.display });
   const client = { query: async (sql: string, values: unknown[] = []) => {
     queries.push({ sql, values });
+    if (sql.includes("AS retired")) return { rows: [{ retired: controls.retired }], rowCount: 1 };
     if (sql.includes('FROM "zzsh_supply"."idempotency_record"')) { const row = receipts.get(String(values[0])+":"+String(values[1])); return { rows: row ? [row] : [], rowCount: row ? 1 : 0 }; }
     if (sql.includes('INSERT INTO "zzsh_supply"."idempotency_record"')) { receipts.set(String(values[0])+":"+String(values[1]), { requestFingerprint: values[2], responseStatus: values[3], responseBody: JSON.parse(String(values[4])), publishRequired: values[5] }); return { rows: [], rowCount: 1 }; }
     if (sql.includes('INSERT INTO "zzsh_iam"."audit_event"')) { const details = JSON.parse(String(values[10])); audits.push({ action: values[4], details }); if (values[4] === "supply.legacy.trade_takeover") controls.formalDone = true; return { rows: [], rowCount: 1 }; }
@@ -112,6 +114,13 @@ function reviewedMaintenanceFixture(t: TestContext, options: { native?: boolean;
   t.mock.method(publishing, "reviewListing", async (_c: unknown, _a: unknown, _id: unknown, _body: unknown, _gate: unknown, grading: import("../src/supply/publishing").LegacyTakeoverGradingContext | undefined) => { assert.equal(grading?.gradingDivision, null); assert.equal(grading?.sourceDigest, original.source.sourceDigest); calls.push("review"); });
   return { intake, original, client, actor, gate, account, version, controls, calls, queries, audits, displayDigest, getStored: () => stored };
 }
+
+test("retired Delta accounts cannot enter the legacy takeover flow", async t => {
+  const f = reviewedMaintenanceFixture(t);
+  f.controls.retired = true;
+  await assert.rejects(() => prepareLegacyTradeTakeover(f.client, f.actor, { batchId: "fixture_batch", intake: f.intake }, f.gate), /历史账号仅保留记录/);
+  assert.equal(f.calls.length, 0);
+});
 
 function mediaCloseoutFixture(t: TestContext, selected = false) {
   const f = reviewedMaintenanceFixture(t, { native: true, selected, originalTitle: "已核来源标题", bumpDraft: true });
@@ -602,7 +611,7 @@ test("actual maintenance chain saves and quotes formal native fields before publ
   t.mock.method(legacy,"lockLegacySource",async()=>{});t.mock.method(legacy,"readLegacyMap",async()=>({account_id:a.id,source_digest:input.source.sourceDigest,version_id:input.source.expectedObservationVersionId}) as Awaited<ReturnType<typeof legacy.readLegacyMap>>);
   t.mock.method(funding,"readFundingPolicyForRelease",async()=>({ownerDepositRules:{normal:{minCents:"1"},fullPayoutSelected:{minCents:"30000"},capCents:"999999"}} as import("../src/supply/funding-policy").FundingPolicy));
   const sourceUpdatedAt=new Date("2026-10-15T00:00:00Z"),extractSha256="e".repeat(64),evidenceRef="FIXTURE_DISPLAY",displayDigest=legacyDisplayDigest(a.id,{observationVersionId:input.source.expectedObservationVersionId,baseSourceDigest:input.source.sourceDigest,extractSha256,sourceUpdatedAt:sourceUpdatedAt.toISOString(),evidenceRef,snapshot:input.display});
-  const client={query:async(sql:string)=>{queries.push(sql);if(sql.includes("e.action='supply.legacy.trade_draft_write'"))return {rows:[{}],rowCount:1};if(sql.includes("legacy_listing_display_snapshot"))return {rows:[{observation_version_id:input.source.expectedObservationVersionId,base_source_digest:input.source.sourceDigest,extract_sha256:extractSha256,source_updated_at:sourceUpdatedAt,evidence_ref:evidenceRef,snapshot:input.display,display_digest:badDisplay?"0".repeat(64):displayDigest}],rowCount:1};if(sql.includes("SELECT title,description"))return {rows:[{title:input.title,description:input.description}],rowCount:1};if(sql.includes("SELECT id,code,unit"))return {rows:catalog(),rowCount:catalog().length};if(sql.includes("FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a")){const rows=plan.expectedMedia.map(m=>({id:m.assetId,account_id:foreignMedia?"foreign_account":a.id,owner_user_id:foreignMedia?"foreign_owner":a.owner_user_id,purpose:"ACCOUNT_DISPLAY"}));return {rows,rowCount:rows.length};}if(sql.includes("unnest($2::text[])"))return {rows:missingTier?[{}]:[],rowCount:missingTier?1:0};if(sql.includes("acceptance_kind='OWNER_ACCEPTED'"))return {rows:accepted?[{}]:[],rowCount:accepted?1:0};if(sql.includes("details->>'batchId'"))return {rows:[{}],rowCount:1};return {rows:[],rowCount:0};}} as unknown as import("pg").PoolClient;
+  const client={query:async(sql:string)=>{queries.push(sql);if(sql.includes("AS retired"))return {rows:[{retired:false}],rowCount:1};if(sql.includes("e.action='supply.legacy.trade_draft_write'"))return {rows:[{}],rowCount:1};if(sql.includes("legacy_listing_display_snapshot"))return {rows:[{observation_version_id:input.source.expectedObservationVersionId,base_source_digest:input.source.sourceDigest,extract_sha256:extractSha256,source_updated_at:sourceUpdatedAt,evidence_ref:evidenceRef,snapshot:input.display,display_digest:badDisplay?"0".repeat(64):displayDigest}],rowCount:1};if(sql.includes("SELECT title,description"))return {rows:[{title:input.title,description:input.description}],rowCount:1};if(sql.includes("SELECT id,code,unit"))return {rows:catalog(),rowCount:catalog().length};if(sql.includes("FROM zzsh_supply.listing_media m JOIN zzsh_supply.media_asset a")){const rows=plan.expectedMedia.map(m=>({id:m.assetId,account_id:foreignMedia?"foreign_account":a.id,owner_user_id:foreignMedia?"foreign_owner":a.owner_user_id,purpose:"ACCOUNT_DISPLAY"}));return {rows,rowCount:rows.length};}if(sql.includes("unnest($2::text[])"))return {rows:missingTier?[{}]:[],rowCount:missingTier?1:0};if(sql.includes("acceptance_kind='OWNER_ACCEPTED'"))return {rows:accepted?[{}]:[],rowCount:accepted?1:0};if(sql.includes("details->>'batchId'"))return {rows:[{}],rowCount:1};return {rows:[],rowCount:0};}} as unknown as import("pg").PoolClient;
   const result=await takeoverLegacyTrade(client,actor,{batchId:"fixture_batch",intake:input},gate);assert.deepEqual(calls,selected?["save","quote"]:["save","quote","review"]);assert.equal((result.body as {state:string}).state,selected?"OWNER_ACCEPTANCE_REQUIRED":"PUBLISHED");
   assert.equal(queries.some(q=>q.includes("'LEGACY_TAKEOVER_AUTHORIZED'")),!selected);assert(!queries.some(q=>/INSERT INTO zzsh_order\.rental_order|ledger_entry/.test(q)));
   if(selected){const finalize={accountId:a.id,source:input.source,batchId:"fixture_batch",expectedRevision:"1",versionId:version.id,contentHash:version.content_hash!,releaseId:version.rule_release_id!};await assert.rejects(()=>finalizeLegacyTradeTakeover(client,actor,finalize,gate),/TERMS_ACCEPTANCE_REQUIRED/);assert.deepEqual(calls,["save","quote"]);accepted=true;assert.equal((await finalizeLegacyTradeTakeover(client,actor,finalize,gate)).status,200);assert.deepEqual(calls,["save","quote","review"]);}
@@ -659,6 +668,7 @@ test("formal takeover is never reported as a draft result when publish-grade fac
   const sourceUpdatedAt = new Date("2026-10-16T00:00:00Z"), extractSha256 = "e".repeat(64), evidenceRef = "FIXTURE_DISPLAY", displayDigest = legacyDisplayDigest(account.id, { observationVersionId: input.source.expectedObservationVersionId, baseSourceDigest: input.source.sourceDigest, extractSha256, sourceUpdatedAt: sourceUpdatedAt.toISOString(), evidenceRef, snapshot: input.display });
   const client = {
     query: async (sql: string) => {
+      if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
       if (sql.includes("legacy_listing_display_snapshot")) return { rows: [{ observation_version_id: input.source.expectedObservationVersionId, base_source_digest: input.source.sourceDigest, extract_sha256: extractSha256, source_updated_at: sourceUpdatedAt, evidence_ref: evidenceRef, snapshot: input.display, display_digest: displayDigest }], rowCount: 1 };
       if (sql.includes("SELECT title,description")) return { rows: [{ title: input.title, description: input.description }], rowCount: 1 };
       if (sql.includes("SELECT id,code,unit")) return { rows: catalog, rowCount: catalog.length };
@@ -681,6 +691,7 @@ test("ordinary draft chain saves the converted declaration without a quote and a
   const saveClient = {
     query: async (sql: string) => {
       statements.push(sql);
+      if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
       if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ suspended: false }], rowCount: 1 };
       if (sql.includes('FROM "zzsh_iam"."user_identity_state"')) return { rows: [], rowCount: 0 };
       if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: account.game_id, gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
@@ -701,6 +712,7 @@ test("ordinary draft chain saves the converted declaration without a quote and a
   // STANDARD line for the declared items; the missing price is never mocked into success.
   const quoteClient = {
     query: async (sql: string) => {
+      if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
       if (sql.includes('FROM "zzsh_auth_user"."user"')) return { rows: [{ suspended: false }], rowCount: 1 };
       if (sql.includes('FROM "zzsh_iam"."user_identity_state"')) return { rows: [], rowCount: 0 };
       if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: account.game_id, gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
@@ -773,6 +785,7 @@ test("ordinary draft command saves one legacy observation without quote, review,
   let badDisplay = false;
   const client = { query: async (sql: string, params?: unknown[]) => {
     queries.push(sql);
+    if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     if (sql.includes("audit_event")) audits.push(params?.[10]);
     if (sql.includes("legacy_listing_display_snapshot")) return { rows: [{ observation_version_id: input.source.expectedObservationVersionId, base_source_digest: input.source.sourceDigest, extract_sha256: extractSha256, source_updated_at: sourceUpdatedAt, evidence_ref: evidenceRef, snapshot: input.display, display_digest: badDisplay ? "0".repeat(64) : displayDigest }], rowCount: 1 };
     if (sql.includes("SELECT title,description")) return { rows: [{ title: input.title, description: input.description }], rowCount: 1 };
@@ -901,6 +914,7 @@ test("submit and review stop on a placeholder title before any publication write
   const writes: string[] = [];
   const client = { query: async (sql: string) => {
     if (/^(INSERT|UPDATE|DELETE)/.test(sql.trim())) writes.push(sql);
+    if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
     if (sql.includes("SELECT enabled,current_release_id")) return { rows: [{ enabled: true, current_release_id: "fixture_release", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("current_release_id,catalog_revision")) return { rows: [{ current_release_id: "fixture_release", catalog_revision: "1" }], rowCount: 1 };

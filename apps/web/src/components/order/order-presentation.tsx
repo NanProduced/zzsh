@@ -43,6 +43,7 @@ export function statusLabel(order: Order): string {
       if (order.cancelReason === "TIMEOUT") return "已取消 · 到期未支付";
       if (order.cancelReason === "USER") return "已取消 · 租客取消";
       if (order.cancelReason === "SUPPORT_UNPAID") return "已取消 · 客服处理";
+      if (order.cancelReason === "OWNER_DELISTED") return "已取消 · 号主下架账号";
     }
     return STATUS_LABELS[order.status];
   }

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, HelpCircle, House, ImageOff, Images, Info, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, HelpCircle, House, ImageOff, Images, Info, LockKeyhole, LogIn, Package, Pencil, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves, X } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
 import { SessionLoading } from "./auth/session-loading";
 import { RecoveryAlert } from "./ui/information";
@@ -88,9 +88,10 @@ type AccountStateFilter = RentalState | "ALL";
 const ACCOUNT_STATE_FILTERS: ReadonlyArray<{ value: AccountStateFilter; label: string }> = [
   { value: "ALL", label: "全部" },
   { value: "LISTED", label: "可出租" },
+  { value: "DELISTED", label: "已下架" },
+  { value: "HISTORICAL", label: "历史记录" },
   { value: "PENDING_PAYMENT", label: "待付款占用" },
   { value: "RENTED", label: "租赁中" },
-  { value: "PAUSED", label: "已暂停" },
   { value: "COMPLETED", label: "已完成" },
   { value: "REVIEWING", label: "审核中" },
   { value: "DRAFT", label: "待完善" },
@@ -102,7 +103,9 @@ const RENTAL_STATE_LABELS: Record<RentalState, string> = {
   RENTED: "已有订单",
   PENDING_PAYMENT: "待付款占用",
   LISTED: "可出租",
-  PAUSED: "已暂停",
+  DELISTED: "已下架",
+  HISTORICAL: "历史记录",
+  PAUSED: "原状态待核",
   REVIEWING: "审核中",
   DRAFT: "待完善",
   REJECTED: "已退回",
@@ -115,6 +118,8 @@ const RENTAL_STATE_TONE: Record<RentalState, string> = {
   RENTED: "success",
   PENDING_PAYMENT: "warning",
   LISTED: "info",
+  DELISTED: "unknown",
+  HISTORICAL: "unknown",
   PAUSED: "warning",
   REVIEWING: "info",
   DRAFT: "unknown",
@@ -889,15 +894,17 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
     const controller = beginRequest();
     try {
       const { action, body, key } = record;
+      if (action !== "withdraw" && action !== "delist") throw new SupplyIntentStorageError();
       const next = action === "withdraw"
         ? await supplyApi.withdraw(record.accountId!, String(body.expectedRevision), String(body.versionId), key, undefined, controller.signal)
-        : await supplyApi.setPaused(record.accountId!, action === "pause", String(body.expectedRevision), key, undefined, controller.signal);
+        : await supplyApi.delist(record.accountId!, String(body.expectedRevision), key, controller.signal);
       if (next.account?.id !== record.accountId || next.account.game_id !== record.gameId || typeof next.account.revision !== "string") throw new SupplyRequestError(502, null, key);
       // A late successful response still updates its original durable responsibility.
       const accepted = acceptSupplyIntent(record, { accountId: next.account.id, revision: next.account.revision, ...(next.version ? { versionId: next.version.id } : {}) });
       if (!currentContext(context, controller.signal) || !sameSupplyIntent(storedIntentRef.current, record)) return;
       storedIntentRef.current = accepted; setStoredIntent(accepted);
-      finishActionResult(accepted, next, context, action === "withdraw" ? "已撤回当前审核版本；修改请创建新草稿。" : action === "pause" ? "已下架并停止接单，已获准公开的详情仍可查看。" : "已恢复接单，资格检查已完成。");
+      const refund = next.delisting?.guaranteeRefund.state;
+      finishActionResult(accepted, next, context, action === "withdraw" ? "已撤回审核，可以继续修改资料。" : refund === "REVIEW_REQUIRED" ? "账号已下架。保证金退款需要客服核实，请联系客服。" : refund === "REQUESTED" ? "账号已下架。保证金退款已登记，进度请查看信用与保证金。" : "账号已下架；如需出租，请重新填写上架资料。");
     } catch (failure) {
       try {
         const persisted = loadSupplyIntent(record.userId);
@@ -922,7 +929,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
       finishRequest(controller);
     }
   };
-  const runAction = async (action: "withdraw" | "pause" | "resume") => {
+  const runAction = async (action: "withdraw" | "delist") => {
     if (identityStatusRef.current !== "confirmed" || !identity.current || !detail?.version || busy || intentStorageIssue) return;
     const id = detail.account.id;
     const context = captureContext(id);
@@ -942,14 +949,14 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
   const recoverAction = async () => {
     const original = storedIntentRef.current;
     if (!original || !original.accountId || identity.current !== original.userId || identityStatusRef.current !== "confirmed" || busy
-      || !["pause", "resume", "withdraw"].includes(original.action)) return;
+      || !["pause", "resume", "withdraw", "delist"].includes(original.action)) return;
     const context = captureContext(), controller = beginRequest();
     setBusy("recover"); setError(null);
     try {
       const record = loadSupplyIntent(original.userId);
       if (!record || !sameSupplyIntent(record, original)) throw new SupplyIntentStorageError();
       if (!(await waitForIdentity(context))) return;
-      const receipt = await supplyApi.operationResult(record.action as "pause" | "resume" | "withdraw", record.accountId!, record.body, record.key, controller.signal);
+      const receipt = await supplyApi.operationResult(record.action as "pause" | "resume" | "withdraw" | "delist", record.accountId!, record.body, record.key, controller.signal);
       if (!currentContext(context, controller.signal) || !sameSupplyIntent(storedIntentRef.current, record)) return;
       if (receipt.receipt === "UNRESOLVED") { setNotice("尚未查到原操作回执；结果仍待确认，不会重新发送或据当前状态推断成功。"); return; }
       if (receipt.operation !== `supply.publication.${record.action}` || receipt.resourceId !== record.accountId || receipt.responseStatus !== 200
@@ -1025,7 +1032,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
     {accountIdProp ? null : heading}
     <AccountActionError error={error} scope={errorScope} onRetry={error?.status === 0 && !storedIntent ? () => void retryLast() : undefined} />
     {intentStorageIssue ? <div className="supply-notice is-error" role="alert"><AlertCircle size={17} /><span>{intentStorageIssue}</span><button type="button" className="button quiet" disabled={Boolean(busy)} onClick={() => { if (identity.current) restoreStoredIntent(identity.current); }}>重试读取操作记录</button></div> : null}
-    {storedIntent ? <div className="supply-notice" role="status"><Clock3 size={17} /><span>有一笔原操作结果待恢复，请先核对后继续，当前账号状态不能证明原操作结果。</span>{["pause", "resume", "withdraw"].includes(storedIntent.action)
+    {storedIntent ? <div className="supply-notice" role="status"><Clock3 size={17} /><span>有一笔原操作结果待恢复，请先核对后继续，当前账号状态不能证明原操作结果。</span>{["pause", "resume", "withdraw", "delist"].includes(storedIntent.action)
       ? <button type="button" className="button secondary button--sm" disabled={Boolean(busy)} onClick={() => void recoverAction()}>{busy === "recover" ? "查询中…" : "查询原操作结果"}</button>
       : <Link className="button secondary button--sm" href="/publish">前往上架页面恢复</Link>}</div> : null}
     {notice ? <div className="supply-notice" role="status"><Check size={17} />{notice}</div> : null}
@@ -1096,7 +1103,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                   {row.activeOrder ? <Link className="mra-row-anchor" href={orderUrl("owner", "", row.id, row.activeOrder.id, row.activeOrder.origin)} scroll={false}>订单 {row.activeOrder.displayNo}</Link> : null}
                   {row.historicalReadOnly ? <span className="mra-badge" data-tone="unknown"><span className="mra-badge-dot" aria-hidden="true" />历史只读</span> : null}
                   {state ? <span className="mra-badge" data-tone={RENTAL_STATE_TONE[state]}><span className="mra-badge-dot" aria-hidden="true" />{state === "DRAFT" ? row.review_state === "WITHDRAWN" ? "已撤回" : row.review_state === "IMPORTED_UNVERIFIED" ? "历史资料待核" : row.review_state === "DRAFT" ? "草稿" : "资料待确认" : RENTAL_STATE_LABELS[state]}</span> : <span className="mra-badge" data-tone={row.review_state ? REVIEW_BADGE_TONE[row.review_state] ?? "unknown" : undefined}><span className="mra-badge-dot" aria-hidden="true" />{row.review_state ? stateLabel(row.review_state) : "资料待确认"}</span>}
-                  {!row.historicalReadOnly && row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />已暂停接单</span> : null}
+                  {!row.historicalReadOnly && row.owner_paused && state !== "PAUSED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />原状态待核</span> : null}
                   {row.staff_restricted && state !== "RESTRICTED" ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />账号受限</span> : null}
                   {!row.historicalReadOnly && state === "LISTED" && row.available === false ? <span className="mra-badge" data-tone="warning"><span className="mra-badge-dot" aria-hidden="true" />暂不可接单</span> : null}
                   {row.accountDisplay?.titleFacts === null && row.accountDisplay?.unknownReason ? <span className="mra-badge" data-tone="unknown">资料待核实</span> : null}
@@ -1174,7 +1181,9 @@ const UNCERTAIN_BLOCKERS = new Set(["PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNO
  * The client never recombines pause flags, restrictions and coverage into its own boolean.
  */
 function availabilityView(detail: MySupply): { tone: "open" | "blocked" | "uncertain"; label: string } {
-  if (detail.version?.origin === "LEGACY_OBSERVATION") return { tone: "uncertain", label: "历史只读，不接新单" };
+  if (detail.account.lifecycle === "DELISTED") return { tone: "blocked", label: "已下架" };
+  if (detail.account.lifecycle === "ARCHIVED") return { tone: "blocked", label: "已结束出租" };
+  if (detail.version?.origin === "LEGACY_OBSERVATION" || detail.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED")) return { tone: "uncertain", label: "历史只读，不接新单" };
   const reasons = [...new Set([...(detail.blockers ?? []), ...(detail.account.staff_restricted ? ["STAFF_RESTRICTED"] : [])])];
   if (detail.available === true) return { tone: "open", label: "当前可接新单" };
   if (detail.available === false) {
@@ -1222,17 +1231,16 @@ function historicalQuantityText(quantity: string | null, unit: string): string {
   return unit === "HAFF_BASE" ? haffMillionsLabel(quantity) + " M 哈夫币" : BigInt(quantity).toLocaleString("zh-CN") + " " + unitLabel(unit);
 }
 
-function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction, onRefresh, onAdopt }: { detail: MySupply; gameName?: string | null; latest: MySupply | null; busy: string; identityReady: boolean; onAction: (action: "withdraw" | "pause" | "resume") => Promise<void>; onRefresh: () => void; onAdopt: () => void }) {
+function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction, onRefresh, onAdopt }: { detail: MySupply; gameName?: string | null; latest: MySupply | null; busy: string; identityReady: boolean; onAction: (action: "withdraw" | "delist") => Promise<void>; onRefresh: () => void; onAdopt: () => void }) {
   const account = detail.account;
   const version = detail.version;
-  const historicalReadOnly = version?.origin === "LEGACY_OBSERVATION";
+  const historicalReadOnly = version?.origin === "LEGACY_OBSERVATION" || Boolean(detail.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"));
   // DTO 降级（S16）：historicalRead 缺子对象按「不渲染该块」处理，不整页崩。
   const historical = detail.historicalRead?.historicalQuote ? detail.historicalRead : null;
   const savedDisplay = historical?.display?.state === "KNOWN" ? historical.display.facts : null;
   const historicalDisplay = savedDisplay?.attributes && Array.isArray(savedDisplay.resources) ? savedDisplay : null;
   const historicalRatio = historicalDisplay?.sourceAccountBaseRatioWanPerYuan ? formatReferenceYuan(historicalDisplay.sourceAccountBaseRatioWanPerYuan)?.replace("¥", "") : null;
   const historicalConditions = historicalDisplay ? conditionLines(historicalDisplay.attributes, { attributeDisplay: historicalDisplay.attributeDisplay }) : [];
-  const history = Array.isArray(detail.history) ? detail.history : [];
   // 列表「查看退回原因」锚链：详情异步插入后自行把 #blockers 滚入视野并接管焦点。
   const blockersRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -1289,7 +1297,9 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
     };
   });
   const editHref = `/publish?accountId=${encodeURIComponent(account.id)}&edit=1`;
-  const editLabel = !version ? "填写账号资料" : version.reviewState === "DRAFT" ? "继续编辑资料" : "修改账号资料";
+  const editLabel = !version ? "填写账号资料" : "继续完善资料";
+  const accountClosed = account.lifecycle === "DELISTED" || account.lifecycle === "ARCHIVED";
+  const delistOrderBlocked = blockers.includes("OCCUPANCY_UNKNOWN") || detail.occupancyKind === "RENTED" || detail.occupancyKind === "OCCUPIED" || (blockers.includes("OCCUPIED") && detail.occupancyKind !== "PENDING_PAYMENT");
   const galleryKey = galleryMedia.map(item => item.assetId).join("|");
   const [imageState, setImageState] = useState<{ accountId: string; key: string; status: "loading" | "ready" | "unknown"; urls: string[] }>({ accountId: account.id, key: galleryKey, status: "loading", urls: [] });
   const images = imageState.accountId === account.id && imageState.key === galleryKey ? imageState : { status: "loading" as const, urls: [] };
@@ -1297,6 +1307,9 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const [activeImgIndex, setActiveImgIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [copiedNo, setCopiedNo] = useState(false);
+  const [delistOpen, setDelistOpen] = useState(false);
+
+  useEffect(() => { setDelistOpen(false); }, [account.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1325,25 +1338,28 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           {account.display_no ? <span className="mra-meta-pill mra-no-pill"><span>账号 {account.display_no}</span><AccountCopyInline text={account.display_no} /></span> : <span className="mra-meta-pill">编号待分配</span>}
         </div>
         <div className="supply-detail-status">
-          <span className="order-status" data-state={REVIEW_TONE[version?.reviewState ?? ""] ?? "unknown"}>{version ? stateLabel(version.reviewState) : "尚未提交上架资料"}</span>
+          <span className="order-status" data-state={historicalReadOnly || accountClosed ? "unknown" : REVIEW_TONE[version?.reviewState ?? ""] ?? "unknown"}>{historicalReadOnly ? "历史记录" : account.lifecycle === "DELISTED" ? "已下架" : account.lifecycle === "ARCHIVED" ? "已结束出租" : version ? stateLabel(version.reviewState) : "尚未提交上架资料"}</span>
           <span className="order-status" data-state={AVAILABILITY_TONE[availability.tone]}>{availability.label}</span>
           {publishedAt ? <span className="supply-detail-pub-time">发布于 {publishedAt}</span> : null}
           <button type="button" className="button quiet button--sm" disabled={!identityReady || busy !== ""} onClick={onRefresh}><RefreshCw size={13} aria-hidden="true" />刷新状态</button>
         </div>
       </div>
       <div className="supply-detail-actions">
-        {historicalReadOnly ? detail.canPrepareLegacyCancelledDraft ? <div className="space-y-2"><p className="supply-detail-actions-hint">原订单已取消，请核实并更新账号资料后重新上架。</p><Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />核实资料并重新上架</Link></div> : <p className="supply-detail-actions-hint">历史只读记录，不参与当前接单或编辑；如需处理请联系客服。</p> : <>
-          {account.owner_paused
-            ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={15} aria-hidden="true" />{busy === "resume" ? "恢复中…" : "恢复接单"}</button>
-            : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}
+        {historicalReadOnly || accountClosed ? <div className="space-y-2"><p className="supply-detail-actions-hint">此账号仅保留记录；如需出租，请重新填写上架资料。</p><Link href="/publish" className="button primary">重新填写上架资料</Link></div> : <>
           {version?.reviewState === "SUBMITTED" ? (
             <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("withdraw")}><Undo2 size={16} aria-hidden="true" />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button>
-          ) : (
+          ) : !version || ["DRAFT", "WITHDRAWN", "REJECTED"].includes(version.reviewState) ? (
             <Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />{editLabel}</Link>
-          )}
+          ) : publication && account.lifecycle === "ACTIVE" ? <div className="space-y-2"><button type="button" className="button secondary" disabled={!identityReady || busy !== "" || delistOrderBlocked} onClick={() => setDelistOpen(true)}>下架账号</button>{delistOrderBlocked ? <p className="supply-detail-actions-hint">订单已付款、租期中或状态待核，请先处理订单后再下架。</p> : null}</div> : null}
         </>}
       </div>
     </div>
+
+    <ConfirmAlertDialog open={delistOpen} onOpenChange={setDelistOpen} title="确认下架账号？"
+      description="下架后不能恢复此账号的出租资料；如需再次出租，请重新填写上架资料。"
+      consequences={<p>未发起支付的待付款订单会随下架取消；如果已发起支付或付款状态待核，请先联系客服处理。已付款或租期中的订单需先处理。保证金退款进度可在信用与保证金中查看。</p>}
+      confirmLabel="确认下架" busy={busy === "delist"} confirmDisabled={!identityReady}
+      onConfirm={() => { void onAction("delist").finally(() => setDelistOpen(false)); }} />
 
     {/* 冲突/阻塞/退回原因提示 */}
     {latest || blockers.length || reasons.length ? <div className="supply-blockers-group" id="blockers" tabIndex={-1} ref={blockersRef}>
@@ -1573,19 +1589,6 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
             <div className="supply-fold-body"><ul className="supply-media-thumbs">{evidenceMedia.map((item) => <li key={item.assetId}><AccountMedia assetId={item.assetId} alt="" className="supply-media-thumb" /></li>)}</ul></div>
           </details> : null}
 
-          {history.length ? <details className="supply-block supply-block--fold">
-            <summary><strong>资料修改记录</strong><span>{history.length} 条</span><ChevronDown size={16} aria-hidden="true" /></summary>
-            <div className="supply-fold-body">
-              <ul className="supply-history-list">{history.map((entry, index) => {
-                const editedAt = displayTime(entry.created_at);
-                return <li key={`${entry.sequence ?? "x"}-${index}`}>
-                  <span className="order-status" data-state={REVIEW_TONE[entry.review_state ?? ""] ?? "unknown"}>{stateLabel(entry.review_state)}</span>
-                  <span className="supply-history-title">{entry.title ?? "未命名草稿"}</span>
-                  {editedAt ? <time dateTime={entry.created_at ?? undefined}>{editedAt}</time> : null}
-                </li>;
-              })}</ul>
-            </div>
-          </details> : null}
         </div>
       </div>
 

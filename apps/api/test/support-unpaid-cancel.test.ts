@@ -13,7 +13,7 @@ import { supportCancelUnpaidOrder } from "../src/order/support-unpaid-cancel";
 import { handleSupportUnpaidCancelRoute } from "../src/order/support-unpaid-cancel-routes";
 
 const original = { id: "order_1", accountId: "account_1", renterUserId: "renter_1", ownerUserId: "owner_1", gameId: "game_1",
-  status: "PENDING_PAYMENT", revision: "1", cancelReason: null, hasPayment: false, hasRequest: false, hasGroup: false };
+  status: "PENDING_PAYMENT", revision: "1", cancelReason: null, hasPayment: false, hasRequest: false, hasTransaction: false, hasGroup: false };
 const actor = { userId: "support_1", sessionId: "session_1" };
 const input = { orderId: "order_1", expectedOrderRevision: "1", reason: "客服核对后取消", requestId: "req_1" };
 
@@ -49,7 +49,7 @@ test("客服取消无付款请求的待付单：锁后重新查付款证据并�
 });
 
 test("等待锁期间产生付款请求或确认、版本变化与已付款都不会被取消", async t => {
-  for (const patch of [{ hasRequest: true }, { hasPayment: true }, { hasGroup: true }, { revision: "2" }, { status: "PAID" }]) {
+  for (const patch of [{ hasRequest: true }, { hasPayment: true }, { hasTransaction: true }, { hasGroup: true }, { revision: "2" }, { status: "PAID" }]) {
     const f = fixture(t, patch), result = await supportCancelUnpaidOrder(f.client, actor, input);
     assert.equal(result.status, 409);
     assert.equal(f.events.includes("update"), false);

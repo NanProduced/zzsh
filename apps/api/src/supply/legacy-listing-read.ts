@@ -290,7 +290,9 @@ const VISIBLE_BASE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LE
  AND ${LEGACY_DISPLAY_IDENTITY_SQL}
  AND (d.account_id IS NULL OR (d.snapshot#>>'{risk,highRiskOwner}'='false' AND d.observation_version_id=h.observation_version_id AND d.base_source_digest=h.source_digest))
  AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
-const VISIBLE = `${VISIBLE_BASE} AND h.source_status=3 AND NOT a.owner_paused`;
+const NOT_RETIRED_LEGACY_SOURCE = `NOT (g.code='delta' AND h.source_system='legacy_mysql_restore' AND h.source_entity='la_rental_accounts')`;
+const VISIBLE_SOURCE = `${VISIBLE_BASE} AND h.source_status=3 AND ${NOT_RETIRED_LEGACY_SOURCE}`;
+const VISIBLE = `${VISIBLE_SOURCE} AND NOT a.owner_paused`;
 
 const LEGACY_DISPLAY_EVIDENCE_FIELDS = `a.id,v.title,v.description,h.snapshot,h.evidence_ref,d.snapshot AS display_snapshot,
   d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,
@@ -312,7 +314,7 @@ export async function readLegacyMarketAccountIds(client: PoolClient, admission: 
   const admitted = legacyAdmissionSql(admission, param);
   const subject = ownerId === undefined ? "" : ` AND a.owner_user_id=${param(ownerId)}`;
   const rows = (await client.query(`/* legacy-market-account-ids */ SELECT ${LEGACY_DISPLAY_EVIDENCE_FIELDS}
-    ${FROM} WHERE ${includePaused ? `${VISIBLE_BASE} AND h.source_status=3` : VISIBLE} AND ${admitted}${subject}`, values)).rows;
+    ${FROM} WHERE ${includePaused ? VISIBLE_SOURCE : VISIBLE} AND ${admitted}${subject}`, values)).rows;
   return rows.flatMap(row => {
     try { verifiedLegacyDisplay(row); return [row.id as string]; }
     catch (error) { if ((error as { status?: number }).status === 404) return []; throw error; }
@@ -323,7 +325,8 @@ export async function readLegacyMarketAccountIds(client: PoolClient, admission: 
 // enabled game with a valid configuration keeps its filters and returns an
 // empty list when every snapshot is hidden. Hidden rows are never projected.
 export async function hasLegacyReadSnapshots(client: PoolClient, gameId: string): Promise<boolean> {
-  return Boolean((await client.query(`SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h JOIN zzsh_supply.rental_account a ON a.id=h.account_id WHERE a.game_id=$1 LIMIT 1`,[gameId])).rowCount);
+  return Boolean((await client.query(`SELECT 1 FROM zzsh_supply.legacy_listing_read_snapshot h JOIN zzsh_supply.rental_account a ON a.id=h.account_id
+    JOIN zzsh_supply.game g ON g.id=a.game_id WHERE a.game_id=$1 AND ${NOT_RETIRED_LEGACY_SOURCE} LIMIT 1`,[gameId])).rowCount);
 }
 
 export async function readLegacyListing(client: PoolClient, accountId: string, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex) {
@@ -332,11 +335,12 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
   const detailAdmission=admissionForAccount(detailIndex,accountId)??(admission?.schema==="legacy-public-admission-v3"?admission:undefined);
   const values: unknown[]=[accountId];
   const param=(value:unknown)=>{values.push(value);return "$"+values.length;};
-  const admitted=`((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${detailAdmission ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(detailAdmission,param,false)})` : ""})`;
-  const r=(await client.query(`SELECT a.id,a.owner_user_id,a.display_no,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,
+  const admitted=`(${NOT_RETIRED_LEGACY_SOURCE} AND ((h.source_status=3 AND ${legacyAdmissionSql(admission,param)})${detailAdmission ? ` OR (h.source_status IN(4,5,6) AND ${legacyAdmissionSql(detailAdmission,param,false)})` : ""}))`;
+  const r=(await client.query(`SELECT a.id,a.owner_user_id,a.display_no,g.id game_id,g.code game_code,g.name game_name,v.id version_id,v.title,v.description,v.attributes,h.snapshot,h.source_updated_at,h.evidence_ref,a.owner_paused,h.source_status,h.source_system,h.source_entity,
     d.snapshot AS display_snapshot,d.display_digest,d.observation_version_id AS display_version_id,d.base_source_digest,d.extract_sha256,d.source_updated_at AS display_updated_at,d.evidence_ref AS display_evidence_ref
     ${FROM} WHERE a.id=$1 AND ${VISIBLE_BASE} AND ${admitted}`,values)).rows[0];
   if(!r)throw notFound();
+  if(r.game_code==='delta' && r.source_system==='legacy_mysql_restore' && r.source_entity==='la_rental_accounts')throw notFound();
   if(r.source_status!==3 && !(detailAdmission && [4,5,6].includes(r.source_status) &&
     detailAdmission.records.some(record=>record.accountId===r.id && record.sourceStatus===r.source_status))) throw notFound();
   // Shared runtime admission for list and detail: privacy-bearing text and

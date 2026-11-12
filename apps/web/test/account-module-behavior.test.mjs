@@ -499,11 +499,24 @@ test("unknown cancellation survives tab navigation without resubmission", async 
 const accountRow = (id, extra = {}) => ({ id, display_no: id, title: `账号 ${id}`, game_name: "三角洲行动", review_state: "PUBLISHED", sequence: "1", owner_paused: false, staff_restricted: false, ...extra });
 const detailOf = (id) => ({ account: { id, display_no: id, revision: "1", owner_paused: false, staff_restricted: false }, version: { reviewState: "PUBLISHED", declaration: { title: `账号 ${id}`, mediaBindings: [] } }, decisions: [], blockers: [] });
 
-test("R03: unknown pause/resume/withdraw survives remount and recovers only the original receipt", async () => {
-  for (const action of ["pause", "resume", "withdraw"]) {
+test("delisting allows a pending payment but blocks a paid or uncertain order", async () => {
+  for (const [kind, blockers, disabled] of [["PENDING_PAYMENT", ["OCCUPIED"], false], ["RENTED", ["OCCUPIED"], true], [null, ["OCCUPANCY_UNKNOWN"], true]]) {
+    const supply = detailOf("acc-occupied");supply.account.lifecycle="ACTIVE";supply.version.publication={source:"OWNER_DIRECT"};supply.occupancyKind=kind;supply.blockers=blockers;
+    const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[accountRow("acc-occupied")],nextCursor:null}):Response.json(supply)});
+    try {
+      await p.render("accounts","acc-occupied");
+      const button=[...p.host.querySelectorAll("button")].find(item=>item.textContent.trim()==="下架账号");assert(button);assert.equal(button.disabled,disabled);
+      if (!disabled) { await p.clickDocButton("下架账号");assert.match(p.popup()?.textContent ?? "",/待付款订单将同时关闭/); }
+      else assert.match(p.host.textContent,/请先处理订单后再下架/);
+    } finally { await p.close(); }
+  }
+});
+
+test("R03: unknown delist/withdraw survives remount and recovers only the original receipt", async () => {
+  for (const action of ["delist", "withdraw"]) {
     const calls = [], supply = detailOf("acc-recover");
     supply.account.game_id = "game-recover"; supply.version.id = "version-recover";
-    supply.account.owner_paused = action === "resume";
+    supply.account.lifecycle = "ACTIVE"; supply.version.publication = action === "delist" ? { publishedAt: "2026-11-10T00:00:00.000Z", source: "OWNER_DIRECT" } : null;
     supply.version.reviewState = action === "withdraw" ? "SUBMITTED" : "PUBLISHED";
     let receipt = "UNRESOLVED", readbackFails = false;
     const viaFetch = async (url, init = {}) => {
@@ -518,7 +531,8 @@ test("R03: unknown pause/resume/withdraw survives remount and recovers only the 
     const first = await probe({viaFetch}); let stored;
     try {
       await first.render("accounts", "acc-recover");
-      await first.clickDocButton(({pause:"暂停接单",resume:"恢复接单",withdraw:"撤回审核"})[action]);
+      await first.clickDocButton(action === "delist" ? "下架账号" : "撤回审核");
+      if (action === "delist") { assert.match(first.popup()?.textContent ?? "", /待付款订单将同时关闭/); await first.clickDocButton("确认下架"); }
       await first.waitFor(() => JSON.parse(first.window.sessionStorage.getItem(slot) ?? "null")?.uncertain === true);
       stored = first.window.sessionStorage.getItem(slot);
       assert.ok(stored, "a write responsibility must survive closing this component");
@@ -564,7 +578,7 @@ test("R03: recovery conflicts and current paused state cannot clear another orig
     await p.render("accounts","acc-recover");
     await p.clickDocButton("查询原操作结果");await p.waitFor(()=>p.host.textContent.includes("fingerprint conflict"));
     assert.deepEqual(JSON.parse(p.window.sessionStorage.getItem(slot)),record);
-    assert.ok([...p.host.querySelectorAll('button')].find(button=>button.textContent==='恢复接单')?.disabled);
+    assert.equal([...p.host.querySelectorAll('button')].some(button=>button.textContent==='恢复接单'), false);
     p.session.userId="user_B";p.session.identityVersion++;await React.act(async()=>p.sessionChange());await p.render("accounts");
     assert.doesNotMatch(p.host.textContent,/原操作结果待恢复/);
     assert.equal(p.window.sessionStorage.getItem(slot),JSON.stringify(record),"another identity cannot clear A's responsibility");
@@ -587,22 +601,32 @@ test("historical-only legacy observations show a read-only business state withou
     assert.equal(p.host.querySelector('[data-account-row="acc-historical"]')?.textContent.includes("历史只读"), true);
     assert.match(p.host.querySelector('[data-account-row="acc-historical"]').textContent, /账号受限/);
     await p.render("accounts", "acc-historical");
-    assert.match(p.host.textContent, /历史只读记录，不参与当前接单或编辑/);
+    assert.match(p.host.textContent, /此账号仅保留记录；如需出租，请重新填写上架资料/);
     assert.equal([...p.host.querySelectorAll("button")].some(button => ["暂停接单", "恢复接单", "修改账号资料", "开始修改"].includes(button.textContent.trim())), false);
     assert.doesNotMatch(p.host.textContent, /RULE_CHANGED|QUOTE_REQUIRED|PUBLISHER_BAIL_UNCONFIRMED|FUNDING_UNKNOWN|CURRENT_VERSION_MISSING/);
     assert.doesNotMatch(p.host.textContent, /规则变更|未报价|保证金未知|资料不能发布/);
   } finally { await p.close(); }
 });
-test("a cancelled in-flight legacy account offers owner verification without pretending it is listed", async () => {
-  const supply=detailOf("acc-cancelled");supply.version.origin="LEGACY_OBSERVATION";supply.canPrepareLegacyCancelledDraft=true;
+test("a cancelled in-flight legacy account requires a new account rather than editing history", async () => {
+  const supply=detailOf("acc-cancelled");supply.version.origin="LEGACY_OBSERVATION";
   const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[{...accountRow("acc-cancelled"),historicalReadOnly:true}],nextCursor:null}):Response.json(supply)});
   try {
     await p.render("accounts","acc-cancelled");
-    assert.match(p.host.textContent,/原订单已取消，请核实并更新账号资料后重新上架/);
-    const link=[...p.host.querySelectorAll("a")].find(item=>item.textContent.includes("核实资料并重新上架"));assert(link);
-    assert.match(link.getAttribute("href"),/\/publish\?accountId=acc-cancelled&edit=1/);
+    assert.match(p.host.textContent,/此账号仅保留记录；如需出租，请重新填写上架资料/);
+    const link=[...p.host.querySelectorAll("a")].find(item=>item.textContent.includes("重新填写上架资料"));assert(link);
+    assert.equal(link.getAttribute("href"),"/publish");
     assert.equal([...p.host.querySelectorAll("button")].some(button=>["暂停接单","恢复接单"].includes(button.textContent.trim())),false);
   } finally {await p.close();}
+});
+test("an archived account offers a new listing instead of editing an old draft", async () => {
+  const supply=detailOf("acc-archived");supply.account.lifecycle="ARCHIVED";supply.version.reviewState="DRAFT";
+  const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[accountRow("acc-archived",{rentalState:"COMPLETED"})],nextCursor:null}):Response.json(supply)});
+  try {
+    await p.render("accounts","acc-archived");
+    assert.match(p.host.textContent,/已结束出租/);
+    assert.ok([...p.host.querySelectorAll("a")].some(item=>item.textContent.includes("重新填写上架资料")&&item.getAttribute("href")==="/publish"));
+    assert.equal([...p.host.querySelectorAll("a")].some(item=>/继续完善资料|编辑资料/.test(item.textContent)),false);
+  } finally { await p.close(); }
 });
 const rowIds = (p) => [...p.host.querySelectorAll("[data-account-row]")].map((node) => node.getAttribute("data-account-row"));
 const { SupplyRequestError } = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
@@ -774,7 +798,7 @@ test("confirmed account detail refreshes the cached row without losing paginatio
     await p.render("accounts");
     await p.frames();
     const row = p.host.querySelector('[data-account-row="acc-A"]');
-    assert.match(row.textContent, /已暂停接单/);
+    assert.match(row.textContent, /原状态待核/);
     assert.match(row.textContent, /账号受限/);
     assert.doesNotMatch(row.textContent, /更新后的账号/);
     assert.doesNotMatch(row.textContent, /版本 2/, "内部版本号不占用列表空间");
@@ -803,7 +827,7 @@ test("adopting an account detail refresh updates cached review and availability 
     await p.render("accounts");
     const row = p.host.querySelector('[data-account-row="acc-A"]');
     assert.match(row.textContent, /已撤回/);
-    assert.match(row.textContent, /已暂停接单/);
+    assert.match(row.textContent, /原状态待核/);
     assert.match(row.textContent, /账号受限/);
     assert.doesNotMatch(row.textContent, /权威新标题/);
     assert.doesNotMatch(row.textContent, /版本 3/, "内部版本号不占用列表空间");
@@ -841,7 +865,7 @@ test("historical account detail renders saved display facts and refreshes its li
     assert.match(p.host.textContent, /封禁记录声明未提供/);
     assert.doesNotMatch(p.host.textContent, /本人人脸实名|无封号记录|信用良好/);
     await p.render("accounts");
-    assert.doesNotMatch(p.host.textContent, /历史资料已读取|历史记录|编号待分配/);
+    assert.doesNotMatch(p.host.querySelector('[data-account-row="history-1"]').textContent, /历史资料已读取|历史记录|编号待分配/);
     assert.match(p.host.textContent, /AC0000000019/);
     assert.doesNotMatch(p.host.textContent, /SOURCE-9/);
     assert.equal(p.calls.myAccounts.length, 1);
@@ -1014,7 +1038,7 @@ test("account list consumes rentalState, title facts, active order and signed pa
   } finally { await p.close(); }
 });
 
-test("listed account filters use server rentalState and keep paused separate", async () => {
+test("listed account filters use server rentalState and include permanently delisted accounts", async () => {
   const seen = [];
   const pages = (params) => { const q = new URLSearchParams(params); seen.push(q); return { items: [accountRow("acc-l", { rentalState: q.get("rentalState") ?? "LISTED" })], nextCursor: null, nextPageCursor: null }; };
   const p = await probe({ pages });
@@ -1023,27 +1047,27 @@ test("listed account filters use server rentalState and keep paused separate", a
     await p.waitFor(() => p.calls.myAccounts.length === 1);
     assert.equal(seen[0].get("rentalState"), null, "unified default reads all lifecycle states");
     await p.clickDocButton("更多状态");
-    await p.clickDocButton("已暂停");
-    assert.equal(seen.at(-1).get("rentalState"), "PAUSED");
-    assert.match(p.host.querySelector(".mra-chip[aria-pressed='true']").textContent, /已暂停/);
-    assert.match(p.host.querySelector('[data-account-row="acc-l"]').textContent, /已暂停/);
+    await p.clickDocButton("已下架");
+    assert.equal(seen.at(-1).get("rentalState"), "DELISTED");
+    assert.match(p.host.querySelector(".mra-chip[aria-pressed='true']").textContent, /已下架/);
+    assert.match(p.host.querySelector('[data-account-row="acc-l"]').textContent, /已下架/);
   } finally { await p.close(); }
 });
 
 test("unified account filters survive details, URL navigation and the old rented entry", async () => {
-  const p = await probe({ pages: params => { const state = new URLSearchParams(params).get("rentalState"); return { items: [accountRow(state ?? "all", { rentalState: state ?? "LISTED" })], nextCursor: null }; }, detail: detailOf("PAUSED") });
+  const p = await probe({ pages: params => { const state = new URLSearchParams(params).get("rentalState"); return { items: [accountRow(state ?? "all", { rentalState: state ?? "LISTED" })], nextCursor: null }; }, detail: detailOf("DELISTED") });
   try {
     await p.render("accounts");
     await p.clickDocButton("更多状态");
-    await p.clickDocButton("已暂停");
-    assert.match(p.navigations.at(-1), /view=accounts&status=PAUSED/);
+    await p.clickDocButton("已下架");
+    assert.match(p.navigations.at(-1), /view=accounts&status=DELISTED/);
     const href = p.host.querySelector(".mra-row-main").getAttribute("href");
-    assert.match(href, /view=accounts&status=PAUSED&accountId=PAUSED/);
+    assert.match(href, /view=accounts&status=DELISTED&accountId=DELISTED/);
     assert.doesNotMatch(href, /view=listed/);
-    await p.render("accounts", "PAUSED", "PAUSED");
-    assert.match(p.host.querySelector(".account-detail-back").getAttribute("href"), /status=PAUSED/);
-    await p.render("accounts", undefined, "PAUSED");
-    assert.deepEqual(rowIds(p), ["PAUSED"]);
+    await p.render("accounts", "DELISTED", "DELISTED");
+    assert.match(p.host.querySelector(".account-detail-back").getAttribute("href"), /status=DELISTED/);
+    await p.render("accounts", undefined, "DELISTED");
+    assert.deepEqual(rowIds(p), ["DELISTED"]);
     await p.render("accounts");
     await p.waitFor(() => rowIds(p).includes("all"));
     await p.render("rented");
@@ -1054,7 +1078,7 @@ test("unified account filters survive details, URL navigation and the old rented
 
 test("account status keeps simultaneous restrictions and does not label withdrawn or historical facts as drafts", async () => {
   const p=await probe({rows:[accountRow('occupied',{rentalState:'RENTED',staff_restricted:true,owner_paused:true}),accountRow('withdrawn',{rentalState:'DRAFT',review_state:'WITHDRAWN'}),accountRow('historical',{rentalState:'DRAFT',review_state:'IMPORTED_UNVERIFIED'}),accountRow('draft',{rentalState:'DRAFT',review_state:'DRAFT'})]});
-  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/已暂停接单/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.equal(p.host.querySelectorAll('.mra-filter-rail .mra-chip').length,5);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
+  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/原状态待核/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.equal(p.host.querySelectorAll('.mra-filter-rail .mra-chip').length,5);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
 });
 
 test("identity page shows only server-masked name and document, and explains missing source", async () => {

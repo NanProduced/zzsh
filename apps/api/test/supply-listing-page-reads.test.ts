@@ -74,7 +74,8 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
     queries.push(sql);
     const pick = <T extends { id: string }>(pool: T[]) => (Array.isArray(args[0]) ? pool.filter((row) => (args[0] as string[]).includes(row.id)) : pool.filter((row) => row.id === args[0]));
     let rows: unknown[] = [];
-    if (sql.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) { windows.push(args[0] as string[]); rows = pick(accounts); }
+    if (sql.includes("legacy_supply_map m ON m.account_id=$1") && sql.includes("AS retired")) rows = [{ retired: false }];
+    else if (sql.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) { windows.push(args[0] as string[]); rows = pick(accounts); }
     else if (sql.includes('u."suspended"')) rows = [{ suspended: false, accountStatus: "ACTIVE" }];
     else if (sql === "SELECT * FROM zzsh_supply.rental_account WHERE id=$1") rows = pick(accounts);
     else if (sql.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) rows = pick(versions);
@@ -147,6 +148,8 @@ test("a native market page reads each shared dimension once, not once per candid
   // Set-based selection: one round trip per dimension for the whole window.
   assert.equal(countOf(queries, "FROM zzsh_supply.rental_account WHERE id = ANY"), 1, "accounts are read once per window");
   assert.equal(countOf(queries, "FROM zzsh_supply.listing_version WHERE id = ANY"), 1, "current versions are read once per window");
+  assert.equal(countOf(queries, "SELECT DISTINCT m.account_id"), 1, "legacy source eligibility is read once per window");
+  assert.equal(countOf(queries, "AS retired"), 0, "no per-candidate legacy source read");
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.rental_account WHERE id=$1"), 0, "no per-candidate account read");
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2"), 0, "no per-candidate version read");
   // Request-invariant dimensions are memoized for the whole page.
