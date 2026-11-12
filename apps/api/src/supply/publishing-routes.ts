@@ -31,6 +31,7 @@ import { OWNER_INCOME_PREVIEW_MAX_BYTES, parseOwnerIncomePreviewInput, readOwner
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
+import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import {
   assertGameScope,
   bodyOf,
@@ -65,7 +66,7 @@ import {
   listingCandidatePage,
   listingDetail,
   lockPublishingAccount,
-  readPublicListing,
+  readPublicListingSnapshot,
   readPublishingAccount,
   readCurrentVersion,
   readDepositRecommendation,
@@ -199,6 +200,7 @@ export async function handlePublishingRoute(
       {
         releaseId: release.id,
         generation: release.generation,
+        ...(options.mediaStorage?.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
         termOptions,
         declarationOptions: {
           next_season_pass: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "下赛季通行证计划", type: "BOOLEAN", public: true },
@@ -246,7 +248,7 @@ export async function handlePublishingRoute(
     : ACCOUNT_ROUTE.exec(path);
   if (!admin && method === "GET" && path === "/listings/lookup") {
     const lookup = parseNumberLookupQuery(query);
-    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail));
+    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail, options.mediaStorage?.accountImageCdn));
     sendJson(response, 200, result, requestId);
     return true;
   }
@@ -261,8 +263,8 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await readPublicListing(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail);
-          if (!publicMatch[2]) return { detail };
+          const detail = await readPublicListingSnapshot(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail);
+          if (!publicMatch[2]) return { detail: (await projectPublicListingImages(client, [detail], options.mediaStorage?.accountImageCdn))[0]! };
           if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
           const asset = await loadMediaAsset(client, publicMatch[2]);
           const v = await readCurrentVersion(client, { ...a, current_version_id: String(detail.versionId) });
@@ -354,7 +356,7 @@ export async function handlePublishingRoute(
             values,
           )
         ).rows;
-        const items: unknown[] = [];
+        const items: PublicListingProjection[] = [];
         let last = cursor;
         let hasMore = false;
         const page = listingCandidatePage(client);
@@ -398,7 +400,7 @@ export async function handlePublishingRoute(
         }
         if (rows.length === 200) hasMore = true;
         return {
-          items,
+          items: await projectPublicListingImages(client, items, options.mediaStorage?.accountImageCdn),
           nextCursor: hasMore
             ? Buffer.from(
                 JSON.stringify({

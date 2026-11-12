@@ -12,6 +12,8 @@ const root = fileURLToPath(new URL("../../../", import.meta.url));
 const source = await createServer({ root: resolve(root, "apps/admin"), configFile: false, server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
 const file = resolve(root, "packages/ui/src/account-media-placeholder.tsx").replaceAll("\\", "/");
 const { AccountMediaPlaceholder } = await source.ssrLoadModule(`/@fs/${file}`);
+const legacyFile = resolve(root, "packages/ui/src/legacy-account-image.tsx").replaceAll("\\", "/");
+const { LegacyAccountImage } = await source.ssrLoadModule(`/@fs/${legacyFile}`);
 
 test("the two explicit states render the original supplied image and accessible message", async () => {
   try {
@@ -24,5 +26,9 @@ test("the two explicit states render the original supplied image and accessible 
       const bytes = readFileSync(resolve(root, "packages/ui/assets", filename));
       assert.equal(createHash("sha256").update(bytes).digest("hex"), sha);
     }
+    const imageUrl = "/api/supply/listings/account_fixture/legacy-images/0";
+    const known = renderToStaticMarkup(React.createElement(LegacyAccountImage, { src: imageUrl, alt: "旧图片", knownState: "PENDING_IMPORT" }));
+    assert.doesNotMatch(known, /legacy-images/);
+    assert.match(known, /图片正在迁移中/);
   } finally { await source.close(); }
 });

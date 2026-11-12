@@ -29,7 +29,7 @@ import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { AccountMediaPlaceholder } from "@zzsh/ui/account-media-placeholder";
 import { CONDITION_LABELS, booleanDeclarationText, conditionLines, haffMillionsLabel, skinTypeLabel, termLabel, unitLabel, toListingDetail, type ResourceLine } from "../lib/listing-view";
 import { deriveAccountTitle } from "../lib/account-title";
-import { supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
+import { mediaAccessUrl, supplyApi, SupplyRequestError, supplyBlockerMessages, uncertainSupplyWriteFailure } from "../lib/supply-client";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent } from "../lib/supply-write-intent";
 import { IdentityPauseGate, isCurrentQuery, mergePageById } from "../lib/supply-workspace-guards";
 import type { MyAccountRow, MySupply, RentalState } from "../lib/supply-types";
@@ -1119,7 +1119,6 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
   </section>;
 }
 
-const mediaAccessUrl = (assetId: string) => `/api/supply/media/${encodeURIComponent(assetId)}/access`;
 
 const CONDITION_LEVELS = new Set(["vit_level", "bear_level", "dive_level", "character_level"]);
 

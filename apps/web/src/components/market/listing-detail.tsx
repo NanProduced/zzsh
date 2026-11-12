@@ -118,6 +118,7 @@ function DetailImage({
   loading = "lazy",
   onLoad,
   legacy,
+  legacyState,
 }: {
   src: string;
   alt: string;
@@ -125,10 +126,11 @@ function DetailImage({
   loading?: "lazy" | "eager";
   onLoad?: (image: HTMLImageElement) => void;
   legacy?: boolean;
+  legacyState?: "PENDING_IMPORT" | "UNAVAILABLE";
 }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
-  if (legacy) return <LegacyAccountImage src={src} alt={alt} className={className} loading={loading} />;
+  if (legacy) return <LegacyAccountImage src={src} knownState={legacyState} alt={alt} className={className} loading={loading} />;
   if (failed) {
     return (
       <span className={`detail-image-fallback${className ? ` ${className}` : ""}`}>
@@ -193,6 +195,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
               <DetailImage
                 src={activeMedia.url}
                 legacy={activeMedia.legacy}
+                legacyState={activeMedia.legacyState}
                 alt={`${title}公开展示图，第${index + 1}张`}
                 loading="eager"
               />
@@ -211,6 +214,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
               <DetailImage
                 src={activeMedia.url}
                 legacy={activeMedia.legacy}
+                legacyState={activeMedia.legacyState}
                 alt={`${title}公开展示图大图，第${index + 1}张`}
                 className="detail-preview-image"
                 loading="eager"
@@ -251,7 +255,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
             aria-pressed={thumbnailIndex === index}
             onClick={() => select(thumbnailIndex)}
           >
-            <DetailImage src={item.url} legacy={item.legacy} alt="" className="detail-gallery-thumb-image" />
+            <DetailImage src={item.coverUrl ?? item.url} legacy={item.legacy} legacyState={item.legacyState} alt="" className="detail-gallery-thumb-image" />
             <span className="detail-gallery-thumb-index">{thumbnailIndex + 1}</span>
           </button>
         ))}

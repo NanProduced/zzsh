@@ -8,6 +8,7 @@ import { contentTime } from "./content-resources-model";
 import { SettlementRefundPolicyPanel } from "./settlement-refund-policy-panel";
 import { OpeningAutoConfirmPolicyPanel } from "./opening-auto-confirm-policy-panel";
 import { SystemSmsConfigurationPanel } from "./system-sms-configuration-panel";
+import { AccountImageWatermarkPanel } from "./account-image-watermark-panel";
 
 export type SystemStorageConfiguration = {
   backend: "local" | "oss" | "unavailable";
@@ -93,6 +94,7 @@ export function SystemConfigurationView({ snapshot, refreshNonce = 0 }: {
       </div>
     </section>
     <SystemSmsConfigurationPanel key={owner} refreshNonce={refreshNonce}/>
+    <AccountImageWatermarkPanel key={`watermark:${owner}`} />
     <div className="mt-5"><StatusMessage error={current.error} /></div>
     {current.busy ? <p className="mt-4 text-sm text-muted-foreground" role="status">正在读取存储配置…</p> : null}
     {data ? <div className="mt-6 max-w-5xl space-y-8">

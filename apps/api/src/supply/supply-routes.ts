@@ -78,6 +78,7 @@ import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
 import {
   MAX_MEDIA_BYTES,
+  STORAGE_KEY_PATTERN,
   assertDeclaredMediaSize,
   changeMediaVisibility,
   finalizeMediaUpload,
@@ -88,6 +89,7 @@ import {
   prepareMediaUpload,
   reviewMediaAsset,
   parseMediaReviewBinding,
+  type ImageMime,
   type MediaActor,
   type MediaStorage,
   type PreparedMediaUpload,
@@ -227,6 +229,22 @@ export async function sendStoredMedia(
   response.send?.(bytes);
 }
 
+function isAccountOriginal(asset: NonNullable<Awaited<ReturnType<typeof loadMediaAsset>>>): boolean {
+  return asset.accountId !== null && asset.ownershipKind === "USER_SUPPLY"
+    && (asset.purpose === "ACCOUNT_DISPLAY" || asset.purpose === "ACCOUNT_EVIDENCE");
+}
+
+async function sendOriginalMedia(response: SupplyResponse, requestId: string, storage: MediaStorage, asset: NonNullable<Awaited<ReturnType<typeof loadMediaAsset>>>, direct: boolean): Promise<void> {
+  if (!direct || !storage.accountMedia || !isAccountOriginal(asset)) {
+    await sendStoredMedia(response, requestId, storage, asset, "private, no-store");
+    return;
+  }
+  const url = await storage.accountMedia.signOriginal(asset.storageKey);
+  response.setHeader("Location", url);
+  response.setHeader("Referrer-Policy", "no-referrer");
+  sendJson(response, 307, null, requestId, "private, no-store");
+}
+
 export type WriteActor = { realm: "admin" | "user"; id: string; sessionId: string };
 
 export async function runIdempotentWrite(
@@ -333,12 +351,11 @@ export async function runMediaUpload(
     mediaActor: MediaActor;
     intentId: string;
     uploadToken: string;
-    bytes: Buffer;
     authorize: (client: PoolClient) => Promise<void>;
     beforeFinalize?: (client: PoolClient) => Promise<void>;
     afterFinalize?: (client: PoolClient, asset: UploadedAsset) => Promise<UploadedAsset | void>;
     lockPublishingAccount?: (client: PoolClient, accountId: string) => Promise<unknown>;
-  },
+  } & ({ bytes: Buffer; directHash?: never } | { bytes?: never; directHash: string }),
 ): Promise<void> {
   const scope = { principalId: input.actor.id, operation: "supply.media.upload", resourceId: input.intentId };
   const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
@@ -351,7 +368,8 @@ export async function runMediaUpload(
       await input.authorize(client);
     });
     try {
-      prepared = await prepareMediaUpload(options.pool, options.mediaStorage, input.mediaActor, input.intentId, input.uploadToken, input.bytes);
+      const upload = input.bytes ?? { contentHash: input.directHash };
+      prepared = await prepareMediaUpload(options.pool, options.mediaStorage, input.mediaActor, input.intentId, input.uploadToken, upload);
     } catch (error) {
       if (!(error instanceof SecurityApiError) || error.status !== 409 || !(await hasIdempotencyRecord(options.pool, idempotentScope, key))) throw error;
     }
@@ -364,7 +382,9 @@ export async function runMediaUpload(
       requestId,
       scope,
       input.actor,
-      { intentId: input.intentId, token: input.uploadToken, contentHash: fingerprintRequest("bytes", input.intentId, input.bytes.toString("base64")) },
+      { intentId: input.intentId, token: input.uploadToken, ...(input.bytes
+        ? { contentHash: fingerprintRequest("bytes", input.intentId, input.bytes.toString("base64")) }
+        : { transport: "OSS_POST", contentHash: input.directHash }) },
       input.authorize,
       async (client) => {
         await input.beforeFinalize?.(client);
@@ -596,11 +616,14 @@ export async function handleSupplyUserRoute(
     if (userIntentMatch) {
       const context = await readUserContext(request, options);
       const body = bodyOf(request);
-      ensureOnlyFields(body, ["gameId", "accountId", "mime", "size", "purpose"]);
+      ensureOnlyFields(body, ["gameId", "accountId", "mime", "size", "purpose", "transport"]);
       const gameId = decodeId(requiredString(body, "gameId", 128));
       const accountId = decodeId(requiredString(body, "accountId", 128));
       const mime = requiredString(body, "mime", 64);
       const size = assertDeclaredMediaSize(body.size);
+      if (body.transport !== undefined && body.transport !== "OSS_POST") throw invalid("Unsupported upload transport", "transport");
+      const accountMedia = body.transport === "OSS_POST" ? options.mediaStorage.accountMedia : undefined;
+      if (body.transport && !accountMedia) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Direct media upload is unavailable");
       if (!options.mediaStorage.available) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Media storage is not configured");
       await runIdempotentWrite(
         options,
@@ -609,14 +632,14 @@ export async function handleSupplyUserRoute(
         requestId,
         { principalId: context.userId, operation: "supply.media.upload_intent.create" },
         { realm: "user", id: context.userId, sessionId: context.sessionId },
-        { gameId, accountId, mime, size, ...(body.purpose === undefined ? {} : { purpose: body.purpose }) },
+        { gameId, accountId, mime, size, ...(body.purpose === undefined ? {} : { purpose: body.purpose }), ...(accountMedia ? { transport: "OSS_POST" } : {}) },
         async (client) => {
           await assertUserContextInTransaction(client, context);
           if (!(await client.query(`SELECT 1 FROM zzsh_supply.rental_account WHERE id = $1 AND game_id = $2 AND owner_user_id = $3`, [accountId, gameId, context.userId])).rowCount) throw notFound();
         },
         async (client) => {
           const purpose = String(body.purpose ?? "ACCOUNT_EVIDENCE");
-          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose, mime, size });
+          const intent = await createMediaUploadIntent(client, { realm: "user", userId: context.userId }, { gameId, accountId, purpose, mime, size, directOss: Boolean(accountMedia) });
           await recordAudit(client, {
             actorType: "user",
             actorId: context.userId,
@@ -629,25 +652,36 @@ export async function handleSupplyUserRoute(
             reason: "supply.media.upload_intent.create",
             details: { gameId, before: null, after: { intentId: intent.intentId, accountId, purpose }, result: "CREATED" },
           });
-          return { status: 200, body: { intentId: intent.intentId, uploadToken: intent.uploadToken, expiresAt: intent.expiresAt } };
+          return { status: 200, body: intent };
         },
+        accountMedia && (async (_client, result) => {
+          const intent = result.body as Awaited<ReturnType<typeof createMediaUploadIntent>>;
+          const ossUpload = Date.parse(intent.expiresAt) > Date.now()
+            ? accountMedia.createUpload(intent.intentId, intent.expiresAt, mime as ImageMime, size)
+            : null;
+          return { ...result, body: { ...intent, transport: "OSS_POST", ossUpload } };
+        }),
       );
       return;
     }
 
-    const userUploadMatch = /^\/media\/uploads\/([^/]+)$/.exec(path);
-    if (userUploadMatch && method === "PUT") {
+    const userUploadMatch = /^\/media\/uploads\/([^/]+)(\/complete)?$/.exec(path);
+    if (userUploadMatch && method === (userUploadMatch[2] ? "POST" : "PUT")) {
       const context = await readUserContext(request, options);
       const intentId = decodeId(userUploadMatch[1]!);
-      const uploadToken = headerValue(request.headers["x-upload-token"]);
+      const complete = Boolean(userUploadMatch[2]);
+      const body = complete ? bodyOf(request) : undefined;
+      if (body) ensureOnlyFields(body, ["uploadToken", "contentHash"]);
+      const uploadToken = body ? requiredString(body, "uploadToken", 128) : headerValue(request.headers["x-upload-token"]);
       if (!uploadToken) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
-      const bytes = await readRawBody(request, MAX_MEDIA_BYTES);
+      const directHash = body ? requiredString(body, "contentHash", 64) : undefined;
+      if (directHash !== undefined && !STORAGE_KEY_PATTERN.test(directHash)) throw invalid("Invalid SHA-256", "contentHash");
       await runMediaUpload(options, request, response, requestId, {
         actor: { realm: "user", id: context.userId, sessionId: context.sessionId },
         mediaActor: { realm: "user", userId: context.userId },
         intentId,
         uploadToken,
-        bytes,
+        ...(directHash !== undefined ? { directHash } : { bytes: await readRawBody(request, MAX_MEDIA_BYTES) }),
         authorize: async (client) => {
           await assertUserContextInTransaction(client, context);
           await authorizeUpload(client, { realm: "user", id: context.userId, sessionId: context.sessionId }, intentId);
@@ -661,9 +695,18 @@ export async function handleSupplyUserRoute(
     if (accessMatch && method === "GET") {
       const context = await readUserContext(request, options);
       const assetId = decodeId(accessMatch[1]!);
-      const asset = await loadMediaAsset(options.pool, assetId);
+      const direct = Boolean(options.mediaStorage.accountMedia && query.size === 1 && query.get("delivery") === "direct");
+      const asset = direct ? await withTransaction(options.pool, async client => {
+        await assertUserContextInTransaction(client, context, "READ");
+        const row = await loadMediaAsset(client, assetId);
+        if (row && isAccountOriginal(row) && !(await client.query(
+          `SELECT 1 FROM zzsh_supply.rental_account WHERE id=$1 AND owner_user_id=$2 AND game_id=$3`,
+          [row.accountId, context.userId, row.gameId],
+        )).rowCount) throw notFound();
+        return row;
+      }) : await loadMediaAsset(options.pool, assetId);
       if (!asset || asset.ownerUserId !== context.userId) throw notFound();
-      await sendStoredMedia(response, requestId, options.mediaStorage, asset, "private, no-store");
+      await sendOriginalMedia(response, requestId, options.mediaStorage, asset, direct);
       return;
     }
 
@@ -977,7 +1020,9 @@ async function handleAdminRead(
   const contentMatch = /^\/media\/([^/]+)\/content$/.exec(path);
   if (contentMatch) {
     const assetId = decodeId(contentMatch[1]!);
+    const direct = Boolean(options.mediaStorage.accountMedia && query.size === 1 && query.get("delivery") === "direct");
     const asset = await withTransaction(options.pool, async (client) => {
+      if (direct) await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
       const access = await requireAdminAccess(client, adminUserId);
       requirePermission(access, ADMIN_PERMISSION.supplyReviewRead);
       const row = await loadMediaAsset(client, assetId);
@@ -985,7 +1030,7 @@ async function handleAdminRead(
       await assertGameScope(client, adminUserId, access.isBoss, row.gameId);
       return row;
     });
-    await sendStoredMedia(response, requestId, options.mediaStorage, asset, "private, no-store");
+    await sendOriginalMedia(response, requestId, options.mediaStorage, asset, direct);
     return;
   }
   throw notFound();

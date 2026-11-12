@@ -78,3 +78,34 @@ test('legacy media URLs are rewritten to the same-origin user proxy',async()=>{
     assert.equal((await response.json()).legacyImages[0].url,'/api/supply/listings/account_1/legacy-images/0');
   }finally{globalThis.fetch=old;}
 });
+
+test('the BFF passes an opt-in private account redirect only for its configured OSS origin', async t => {
+  const oldFetch = globalThis.fetch, oldOrigin = process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN;
+  t.after(() => {
+    globalThis.fetch = oldFetch;
+    if (oldOrigin === undefined) delete process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN;
+    else process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN = oldOrigin;
+  });
+  const origin = 'https://images.example.com';
+  process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN = origin;
+  const path = ['media', 'asset_1', 'access'];
+  const req = () => new Request('http://127.0.0.1:3100/api/supply/' + path.join('/') + '?delivery=direct');
+  for (const [host, status] of [[origin, 307], ['https://untrusted.example.com', 502]]) {
+    globalThis.fetch = async (url, options) => {
+      assert.equal(new URL(url).searchParams.get('delivery'), 'direct');
+      assert.equal(options.redirect, 'manual');
+      return new Response(null, { status: 307, headers: { Location: host + '/original?signature=fixture' } });
+    };
+    const response = await GET(req(), ctx(path));
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get('location'), status === 307 ? origin + '/original?signature=fixture' : null);
+    if (status === 307) assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+  }
+  delete process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(new URL(url).search, '');
+    assert.equal(options.redirect, 'error');
+    return new Response(new Uint8Array([1, 2]), { headers: { 'content-type': 'image/png' } });
+  };
+  assert.deepEqual(new Uint8Array(await (await GET(req(), ctx(path))).arrayBuffer()), new Uint8Array([1, 2]));
+});

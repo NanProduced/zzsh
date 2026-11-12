@@ -10,6 +10,7 @@ export type ThumbnailCarouselItem = {
   src: string;
   alt: string;
   legacy?: boolean;
+  legacyState?: "PENDING_IMPORT" | "UNAVAILABLE";
 };
 
 type ThumbnailCarouselProps = {
@@ -103,7 +104,7 @@ export function ThumbnailCarousel({
                   {failed ? (
                     <span className="thumbnail-carousel-fallback"><ImageOff size={24} aria-hidden="true" />图片暂不可用</span>
                   ) : item.legacy ? (
-                    <LegacyAccountImage src={item.src} alt={item.alt} loading={itemIndex === activeIndex ? "eager" : "lazy"} />
+                    <LegacyAccountImage src={item.src} knownState={item.legacyState} alt={item.alt} loading={itemIndex === activeIndex ? "eager" : "lazy"} />
                   ) : (
                     <img
                       src={item.src}

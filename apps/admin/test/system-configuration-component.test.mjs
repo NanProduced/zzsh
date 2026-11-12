@@ -82,6 +82,27 @@ test("Boss reads deployment target without editable secrets, and GET has no writ
   assert.equal(h.container.querySelector("a").getAttribute("href"), "/content?tab=media");
 });
 
+test("Boss opens the account watermark rule on demand and saves with its current revision", async t => {
+  const policy = { revision: "4", enabled: true, logoAssetId: "asset_logo", position: "se", sizePercent: 12, opacityPercent: 55, marginPercent: 2 };
+  const path = "/api/bff/admin/system/account-image-watermark";
+  const h = await harness(t, (url, init) => {
+    if (url.pathname === path) return response({ policy, previewAvailable: false });
+    if (url.pathname.endsWith("/storage")) return response(storage());
+    return response({});
+  });
+  assert.equal(h.requests.some(request => request.url.pathname === path), false);
+  await h.click("设置水印");
+  assert.match(h.text(), /当前无法生成预览/);
+  assert.equal(h.container.querySelector('input[placeholder="已审核公开的 PNG 素材"]').value, policy.logoAssetId);
+  await h.click("保存水印设置");
+  const requests = h.requests.filter(request => request.url.pathname === path);
+  assert.deepEqual(requests.map(request => request.init.method), ["GET", "PUT"]);
+  const { revision, ...settings } = policy;
+  assert.deepEqual(JSON.parse(requests[1].init.body), { ...settings, expectedRevision: revision });
+  assert.match(new Headers(requests[1].init.headers).get("idempotency-key"), /^account-image-watermark-/);
+  assert.match(h.text(), /水印规则已保存/);
+});
+
 test("Boss can inspect SMS scene configuration without exposing credentials",async t=>{
   const scenes=['IDENTITY','REGISTER','LOGIN','BIND','RENTAL_EXPIRY','OWNER_ORDER_PAID'].map((scene,index)=>({
     scene,templateCode:index===4?null:'SMS_FIXTURE',source:index===4?'NOT_CONFIGURED':index===2?'SCENE':'SHARED',

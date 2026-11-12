@@ -1,5 +1,5 @@
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
-import { attachLegacyPathImages } from "./legacy-path-projection";
+import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
 import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
@@ -332,7 +332,7 @@ export type ListingDetailPrefetch = {
    *  means "no public listing" (the read answered 404). */
   publicListing?: (
     account: PublishingAccount,
-  ) => Promise<Record<string, unknown> | null>;
+  ) => Promise<PublicListingProjection | null>;
 };
 
 /** One page of candidates: accounts, current versions and the native-publication
@@ -382,14 +382,14 @@ export type PublicListingMemo = {
   read(
     account: PublishingAccount,
     prefetch?: ListingDetailPrefetch,
-  ): Promise<Record<string, unknown> | null>;
+  ): Promise<PublicListingProjection | null>;
 };
 
 export function publicListingMemo(
   client: PoolClient,
   gate: SupplyGateReader,
 ): PublicListingMemo {
-  const pending = new Map<string, Promise<Record<string, unknown> | null>>();
+  const pending = new Map<string, Promise<PublicListingProjection | null>>();
   return {
     read: (account, prefetch) => {
       let open = pending.get(account.id);
@@ -1948,7 +1948,7 @@ function publicAvailabilityReason(state: PublicAvailabilityState, blockers: read
 // Native publication owns the stable account even when it cannot take a new
 // order. Detail/favorites may show that approved version, never an old legacy
 // fallback or an unreviewed current draft.
-export async function readPublicListing(
+export async function readPublicListingSnapshot(
   client: PoolClient,
   a: PublishingAccount,
   gate: SupplyGateReader,
@@ -1957,7 +1957,7 @@ export async function readPublicListing(
   mode: PublicListingReadMode = "DETAIL",
   detailIndex?: LegacyPublicAdmissionDetailIndex,
   prefetch?: ListingDetailPrefetch,
-): Promise<Record<string, unknown>> {
+): Promise<PublicListingProjection> {
   const hasPublication = prefetch?.hasPublication ??
     Boolean(
       (
@@ -1972,14 +1972,17 @@ export async function readPublicListing(
     if (prefetch?.publicListing && !strictReadErrors && mode === "DETAIL") {
       const listing = await prefetch.publicListing(a);
       if (!listing) throw notFound();
-      return (await attachLegacyPathImages(client, [listing]))[0]!;
+      return listing;
     }
-    const listing = await listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
-    return (await attachLegacyPathImages(client, [listing]))[0]!;
+    return listingDetail(client, a, "public", gate, "public", a, strictReadErrors, mode, prefetch);
   }
   if (mode === "RENTABLE") throw notFound();
-  const listing = await readLegacyListing(client, a.id, admission, detailIndex);
-  return (await attachLegacyPathImages(client, [listing]))[0]!;
+  return readLegacyListing(client, a.id, admission, detailIndex);
+}
+
+export async function readPublicListing(...args: Parameters<typeof readPublicListingSnapshot>): Promise<PublicListingProjection> {
+  const [listing] = await projectPublicListingImages(args[0], [await readPublicListingSnapshot(...args)]);
+  return listing!;
 }
 /** Display-only fallback from the same sealed declaration; never changes the stored quote or its hash. */
 export function publicDepositProjection(quote: unknown, declaration: unknown): { tenantDeposit: ReturnType<typeof yuanAmountObject>; tenantPayableTotal: ReturnType<typeof yuanAmountObject> | null } | null {
@@ -2007,6 +2010,16 @@ export function publicDepositProjection(quote: unknown, declaration: unknown): {
   return { tenantDeposit, tenantPayableTotal };
 }
 
+export function listingDetail(
+  client: PoolClient, a: PublishingAccount, viewer: "public", gate: SupplyGateReader,
+  quoteViewer?: QuoteViewer, publicAccount?: PublishingAccount, strictReadErrors?: boolean,
+  mode?: PublicListingReadMode, prefetch?: ListingDetailPrefetch,
+): Promise<PublicListingProjection>;
+export function listingDetail(
+  client: PoolClient, a: PublishingAccount, viewer: QuoteViewer, gate: SupplyGateReader,
+  quoteViewer?: QuoteViewer, publicAccount?: PublishingAccount, strictReadErrors?: boolean,
+  mode?: PublicListingReadMode, prefetch?: ListingDetailPrefetch,
+): Promise<Record<string, unknown>>;
 export async function listingDetail(
   client: PoolClient,
   a: PublishingAccount,
@@ -2136,7 +2149,7 @@ export async function listingDetail(
         category: publicMediaCategory(attrs, m.assetId, legacyCategories.find(row => row.assetId === m.assetId)?.category),
         url: `/api/v1/supply/listings/${a.id}/media/${m.assetId}`,
       })),
-    };
+    } satisfies PublicListingProjection;
   }
   const publicRoute = await resolvePublicMediaRoute(
     client,
