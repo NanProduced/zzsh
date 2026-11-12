@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, friendlyError } from "../api";
 import { Button } from "../components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
+import { Skeleton } from "../components/ui/skeleton";
 import { StatusMessage } from "../components/ui-elements";
 
 type Policy = { normalDays: number; earlyDays: number; revision: string; available: boolean };
@@ -31,11 +33,12 @@ export function SettlementRefundPolicyPanel({ actorId, sessionId }: { actorId: s
   return <PolicyDialog key={`${actorId}:${sessionId}`} actorId={actorId} />;
 }
 function PolicyDialog({ actorId }: { actorId: string }) {
-  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true);
   const [policy, setPolicy] = useState<Policy | null>(null), [normal, setNormal] = useState(""), [early, setEarly] = useState("");
   const [pending, setPending] = useState<Command | null>(null), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [storageBlocked, setStorageBlocked] = useState(false);
   const generation = useRef(0), alive = useRef(true), writing = useRef(false), readAbort = useRef<AbortController | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   async function load() {
     readAbort.current?.abort();
@@ -95,33 +98,51 @@ function PolicyDialog({ actorId }: { actorId: string }) {
     catch { setStorageBlocked(true); setError("无法保存操作记录，请检查浏览器存储后重试。"); return; }
     void send(command);
   }
-  const valid = /^\d+$/.test(normal) && /^\d+$/.test(early) && days(Number(normal)) && days(Number(early));
+  const normalValid = /^\d+$/.test(normal) && days(Number(normal));
+  const earlyValid = /^\d+$/.test(early) && days(Number(early));
+  const valid = normalValid && earlyValid;
   const isUnchanged = normal === String(policy?.normalDays) && early === String(policy?.earlyDays);
   const saveDisabled = !policy?.available || !valid || busy || loading || !!pending || storageBlocked || isUnchanged;
-  const saveTitle = isUnchanged ? "数值未修改，无需保存" : !valid ? "请输入 0 至 365 的整数天数" : undefined;
+  const rowValue = loading ? "正在读取设置…" : policy?.available ? `正常 ${policy.normalDays} 天 · 提前 ${policy.earlyDays} 天` : policy ? "尚未安装，暂不可修改" : "设置读取失败";
   return <>
-    <div className="flex flex-wrap items-center gap-3">
-      {policy?.available ? (
-        <span className="text-xs text-muted-foreground bg-muted/50 px-2.5 py-1 rounded">
-          当前等待期：正常结算 {policy.normalDays} 天 · 提前结算 {policy.earlyDays} 天
-        </span>
-      ) : null}
-      <Button type="button" variant="outline" onClick={() => setOpen(true)}>设置退款等待期</Button>
+    <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+      <div className="min-w-0">
+        <h3 className="text-sm font-medium">退款等待期</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">{rowValue}</p>
+      </div>
+      <Button ref={triggerRef} type="button" variant="outline" aria-label="设置退款等待期" disabled={loading || Boolean(policy && !policy.available)} onClick={() => setOpen(true)}>设置</Button>
     </div>
-    <Dialog open={open} onOpenChange={setOpen}><DialogContent>
-      <div className="space-y-5">
-        <div><DialogTitle>设置退款等待期</DialogTitle><DialogDescription>结算生效后，退款按对应等待期处理；提交和到账请查看具体退款进度。已结算订单保持原到期时间。</DialogDescription></div>
-        {loading ? <p role="status" className="text-sm text-muted-foreground">正在读取设置…</p> : null}
+    <Dialog open={open} onOpenChange={setOpen}><DialogContent size="md" finalFocus={triggerRef} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[520px]">
+      <DialogHeader className="shrink-0 border-b border-border/60 px-5 py-4 pr-12">
+        <DialogTitle>退款等待期</DialogTitle>
+        <DialogDescription className="text-[13px] leading-relaxed">结算生效后按等待期处理退款；已结算订单保持原到期时间。提交和到账以具体退款进度为准。</DialogDescription>
+      </DialogHeader>
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
+        {loading && !policy ? <div role="status" aria-label="正在读取设置"><span className="sr-only">正在读取设置…</span><div className="grid gap-4 sm:grid-cols-2"><Skeleton className="h-14 w-full" /><Skeleton className="h-14 w-full" /></div></div> : null}
+        {loading && policy ? <p role="status" className="text-[13px] text-muted-foreground">正在读取设置…</p> : null}
         {error ? <StatusMessage error={error} /> : null}
         {notice ? <StatusMessage success={notice} /> : null}
         {storageBlocked ? <StatusMessage error="操作记录无法读取或保存，暂不能修改设置，请联系技术人员。" /> : null}
-        {pending ? <div className="space-y-2 rounded-lg border border-amber-500/40 p-3 text-sm"><p>上次保存的结果待确认，重试会使用原操作，不会新建另一笔。</p><Button type="button" variant="outline" disabled={busy} onClick={() => void send(pending)}>重试原操作</Button></div> : null}
-        {policy && !policy.available ? <p className="text-sm text-muted-foreground">退款等待期设置尚未安装，暂不可修改。</p> : null}
-        {policy?.available ? <div className="grid gap-4 sm:grid-cols-2">
-          <label className="space-y-1 text-sm"><span>正常结算（天）</span><Input inputMode="numeric" value={normal} disabled={busy || !!pending || storageBlocked} onChange={e => setNormal(e.target.value)} /></label>
-          <label className="space-y-1 text-sm"><span>提前结算（天）</span><Input inputMode="numeric" value={early} disabled={busy || !!pending || storageBlocked} onChange={e => setEarly(e.target.value)} /></label>
-        </div> : null}
-        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">0 表示结算后即可处理退款；范围 0–365 天。</p><Button type="button" disabled={saveDisabled} title={saveTitle} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button></div>
+        {pending ? <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm"><p>上次保存的结果待确认，重试会使用原操作，不会新建另一笔。</p><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void send(pending)}>重试原操作</Button></div> : null}
+        {policy && !policy.available ? <p className="text-sm text-muted-foreground">尚未安装，暂不可修改；已有订单仍按原到期时间处理。</p> : null}
+        {policy?.available ? <dl className="grid grid-cols-2 gap-4 border-b border-border/60 pb-4 text-[13px]">
+          <div><dt className="text-muted-foreground">正常结算</dt><dd className="mt-0.5 font-medium tabular-nums">{policy.normalDays} 天</dd></div>
+          <div><dt className="text-muted-foreground">提前结算</dt><dd className="mt-0.5 font-medium tabular-nums">{policy.earlyDays} 天</dd></div>
+        </dl> : null}
+        {policy?.available ? <>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="正常结算（天）" error={normal.length > 0 && !normalValid ? "请输入 0–365 的整数。" : undefined}><Input className="h-9 text-base md:text-sm" inputMode="numeric" value={normal} disabled={busy || !!pending || storageBlocked}
+              onChange={e => setNormal(e.target.value)} /></Field>
+            <Field label="提前结算（天）" error={early.length > 0 && !earlyValid ? "请输入 0–365 的整数。" : undefined}><Input className="h-9 text-base md:text-sm" inputMode="numeric" value={early} disabled={busy || !!pending || storageBlocked}
+              onChange={e => setEarly(e.target.value)} /></Field>
+          </div>
+          <p className="text-[13px] leading-relaxed text-muted-foreground">0 表示结算后即可处理退款；范围 0–365 天。</p>
+        </> : null}
+      </div>
+      <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border/60 bg-muted/30 px-5 py-3 sm:flex-row sm:items-center sm:justify-end">
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>{notice ? "关闭" : "取消"}</Button>
+        {!loading && !policy ? <Button type="button" variant="outline" onClick={() => void load()}>重新读取</Button> : null}
+        {policy?.available ? <Button type="button" disabled={saveDisabled} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button> : null}
       </div>
     </DialogContent></Dialog>
   </>;

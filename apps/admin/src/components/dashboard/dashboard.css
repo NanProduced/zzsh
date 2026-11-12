@@ -7,7 +7,36 @@
 .dashboard-stat-card { height:100%; min-width:0; }
 .dashboard-stat-content { display:flex; min-height:136px; flex-direction:column; justify-content:space-between; gap:8px; }
 .dashboard-stat-value { margin-top:12px; font-size:clamp(1rem,1.7vw,1.5rem); font-weight:600; line-height:1.25; letter-spacing:-.02em; overflow-wrap:anywhere; }
-.dashboard-stat-delta { flex-shrink:1; max-width:55%; white-space:normal; overflow-wrap:anywhere; font-size:10px; }
+.dashboard-stat-delta-row { margin-top:6px; }
+.dashboard-stat-delta { flex-shrink:1; max-width:100%; white-space:normal; overflow-wrap:anywhere; font-size:11px; }
+.dashboard-stat-delta-label { margin-right:2px; font-size:10px; font-weight:500; opacity:.8; }
+.dashboard-stat-footer { display:flex; flex-direction:column; justify-content:flex-end; gap:2px; min-height:44px; }
+
+/* 状态行：短标签 + 数值，不写成长句解释 */
+.dashboard-stat-meta { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-top:6px; font-size:12px; line-height:1.5; color:var(--muted-foreground); }
+.dashboard-stat-meta-tag { flex-shrink:0; padding:1px 7px; border:1px dashed var(--border); border-radius:999px; font-size:11px; font-weight:600; color:var(--foreground); background:var(--muted); }
+.dashboard-stat-meta-value { font-variant-numeric:tabular-nums; }
+
+/* 图表元信息：label / value 分层，替代一段突兀的小字 */
+.dashboard-trend-meta { display:flex; flex-wrap:wrap; align-items:center; gap:6px 18px; margin-top:6px; font-size:12px; line-height:1.6; color:var(--muted-foreground); }
+.dashboard-trend-meta-item { display:inline-flex; align-items:baseline; gap:6px; }
+.dashboard-trend-meta-label { flex-shrink:0; font-size:11px; font-weight:600; letter-spacing:.02em; color:var(--foreground); opacity:.7; }
+.dashboard-meta-flag { display:inline-flex; align-items:center; gap:5px; margin-left:6px; padding:1px 8px; border:1px solid var(--border); border-radius:999px; font-size:11px; font-weight:600; line-height:1.5; color:var(--foreground); background:var(--muted); white-space:nowrap; }
+.dashboard-meta-flag::before { content:""; width:5px; height:5px; border-radius:50%; background:var(--warning, currentColor); }
+.dashboard-cell-meta { display:block; margin-top:2px; font-size:11px; line-height:1.5; color:var(--muted-foreground); }
+
+/* 待办行：明确的可点击反馈，ease-out 短过渡 */
+.dashboard-queue-grid { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }
+.dashboard-queue-grid > li { border:1px solid var(--border); border-radius:12px; padding:0 12px; transition:background-color .15s ease-out, border-color .15s ease-out; }
+.dashboard-queue-grid > li:hover { background:var(--muted); border-color:var(--ring); }
+.dashboard-queue-grid > li:has(button:disabled):hover { background:transparent; border-color:var(--border); }
+.dashboard-queue-grid > li > button { min-height:68px; cursor:pointer; }
+.dashboard-queue-grid > li > button:hover { background:transparent; }
+.dashboard-queue-cta { display:block; margin-top:2px; font-size:11px; font-weight:500; color:var(--primary); transition:color .15s ease-out; }
+.dashboard-queue-grid > li:hover .dashboard-queue-cta { color:var(--foreground); }
+.dashboard-queue-chevron { transition:transform .15s ease-out; }
+.dashboard-queue-grid > li:hover .dashboard-queue-chevron { transform:translateX(2px); }
+
 .dashboard-stat-card--long { grid-column:span 2; }
 .dashboard-stat-card--long .dashboard-stat-value { font-size:clamp(.875rem,2vw,1.5rem); }
 .dashboard-stat-card[data-knowledge="FORBIDDEN"] .dashboard-stat-content,
@@ -20,6 +49,8 @@
   .dashboard-stat-value { margin-top:10px; font-size:1.125rem; }
   .dashboard-stat-delta { max-width:100%; }
   .dashboard-stat-card [data-slot="card-content"] > div > .flex { flex-wrap:wrap; }
+  .dashboard-queue-grid { grid-template-columns:1fr; }
+  .dashboard-trend-meta { gap:4px 12px; }
 }
 
 @media (min-width: 640px) {
@@ -32,4 +63,8 @@
   .dashboard-kpi-grid {
     grid-template-columns: repeat(var(--dashboard-kpi-columns, 4), minmax(0, 1fr));
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-queue-grid > li, .dashboard-queue-chevron, .dashboard-queue-cta { transition:none; }
 }

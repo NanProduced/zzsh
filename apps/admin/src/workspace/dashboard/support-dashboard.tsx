@@ -29,7 +29,6 @@ export function SupportDashboard({
   return <div className="space-y-5">
     <DashboardPageHeader
       title="客服工作台"
-      description="先看排队和我的进行中，再进入客服工作台接待；这里不展示财务和平台内部数据。"
       range={range}
       onRange={onRange}
       onRefresh={onRefresh}
@@ -42,7 +41,7 @@ export function SupportDashboard({
     <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
       <ActionQueue queues={data.queues} onNavigate={onNavigate} />
       <Card>
-        <CardHeader><CardTitle>客服入口</CardTitle><p className="text-xs text-muted-foreground">进入现有工作台处理消息、订单和结算。</p></CardHeader>
+        <CardHeader><CardTitle>客服入口</CardTitle></CardHeader>
         <CardContent className="grid gap-2">
           {has("im.support.read") ? <><Button type="button" variant="outline" className="justify-start" onClick={() => onNavigate("/support")}><MessagesSquare aria-hidden="true" />客服工作台</Button>
           <Button type="button" variant="outline" className="justify-start" onClick={() => onNavigate("/support/mine")}><Headphones aria-hidden="true" />我的接待</Button></> : null}

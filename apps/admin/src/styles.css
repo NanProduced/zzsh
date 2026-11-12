@@ -325,10 +325,22 @@ input::placeholder, textarea::placeholder {
   opacity: 1;
 }
 
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--admin-ring);
-  outline-offset: 2px;
+/* 焦点基线：单一 2px outline，组件局部样式不得覆盖，避免粗环叠加。 */
+html body .workspace-root :is(button, input, select, textarea, [role="button"], [role="switch"], [role="checkbox"], summary, a):focus-visible {
+  outline: 2px solid var(--ring, oklch(0.55 0 0)) !important;
+  outline-offset: 2px !important;
 }
+
+html body .workspace-root button[data-variant="link"]:focus-visible {
+  outline: none !important;
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+
+.admin-info-tip { max-width: 18rem; }
+.admin-info-tip-title { font-size: 12px; font-weight: 500; line-height: 1.5; color: inherit; }
+.admin-info-tip-body { font-size: 12px; line-height: 1.6; color: inherit; opacity: .82; }
 
 /* Reduced Motion preferences */
 @utility ring-3 {

@@ -78,6 +78,14 @@
 - 工作台避免页面加载编排和无意义循环动画；动效只表达状态、反馈、加载或局部揭示。登录/引导的 shader 不得遮挡表单、刻度、数据或关键操作。
 - 深浅主题均需通过对比度与 reduced-motion 检查；状态同时提供文字、图标、线型或图例。
 
+### 交互细节基线（所有页面优化统一遵守）
+
+- **可点击性**：交互元素必须有 `cursor:pointer` 与明确的 hover/focus/active 反馈（背景、边框或轻微位移，不只靠极淡底色）；禁用态用 `cursor:default`。基础按钮统一由 `components/ui/button.tsx` 提供，不逐页补写。
+- **Tooltip 单一实现**：说明型提示统一用 `components/ui/tooltip.tsx` 的 `InfoTip`（Base UI）；普通业务页不得新增原生 `title=`、自绘浮层或改用 Plate 的 Radix tooltip。Popover / HoverCard / ChartTooltip 属不同交互，不混用。气泡内文字用继承色与透明度区分标题/正文，不能用页面前景色变量。
+- **键盘焦点**：只使用 `styles.css` 的单一 2px `--ring` outline + 2px offset；组件不得再自绘 `ring-3` / `ring-[3px]`，避免双框叠加。link 类按钮以下划线表示焦点，不出现粗胶囊框；焦点需跟随控件圆角并支持 reduced-motion。
+- **详情承载**：列表只负责定位与比较。已有详情页时优先跳转详情页；内容少或没有详情页时用**弹窗**，并打磨尺寸、内边距、分区、关闭/返回与窄屏表现。**不使用抽屉**——当前 AppShell 的侧栏与多对象标签布局下抽屉显示效果差。
+- **文案**：删除解释 UI 怎么用、实现状态、内部参数与测试范围的说明；保留操作后果、禁用原因、恢复入口，就近改为短状态标签或收进 `InfoTip`。说明文字不小于 12px，技术参数用 label/value 结构化呈现。
+
 ## Open Decisions
 
 - 品牌 Logo 见 [品牌物料](../../assets/brand/README.md)；具体变体按背景和空间适配。沿用当前主题 token，字体、对比度与密度按受影响页面核验。

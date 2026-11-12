@@ -1,7 +1,9 @@
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
-import { cloneElement } from "react"
+import { cloneElement, type ReactNode } from "react"
+import { Info } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import { workspacePortalContainer } from "@/lib/workspace-portal"
 
 function TooltipProvider({
@@ -28,7 +30,7 @@ function TooltipTrigger({ ...props }: TooltipPrimitive.Trigger.Props) {
 function TooltipContent({
   className,
   side = "top",
-  sideOffset = 4,
+  sideOffset = 6,
   align = "center",
   alignOffset = 0,
   children,
@@ -50,7 +52,7 @@ function TooltipContent({
         <TooltipPrimitive.Popup
           data-slot="tooltip-content"
           className={cn(
-            "z-50 inline-flex w-fit max-w-xs origin-(--transform-origin) items-center gap-1.5 rounded-md bg-foreground px-3 py-1.5 text-xs text-background has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-sm data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
+            "z-50 flex w-fit max-w-xs origin-(--transform-origin) flex-col items-start gap-1 rounded-md bg-foreground px-3 py-2 text-left text-xs leading-relaxed text-background has-data-[slot=kbd]:pr-1.5 data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 **:data-[slot=kbd]:relative **:data-[slot=kbd]:isolate **:data-[slot=kbd]:z-50 **:data-[slot=kbd]:rounded-sm data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0 data-[state=delayed-open]:zoom-in-95 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
             className
           )}
           {...props}
@@ -60,6 +62,47 @@ function TooltipContent({
         </TooltipPrimitive.Popup>
       </TooltipPrimitive.Positioner>
     </TooltipPrimitive.Portal>
+  )
+}
+
+/**
+ * 管理端统一的「说明型」Tooltip 入口：Info 图标 + 标题 + 正文。
+ * 业务页不再自行拼 TooltipProvider/Root/Trigger/Content，也不使用原生 title=。
+ */
+function InfoTip({
+  label,
+  title,
+  body,
+  describedBy,
+  className,
+}: {
+  label: string;
+  title?: string;
+  body: ReactNode;
+  describedBy?: string;
+  className?: string;
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className={cn("-mt-0.5 shrink-0", className)}
+            aria-label={label}
+            aria-describedby={describedBy}
+          >
+            <Info className="size-3.5" aria-hidden="true" />
+          </Button>
+        } />
+        <TooltipContent side="bottom" align="start" className="admin-info-tip">
+          {title ? <p className="admin-info-tip-title">{title}</p> : null}
+          <p className="admin-info-tip-body">{body}</p>
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -95,4 +138,4 @@ function ActionTooltip({
   );
 }
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, ActionTooltip }
+export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider, ActionTooltip, InfoTip }

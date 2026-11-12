@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, friendlyError } from "../api";
 import { Button } from "../components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
+import { Skeleton } from "../components/ui/skeleton";
 import { StatusMessage } from "../components/ui-elements";
 
 type Policy = { waitMinutes: number; revision: string; available: boolean };
@@ -31,11 +33,12 @@ export function OpeningAutoConfirmPolicyPanel({ actorId, sessionId }: { actorId:
   return <PolicyDialog key={`${actorId}:${sessionId}`} actorId={actorId} />;
 }
 function PolicyDialog({ actorId }: { actorId: string }) {
-  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [loading, setLoading] = useState(true);
   const [policy, setPolicy] = useState<Policy | null>(null), [value, setValue] = useState("");
   const [pending, setPending] = useState<Command | null>(null), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [storageBlocked, setStorageBlocked] = useState(false);
   const generation = useRef(0), alive = useRef(true), writing = useRef(false), readAbort = useRef<AbortController | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   async function load() {
     readAbort.current?.abort();
@@ -94,27 +97,41 @@ function PolicyDialog({ actorId }: { actorId: string }) {
   const valid = /^\d+$/.test(value) && minutes(Number(value));
   const isUnchanged = value === String(policy?.waitMinutes);
   const saveDisabled = !policy?.available || !valid || busy || loading || !!pending || storageBlocked || isUnchanged;
-  const saveTitle = isUnchanged ? "数值未修改，无需保存" : !valid ? "请输入 1 至 10080 的整数分钟" : undefined;
+  const rowValue = loading ? "正在读取设置…" : policy?.available ? `当前等待期 ${policy.waitMinutes} 分钟` : policy ? "尚未安装，暂不可修改" : "设置读取失败";
   return <>
-    <div className="flex flex-wrap items-center gap-3">
-      {policy?.available ? (
-        <span className="text-xs text-muted-foreground bg-muted/50 px-2.5 py-1 rounded">
-          当前等待期：{policy.waitMinutes} 分钟
-        </span>
-      ) : null}
-      <Button type="button" variant="outline" onClick={() => setOpen(true)}>设置开租自动确认</Button>
+    <div className="flex flex-wrap items-center justify-between gap-3 py-3">
+      <div className="min-w-0">
+        <h3 className="text-sm font-medium">开租自动确认</h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">{rowValue}</p>
+      </div>
+      <Button ref={triggerRef} type="button" variant="outline" aria-label="设置开租自动确认" disabled={loading || Boolean(policy && !policy.available)} onClick={() => setOpen(true)}>设置</Button>
     </div>
-    <Dialog open={open} onOpenChange={setOpen}><DialogContent>
-      <div className="space-y-5">
-        <div><DialogTitle>设置开租自动确认等待期</DialogTitle><DialogDescription>付款接纳后系统立即生成开租清单；清单生成后等待双方确认，超时按本设置补齐未确认方。修改只影响之后新生成的清单，已有清单截止时间不变。</DialogDescription></div>
-        {loading ? <p role="status" className="text-sm text-muted-foreground">正在读取设置…</p> : null}
+    <Dialog open={open} onOpenChange={setOpen}><DialogContent size="md" finalFocus={triggerRef} className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[480px]">
+      <DialogHeader className="shrink-0 border-b border-border/60 px-5 py-4 pr-12">
+        <DialogTitle>开租自动确认</DialogTitle>
+        <DialogDescription className="text-[13px] leading-relaxed">付款接纳后生成开租清单；超时按本设置补齐未确认方。</DialogDescription>
+      </DialogHeader>
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
+        {loading && !policy ? <div role="status" aria-label="正在读取设置"><span className="sr-only">正在读取设置…</span><div className="space-y-3"><Skeleton className="h-4 w-24" /><Skeleton className="h-9 w-44" /></div></div> : null}
+        {loading && policy ? <p role="status" className="text-[13px] text-muted-foreground">正在读取设置…</p> : null}
         {error ? <StatusMessage error={error} /> : null}
         {notice ? <StatusMessage success={notice} /> : null}
         {storageBlocked ? <StatusMessage error="操作记录无法读取或保存，暂不能修改设置，请联系技术人员。" /> : null}
-        {pending ? <div className="space-y-2 rounded-lg border border-amber-500/40 p-3 text-sm"><p>上次保存的结果待确认，重试会使用原操作，不会新建另一笔。</p><Button type="button" variant="outline" disabled={busy} onClick={() => void send(pending)}>重试原操作</Button></div> : null}
-        {policy && !policy.available ? <p className="text-sm text-muted-foreground">开租自动确认设置尚未安装，暂不可修改；系统仍按已有清单的截止时间处理。</p> : null}
-        {policy?.available ? <label className="block max-w-xs space-y-1 text-sm"><span>等待期（分钟）</span><Input inputMode="numeric" value={value} disabled={busy || !!pending || storageBlocked} onChange={e => setValue(e.target.value)} /></label> : null}
-        <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">范围 1–10080 分钟（最长 7 天）。0 不代表关闭或立即确认。</p><Button type="button" disabled={saveDisabled} title={saveTitle} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button></div>
+        {pending ? <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm"><p>上次保存的结果待确认，重试会使用原操作，不会新建另一笔。</p><Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void send(pending)}>重试原操作</Button></div> : null}
+        {policy && !policy.available ? <p className="text-sm text-muted-foreground">尚未安装，暂不可修改；已有清单仍按原截止时间处理。</p> : null}
+        {policy?.available ? <dl className="flex items-baseline justify-between gap-4 border-b border-border/60 pb-4 text-[13px]">
+          <dt className="text-muted-foreground">当前等待期</dt>
+          <dd className="font-medium tabular-nums">{policy.waitMinutes} 分钟</dd>
+        </dl> : null}
+        {policy?.available ? <Field label="等待期（分钟）" hint="1–10080 分钟（最长 7 天），仅影响之后新生成的清单。" error={value.length > 0 && !valid ? "请输入 1–10080 的整数分钟。" : undefined}>
+          <Input className="h-9 max-w-[220px] text-base md:text-sm" inputMode="numeric" value={value} disabled={busy || !!pending || storageBlocked}
+            onChange={e => setValue(e.target.value)} />
+        </Field> : null}
+      </div>
+      <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border/60 bg-muted/30 px-5 py-3 sm:flex-row sm:items-center sm:justify-end">
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => setOpen(false)}>{notice ? "关闭" : "取消"}</Button>
+        {!loading && !policy ? <Button type="button" variant="outline" onClick={() => void load()}>重新读取</Button> : null}
+        {policy?.available ? <Button type="button" disabled={saveDisabled} onClick={save}>{busy ? "保存中…" : "保存设置"}</Button> : null}
       </div>
     </DialogContent></Dialog>
   </>;

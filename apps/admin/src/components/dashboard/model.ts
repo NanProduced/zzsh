@@ -185,3 +185,12 @@ export function metricNote(metric: DashboardMetric): string {
   if (metric.coverage?.totalCount === 0) return "本期暂无数据";
   return SHORT_NOTES[metric.id] ?? metric.definition;
 }
+
+/**
+ * 口径短说明与状态/覆盖率说明分离：PARTIAL 时 metricNote 返回覆盖率，
+ * 卡片仍需展示该指标「是不是收益、是不是估算」的口径，避免把部分覆盖金额读成全量结果。
+ * 不改变 metricNote 的既有契约。
+ */
+export function metricShortNote(metric: DashboardMetric): string {
+  return SHORT_NOTES[metric.id] ?? metricNote(metric);
+}

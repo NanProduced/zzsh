@@ -93,3 +93,41 @@ test('static action tooltips are keyboard reachable without overriding explicit 
   await h.render({...props,children:createElement('span',{'data-probe':'hidden','aria-hidden':true},'装饰')});assert.equal(h.host.querySelector('[data-probe="hidden"]').tabIndex,-1);
   let clicks=0;await h.render({...props,children:createElement('button',{type:'button',onClick:()=>clicks++},'动作')});await act(async()=>h.host.querySelector('button').click());assert.equal(clicks,1);assert.equal(h.host.querySelectorAll('button').length,1);assert.equal(h.host.querySelectorAll('button button').length,0);
 });
+
+test('partial coverage uses a compact status row and keeps the definition in the info tooltip',async t=>{
+ const m=metric('quotedSpread','321165','PARTIAL'),h=await mount(t,'StatCard',{metric:m,onNavigate:()=>{}}),text=h.host.textContent;
+ assert.match(text,/部分覆盖/);
+ assert.match(text,/1\/2 单/);
+ assert.doesNotMatch(text,/查看明细/);
+ assert.doesNotMatch(text,/该指标暂无|该范围暂无|非最终收益|已覆盖/);
+ const trigger=h.host.querySelector('button'),matches=trigger.matches.bind(trigger);trigger.matches=selector=>selector===':focus-visible'?h.browser.document.activeElement===trigger:matches(selector);
+ await act(async()=>{h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown',{key:'Tab',bubbles:true}));trigger.focus();await new Promise(resolve=>setTimeout(resolve,0))});await act(async()=>{await new Promise(setImmediate)});
+ assert.match(h.browser.document.querySelector('[data-slot="tooltip-content"]')?.textContent??'',/冻结报价估算 · 非最终收益/);
+});
+
+test('trend chart keeps Y axis ticks inside the SVG viewport',()=>{
+ const src=fs.readFileSync(new URL('../src/components/dashboard/dashboard-components.tsx',import.meta.url),'utf8');
+ assert.doesNotMatch(src,/left:\s*-18/);
+ assert.equal((src.match(/left:\s*0,/g)||[]).length,2,'area and bar charts both use a non-negative left margin');
+});
+
+test('dashboard UI does not ship dev-flavoured explanatory prose',()=>{
+ for(const f of ['../src/components/dashboard/dashboard-components.tsx','../src/workspace/dashboard/boss-dashboard.tsx','../src/workspace/dashboard/ops-dashboard.tsx','../src/workspace/dashboard/support-dashboard.tsx','../src/workspace/dashboard/dashboard-page.tsx']){
+  const src=fs.readFileSync(new URL(f,import.meta.url),'utf8');
+  assert.doesNotMatch(src,/先看需要|先处理下列|该指标暂无|该范围暂无|按原始分|未实现|这里不展示|避免把旧数据/,f);
+ }
+});
+
+test('interaction baseline: pointer cursor, one tooltip entry, one focus ring',()=>{
+ const read=f=>fs.readFileSync(new URL(f,import.meta.url),'utf8');
+ const button=read('../src/components/ui/button.tsx'),css=read('../src/styles.css'),dash=read('../src/components/dashboard/dashboard-components.tsx'),tip=read('../src/components/ui/tooltip.tsx');
+ assert.match(button,/cursor-pointer/);
+ assert.doesNotMatch(button,/focus-visible:ring-3|focus-visible:ring-\[3px\]/);
+ assert.match(css,/outline: 2px solid var\(--ring, oklch\(0\.55 0 0\)\)/);
+ assert.match(css,/button\[data-variant="link"\]:focus-visible/);
+ assert.match(tip,/export \{[^}]*InfoTip/);
+ assert.match(dash,/InfoTip/);
+ assert.doesNotMatch(dash,/plate\/ui\/tooltip/);
+ const nativeTitles=dash.split("\n").filter(line=>/title="/.test(line)&&!line.includes("InfoTip"));
+ assert.deepEqual(nativeTitles,[],'no native title= tooltips in dashboard components');
+});

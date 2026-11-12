@@ -78,7 +78,7 @@ export function DashboardPage({
   return <div className="space-y-4">
     {current.error ? <Alert variant="destructive">
       <AlertTitle>工作台暂时无法读取</AlertTitle>
-      <AlertDescription>没有显示上一次的统计，避免把旧数据当作当前结果。{current.error}</AlertDescription>
+      <AlertDescription>{current.error}</AlertDescription>
       <div className="col-span-2 mt-2"><Button type="button" variant="outline" size="sm" onClick={() => setReload((value) => value + 1)}>重试</Button></div>
     </Alert> : null}
     {!data && !current.error ? <DashboardSkeleton /> : null}

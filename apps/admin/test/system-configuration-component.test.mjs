@@ -65,7 +65,7 @@ async function harness(t, handler, initialSnapshot = snapshot()) {
   let identity = initialSnapshot;
   const render = async (refreshNonce = 0, nextSnapshot = identity) => { identity = nextSnapshot; await act(async () => root.render(createElement(module.SystemConfigurationView, { snapshot: identity, refreshNonce }))); };
   const settle = async () => act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
-  const click = async (text) => { const button = [...container.querySelectorAll("button")].find(node => node.textContent.trim() === text); assert.ok(button, `button ${text}`); await act(async () => button.dispatchEvent(new browser.MouseEvent("click", { bubbles: true }))); await settle(); };
+  const click = async (text) => { const button = [...browser.document.body.querySelectorAll("button")].find(node => node.getAttribute("aria-label") === text || node.textContent.trim() === text); assert.ok(button, `button ${text}`); await act(async () => button.dispatchEvent(new browser.MouseEvent("click", { bubbles: true }))); await settle(); };
   t.after(async () => { await act(async () => root.unmount()); globalThis.fetch = beforeFetch; container.remove(); await source.close(); await browser.happyDOM.abort(); });
   await render(); await settle();
   return { container, browser, requests, render, settle, click, module, text: () => container.textContent };
@@ -92,16 +92,17 @@ test("Boss opens the account watermark rule on demand and saves with its current
   });
   assert.equal(h.requests.some(request => request.url.pathname === path), false);
   await h.click("设置水印");
-  assert.match(h.text(), /当前无法生成预览/);
-  assert.match(h.container.querySelector('img[alt="水印 Logo预览"]').getAttribute("src"), /asset_logo/);
-  assert.doesNotMatch(h.text(), /Logo 素材编号|预览用账号展示图编号/);
+  const dialogText = () => h.browser.document.body.textContent;
+  assert.match(dialogText(), /当前无法生成预览/);
+  assert.match(h.browser.document.body.querySelector('img[alt="水印 Logo预览"]').getAttribute("src"), /asset_logo/);
+  assert.doesNotMatch(dialogText(), /Logo 素材编号|预览用账号展示图编号/);
   await h.click("保存水印设置");
   const requests = h.requests.filter(request => request.url.pathname === path);
   assert.deepEqual(requests.map(request => request.init.method), ["GET", "PUT"]);
   const { revision, ...settings } = policy;
   assert.deepEqual(JSON.parse(requests[1].init.body), { ...settings, expectedRevision: revision });
   assert.match(new Headers(requests[1].init.headers).get("idempotency-key"), /^account-image-watermark-/);
-  assert.match(h.text(), /水印规则已保存/);
+  assert.match(dialogText(), /水印规则已保存/);
 });
 
 test("watermark chooses a PNG and previews with an automatic or selected sample", async t => {
@@ -121,7 +122,7 @@ test("watermark chooses a PNG and previews with an automatic or selected sample"
   });
   await h.click("设置水印");
   await h.click("选择图片");
-  const logoDialog = h.browser.document.querySelector("[role=dialog]");
+  const logoDialog = [...h.browser.document.querySelectorAll("[role=dialog]")].find(dialog => dialog.querySelector(".content-image-option"));
   assert.ok(logoDialog);
   assert.equal(logoDialog.querySelectorAll(".content-image-option").length, 1, "Logo picker only offers PNG");
   const logo = logoDialog.querySelector('img[src*="logo_png"]').closest("button");
@@ -130,8 +131,8 @@ test("watermark chooses a PNG and previews with an automatic or selected sample"
   const previews = () => h.requests.filter(request => request.url.pathname === path + "/preview");
   assert.equal(JSON.parse(previews()[0].init.body).assetId, null);
   assert.equal(JSON.parse(previews()[0].init.body).logoAssetId, "logo_png");
-  assert.match(h.text(), /暂无可用的账号图片，请选择或上传预览底图/);
-  const chooseSample = [...h.container.querySelectorAll("button")].find(button => button.textContent.trim() === "选择图片" && button.closest(".content-media-field")?.textContent.includes("更换预览底图"));
+  assert.match(h.browser.document.body.textContent, /暂无可用的账号图片，请选择或上传预览底图/);
+  const chooseSample = [...h.browser.document.body.querySelectorAll("button")].find(button => button.textContent.trim() === "选择图片" && button.closest(".content-media-field")?.textContent.includes("更换预览底图"));
   await act(async () => chooseSample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
   const sample = h.browser.document.querySelector('img[src*="sample_jpeg"]').closest("button");
   await act(async () => sample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
@@ -147,9 +148,10 @@ test("Boss can inspect SMS scene configuration without exposing credentials",asy
   const h=await harness(t,url=>response(url.pathname.endsWith('/sms')?{provider:'aliyun',signName:'测试签名',providerVerification:'NOT_RUN',scenes,accessKey:'must-not-render'}:storage()));
   assert.equal(h.requests.length,1);await h.click('查看短信配置');
   assert.equal(h.requests.at(-1).url.pathname,'/api/bff/admin/system/sms');
-  assert.match(h.text(),/登录/);assert.match(h.text(),/租期到期提醒/);assert.match(h.text(),/共用验证码模板/);
-  assert.match(h.text(),/模板已审核或短信已送达/);assert.doesNotMatch(h.text(),/must-not-render/);
-  assert.match(h.text(),/更新 API 后可查看更换手机号和找回密码模板/);
+  const smsText = h.browser.document.body.textContent;
+  assert.match(smsText,/登录/);assert.match(smsText,/租期到期提醒/);assert.match(smsText,/共用验证码模板/);
+  assert.match(smsText,/模板已审核或短信已送达/);assert.doesNotMatch(smsText,/must-not-render/);
+  assert.match(smsText,/更新 API 后可查看更换手机号和找回密码模板/);
 });
 
 test("SMS configuration displays new scenes and their actual fallback sources",async t=>{
@@ -164,10 +166,10 @@ test("SMS configuration displays new scenes and their actual fallback sources",a
   ];
   const h=await harness(t,url=>response(url.pathname.endsWith('/sms')?{provider:'aliyun',signName:'测试签名',providerVerification:'NOT_RUN',scenes,additionalScenes}:storage()));
   await h.click('查看短信配置');
-  const rows=[...h.container.querySelectorAll('tr')].map(row=>row.textContent);
-  assert(rows.some(row=>/更换手机号.*SMS_BIND.*复用绑定手机模板.*已支持/.test(row)));
-  assert(rows.some(row=>/找回密码.*SMS_FORGOT.*场景专用.*已支持/.test(row)));
-  assert.doesNotMatch(h.text(),/更新 API 后可查看/);
+  const rows=[...h.browser.document.body.querySelectorAll('[data-sms-scene]')].map(row=>row.textContent);
+  assert(rows.some(row=>/更换手机号.*SMS_BIND.*复用绑定手机模板.*已接入/.test(row)));
+  assert(rows.some(row=>/找回密码.*SMS_FORGOT.*场景专用.*已接入/.test(row)));
+  assert.doesNotMatch(h.browser.document.body.textContent,/更新 API 后可查看/);
 });
 
 test("refund wait policy reads lazily and retries an unknown save with the original key and values", async t => {

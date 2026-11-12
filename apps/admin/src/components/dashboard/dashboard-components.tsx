@@ -1,12 +1,12 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
-import { ArrowDownRight, ArrowUpRight, ChevronRight, Info, RefreshCw } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, ChevronRight, RefreshCw } from "lucide-react";
 import { AreaChart, BarChart, CartesianGrid, ChartArea, ChartBar, ChartContainer, ChartLegendContent, ChartTooltip, ChartTooltipContent, XAxis, YAxis, type ChartConfig } from "../ui/chart";
 
 import "./dashboard.css";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "../ui/card";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
+import { InfoTip } from "../ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import {
   formatAge,
@@ -16,6 +16,7 @@ import {
   formatDashboardPeriod,
   dashboardOrdersPath,
   metricNote,
+  metricShortNote,
   metricValue,
   type DashboardMetric,
   type DashboardPayload,
@@ -49,7 +50,6 @@ function Sparkline({ values }: { values: string[] }) {
 
 export function DashboardPageHeader({
   title,
-  description,
   range,
   ranges,
   onRange,
@@ -59,7 +59,6 @@ export function DashboardPageHeader({
   children,
 }: {
   title: string;
-  description: string;
   range: DashboardRange;
   ranges?: DashboardRange[];
   onRange: (range: DashboardRange) => void;
@@ -73,11 +72,10 @@ export function DashboardPageHeader({
   return <header className="flex flex-wrap items-end justify-between gap-4">
     <div className="min-w-0">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1"><h1 className="text-2xl font-semibold tracking-tight">{title}</h1><span className="text-xs text-muted-foreground">{scopeLabel}</span></div>
-      <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">{description}</p>
     </div>
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-nowrap items-center gap-2">
       {children}
-      <div className="inline-flex rounded-lg border border-border bg-card p-0.5" role="group" aria-label="时间范围">
+      <div className="inline-flex shrink-0 rounded-lg border border-border bg-card p-0.5" role="group" aria-label="时间范围">
         {options.map((option) => <Button
           key={option}
           type="button"
@@ -96,26 +94,39 @@ export function DashboardPageHeader({
 
 export function StatCard({ metric, onNavigate }: { metric: DashboardMetric; onNavigate: (path: string) => void }) {
   const definitionId = useId();
-  const path = metric.state === "KNOWN" || metric.state === "PARTIAL" ? safeDashboardPath(metric.drilldown) : null;
-  const known = metric.state === "KNOWN", delta = known ? metric.delta : null, value = metricValue(metric);
+  const readable = metric.state === "KNOWN" || metric.state === "PARTIAL";
+  const known = metric.state === "KNOWN";
+  const partial = metric.state === "PARTIAL";
+  const path = readable ? safeDashboardPath(metric.drilldown) : null;
+  const delta = known ? metric.delta : null;
+  const value = metricValue(metric);
+  const note = metricNote(metric);
+  const shortNote = metricShortNote(metric);
+  const hasSparkline = known && metric.sparkline.length >= 2;
+  // 只保留短状态词；口径解释统一收进标题旁的 Info tooltip。
+  const statusLabel = !readable ? note : partial ? "部分覆盖" : known && note !== shortNote ? note : null;
+  const coverageText = partial ? (metric.coverage ? `${formatCount(metric.coverage.knownCount)}/${formatCount(metric.coverage.totalCount)} 单` : note) : null;
   return <Card size="sm" className={`dashboard-stat-card ${value.length > 18 ? "dashboard-stat-card--long" : ""}`} data-knowledge={metric.state}>
     <CardContent className="dashboard-stat-content">
       <div>
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-start gap-1 text-xs font-medium text-muted-foreground">
-            {metric.label}
-            <TooltipProvider><Tooltip><TooltipTrigger render={<Button type="button" variant="ghost" size="icon-xs" className="-mt-0.5 shrink-0" aria-label={`${metric.label}口径`} aria-describedby={definitionId}><Info className="size-3.5" aria-hidden="true" /></Button>} /><TooltipContent className="max-w-xs leading-relaxed">{metric.definition}</TooltipContent></Tooltip></TooltipProvider><span id={definitionId} className="sr-only">{metric.definition}</span>
-          </div>
-          {delta ? <Badge variant={delta.direction === "FLAT" ? "outline" : delta.direction === "DOWN" ? "warning" : "success"} className="dashboard-stat-delta tabular-nums">
-            {delta.direction === "UP" ? <ArrowUpRight aria-hidden="true" /> : delta.direction === "DOWN" ? <ArrowDownRight aria-hidden="true" /> : null}
-            {formatDelta(metric)}
-          </Badge> : null}
+        <div className="flex items-start gap-1 text-xs font-medium text-muted-foreground">
+          <span className="min-w-0">{metric.label}</span>
+          <InfoTip label={`${metric.label}口径`} title={shortNote} body={metric.definition} describedBy={definitionId} />
+          <span id={definitionId} className="sr-only">{metric.definition}</span>
         </div>
         <p className="dashboard-stat-value tabular-nums">{value}</p>
-        <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{metricNote(metric)}</p>
+        {delta ? <div className="dashboard-stat-delta-row"><Badge variant={delta.direction === "FLAT" ? "outline" : delta.direction === "DOWN" ? "warning" : "success"} className="dashboard-stat-delta tabular-nums" aria-label={`较上期 ${formatDelta(metric)}`}>
+          <span className="dashboard-stat-delta-label">较上期</span>
+          {delta.direction === "UP" ? <ArrowUpRight aria-hidden="true" /> : delta.direction === "DOWN" ? <ArrowDownRight aria-hidden="true" /> : null}
+          {formatDelta(metric)}
+        </Badge></div> : null}
+        {statusLabel ? <div className="dashboard-stat-meta">
+          {partial ? <span className="dashboard-stat-meta-tag">{statusLabel}</span> : null}
+          <span className={partial ? "dashboard-stat-meta-value" : ""}>{partial ? coverageText : statusLabel}</span>
+        </div> : null}
       </div>
-      <div>
-        {known ? <Sparkline values={metric.sparkline} /> : null}
+      <div className="dashboard-stat-footer">
+        {hasSparkline ? <Sparkline values={metric.sparkline} /> : null}
         {path ? <Button type="button" variant="link" size="sm" onClick={() => onNavigate(path)} className="mt-1 h-auto justify-start px-0" aria-label={`${metric.label}查看明细`}>
           查看明细 <ChevronRight className="size-3.5" aria-hidden="true" />
         </Button> : null}
@@ -152,27 +163,30 @@ export function TrendPanel({ data, onNavigate }: { data: DashboardPayload; onNav
   const values = metric ? chartData.map(point => point[metric]) : [];
   const knownPoints = values.some(value => value !== null);
   const knownEmpty = metric !== null && states[metric] === "KNOWN" && !unknown && values.every(value => value === 0) && (values.length > 0 || data.metrics.find(item => item.id === TREND_IDS[metric])?.value === "0");
-  const status = !metric ? (Object.values(states).every(state => state === "FORBIDDEN") ? "当前无权读取经营趋势" : "经营趋势暂不可用，请核对权限与游戏范围") : overflow ? "数值超过图表安全范围，请查看下方精确数据表" : knownEmpty ? "本期暂无数据" : !knownPoints ? "本期趋势尚未核定，请查看精确数据表" : null;
+  const status = !metric ? (Object.values(states).every(state => state === "FORBIDDEN") ? "当前无权读取经营趋势" : "经营趋势暂不可用") : overflow ? "数值超过图表安全范围，请查看下方精确数据表" : knownEmpty ? "本期暂无数据" : !knownPoints ? "本期趋势尚未核定" : null;
   const ordersPath = available("orders") ? dashboardOrdersPath(data.period, data.metrics.find(item => item.id === "paidOrders")?.drilldown) : null;
   const label = metric ? `${TREND_LABELS[metric]}趋势，单位：${metric === "receipts" ? "元" : "笔"}` : "经营趋势";
   const legend = <ChartLegendContent payload={(Object.keys(TREND_IDS) as TrendKey[]).map(key => ({ dataKey: key, disabled: !available(key), disabledReason: !available(key) ? STATE_LABELS[states[key]] : undefined }))} selected={metric} onSelect={key => setSelection(key as TrendKey)} label="趋势指标" />;
   const tooltip = <ChartTooltip content={<ChartTooltipContent formatValue={(point, key) => key === "receipts" ? formatCents(typeof point.receiptsCents === "string" ? point.receiptsCents : null) : formatCount(typeof point.paidOrders === "string" ? point.paidOrders : null)} />} />;
+  // margin.left 必须 >= 0：负值会把最宽的 Y 轴刻度（如 120,000）推出 SVG 视口被裁掉首位。
   return <Card className="min-w-0">
     <CardHeader>
-      <div>
-        <CardTitle role="heading" aria-level={2}>经营趋势</CardTitle>
-        <p className="mt-1 text-xs text-muted-foreground">{formatDashboardPeriod(data.period)}</p>
+      <CardTitle role="heading" aria-level={2}>经营趋势</CardTitle>
+      <div className="dashboard-trend-meta">
+        <span className="dashboard-trend-meta-item"><span className="dashboard-trend-meta-label">统计区间</span>{formatDashboardPeriod(data.period)}</span>
+        <span className="dashboard-trend-meta-item">单位：{metric === "receipts" ? "元" : "笔"}</span>
+        {metric && (unknown || states[metric] === "PARTIAL") ? <span className="dashboard-meta-flag">部分日期未核</span> : null}
       </div>
     </CardHeader>
     <CardContent>
       <ChartContainer config={TREND_CONFIG} legend={legend} label={label} emptyState={<div className="chart-state" role="status">{status}</div>}>
-        {status ? null : metric === "receipts" ? <AreaChart data={chartData} margin={{ top: 8, right: 4, left: -18, bottom: 0 }}>
+        {status ? null : metric === "receipts" ? <AreaChart data={chartData} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" />
             <XAxis dataKey="date" tickFormatter={value => String(value).slice(5)} tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} minTickGap={22} />
             <YAxis tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} tickFormatter={(value) => Number(value).toLocaleString("zh-CN")} />
             {tooltip}
             <ChartArea dataKey="receipts" name="实付金额" />
-          </AreaChart> : <BarChart data={chartData} margin={{ top: 8, right: 4, left: -18, bottom: 0 }}>
+          </AreaChart> : <BarChart data={chartData} margin={{ top: 8, right: 4, left: 0, bottom: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" />
             <XAxis dataKey="date" tickFormatter={value => String(value).slice(5)} tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} minTickGap={22} />
             <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: "var(--muted-foreground)", fontSize: 11 }} />
@@ -180,7 +194,6 @@ export function TrendPanel({ data, onNavigate }: { data: DashboardPayload; onNav
             <ChartBar dataKey="orders" name="已付款订单" />
           </BarChart>}
       </ChartContainer>
-      {metric ? <p className="mt-2 text-xs text-muted-foreground">单位：{metric === "receipts" ? "元" : "笔"}{unknown || states[metric] === "PARTIAL" ? " · 部分日期未核，图中仅显示已知部分" : ""}</p> : null}
       <details className="mt-3 text-xs text-muted-foreground" open={overflow || undefined}>
         <summary className="chart-table-summary">查看精确数据表</summary>
         <div className="mt-2 overflow-x-auto">
@@ -189,27 +202,31 @@ export function TrendPanel({ data, onNavigate }: { data: DashboardPayload; onNav
           </Table>
         </div>
       </details>
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
-        <span className="min-w-0">指标卡环比为上期同一时长；金额按原始分精确展示。</span>
-        {ordersPath ? <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={() => onNavigate(ordersPath)}>查看订单 <ChevronRight className="size-3.5" aria-hidden="true" /></Button> : null}
-      </div>
+      {ordersPath ? <div className="mt-3 flex justify-end border-t border-border pt-3">
+        <Button type="button" variant="link" size="sm" className="h-auto px-0" onClick={() => onNavigate(ordersPath)}>查看订单 <ChevronRight className="size-3.5" aria-hidden="true" /></Button>
+      </div> : null}
     </CardContent>
   </Card>;
 }
 
-export function ActionQueue({ queues, onNavigate }: { queues: DashboardQueue[]; onNavigate: (path: string) => void }) {
+export function ActionQueue({ queues, onNavigate, layout = "list" }: { queues: DashboardQueue[]; onNavigate: (path: string) => void; layout?: "list" | "grid" }) {
   return <Card className="min-w-0">
-    <CardHeader><CardTitle role="heading" aria-level={2}>待办与异常</CardTitle><p className="text-xs text-muted-foreground">只显示当前有权限且可处理的队列</p></CardHeader>
+    <CardHeader>
+      <div className="flex items-center gap-1.5">
+        <CardTitle role="heading" aria-level={2}>待办与异常</CardTitle>
+        <InfoTip label="待办队列范围" title="按当前权限筛选" body="仅列出你有权限处理的事项。" />
+      </div>
+    </CardHeader>
     <CardContent>
-      {queues.length === 0 ? <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">当前没有可处理事项</div> : <ul className="divide-y divide-border">
+      {queues.length === 0 ? <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">当前没有可处理事项</div> : <ul className={layout === "grid" ? "dashboard-queue-grid" : "divide-y divide-border"}>
         {queues.map((queue) => {
           const path = safeDashboardPath(queue.drilldown);
           return <li key={queue.id}>
             <Button type="button" variant="ghost" disabled={!path} onClick={() => path && onNavigate(path)} className="h-auto min-h-12 w-full justify-start gap-3 whitespace-normal px-0 py-3 text-left disabled:cursor-default disabled:opacity-70">
               <span className={`size-2 shrink-0 rounded-full ${queue.severity === "CRITICAL" ? "bg-destructive" : queue.severity === "WARN" ? "bg-warning" : "bg-info"}`} aria-hidden="true" />
-              <span className="min-w-0 flex-1 text-sm font-medium">{queue.label}</span>
-              <span className="text-right"><strong className="text-lg tabular-nums">{formatCount(queue.count)}</strong><span className="mt-0.5 block text-[10px] text-muted-foreground">最久 {formatAge(queue.oldestAgeSeconds)}</span></span>
-              <ChevronRight className={`size-4 text-muted-foreground ${path ? "" : "opacity-0"}`} aria-hidden="true" />
+              <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{queue.label}</span>{path ? <span className="dashboard-queue-cta">去处理</span> : null}</span>
+              <span className="text-right"><strong className="text-lg tabular-nums">{formatCount(queue.count)}</strong><span className="mt-0.5 block text-[11px] text-muted-foreground">最久 {formatAge(queue.oldestAgeSeconds)}</span></span>
+              <ChevronRight className={`dashboard-queue-chevron size-4 text-muted-foreground ${path ? "" : "opacity-0"}`} aria-hidden="true" />
             </Button>
           </li>;
         })}
@@ -232,7 +249,7 @@ const CONTRIBUTION_LABELS: Record<DashboardRecentOrder["contributionState"], str
 };
 
 function contributionLabel(order: DashboardRecentOrder): string {
-  return order.status === "CANCELLED" && order.contributionState === "QUOTED" ? "报价估算（未实现）" : CONTRIBUTION_LABELS[order.contributionState];
+  return order.status === "CANCELLED" && order.contributionState === "QUOTED" ? "估算未入账" : CONTRIBUTION_LABELS[order.contributionState];
 }
 
 export function RecentTable({ orders, period, ordersState, ordersDrilldown, onNavigate, allowContribution = true }: { orders: DashboardRecentOrder[]; period: DashboardPayload["period"]; ordersState: DashboardState; ordersDrilldown?: string | null; onNavigate: (path: string) => void; allowContribution?: boolean }) {
@@ -240,7 +257,7 @@ export function RecentTable({ orders, period, ordersState, ordersDrilldown, onNa
   const ordersPath = readable ? dashboardOrdersPath(period, ordersDrilldown) : null;
   const showContribution = allowContribution && orders.some((order) => order.contributionState !== "UNAVAILABLE");
   return <Card className="min-w-0">
-    <CardHeader><div><CardTitle role="heading" aria-level={2}>最近成交</CardTitle><p className="mt-1 text-xs text-muted-foreground">{readable && (orders.length > 0 || ordersPath) ? `最近 ${orders.length} 笔本期已付款订单${ordersState === "PARTIAL" ? " · 范围未完整核定" : ""}` : "当前无法读取本期成交"}</p></div>{ordersPath ? <CardAction><Button type="button" variant="link" size="sm" onClick={() => onNavigate(ordersPath)}>全部订单</Button></CardAction> : null}</CardHeader>
+    <CardHeader><div><CardTitle role="heading" aria-level={2}>最近成交</CardTitle><p className="mt-1 text-xs text-muted-foreground">{readable && (orders.length > 0 || ordersPath) ? <>最近 {orders.length} 笔本期已付款订单{ordersState === "PARTIAL" ? <span className="dashboard-meta-flag">范围未完整核定</span> : null}</> : "当前无法读取本期成交"}</p></div>{ordersPath ? <CardAction><Button type="button" variant="link" size="sm" onClick={() => onNavigate(ordersPath)}>全部订单</Button></CardAction> : null}</CardHeader>
     <CardContent>
       {!readable || orders.length === 0 ? <div className="chart-state" role="status">{!readable ? "当前无法读取本期成交" : ordersState === "PARTIAL" ? "暂未读到成交，范围未完整核定" : !ordersPath ? "当前无法读取本期成交" : "本期暂无成交"}</div> : <>
         <div className="grid gap-2 sm:hidden">
@@ -257,7 +274,7 @@ export function RecentTable({ orders, period, ordersState, ordersDrilldown, onNa
               <TableCell><Button type="button" variant="link" size="sm" onClick={() => onNavigate(`/orders/${encodeURIComponent(order.id)}`)} className="h-auto justify-start px-0 font-medium text-foreground tabular-nums">{order.displayNo}</Button></TableCell>
               <TableCell><Badge variant={order.status === "PAID" ? "info" : order.status === "COMPLETED" ? "success" : order.status === "CANCELLED" ? "secondary" : "outline"}>{STATUS_LABELS[order.status]}</Badge></TableCell>
               <TableCell className="text-right tabular-nums">{formatCents(order.confirmedCents)}</TableCell>
-              {showContribution ? <TableCell className="text-right tabular-nums"><span>{formatCents(order.contributionState === "UNAVAILABLE" ? null : order.contributionCents)}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{contributionLabel(order)}</span></TableCell> : null}
+              {showContribution ? <TableCell className="text-right tabular-nums"><span>{formatCents(order.contributionState === "UNAVAILABLE" ? null : order.contributionCents)}</span><span className="dashboard-cell-meta">{contributionLabel(order)}</span></TableCell> : null}
               <TableCell className="text-right text-xs text-muted-foreground">{order.paidAt ? new Date(order.paidAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—"}</TableCell>
             </TableRow>)}</TableBody>
           </Table>
