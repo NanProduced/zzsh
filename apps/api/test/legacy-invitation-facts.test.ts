@@ -4,7 +4,8 @@ import type {PoolClient} from 'pg';
 import {canonicalize} from '../src/supply/content-hash';
 import {legacyOwnerUserId} from '../src/supply/legacy-user-migration';
 import {invitationFactHash as hash,planLegacyInvitationFacts,prepareLegacyInvitationFacts,projectInvitationFactParticipant,type LegacyInvitationRawFact,type LegacyInvitationFactSource,type LegacyInvitationFactsInput,type LegacyInvitationFactPolicy} from '../src/finance/legacy-invitation-facts';
-import {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,prepareReviewedLegacyQualificationIndex,readReviewedLegacyQualificationIndex,qualifyReviewedLegacyParticipants,type LegacyInvitationFactsReview,type LegacyQualificationBatch} from '../src/finance/legacy-invitation-facts-maintenance';
+import {bindReviewedLegacyInvitationFacts,planReviewedLegacyInvitationFactsTarget,importReviewedLegacyInvitationFacts,closeReviewedLegacyInvitationCounts,recoverReviewedLegacyInvitationFacts,bindSystemInvitationReceiptBaseline,importSystemLegacyInvitationFacts,closeSystemLegacyInvitationCounts,prepareReviewedLegacyQualificationIndex,readReviewedLegacyQualificationIndex,qualifyReviewedLegacyParticipants,type LegacyInvitationFactsReview,type LegacyQualificationBatch} from '../src/finance/legacy-invitation-facts-maintenance';
+import {systemInvitationMigrationId,withSystemInvitationMigrationBatch} from '../src/legacy-load/system-user-migration';
 import {projectLegacyInvitationQualification} from '../src/finance/legacy-invitation-facts';
 import {readLegacyDistributionQualifications} from '../src/finance/admin-distribution-read';
 import {validateDistributionPolicy} from '../src/finance/distribution-policy';
@@ -57,6 +58,11 @@ function database(){
  const client={connectionParameters:{host:'127.0.0.1',port:55432,database:'zzsh_dev_daily',user:'daily_m'},getTransactionStatus:()=>state.mode,query:async(sql:string,args:any[]=[])=>{
   state.queries.push(sql);const rows=(values:any[]=[])=>({rows:values,rowCount:values.length});
   if(sql.includes('invitation-facts resource'))return rows([{oid:2400547,database:'zzsh_dev_daily',owner:'zzsh',ownerOid:10,marker:'zzsh:synthetic-target:2400547',role:'daily_m',roleOid:1221849,now:state.now,owned:state.owner?3:2,complete:true,read_only:'off'}]);
+  if(sql.includes('AS "transactionId"'))return rows([{transactionId:'1',authorized:true,nonce:'a'.repeat(24),direct:true,mode:true}]);
+  if(sql.includes('distribution_policy_contract_version()>=2'))return rows([{authorized:true}]);
+  if(sql.includes('invitation system original receipt baseline'))return rows([{conflicts:false}]);
+  if(sql.includes("SELECT EXISTS(SELECT 1 FROM zzsh_iam.audit_event WHERE object_type='legacy_invitation_batch'"))return rows([{present:audits.has(args[0]+':'+args[1])}]);
+  if(sql.startsWith("SELECT set_config('zzsh.actor_type'"))return rows();
   if(sql.includes('FROM "zzsh_auth_admin"."session" s JOIN'))return rows([{locked:false,twoFactorEnabled:true,suspended:state.actorFrozen}]);
   if(sql.includes('SELECT "status", "is_boss"'))return rows([{status:'ACTIVE',isBoss:true,passwordChangeRequired:false}]);
   if(sql.startsWith('SELECT suspended'))return rows([{suspended:false}]);
@@ -80,7 +86,7 @@ function database(){
   if(sql.startsWith('INSERT INTO zzsh_order.distribution_invite_code')){state.writes++;for(const c of JSON.parse(args[0]))codes.set(c.id,{id:c.id,user_id:c.user_id,display_code:c.code,match_code:c.code.toUpperCase(),source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_user',source_id:c.legacy_id,source_digest:c.digest});return rows();}
   if(sql.startsWith('INSERT INTO zzsh_order.invitation_relation')){state.writes++;for(const e of JSON.parse(args[0]))edges.set(e.id,{...e,policy_version_id:args[1],source_type:'LEGACY_MYSQL'});return rows();}
   if(sql.startsWith('UPDATE zzsh_order.distribution_participant')){state.writes++;const updates=JSON.parse(args[0]);for(const x of updates){const p=participants.get(x.user_id);assert.equal(p.revision,x.revision);p.invitees_knowledge=x.knowledge;p.revision=String(BigInt(p.revision)+1n);}return{rows:[],rowCount:updates.length};}
-  if(sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')){if(state.failAudit)throw Error('AUDIT_WRITE_REJECTED');state.writes++;audits.set(args[6]+':'+args[4],JSON.parse(args[10]));auditActors.set(args[6]+':'+args[4],{actor_type:args[1],actor_id:args[2],session_id:args[3]});if(state.revokeAfterAudit)state.actorFrozen=true;if(state.expireAfterAudit)state.now='2026-11-02T16:00:00.000Z';return rows();}
+  if(sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')){if(state.failAudit)throw Error('AUDIT_WRITE_REJECTED');state.writes++;audits.set(args[6]+':'+args[4],JSON.parse(args[10]));auditActors.set(args[6]+':'+args[4],{actor_type:args[1],actor_id:args[2],session_id:args[3],source_manifest:args[11]??null});if(state.revokeAfterAudit)state.actorFrozen=true;if(state.expireAfterAudit)state.now='2026-11-02T16:00:00.000Z';return rows();}
   if(sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"')){state.writes++;receipts.set(args[0]+':'+args[1],{request_fingerprint:args[2],response_status:args[3],response_body:JSON.parse(args[4]),publish_required:args[5]});return rows();}
   throw Error('Unexpected actual maintenance query: '+sql.slice(0,100));
  }} as unknown as PoolClient;
@@ -190,6 +196,17 @@ test('invitation recovery requires the original actor and both import and count 
  db.audits.delete(countAudit);await assert.rejects(recoverReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),countScope,'COUNTS'));db.audits.set(countAudit,details);
  const receipt=[...db.receipts.values()].find(r=>r.response_body?.subjects===1);receipt.publish_required=true;
  await assert.rejects(recoverReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),countScope,'COUNTS'));assert.equal(db.state.writes,before);
+});
+test('system invitation migration preserves original facts without granting a commission policy',async()=>{
+ const packet=planned([raw('1'),raw('2','1')]).packets[0]!,db=database(),target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},dataset='b'.repeat(64);
+ let phase:'IMPORT'|'COUNTS'='IMPORT';const system={kind:'SYSTEM_INVITATION_MIGRATION' as const,id:systemInvitationMigrationId(dataset,target),sourceDatasetSha256:dataset,target,fenceEpochSha256:'c'.repeat(64),requestId:'system',assertMigrationFence:async()=>{},assertSourceEvidence:async(value:any)=>{
+  const p=prepareLegacyInvitationFacts(packet,hash(packet));assert.deepEqual(value,{phase,key:p.key,sourceDigest:hash(packet.source),bodyDigest:p.bodyDigest});}};
+ let baseline:any;await withSystemInvitationMigrationBatch(db.client,system,async()=>{baseline=await bindSystemInvitationReceiptBaseline(db.client,system,packet,phase);assert.equal((await importSystemLegacyInvitationFacts(db.client,system,packet,baseline)).replayed,false);});
+ phase='COUNTS';await withSystemInvitationMigrationBatch(db.client,system,async()=>{assert.equal((await closeSystemLegacyInvitationCounts(db.client,system,packet,baseline)).replayed,false);});
+ assert([...db.auditActors.values()].every(row=>row.actor_type==='system'&&row.actor_id===system.id&&row.session_id===null&&row.source_manifest===dataset));
+ assert([...db.participants.values()].every(row=>row.eligibility==='UNKNOWN'&&row.policy_version_id===null));
+ const receipt=[...db.receipts.values()][0]!;receipt.request_fingerprint='0'.repeat(64);phase='IMPORT';const before=db.state.writes;
+ await assert.rejects(withSystemInvitationMigrationBatch(db.client,system,()=>importSystemLegacyInvitationFacts(db.client,system,packet,baseline)));assert.equal(db.state.writes,before);
 });
 test('delivery clone admits count closure only with exact independent epoch, role, actor and live system identifier',async()=>{
  const packet=planned([raw('1')]).packets[0]!,db=database(),r:LegacyInvitationFactsReview={...review(packet,'COUNTS'),

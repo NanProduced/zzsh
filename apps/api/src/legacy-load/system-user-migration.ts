@@ -8,6 +8,7 @@ export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SN
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
 export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
 export type FinanceMigrationSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
+export type InvitationMigrationSource = Readonly<{ phase: 'IMPORT' | 'COUNTS'; key: string; sourceDigest: string; bodyDigest: string }>;
 
 export function systemUserMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
   if (typeof sourceDatasetSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceDatasetSha256) || !target
@@ -75,8 +76,17 @@ export function systemFinanceMigrationId(sourceDatasetSha256: string, target: Mi
   const userId = systemUserMigrationId(sourceDatasetSha256, target);
   return `legacy-finance-migration:${createHash("sha256").update(userId).digest("hex")}`;
 }
+export type SystemInvitationMigrationActor = Readonly<{
+  kind: "SYSTEM_INVITATION_MIGRATION"; id: string; requestId: string; sourceDatasetSha256: string;
+  target: MigrationTarget; fenceEpochSha256: string; assertMigrationFence: (client: PoolClient) => Promise<void>;
+  assertSourceEvidence: (source: InvitationMigrationSource) => Promise<void>;
+}>;
+export function systemInvitationMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
+  const userId = systemUserMigrationId(sourceDatasetSha256, target);
+  return `legacy-invitation-migration:${createHash("sha256").update(userId).digest("hex")}`;
+}
 
-type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor | SystemOrderMigrationActor | SystemFinanceMigrationActor;
+type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor | SystemOrderMigrationActor | SystemFinanceMigrationActor | SystemInvitationMigrationActor;
 const activeBatches = new WeakMap<PoolClient, { actor: SystemMigrationActor; transactionId: string | null;
   fence: SystemMigrationActor["assertMigrationFence"]; source: SystemMigrationActor["assertSourceEvidence"]; binding: string; readOnly: boolean }>();
 
@@ -85,12 +95,13 @@ function expectedActorId(actor: SystemMigrationActor): string {
   if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION") return systemAccountMigrationId(actor.sourceDatasetSha256, actor.target);
   if (actor.kind === "SYSTEM_ORDER_MIGRATION") return systemOrderMigrationId(actor.sourceDatasetSha256, actor.target);
   if (actor.kind === "SYSTEM_FINANCE_MIGRATION") return systemFinanceMigrationId(actor.sourceDatasetSha256, actor.target);
+  if (actor.kind === "SYSTEM_INVITATION_MIGRATION") return systemInvitationMigrationId(actor.sourceDatasetSha256, actor.target);
   throw forbidden("Legacy system migration kind is invalid");
 }
 function actorBinding(actor: SystemMigrationActor): string {
   return JSON.stringify([actor.kind,actor.id,actor.requestId,actor.sourceDatasetSha256,actor.target.systemIdentifier,
     actor.target.databaseOid,actor.target.marker,actor.target.nonce,actor.target.roleOid,
-    actor.kind === "SYSTEM_FINANCE_MIGRATION" ? actor.fenceEpochSha256 : null]);
+    actor.kind === "SYSTEM_FINANCE_MIGRATION" || actor.kind === "SYSTEM_INVITATION_MIGRATION" ? actor.fenceEpochSha256 : null]);
 }
 
 async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, readOnly = false): Promise<string> {
@@ -195,6 +206,31 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, read
       ,false) AS authorized FROM pg_roles r JOIN pg_class c ON c.oid=to_regclass('zzsh_order.personal_finance_observation_coverage') WHERE r.rolname=current_user`)).rows[0];
     if (financeGuard?.authorized !== true) throw forbidden("Legacy system finance migration requires protected coverage guards");
   }
+  if (actor.kind === "SYSTEM_INVITATION_MIGRATION") {
+    if (!/^[a-f0-9]{64}$/.test(actor.fenceEpochSha256)) throw forbidden("Legacy invitation fence epoch is invalid");
+    const invitationGuard = (await client.query<{authorized:boolean}>(`SELECT COALESCE(
+      (SELECT count(*)=4 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.distribution_participant'),to_regclass('zzsh_order.distribution_invite_code'),
+        to_regclass('zzsh_order.invitation_relation'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
+      AND zzsh_order.distribution_policy_contract_version()>=2
+      AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()')
+        AND position('legacy-invitation-migration:' IN p.prosrc)>0 AND position('distribution.legacy_facts.imported' IN p.prosrc)>0
+        AND position('distribution.legacy_facts.counts_closed' IN p.prosrc)>0)
+      AND NOT EXISTS (SELECT 1 FROM (VALUES
+        (to_regclass('zzsh_order.distribution_participant'),'distribution_participant_guard',31,'zzsh_order.guard_distribution_participant()',false),
+        (to_regclass('zzsh_order.distribution_participant'),'distribution_participant_knowledge_guard',21,'zzsh_order.check_distribution_relation_knowledge()',true),
+        (to_regclass('zzsh_order.distribution_invite_code'),'distribution_code_lifecycle_guard',27,'zzsh_order.guard_distribution_code_lifecycle()',false),
+        (to_regclass('zzsh_order.invitation_relation'),'invitation_relation_immutable',27,'zzsh_order.finance_immutable()',false),
+        (to_regclass('zzsh_order.invitation_relation'),'invitation_relation_cycle_guard',7,'zzsh_order.guard_invitation_relation()',false),
+        (to_regclass('zzsh_order.invitation_relation'),'invitation_relation_source_guard',7,'zzsh_order.guard_native_invitation_source()',false),
+        (to_regclass('zzsh_order.invitation_relation'),'invitation_relation_knowledge_guard',5,'zzsh_order.check_distribution_relation_knowledge()',true)
+      ) required(relation,name,kind,fn,deferred) WHERE NOT EXISTS (
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation AND t.tgname=required.name
+          AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint AND t.tgqual IS NULL
+          AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
+          AND (NOT required.deferred OR (t.tgdeferrable AND t.tginitdeferred))))
+      ,false) AS authorized FROM pg_roles r WHERE r.rolname=current_user`)).rows[0];
+    if (invitationGuard?.authorized !== true) throw forbidden("Legacy system invitation migration requires protected graph guards");
+  }
   return row.transactionId;
 }
 
@@ -234,6 +270,14 @@ export function withSystemFinanceMigrationBatch<T>(client: PoolClient, actor: Sy
 }
 export function withSystemFinanceRecoveryBatch<T>(client: PoolClient, actor: SystemFinanceMigrationActor, work: () => Promise<T>): Promise<T> {
   if (actor.kind !== "SYSTEM_FINANCE_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  return withSystemMigrationBatch(client, actor, work, true);
+}
+export function withSystemInvitationMigrationBatch<T>(client: PoolClient, actor: SystemInvitationMigrationActor, work: () => Promise<T>): Promise<T> {
+  if (actor.kind !== "SYSTEM_INVITATION_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  return withSystemMigrationBatch(client, actor, work);
+}
+export function withSystemInvitationRecoveryBatch<T>(client: PoolClient, actor: SystemInvitationMigrationActor, work: () => Promise<T>): Promise<T> {
+  if (actor.kind !== "SYSTEM_INVITATION_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   return withSystemMigrationBatch(client, actor, work, true);
 }
 
@@ -279,5 +323,11 @@ export function authorizeSystemFinanceMigration(client: PoolClient, actor: Syste
   if (actor.kind !== "SYSTEM_FINANCE_MIGRATION" || !/^[a-f0-9]{64}$/.test(source.inputsDigest)
       || !/^[a-f0-9]{64}$/.test(source.inputSha256) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(source.cutoff)
       || !Number.isFinite(Date.parse(source.cutoff))) throw forbidden("Legacy system finance source is invalid");
+  return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source),readOnly);
+}
+export function authorizeSystemInvitationMigration(client: PoolClient, actor: SystemInvitationMigrationActor, source: InvitationMigrationSource, readOnly = false): Promise<void> {
+  if (actor.kind !== "SYSTEM_INVITATION_MIGRATION" || !['IMPORT','COUNTS'].includes(source.phase)
+      || !/^legacy-invitation-facts-v2-[a-f0-9]{40}$/.test(source.key) || !/^[a-f0-9]{64}$/.test(source.sourceDigest)
+      || !/^[a-f0-9]{64}$/.test(source.bodyDigest)) throw forbidden("Legacy system invitation source is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source),readOnly);
 }

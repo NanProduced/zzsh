@@ -13,12 +13,34 @@ BEGIN
   IF actor_role.oid IS DISTINCT FROM owner_oid OR current_user<>session_user
      OR actor_role.rolsuper OR actor_role.rolcreatedb OR actor_role.rolcreaterole OR actor_role.rolbypassrls
      OR NEW.actor_type IS DISTINCT FROM 'system' OR NEW.session_id IS NOT NULL OR NEW.object_id IS NULL
-     OR NEW.outcome IS DISTINCT FROM 'SUCCESS' OR NEW.details->>'sourceSystem' IS DISTINCT FROM 'legacy_mysql_restore'
-     OR NEW.details->>'sourceDatasetSha256' IS DISTINCT FROM NEW.legacy_migration_manifest_sha256
-     OR COALESCE(NEW.details->>'migrationRunDigest','') !~ '^[a-f0-9]{64}$' THEN
+     OR NEW.outcome IS DISTINCT FROM 'SUCCESS'
+     OR (NEW.action NOT IN ('distribution.legacy_facts.imported','distribution.legacy_facts.counts_closed') AND
+       (NEW.details->>'sourceSystem' IS DISTINCT FROM 'legacy_mysql_restore'
+        OR NEW.details->>'sourceDatasetSha256' IS DISTINCT FROM NEW.legacy_migration_manifest_sha256
+        OR COALESCE(NEW.details->>'migrationRunDigest','') !~ '^[a-f0-9]{64}$')) THEN
     RAISE EXCEPTION 'legacy system source requires the migration owner' USING ERRCODE='42501';
   END IF;
-  IF NEW.action='user.legacy_owner.migrated' THEN
+  IF NEW.action='distribution.legacy_facts.imported' THEN
+    actor_prefix:='legacy-invitation-migration:';
+    IF NEW.object_type IS DISTINCT FROM 'legacy_invitation_batch' OR NEW.object_id !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.actor_id,'') !~ '^legacy-invitation-migration:[a-f0-9]{64}$' OR NEW.details->>'bodyDigest' IS DISTINCT FROM NEW.object_id
+       OR NEW.details#>>'{source,sourceSystem}' IS DISTINCT FROM 'legacy_mysql_restore'
+       OR COALESCE(NEW.details#>>'{source,receiptSha256}','') !~ '^[a-f0-9]{64}$'
+       OR jsonb_typeof(NEW.details->'facts') IS DISTINCT FROM 'array' OR jsonb_array_length(NEW.details->'facts')<1
+       OR NEW.details->'financialEffects' IS DISTINCT FROM 'false'::jsonb THEN
+      RAISE EXCEPTION 'legacy invitation fact source is invalid' USING ERRCODE='42501';
+    END IF;
+  ELSIF NEW.action='distribution.legacy_facts.counts_closed' THEN
+    actor_prefix:='legacy-invitation-migration:';
+    IF NEW.object_type IS DISTINCT FROM 'legacy_invitation_batch' OR NEW.object_id !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.actor_id,'') !~ '^legacy-invitation-migration:[a-f0-9]{64}$' OR NEW.details->>'bodyDigest' IS DISTINCT FROM NEW.object_id
+       OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$' OR NEW.details->'financialEffects' IS DISTINCT FROM 'false'::jsonb
+       OR NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.action='distribution.legacy_facts.imported'
+         AND a.object_id=NEW.object_id AND a.actor_type='system' AND a.actor_id=NEW.actor_id AND a.outcome='SUCCESS'
+         AND a.legacy_migration_manifest_sha256=NEW.legacy_migration_manifest_sha256) THEN
+      RAISE EXCEPTION 'legacy invitation count source is invalid' USING ERRCODE='42501';
+    END IF;
+  ELSIF NEW.action='user.legacy_owner.migrated' THEN
     actor_prefix:='legacy-user-migration:'; source_entity:='la_user';
     IF NEW.object_type IS DISTINCT FROM 'user' OR COALESCE(NEW.details->>'evidenceDigest','') !~ '^[a-f0-9]{64}$'
        OR NEW.details#>>'{initialAvatar,created}' IS DISTINCT FROM 'true' OR NEW.details#>>'{initialAvatar,version}' IS DISTINCT FROM '1'
@@ -64,11 +86,12 @@ BEGIN
   ELSE
     RAISE EXCEPTION 'unsupported legacy system source' USING ERRCODE='42501';
   END IF;
-  IF NEW.actor_id IS DISTINCT FROM actor_prefix||(NEW.details->>'migrationRunDigest')
-     OR NEW.details->>'sourceEntity' IS DISTINCT FROM source_entity THEN
+  IF NEW.action NOT IN ('distribution.legacy_facts.imported','distribution.legacy_facts.counts_closed') AND
+     (NEW.actor_id IS DISTINCT FROM actor_prefix||(NEW.details->>'migrationRunDigest')
+     OR NEW.details->>'sourceEntity' IS DISTINCT FROM source_entity) THEN
     RAISE EXCEPTION 'legacy system source identity is invalid' USING ERRCODE='42501';
   END IF;
-  IF NEW.action NOT IN ('finance.history.empty_batch.imported','finance.history.batch.imported')
+  IF NEW.action NOT IN ('finance.history.empty_batch.imported','finance.history.batch.imported','distribution.legacy_facts.imported','distribution.legacy_facts.counts_closed')
      AND (COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
        OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$') THEN
     RAISE EXCEPTION 'legacy system source tuple is invalid' USING ERRCODE='42501';
