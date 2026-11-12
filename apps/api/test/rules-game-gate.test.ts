@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assertRulesGameSupported } from "../src/supply/game-services";
 import { assertSettlementResourcePrices } from "../src/supply/rules";
-import { initializeFixedFeePricing, scheduleFixedFeePrice } from "../src/supply/pricing-policy-schedule";
+import { initializeFixedFeePricing, readPricingSchedules, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "../src/supply/pricing-policy-schedule";
 import { compatRule } from "./pricing-compat-fixture";
 
 const clientFor = (code: string | null) => ({ query: async (sql: string, params: unknown[]) => { assert.match(sql, /FROM "zzsh_supply"\."game"/); assert.deepEqual(params, ["game-1"]); return { rows: code === null ? [] : [{ code }] }; } }) as never;
@@ -27,10 +27,11 @@ test('scheduling a fixed-fee price rejects an enabled item without a price', asy
   const {compatibility,...base}=compatRule();
   let inserts=0,hasHaff=true;
   const client={query:async(sql:string)=>{
+    if(sql.includes('pricing_schedule_available'))return {rows:[{ready:true}]};
     if(sql.includes('pg_advisory_xact_lock'))return {rows:[]};
     if(sql.includes('clock_timestamp()'))return {rows:[{at:'2026-01-01T00:00:00.000000Z'}]};
     if(sql.includes('FROM zzsh_supply.game WHERE'))return {rows:[{id:'game-1'}]};
-    if(sql.includes('FROM zzsh_supply.price_version WHERE'))return {rows:[{id:'price-1',mode:'PERCENT',status:'SEALED',rates:{ordinary:'0.10',custom:'0.10',fast:'0.10'},haffRule:{...base,schema:'haff-ratio-v3',fixedModes:compatibility!.modes}}]};
+    if(sql.includes('FROM zzsh_supply.price_version WHERE'))return {rows:[{id:'price-1',mode:'PERCENT',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:{ordinary:'0.10',custom:'0.10',fast:'0.10'},haffRule:{...base,schema:'haff-ratio-v3',fixedModes:compatibility!.modes}}]};
     if(sql.includes('MAX(generation)'))return {rows:[{generation:'1'}]};
     if(sql.includes('FROM zzsh_supply.billable_item'))return {rows:[...(hasHaff?[{name:'哈夫币',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',unitQuantity:null,buyerUnitAmount:null,ownerUnitAmount:null}]:[]),
       {name:'额外物资',unit:'PIECE',pricingKind:null,unitQuantity:null,buyerUnitAmount:null,ownerUnitAmount:null}]};
@@ -62,4 +63,32 @@ test('first-install pricing never overwrites existing schedules or uses runtime 
   await assert.rejects(initializeFixedFeePricing(client,{...input,priceVersionId:'changed'}),/未覆盖/);
   assert(!statements.some(sql=>/\b(?:INSERT|UPDATE|DELETE)\b/.test(sql.replace(/FOR UPDATE/g,''))));
   owner=false;await assert.rejects(initializeFixedFeePricing(client,input),(error:{status?:number})=>error.status===403);
+});
+
+test('uninstalled or incomplete pricing schedule schema is visible without guessing a default',async()=>{
+  const client=(prices:boolean,modes:boolean)=>({query:async()=>({rows:[{prices,modes,rates:prices&&modes,asOf:'2026-11-12T00:00:00.000000Z'}]})}) as never;
+  assert.deepEqual(await readPricingSchedules(client(false,false),'game-1'),{available:false,reason:'NOT_INSTALLED',asOf:'2026-11-12T00:00:00.000000Z'});
+  assert.deepEqual(await readPricingSchedules(client(true,false),'game-1'),{available:false,reason:'INCOMPLETE',asOf:'2026-11-12T00:00:00.000000Z'});
+});
+
+test('spread scheduling cannot switch to a price outside the current release contract',async()=>{
+  let writes=0;
+  const client={query:async(sql:string)=>{
+    if(sql.includes('pricing_schedule_available'))return {rows:[{ready:true}]};
+    if(sql.includes('pg_advisory_xact_lock'))return {rows:[]};
+    if(sql.includes('clock_timestamp()'))return {rows:[{at:'2026-01-01T00:00:00.000000Z'}]};
+    if(sql.includes('SELECT id FROM zzsh_supply.game'))return {rows:[{id:'game-1'}]};
+    if(sql.includes('MAX(generation)'))return {rows:[{generation:'1'}]};
+    if(sql.includes('SELECT s.id,s.price_version_id'))return {rows:[{id:'spread-policy',priceVersionId:'spread-price'}]};
+    if(sql.includes('FROM zzsh_supply.billable_item'))return {rows:[{name:'哈夫币',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',unitQuantity:null,buyerUnitAmount:null,ownerUnitAmount:null}]};
+    if(sql.includes('SELECT r.price_version_id'))return {rows:[{priceVersionId:'fixed-release-price'}]};
+    if(sql.includes('SELECT p.id FROM zzsh_supply.price_version'))return {rows:[]};
+    if(sql.includes('INSERT INTO'))writes++;
+    throw new Error('unexpected pricing query');
+  }} as never;
+  const actor={userId:'boss-1',isBoss:true},input={gameId:'game-1',expectedGeneration:'1',effectiveAt:'2099-01-01T00:00:00.000Z'};
+  await assert.rejects(schedulePricingMode(client,actor,{...input,pricingModel:'SPREAD'}),/价差价格与当前规则/);
+  await assert.rejects(scheduleSpreadPrice(client,actor,{...input,priceVersionId:'spread-price'}),/价差价格与当前规则/);
+  await assert.rejects(scheduleSpreadPrice(client,{...actor,isBoss:false},{...input,priceVersionId:'spread-price'}),(error:{status?:number})=>error.status===403);
+  assert.equal(writes,0);
 });

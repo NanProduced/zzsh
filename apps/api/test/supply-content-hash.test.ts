@@ -1,4 +1,4 @@
-import { computePublishedFixedFeeQuote, computeQuote, type QuoteInput } from "../src/supply/pricing";
+import { computeDeltaQuote, computePublishedFixedFeeQuote, computeQuote, type QuoteInput } from "../src/supply/pricing";
 import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
@@ -136,6 +136,25 @@ test("published v1 listings retain their original pricing mode after the platfor
     const selection = await readListingPricingModel(client as never, { accountId: stored.accountId, ownerUserId: "owner", gameId: stored.gameId });
     assert.equal(selection?.model, expected);
   }
+});
+
+test("published v2 spread listings without a schedule keep their original release",async()=>{
+  const quoted=computeDeltaQuote({priceVersionId:'price_1',mode:'SPREAD',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',haffRule:compatRule(),
+    conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},
+    termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},
+    lines:[{itemId:'haff',quantity:'10000000',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'}]});
+  assert(quoted.quotable);quoted.quote.ruleReleaseId='release_1';
+  const stored=payload({schemaVersion:2,quoteValues:quoted.quote as unknown as Record<string,unknown>});
+  stored.declaration={...stored.declaration,attributes:{safe_box_code:'box-a',vitLevel:6,bearLevel:6,rentalPricing:{rentalMode:'ordinary'}},
+    inventory:[{itemId:'haff',quantity:'10000000'}],skins:[],entitlements:[],mediaBindings:[],pricingOptionCode:''};
+  const read=async(document:typeof stored)=>{
+    const client={query:async(sql:string)=>sql.includes('to_regclass')?{rows:[{modes:true,prices:true,asOf:'2026-11-02T00:00:00.000000Z'}]}
+      :{rows:[{schemaVersion:2,contentHash:computeContentHash(document),payload:document}]}};
+    return readListingPricingModel(client as never,{accountId:document.accountId,ownerUserId:'owner',gameId:document.gameId});
+  };
+  assert.equal((await read(stored))?.model,'LEGACY_SPREAD');
+  const scheduled=structuredClone(stored);scheduled.pricingPolicy={schema:'pricing-policy-v1',pricingModel:'SPREAD',scheduleId:'schedule-1',generation:'1',effectiveAt:'2026-11-01T00:00:00Z',priceVersionId:'price_1'};
+  assert.equal((await read(scheduled))?.model,'SPREAD');
 });
 
 test("published fixed-fee accounts retain their selected ratio while new rules apply to new listings", () => {

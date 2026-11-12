@@ -47,13 +47,13 @@ import {
   sha256Hex,
 } from "./supply-util";
 import { GAME_SERVICE, readGameService, requireWritableGameService, type GameServiceState } from "./game-services";
-import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes, validateDeltaRentalTerm } from "./delta-rental";
+import { assertDeltaResourceUnit, isDeltaGradingDivision, isRetiredDeltaInsurance, normalizeRentalPricing, validateDeltaPublicationAttributes, validateDeltaRentalTerm, type RentalMode } from "./delta-rental";
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwnerDepositDeclaration } from "./funding-policy";
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
-import { readEffectiveFixedFeePrice, readEffectiveSpreadPrice, readListingPricingModel } from "./pricing-policy-schedule";
+import { readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -1048,18 +1048,54 @@ export function parseIncomePreviewInventory(inventory: unknown): Map<string, str
 export type IncomePreviewRelease = {
   releaseId: string; generation: string; priceVersionId: string; termVersionId: string; catalogRevision: string;
   mode: "SPREAD" | "PERCENT"; commissionRate: string | null; roundingPolicy: string; priceStatus: string; haffRule: QuoteInput["haffRule"];
+  pricingPolicy?: ContentPayloadInput["pricingPolicy"];
 };
 export type IncomePreviewItem = {
   itemId: string; code: string; name: string; unit: "HAFF_BASE" | "ROUND" | "PIECE" | "DAY"; enabled: boolean; required: boolean;
   pricingKind: "FIXED_UNIT" | "HAFF_RATIO" | null; unitQuantity: string | null; buyerUnitAmount: string | null; ownerUnitAmount: string | null;
 };
-export async function readIncomePreviewContext(client: PoolClient, gameId: string, expected: {catalogRevision: string; releaseId: string}, includeHaff = false) {
-  const release = (await client.query<IncomePreviewRelease>(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",p.status AS "priceStatus",p.haff_rule AS "haffRule" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
-  if (!release) return {available:false as const,reason:"RULE_UNCONFIGURED"};
-  if (release.releaseId !== expected.releaseId || release.catalogRevision !== expected.catalogRevision) throw conflict("资源规则已更新，请重新读取目录");
+export type PreviewPricingContext = { asOf: string; accountId?: string; ownerUserId?: string; rentalMode?: RentalMode };
+
+/** Use the same mode and effective price as the later owner quote, without changing the listing. */
+export async function resolveIncomePreviewRelease(client:PoolClient,gameId:string,base:IncomePreviewRelease,context?:PreviewPricingContext) {
+  const tables=(await client.query<{modes:boolean;prices:boolean}>(`SELECT to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
+    to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices`)).rows[0];
+  if(!tables||typeof tables.modes!=="boolean"||typeof tables.prices!=="boolean")return {available:false as const,reason:"RULE_UNCONFIGURED"};
+  if(!tables.modes&&!tables.prices)return {available:true as const,release:base};
+  if(!tables.modes||!tables.prices||!context)return {available:false as const,reason:"PRICING_CONTEXT_REQUIRED"};
+  const selected=context.accountId
+    ? await readListingPricingModel(client,{accountId:context.accountId,ownerUserId:context.ownerUserId!,gameId,asOf:context.asOf})
+    : await readEffectivePricingMode(client,gameId,context.asOf).then(value=>value?{model:value.pricingModel}:null);
+  if(!selected)return {available:false as const,reason:"RULE_UNCONFIGURED"};
+  if(selected.model==="FIXED_FEE"){
+    // The ordinary rate is used only to read the common version when the form has no mode yet.
+    const effective=await readEffectiveFixedFeePrice(client,gameId,context.rentalMode??"ordinary",context.asOf);
+    if(!effective)return {available:false as const,reason:"RULE_UNCONFIGURED"};
+    return {available:true as const,release:{...base,priceVersionId:effective.priceVersionId,mode:"PERCENT" as const,
+      commissionRate:context.rentalMode?effective.commissionRate:null,roundingPolicy:effective.roundingPolicy,priceStatus:"SEALED",
+      haffRule:effective.haffRule as IncomePreviewRelease["haffRule"],pricingPolicy:{schema:"pricing-policy-v1" as const,
+        pricingModel:"FIXED_FEE" as const,scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId}}};
+  }
+  if(selected.model==="SPREAD"){
+    const effective=await readEffectiveSpreadPrice(client,gameId,context.asOf);
+    if(!effective||effective.priceVersionId!==base.priceVersionId||base.mode!=="SPREAD")return {available:false as const,reason:"PRICING_POLICY_MISMATCH"};
+    return {available:true as const,release:base};
+  }
+  if((selected.model==="LEGACY_SPREAD"&&base.mode!=="SPREAD")||(selected.model==="LEGACY_PERCENT"&&base.mode!=="PERCENT"))
+    return {available:false as const,reason:"PRICING_POLICY_MISMATCH"};
+  return {available:true as const,release:base};
+}
+
+export async function readIncomePreviewContext(client: PoolClient, gameId: string, expected: {catalogRevision: string; releaseId: string}, includeHaff = false, pricing?:PreviewPricingContext) {
+  const base = (await client.query<IncomePreviewRelease>(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",p.status AS "priceStatus",p.haff_rule AS "haffRule" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
+  if (!base) return {available:false as const,reason:"RULE_UNCONFIGURED"};
+  if (base.releaseId !== expected.releaseId || base.catalogRevision !== expected.catalogRevision) throw conflict("资源规则已更新，请重新读取目录");
+  const resolved=await resolveIncomePreviewRelease(client,gameId,base,pricing);
+  if(!resolved.available)return resolved;
+  const release=resolved.release;
   if (release.roundingPolicy !== ROUNDING_POLICY || !["SPREAD", "PERCENT"].includes(release.mode)) return {available:false as const,reason:"RULE_UNSUPPORTED"};
   const commission = release.mode === "PERCENT" && release.commissionRate !== null ? parseNonNegativeDecimal(release.commissionRate,8,"commission") : null;
-  if (release.mode === "PERCENT" && (!commission || commission.value >= 10n ** BigInt(commission.scale))) return {available:false as const,reason:"RULE_UNCONFIGURED"};
+  if (release.mode === "PERCENT" && ((!commission && release.pricingPolicy?.pricingModel!=="FIXED_FEE") || (commission && commission.value >= 10n ** BigInt(commission.scale)))) return {available:false as const,reason:"RULE_UNCONFIGURED"};
   const items=(await client.query<IncomePreviewItem>(`SELECT i.id AS "itemId",i.code,i.name,i.unit,i.enabled,i.required,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount" FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD' WHERE i.game_id=$1${includeHaff ? "" : " AND i.unit<>'HAFF_BASE'"} ORDER BY i.sort_order,i.code,i.id`,[gameId,release.priceVersionId])).rows;
   return {available:true as const,release,items,commission};
 }
@@ -1073,7 +1109,9 @@ export function projectResourceIncomePreview(items: readonly IncomePreviewItem[]
     if(!item.enabled||item.pricingKind!=="FIXED_UNIT") {if(quantity!==null)unpricedItemIds.push(item.itemId);continue;}
     assertDeltaResourceUnit(item.code,item.unit);
     try {
-      const amounts=computeFixedUnitAmounts({...item,pricingKind:"FIXED_UNIT",quantity:quantity??"0",unitQuantity:item.unitQuantity??undefined,buyerUnitAmount:item.buyerUnitAmount??undefined,ownerUnitAmount:item.ownerUnitAmount??undefined},release.mode,commission);
+      const fixedFee=release.pricingPolicy?.pricingModel==="FIXED_FEE";
+      const amounts=computeFixedUnitAmounts({...item,pricingKind:"FIXED_UNIT",quantity:quantity??"0",unitQuantity:item.unitQuantity??undefined,buyerUnitAmount:item.buyerUnitAmount??undefined,
+        ownerUnitAmount:(fixedFee?item.buyerUnitAmount:item.ownerUnitAmount)??undefined},fixedFee?"SPREAD":release.mode,fixedFee?null:commission);
       const ownerAmount=quantity===null?null:yuanAmountObject(amounts.ownerAmount.value);
       if(ownerAmount){total+=amounts.ownerAmount.value;declared++;}
       lines.push({itemId:item.itemId,code:item.code,name:item.name,unit:item.unit,unitQuantity:amounts.unitQuantity.value.toString(),ownerUnitAmount:{currency:"CNY" as const,unit:"yuan" as const,amount:formatDecimalExact(amounts.ownerUnit),scale:amounts.ownerUnit.scale},quantity,ownerAmount});
@@ -1082,15 +1120,21 @@ export function projectResourceIncomePreview(items: readonly IncomePreviewItem[]
   return {lines,ownerTotal:declared&&unpricedItemIds.length===0?yuanAmountObject(total):null,unreportedItemIds:lines.filter(row=>row.quantity===null).map(row=>row.itemId),unpricedItemIds};
 }
 
-export async function readResourceIncomePreview(client: PoolClient, gameId: string, inventory: unknown, expected: {catalogRevision: string; releaseId: string}): Promise<Partial<ReturnType<typeof projectResourceIncomePreview>> & {
+export async function readResourceIncomePreview(client: PoolClient, gameId: string, inventory: unknown, expected: {catalogRevision: string; releaseId: string},
+  account?: {accountId:string;ownerUserId:string}): Promise<Partial<ReturnType<typeof projectResourceIncomePreview>> & {
   available: boolean; reason?: string; informationalOnly?: boolean;
+  incomeBasis?: "OWNER_RESOURCE_INCOME_BEFORE_FEES"; pricingPolicy?: NonNullable<ContentPayloadInput["pricingPolicy"]>;
   binding?: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; catalogRevision: string };
 }> {
   const quantities = parseIncomePreviewInventory(inventory);
-  const context = await readIncomePreviewContext(client, gameId, expected);
+  const asOf=(await client.query<{evaluatedAt:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]?.evaluatedAt;
+  if(!asOf)return {available:false,reason:"RULE_UNCONFIGURED"};
+  const context = await readIncomePreviewContext(client, gameId, expected,false,{asOf,...account});
   if (!context.available) return {available:false,reason:context.reason};
   const {release, items, commission} = context;
-  return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},...projectResourceIncomePreview(items,quantities,release,commission),informationalOnly:true};
+  return {available:true,binding:{gameId,releaseId:release.releaseId,releaseGeneration:release.generation,priceVersionId:release.priceVersionId,catalogRevision:release.catalogRevision},
+    ...projectResourceIncomePreview(items,quantities,release,commission),informationalOnly:true,
+    ...(release.pricingPolicy?{incomeBasis:"OWNER_RESOURCE_INCOME_BEFORE_FEES" as const,pricingPolicy:release.pricingPolicy}:{})};
 }
 
 // Only the formal takeover writer supplies this after checking the immutable source map/observation.

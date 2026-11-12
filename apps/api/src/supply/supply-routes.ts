@@ -73,6 +73,7 @@ import {
   updateTermDraft,
 } from "./rules";
 import { readFullPayoutTerms } from "./full-payout-terms";
+import { readPricingSchedules, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
@@ -860,6 +861,18 @@ async function handleAdminRead(
     sendJson(response, 200, result, requestId);
     return;
   }
+  const pricingSchedulesMatch=/^\/games\/([^/]+)\/pricing-schedules$/.exec(path);
+  if(pricingSchedulesMatch){
+    const gameId=decodeId(pricingSchedulesMatch[1]!);
+    if([...query.keys()].length)throw invalid("Unsupported pricing schedule query");
+    const result=await withTransaction(options.pool,async client=>{
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client,adminUserId,access.isBoss,gameId);await assertRulesGameSupported(client,gameId);
+      return readPricingSchedules(client,gameId);
+    });
+    sendJson(response,200,result,requestId);return;
+  }
   // Approved public catalog media usable as a binding option. Scoped to
   // catalog maintenance rather than media review: choosing an image must not
   // require access to the private review queue. The server filters purpose,
@@ -1343,6 +1356,31 @@ async function handleAdminWrite(
       return { status: 200, body: draft };
     }, "supply.rules.price_draft_created");
     return;
+  }
+  const priceScheduleMatch=/^\/games\/([^/]+)\/pricing-policy-schedules$/.exec(path);
+  if(priceScheduleMatch&&method==="POST"){
+    const gameId=decodeId(priceScheduleMatch[1]!),body=bodyOf(request);
+    ensureOnlyFields(body,["pricingModel","priceVersionId","expectedGeneration","effectiveAt"]);
+    const pricingModel=requiredString(body,"pricingModel",16);
+    if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
+    const priceVersionId=decodeId(requiredString(body,"priceVersionId",128)),expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    await write("supply.rules.pricing_policy_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
+      const result=await (pricingModel==="FIXED_FEE"?scheduleFixedFeePrice:scheduleSpreadPrice)(client,
+        {userId:actor.id,isBoss:access.isBoss},{gameId,priceVersionId,expectedGeneration,effectiveAt});
+      return {status:200,body:{...result,gameId,priceVersionId,pricingModel}};
+    },"supply.rules.pricing_policy_scheduled");return;
+  }
+  const pricingModeScheduleMatch=/^\/games\/([^/]+)\/pricing-mode-schedules$/.exec(path);
+  if(pricingModeScheduleMatch&&method==="POST"){
+    const gameId=decodeId(pricingModeScheduleMatch[1]!),body=bodyOf(request);
+    ensureOnlyFields(body,["pricingModel","expectedGeneration","effectiveAt"]);
+    const pricingModel=requiredString(body,"pricingModel",16);
+    if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
+    const expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
+      const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt});
+      return {status:200,body:{...result,gameId,pricingModel}};
+    },"supply.rules.pricing_mode_scheduled");return;
   }
   const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);
   if (priceUpdateMatch && method === "PUT") {
