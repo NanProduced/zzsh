@@ -1,4 +1,4 @@
--- Candidate: integrate after the permanent DELISTED account state is installed.
+-- Permanent DELISTED account state is installed by the preceding migration.
 ALTER TABLE zzsh_order.owner_guarantee_refund
   DROP CONSTRAINT owner_guarantee_refund_release_policy_state_check,
   DROP CONSTRAINT owner_guarantee_refund_release_decision_shape;

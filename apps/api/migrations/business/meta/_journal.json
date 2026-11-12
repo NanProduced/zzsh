@@ -1464,6 +1464,34 @@
       "when": 1794456000010,
       "tag": "0208_help_guide_draft_discard",
       "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1794456000011,
+      "tag": "0209_initial_distribution_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1794456000012,
+      "tag": "0210_single_publication_lifecycle",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1794456000013,
+      "tag": "0211_auto_guarantee_refund",
+      "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1794456000014,
+      "tag": "0212_publication_credit_snapshot",
+      "breakpoints": true
     }
   ]
 }

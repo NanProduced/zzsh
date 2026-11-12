@@ -95,6 +95,47 @@ export async function recordVerifiedIdentitySubject(client: PoolClient, userId: 
   } catch { throw unavailable(); }
 }
 
+type LegacyIdentitySubjectInput = { userId: string; sourceRef: string; documentNumber: string };
+
+/** NEXT strict batches preserve legacy duplicates but never replace an existing subject. */
+export async function recordLegacyIdentitySubjects(client: PoolClient, entries: LegacyIdentitySubjectInput[], key: Buffer | undefined): Promise<void> {
+  if ((client as PoolClient & { getTransactionStatus?: () => string }).getTransactionStatus?.() !== "T") throw unavailable();
+  if (!Array.isArray(entries) || entries.length > 100 || entries.some(entry => !entry
+    || typeof entry.userId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(entry.userId)
+    || typeof entry.sourceRef !== "string" || !/^la_user:[0-9]{1,32}$/.test(entry.sourceRef)
+    || typeof entry.documentNumber !== "string") || new Set(entries.map(entry => entry.userId)).size !== entries.length) throw unavailable();
+  if (!entries.length) return;
+  const planned = entries.map(entry => ({ userId: entry.userId, sourceRef: entry.sourceRef,
+    subjectDigest: identitySubjectDigest(entry.documentNumber, key) }));
+  const ids = planned.map(entry => entry.userId);
+  const users = await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`, [ids]);
+  if (users.rowCount !== ids.length) throw new SecurityApiError(409, "CONFLICT", "旧实名用户来源不一致");
+  const digests = [...new Set(planned.map(entry => entry.subjectDigest))].sort();
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended(x.digest,806101))
+    FROM unnest($1::text[]) WITH ORDINALITY AS x(digest,ordinal) ORDER BY x.ordinal`, [digests]);
+  const states = new Map((await client.query<{ user_id: string; provider: string; provider_reference: string | null; identity_status: string }>(
+    `SELECT user_id,provider,provider_reference,identity_status FROM zzsh_iam.user_identity_state
+      WHERE user_id=ANY($1::text[]) ORDER BY user_id COLLATE "C" FOR UPDATE`, [ids])).rows.map(row => [row.user_id,row]));
+  const subjects = new Map((await client.query<{ user_id: string; subject_digest: string; source: string }>(
+    `SELECT user_id,subject_digest,source FROM zzsh_iam.user_identity_subject
+      WHERE user_id=ANY($1::text[]) ORDER BY user_id COLLATE "C" FOR UPDATE`, [ids])).rows.map(row => [row.user_id,row]));
+  const missing: typeof planned = [];
+  for (const entry of planned) {
+    const state = states.get(entry.userId), subject = subjects.get(entry.userId);
+    if (!state || state.provider !== "legacy_mysql_restore" || state.provider_reference !== entry.sourceRef || state.identity_status !== "VERIFIED"
+      || subject && (subject.source !== "LEGACY_IMPORT" || subject.subject_digest !== entry.subjectDigest))
+      throw new SecurityApiError(409, "CONFLICT", "旧实名主体与当前身份冲突");
+    if (!subject) missing.push(entry);
+  }
+  if (missing.length) {
+    const inserted = await client.query(`INSERT INTO zzsh_iam.user_identity_subject(user_id,subject_digest,source)
+      SELECT x.user_id,x.subject_digest,'LEGACY_IMPORT' FROM unnest($1::text[],$2::text[]) AS x(user_id,subject_digest)
+      ORDER BY x.user_id COLLATE "C" ON CONFLICT(user_id) DO NOTHING RETURNING user_id`,
+    [missing.map(entry => entry.userId),missing.map(entry => entry.subjectDigest)]);
+    if (inserted.rowCount !== missing.length) throw new SecurityApiError(409, "CONFLICT", "旧实名主体写入冲突");
+  }
+}
+
 /** Trusted importer only: retain grandfathered duplicates; do not mint verification or apply the new-binding cap. */
 export async function recordLegacyIdentitySubject(client: PoolClient, userId: string, documentNumber: string, key: Buffer | undefined): Promise<void> {
   const state = (await client.query<{ identityStatus: string; provider: string }>(

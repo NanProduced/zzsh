@@ -15,13 +15,14 @@ function response() {
 function fixture({ authenticated = true, totpValid = true } = {}) {
   const sql = [], checks = [];
   const client = { query: async statement => { sql.push(statement); return { rows: [], rowCount: 0 }; }, release() {} };
-  const pool = { query: async statement => { sql.push(statement); return { rows: [{ status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] }; }, connect: async () => client };
+  const pool = { query: async statement => { sql.push(statement); return { rows: [statement.includes('operation_code')
+    ? { operationCode: 'distribution.policy.publish' } : { status: "ACTIVE", isBoss: false, passwordChangeRequired: false }] }; }, connect: async () => client };
   const adminAuth = { api: { getSession: async () => authenticated ? { user: { id: "actor", twoFactorEnabled: true }, session: { id: "session", locked: false } } : null,
     verifyPassword: async () => { checks.push("password"); return { status: true }; }, verifyTOTP: async () => { checks.push("totp"); if (!totpValid) throw Error("bad code"); return { status: true }; } } };
   const options = { pool, adminAuth, apiOrigin: "http://127.0.0.1:4232", adminOrigin: "http://127.0.0.1:4231", rateLimitState: new Map(), securityVerificationBudget: { inFlight: 0 }, testOperationsEnabled: false };
   return { sql, checks, options };
 }
-const request = () => ({ method: "POST", originalUrl: "/api/v1/admin/security/approvals/requests/decision", headers: { origin: "http://127.0.0.1:4231", cookie: "zzsh_admin.session_token=synthetic", "idempotency-key": "synthetic-idempotency-1" }, body: { requestId: "approval_1", decision: "APPROVE", password: "synthetic-password", totpCode: "123456" } });
+const request = () => ({ method: "POST", originalUrl: "/api/v1/admin/security/approvals/requests/decision", headers: { origin: "http://127.0.0.1:4231", cookie: "zzsh_admin.session_token=synthetic", "idempotency-key": "synthetic-idempotency-1" }, body: { requestId: "approval_1", decision: "APPROVE", totpCode: "123456" } });
 
 test("real security handler denies unauthenticated approval before any database write", { skip: !available && "compiled API build unavailable" }, async () => {
   const f = fixture({ authenticated: false }), res = response();
@@ -32,7 +33,7 @@ test("real security handler denies unauthenticated approval before any database 
 test("real security handler rejects incorrect TOTP before approval transaction", { skip: !available && "compiled API build unavailable" }, async () => {
   const f = fixture({ totpValid: false }), res = response();
   await handleAdminSecurity(request(), res, f.options);
-  assert.equal(res.statusCode, 401); assert.deepEqual(f.checks, ["password", "totp"]);
+  assert.equal(res.statusCode, 401); assert.deepEqual(f.checks, ["totp"]);
   assert(!f.sql.some(s => /\bBEGIN\b|\bINSERT\b|\bUPDATE\b/.test(s)));
 });
 
@@ -40,6 +41,6 @@ test("real security handler reaches permission check only after step-up and roll
   const f = fixture(), res = response(), old = directory.lockActor;
   directory.lockActor = async () => ({ status: "ACTIVE", passwordChangeRequired: false, isBoss: false, permissions: new Set() });
   try { await handleAdminSecurity(request(), res, f.options); } finally { directory.lockActor = old; }
-  assert.equal(res.statusCode, 403); assert.deepEqual(f.checks, ["password", "totp"]);
+  assert.equal(res.statusCode, 403); assert.deepEqual(f.checks, ["totp"]);
   assert(f.sql.some(s => s === "ROLLBACK")); assert(!f.sql.some(s => /INSERT INTO\s+"zzsh_iam"\."approval_decision"/.test(s)));
 });

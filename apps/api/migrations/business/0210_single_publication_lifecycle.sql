@@ -1,4 +1,3 @@
--- Candidate only: assign a business migration number after the other task lines are integrated.
 -- A delisted account remains a historical record; a new listing needs a new account.
 ALTER TABLE zzsh_supply.rental_account
   DROP CONSTRAINT rental_account_lifecycle_check,

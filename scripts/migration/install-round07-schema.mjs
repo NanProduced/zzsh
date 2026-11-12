@@ -24,7 +24,7 @@ function checkedSecret(value){
   return rel&&!rel.startsWith('..')&&!isAbsolute(rel)?checkedPath(value,false,secretRoot):checkedPath(value);
 }
 function pinned(ref){const p=checkedPath(ref?.path),bytes=readFileSync(p);assert(hex(ref.sha256)&&sha(bytes)===ref.sha256,'SCHEMA_INPUT_CHANGED');return JSON.parse(bytes);}
-function files(rootDir,extensions=null){
+export function files(rootDir,extensions=null){
   const result={};function walk(dir,prefix=''){for(const entry of readdirSync(dir,{withFileTypes:true})){
     assert(!entry.isSymbolicLink(),'SCHEMA_LINK_REFUSED');const name=prefix+entry.name,p=join(dir,entry.name);
     if(entry.isDirectory())walk(p,name+'/');else if(entry.isFile()&&(!extensions||extensions.some(x=>name.endsWith(x))))result[name]=sha(readFileSync(p));
