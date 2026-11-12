@@ -157,6 +157,7 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   const disclosure = { versionId: "legal_early_v2", body, digest: legalDigest(body) };
   const row = { id: disclosure.versionId, body, digest: disclosure.digest, bodyFormat: "text", status: "SEALED" };
   let current: typeof row | null = row;
+  let insertError = Error("OFFLINE_INSERT_CAPTURED");
   let inserted: Record<string, unknown> | undefined;
   const transport = f.client as unknown as { query: (sql: string, values?: unknown[]) => Promise<unknown> };
   const query = transport.query.bind(transport);
@@ -167,7 +168,7 @@ test("an agreed reservation freezes the current early settlement disclosure and 
     }
     if (sql.startsWith("INSERT INTO zzsh_order.rental_order")) {
       inserted = JSON.parse(values![12] as string);
-      throw Error("OFFLINE_INSERT_CAPTURED");
+      throw insertError;
     }
     return query(sql, values);
   };
@@ -177,6 +178,11 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   assert.equal(inserted?.agreementAcceptanceSchema, 1);
   assert.deepEqual(inserted?.agreementAcceptance, issued.agreementAcceptance);
   assert.deepEqual(inserted?.earlySettlementDisclosure, disclosure);
+
+  for (const message of ["fixed fee effective policy changed", "scheduled spread effective policy changed"]) {
+    insertError = Object.assign(Error(message), { code: "40001" });
+    await assert.rejects(create, { status: 409, code: "CONFIRMATION_CHANGED" });
+  }
 
   current = null;
   inserted = undefined;
