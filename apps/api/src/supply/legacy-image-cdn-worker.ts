@@ -3,7 +3,7 @@ import { SecurityApiError } from "../auth/security-core";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import { readLegacyPublicSlots } from "./legacy-path-projection";
 import type { LegacyImageCdn, LegacyImageCdnDelivery, LegacyImageProof } from "./legacy-image-cdn";
-import { readPublicListing, readPublishingAccount, type SupplyGateReader } from "./publishing";
+import { readPublicListingSnapshot, readPublishingAccount, type SupplyGateReader } from "./publishing";
 import { newSupplyId } from "./supply-util";
 
 type DesiredSlot = { versionId: string; position: number; proof: LegacyImageProof };
@@ -16,7 +16,7 @@ async function readDesiredLegacy(client: PoolClient, accountId: string, cdn: Leg
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   try {
     const account = await readPublishingAccount(client, accountId);
-    const listing = await readPublicListing(client, account, context.gate, context.legacyPublicAdmission, false, "DETAIL", context.legacyPublicAdmissionDetail);
+    const listing = await readPublicListingSnapshot(client, account, context.gate, context.legacyPublicAdmission, false, "DETAIL", context.legacyPublicAdmissionDetail);
     const versionId = String(listing.versionId);
     const slots = (await readLegacyPublicSlots(client, [listing])).get(listing) ?? [];
     const approved = slots.flatMap(slot => {

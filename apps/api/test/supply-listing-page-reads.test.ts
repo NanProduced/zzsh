@@ -89,6 +89,7 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
     else if (sql.includes("rule_acceptance")) rows = pick(accounts).some((a) => byAccount.get(a.id)!.state.accepted) ? [{}] : [];
     else if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = media.filter((m) => pick(versions).some((v) => `media-${v.account_id}` === m.id));
     else if (sql.includes("term_option")) rows = [{ code: "daily", name: "每日", dailyConsumption: "10000000" }];
+    else if (sql.includes("FROM zzsh_supply.account_image_cdn_delivery")) rows = pick(accounts).map(account => ({ id: `cdn-${account.id}`, accountId: account.id, assetId: `media-${account.id}` }));
     else if (sql.includes("FROM zzsh_supply.favorite")) rows = favorites ? [...favorites(String(args[0]))].sort((left, right) => right.savedAt.localeCompare(left.savedAt) || right.account_id.localeCompare(left.account_id)) : [];
     return { rows, rowCount: rows.length };
   }, release() {} } as unknown as PoolClient;
@@ -98,6 +99,13 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
   };
   return { client, gate, queries, windows };
 }
+
+const cdn = {
+  mode: "serve" as const,
+  url: (row: { id: string }, edge: number) => `https://cdn.example.test/${row.id}/${edge}.webp`,
+  async publish() {},
+  async revoke() { return ""; },
+};
 
 const countOf = (queries: string[], needle: string) => queries.filter((sql) => sql.includes(needle)).length;
 
@@ -114,14 +122,14 @@ async function marketPage(t: { mock: { method: (object: object, key: string, val
   const real = client.query;
   (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) =>
     sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS") ? { rows, rowCount: rows.length } : real(sql, args)) as never;
-  const options = { pool: { connect: async () => client }, supplyGateReader: gate, listingCursorKey: CURSOR_KEY,
+  const options = { pool: { connect: async () => client }, supplyGateReader: gate, listingCursorKey: CURSOR_KEY, mediaStorage: { accountImageCdn: cdn },
     legacyPublicAdmission: { schema: "legacy-public-admission-v2", records: [] } };
   const undo = [
     t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: false, mixed: mode === "mixed", config: { sorts: [{ key: "latest", label: "最新发布" }] },
       filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
     t.mock.method(filterConfig, "validateListingQuery", async () => {}),
     t.mock.method(legacyRead, "mixedListingBinding", () => ({ queryVersion: 2, gameId: GAME, queryHash: "x", sort: "latest", direction: "DESC", coreItemId: null, filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
-    t.mock.method(legacyRead, "readLegacyListing", async () => ({ id: "legacy-1", source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null })),
+    t.mock.method(legacyRead, "readLegacyListing", async () => ({ id: "legacy-1", versionId: "legacy-version", media: [], source: "LEGACY_READ_ONLY", canCreateOrder: false, quote: null })),
   ];
   try {
     const page = await listV2({ url: "/listings?" + search } as never, options as never, search);
@@ -133,6 +141,8 @@ test("a native market page reads each shared dimension once, not once per candid
   const fixtures = ["a", "b", "c", "d", "e"].map((id, index) => accountFixture(id, index % 2 ? "owner-1" : "owner-0"));
   const { page, queries } = await marketPage(t, fixtures, new URLSearchParams("queryVersion=2&gameId=game-a&limit=5"));
   assert.equal(page.items.length, 5);
+  assert.equal(countOf(queries, "FROM zzsh_supply.account_image_cdn_delivery"), 1);
+  assert.equal(page.items[0]?.media[0]?.coverUrl, cdn.url({ id: "cdn-a" }, 640));
   assert.equal(page.scannedCount, 5); assert.equal(page.scanBudget, 200); assert.equal(page.scanBudgetReached, false);
   // Set-based selection: one round trip per dimension for the whole window.
   assert.equal(countOf(queries, "FROM zzsh_supply.rental_account WHERE id = ANY"), 1, "accounts are read once per window");
@@ -207,8 +217,8 @@ test("only fully rentable candidates reach a RENTABLE market page", async t => {
   const free = [accountFixture("a", "owner-0"), accountFixture("b", "owner-0")];
   const { page } = await marketPage(t, free, new URLSearchParams("queryVersion=2&gameId=game-a&limit=2"));
   assert.equal(page.items.length, 2);
-  for (const item of page.items as Array<{ availability: { state: string }; canCreateOrder: boolean }>) {
-    assert.equal(item.availability.state, "RENTABLE"); assert.equal(item.canCreateOrder, true);
+  for (const item of page.items) {
+    assert.equal((item.availability as { state: string }).state, "RENTABLE"); assert.equal(item.canCreateOrder, true);
   }
 });
 
@@ -242,12 +252,12 @@ test("mixed pages keep both sources, their order and the legacy read contract", 
   const { page } = await marketPage(t, fixtures, new URLSearchParams("queryVersion=2&gameId=game-a&limit=3"), "mixed");
   assert.equal(page.items.length, 3);
   assert.equal(page.scannedCount, 3);
-  const legacy = page.items[0] as { id: string; source: string; canCreateOrder: boolean; quote: unknown };
+  const legacy = page.items[0]!;
   assert.equal(legacy.id, "legacy-1"); assert.equal(legacy.source, "LEGACY_READ_ONLY");
   assert.equal(legacy.canCreateOrder, false); assert.equal(legacy.quote, null);
   assert.deepEqual((page.items[1] as { id: string }).id, "a");
   assert.deepEqual((page.items[2] as { id: string }).id, "b");
-  assert.notEqual((page.items[1] as { canCreateOrder: boolean }).canCreateOrder, legacy.canCreateOrder);
+  assert.notEqual(page.items[1]!.canCreateOrder, legacy.canCreateOrder);
 });
 
 function responseCapture() {
@@ -260,7 +270,7 @@ test("favorites read the private set once per page and hide objects that lost pu
   const fixtures = ["a", "b", "c"].map((id, index) => accountFixture(id, "owner-0", index === 1 ? { restricted: true } : {}));
   const favorites = fixtures.map((f, index) => ({ account_id: f.account.id, savedAt: `2026-10-0${index + 1}T00:00:00.000000Z` }));
   const { client, gate, queries } = clientFor(fixtures, (userId) => (userId === "reader-a" ? favorites : []));
-  const options = { pool: { query: client.query, connect: async () => client }, supplyGateReader: gate,
+  const options = { pool: { query: client.query, connect: async () => client }, supplyGateReader: gate, mediaStorage: { accountImageCdn: cdn },
     userAuth: { api: { getSession: async () => ({ user: { id: "reader-a" }, session: { id: "session-fixture" } }) } } };
   const capture = responseCapture();
   await handleFavorites({ method: "GET", headers: {} } as never, capture.response as never, options as never, "req_fixture", "/me/favorites", new URLSearchParams());
@@ -269,6 +279,7 @@ test("favorites read the private set once per page and hide objects that lost pu
   assert.equal(countOf(queries, "FROM zzsh_supply.rental_account WHERE id = ANY"), 1, "one account read for the whole favorites page");
   assert.equal(countOf(queries, "SELECT DISTINCT account_id FROM zzsh_supply.listing_publication"), 1, "one publication probe for the whole page");
   assert.equal(countOf(queries, "SELECT 1 FROM zzsh_supply.listing_publication"), 0, "no per-row publication probe");
+  assert.equal(countOf(queries, "FROM zzsh_supply.account_image_cdn_delivery"), 1, "one image projection for the page");
   const hidden = items.find((row: { accountId: string }) => row.accountId === "b");
   assert.equal(hidden.state, "UNAVAILABLE"); assert.equal(hidden.listing, null);
   assert(!JSON.stringify(hidden).includes("PRIVATE_RESTRICTION_REASON"));
@@ -277,7 +288,9 @@ test("favorites read the private set once per page and hide objects that lost pu
     const row = items.find((entry: { accountId: string }) => entry.accountId === id);
     assert.equal(row.state, "AVAILABLE");
     const expected = await readPublicListing(client, fixtures.find((f) => f.account.id === id)!.account, gate, undefined, false, "DETAIL");
-    assert.deepEqual(row.listing, expected, `favorite ${id} keeps its exact public DTO`);
+    assert.deepEqual(row.listing, { ...expected, media: expected.media.map(image => ({
+      ...image, coverUrl: cdn.url({ id: `cdn-${id}` }, 640), detailUrl: cdn.url({ id: `cdn-${id}` }, 1920),
+    })) }, `favorite ${id} keeps its exact public DTO with both CDN sizes`);
   }
   (options.userAuth.api.getSession as unknown as () => Promise<null>) = (async () => null) as never;
   await assert.rejects(handleFavorites({ method: "GET", headers: {} } as never, responseCapture().response as never, options as never, "req_fixture", "/me/favorites", new URLSearchParams()), (error: { status?: number }) => error.status === 401);

@@ -6,7 +6,8 @@ import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import sharp from "sharp";
 
-import { attachAccountImageCdn, createAccountImageCdn, loadAccountImageCdnTarget, type AccountImageDelivery } from "../src/supply/account-image-cdn";
+import { createAccountImageCdn, loadAccountImageCdnTarget, type AccountImageDelivery } from "../src/supply/account-image-cdn";
+import { projectPublicListingImages } from "../src/supply/legacy-path-projection";
 import { runAccountImageCdnBatch } from "../src/supply/account-image-cdn-worker";
 import type { AccountMediaVariant } from "../src/supply/account-media-oss";
 import { createUnavailableMediaStorage } from "../src/supply/media";
@@ -111,8 +112,8 @@ test("the worker keeps partial publication undisclosed, retires the attempt, and
   };
   const batch = () => runAccountImageCdnBatch({ pool: { connect: async () => client } as unknown as Pool, storage: createUnavailableMediaStorage(), cdn, gate: unknownSupplyGate }, () => false, async () => desired);
   const oldUrl = "/api/v1/supply/listings/account_fixture/media/asset_fixture";
-  const listing: Record<string, unknown> = { id: published.accountId, media: [{ assetId: published.assetId, url: oldUrl }] };
-  const project = async () => (await attachAccountImageCdn(client as unknown as PoolClient, [listing], cdn))[0]!;
+  const listing = { id: published.accountId, versionId: "version_fixture", media: [{ assetId: published.assetId, url: oldUrl }] };
+  const project = async () => (await projectPublicListingImages(client as unknown as PoolClient, [listing], cdn))[0]!;
   await batch();
   assert.equal(deliveryRows[0]?.state, "REVOKING");
   assert.deepEqual((await project()).media, listing.media);
@@ -181,13 +182,16 @@ test("legacy CDN verifies the sealed approved byte proof, retains the source pat
   assert.equal(objects.get(sourceKey), png);
   assert.notEqual(legacy.url(delivery), legacy.url({ ...delivery, id: `cdn_${"b".repeat(32)}` }));
 
-  const listing = { id: delivery.accountId, versionId: delivery.versionId, media: [], legacyImages: [{ position: 0, url: "/authorized-old-url" }, { position: 1, url: "/other-authorized-url" }] };
-  const db = { query: async () => ({ rows: [
+  const listing = { id: delivery.accountId, versionId: delivery.versionId, media: [{ assetId: "media_fixture", url: "/native-url" }], legacyImages: [{ position: 0, url: "/authorized-old-url" }, { position: 1, url: "/other-authorized-url" }] };
+  const db = { query: async (sql: string) => ({ rows: sql.includes("account_image_cdn_delivery") ? [
+    { id: "delivery_native", accountId: listing.id, assetId: "media_fixture" },
+  ] : [
     { ...delivery, ...proof, state: "PENDING_IMPORT" },
     { ...delivery, ...proof, state: "READY", position: 1, versionId: "other_version" },
     { ...delivery, ...proof, state: "READY", position: 2 },
   ] }) } as unknown as PoolClient;
-  const projection = await attachAccountImageCdn(db, [listing], { mode: "serve", legacy, url: () => "", async publish() {}, async revoke() { return ""; } });
+  const projection = await projectPublicListingImages(db, [listing], { mode: "serve", legacy, url: (item, edge) => `${origin}/${item.id}/${edge}.webp`, async publish() {}, async revoke() { return ""; } });
+  assert.deepEqual(projection[0]?.media, [{ ...listing.media[0], coverUrl: `${origin}/delivery_native/640.webp`, detailUrl: `${origin}/delivery_native/1920.webp` }]);
   assert.deepEqual(projection[0]?.legacyImages, [{ ...listing.legacyImages[0], state: "PENDING_IMPORT" }, listing.legacyImages[1]]);
 });
 

@@ -1,5 +1,6 @@
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { normalizeTime } from "./content-hash";
+import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import {
   readUserContext,
   assertUserContextInTransaction,
@@ -12,7 +13,7 @@ import {
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import {
   listingCandidatePage,
-  readPublicListing,
+  readPublicListingSnapshot,
   readPublishingAccount,
   unknownSupplyGate,
   withPublicListingSnapshot,
@@ -90,7 +91,7 @@ export async function handleFavorites(
         ).rows;
         const hasMore = found.length > limit,
           rows = found.slice(0, limit),
-          items = [];
+          items: { accountId: string; savedAt: string; state: "AVAILABLE" | "UNAVAILABLE"; message: string | null; listing: PublicListingProjection | null }[] = [];
         // Favorites are a private set of stable ids; the cards are read as one
         // window so the page costs a fixed number of round trips, not one chain
         // per row. Losing public eligibility still yields UNAVAILABLE with no
@@ -109,9 +110,9 @@ export async function handleFavorites(
             });
             continue;
           }
-          let listing: Record<string, unknown> | null = null;
+          let listing: PublicListingProjection | null = null;
           try {
-            listing = await readPublicListing(
+            listing = await readPublicListingSnapshot(
               client,
               account,
               gate,
@@ -136,9 +137,11 @@ export async function handleFavorites(
             listing,
           });
         }
+        const listings = await projectPublicListingImages(client, items.flatMap(item => item.listing ? [item.listing] : []), options.mediaStorage?.accountImageCdn);
+        const byAccountId = new Map(listings.map(listing => [listing.id, listing]));
         const last = rows.at(-1);
         return {
-          items,
+          items: items.map(item => ({ ...item, listing: byAccountId.get(item.accountId) ?? null })),
           nextCursor:
             hasMore && last
               ? Buffer.from(
@@ -167,7 +170,7 @@ export async function handleFavorites(
   if (saved) {
     try {
       await withPublicListingSnapshot(options.pool, async (reader) =>
-        readPublicListing(
+        readPublicListingSnapshot(
           reader,
           await readPublishingAccount(reader, accountId),
           gate,

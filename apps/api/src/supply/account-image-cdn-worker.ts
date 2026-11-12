@@ -8,7 +8,7 @@ import type { AccountImageCdn, AccountImageDelivery } from "./account-image-cdn"
 import type { AccountMediaVariant } from "./account-media-oss";
 import { readAccountWatermarkPolicy, resolveAccountImageWatermark } from "./account-image-watermark";
 import { inspectImage, loadMediaAsset, logOrphanedMediaObjects, MediaStorageError, recordAccountMediaVariants, type MediaStorage } from "./media";
-import { readPublicListing, readPublishingAccount, type SupplyGateReader } from "./publishing";
+import { readPublicListingSnapshot, readPublishingAccount, type SupplyGateReader } from "./publishing";
 import { newSupplyId } from "./supply-util";
 import { synchronizeLegacyImages } from "./legacy-image-cdn-worker";
 
@@ -21,7 +21,7 @@ async function readDesired(client: PoolClient, accountId: string, gate: SupplyGa
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
   try {
     const account = await readPublishingAccount(client, accountId);
-    const listing = await readPublicListing(client, account, gate, undefined, false, "DETAIL");
+    const listing = await readPublicListingSnapshot(client, account, gate, undefined, false, "DETAIL");
     const media = Array.isArray(listing.media) ? listing.media : [];
     await client.query("COMMIT");
     return media.map((image: { assetId: string }) => image.assetId);

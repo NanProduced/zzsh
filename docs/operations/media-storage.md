@@ -18,8 +18,8 @@
 
 `OSS_ACCOUNT_IMAGE_CDN_MODE` 默认为 `off`。`serve` 需要 OSS 直传处理能力、独立的 `OSS_ACCOUNT_IMAGE_CDN_ORIGIN` 和已应用的投放迁移。`drain` 停止签发公开地址和新增投放，继续删除已投放对象并刷新 CDN。退回 `off` 前先通过投放表确认所有记录已撤下，并核验 CDN 刷新任务完成与旧地址拒绝。切换中应保持所有工作进程的模式、Bucket、前缀和域名一致。
 
-- 投放复用现行账号公开详情与媒体资格。新上传的图使用已核验私有变体，存量已发布资产先核对现有衍生图的 SHA-256 和解码结果再补两个规格。两张成品在同桶复制至 `<prefix>public/listing/<accountId>/<assetId>/<分发版本>/{640,1920}.webp`，实际回读核验成功后才发布。旧 `url` 字段兼容中继，市场及详情优先使用可用的 `coverUrl` 和 `detailUrl`。
-- 新发布、换版、下架、素材审核和限制变更触发投放队列。账号暂停继续按原详情资格处理。已撤下的版本不会复用，撤下操作删除回源对象后请求 CDN 按 URL 刷新。刷新任务受理和各节点完成分别核验。边缘缓存目标不超过 300 秒，禁用过期内容回退，浏览器需要再验证。实际冷回源、热缓存和旧 URL 撤回时效须在隔离域名实测。 [CDN 缓存刷新](https://help.aliyun.com/en/cdn/developer-reference/api-cdn-2018-05-10-refreshobjectcaches)
+- 投放复用现行账号公开详情与媒体资格。新上传的图使用已核验私有变体，存量已发布资产先核对现有衍生图的 SHA-256 和解码结果再补两个规格。两张成品在同桶复制至 `<prefix>public/listing/<accountId>/<assetId>/<分发版本>/{640,1920}.webp`，实际回读核验成功后才发布。旧 `url` 字段兼容中继，市场列表、详情、编号查询与收藏共用图片投影，优先使用可用的 `coverUrl` 和 `detailUrl`。
+- 新发布、换版、下架、素材审核和限制变更触发投放队列。账号暂停继续按原详情资格处理。已撤下的版本不会复用，撤下操作删除回源对象后请求 CDN 按 URL 刷新。刷新任务受理和各节点完成分别核验。在 CDN 为投放目录设 300 秒缓存并开启「忽略源站不缓存标头」，以免浏览器重新验证所用的 `max-age=0` 同时禁用节点缓存。关闭「客户端跟随CDN缓存策略」及「响应过期缓存」。实际冷回源、热缓存和旧 URL 撤回时效须在隔离域名实测。 [CDN 缓存刷新](https://help.aliyun.com/en/cdn/developer-reference/api-cdn-2018-05-10-refreshobjectcaches)
 - CDN 回源身份仅授权 `<prefix>public/listing/*` 当前版本的 `GetObject`。使用独立同账号或跨账号回源身份，核对暂存、原图、内部件和对象版本访问均拒绝。默认的一键 OSS 回源授权范围过宽。处理和投放身份需读写所需私有及投放前缀，允许删除投放对象和刷新指定 CDN 域名。 [CDN 回源配置参数](https://help.aliyun.com/zh/cdn/developer-reference/parameters-for-configuring-features-for-domain-names)
 
 旧平台路径图另以 `OSS_ACCOUNT_LEGACY_CDN=1` 启用，须提供审核通过的展示清单文件 `OSS_ACCOUNT_LEGACY_CDN_MANIFEST` 和其文件摘要 `OSS_ACCOUNT_LEGACY_CDN_MANIFEST_SHA256`。清单格式为 `{"schema":"zzsh.legacy-image-cdn.v1","images":[{"path":"accountsImage/20261112/example.png","sha256":"<sha256>","byteSize":123,"mime":"image/png"}]}`。每条必须同时匹配现行账号公开资格、已核来源版本及展示引用，并排除被任一账号引用为处罚图的路径。已迁入源仍保留 `<prefix>legacy/accountsImage/YYYYMMDD/...`，投放前核对实际 SHA-256、大小、MIME、解码和隐私元数据，投放版本使用 `<prefix>public/legacy/<分发版本>/accountsImage/YYYYMMDD/...`。

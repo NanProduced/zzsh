@@ -2,14 +2,13 @@ import type OSS from "ali-oss";
 import OpenApi, { $OpenApiUtil } from "@alicloud/openapi-core";
 import { RuntimeOptions } from "@darabonba/typescript";
 import { createHash } from "node:crypto";
-import type { PoolClient } from "pg";
 
 import { ConfigurationError } from "../config/config";
 import { MAX_MEDIA_BYTES, MediaStorageError } from "./media";
 import { readBoundedObject, type AccountMediaVariant } from "./account-media-oss";
 import { ACCOUNT_IMAGE_VARIANT_EDGES, type AccountImageEdge } from "./account-image-watermark";
 import type { OssCredentials, OssMediaStorageOptions } from "./media-oss";
-import type { LegacyImageCdn, LegacyImageCdnDelivery, LegacyImageProof } from "./legacy-image-cdn";
+import type { LegacyImageCdn } from "./legacy-image-cdn";
 
 export type AccountImageCdnTarget = { mode: "serve" | "drain"; origin: string };
 export type AccountImageDelivery = { id: string; accountId: string; assetId: string };
@@ -90,41 +89,4 @@ export function createAccountCdnRefresh(credentials: OssCredentials): (urls: str
     if (typeof task !== "string" || !/^[0-9,]{1,256}$/.test(task)) throw new MediaStorageError("CDN cache refresh task is invalid");
     return task;
   };
-}
-
-/** Call with the marketplace projection from the same authorized listing snapshot. */
-export async function attachAccountImageCdn<T extends Record<string, unknown>>(client: PoolClient, listings: T[], cdn?: AccountImageCdn): Promise<T[]> {
-  if (cdn?.mode !== "serve") return listings;
-  const accounts = listings.filter(item => typeof item.id === "string" && Array.isArray(item.media) && item.media.length > 0);
-  const legacyAccounts = cdn.legacy?.enabled ? listings.filter(item => typeof item.id === "string" && Array.isArray(item.legacyImages) && item.legacyImages.length > 0) : [];
-  if (!accounts.length && !legacyAccounts.length) return listings;
-  const deliveries = accounts.length ? (await client.query<AccountImageDelivery>(
-    `SELECT id, account_id AS "accountId", asset_id AS "assetId" FROM zzsh_supply.account_image_cdn_delivery
-      WHERE account_id=ANY($1::text[]) AND state='READY'`, [accounts.map(item => item.id)],
-  )).rows : [];
-  type LegacyStatus = LegacyImageCdnDelivery & Pick<LegacyImageProof, "sha256" | "byteSize" | "mime"> & { state: "READY" | "PENDING_IMPORT" | "UNAVAILABLE" };
-  const legacyDeliveries = legacyAccounts.length ? (await client.query<LegacyStatus>(
-    `SELECT id, account_id AS "accountId", version_id AS "versionId", position, source_path AS "sourcePath", state, sha256, byte_size AS "byteSize", mime
-       FROM zzsh_supply.legacy_image_cdn_delivery WHERE account_id=ANY($1::text[]) AND state IN ('READY','PENDING_IMPORT','UNAVAILABLE')`,
-    [legacyAccounts.map(item => item.id)],
-  )).rows : [];
-  const legacy = cdn.legacy;
-  const legacySlots = new Map(legacyDeliveries.filter(row => {
-    const proof = legacy?.proof(row.sourcePath);
-    return proof?.sha256 === row.sha256 && proof.byteSize === row.byteSize && proof.mime === row.mime;
-  })
-    .map(row => [`${row.accountId}/${row.versionId}/${row.position}`, row]));
-  const ready = new Map(deliveries.map(row => [`${row.accountId}/${row.assetId}`, row]));
-  return listings.map(listing => {
-    if (legacy && Array.isArray(listing.legacyImages) && listing.legacyImages.length && legacySlots.size) return { ...listing, legacyImages: listing.legacyImages.map(slot => {
-      const delivery = legacySlots.get(`${listing.id}/${listing.versionId}/${slot.position}`);
-      if (!delivery) return slot;
-      return delivery.state === "READY" ? { ...slot, cdnUrl: legacy.url(delivery) } : { ...slot, state: delivery.state };
-    }) };
-    if (!Array.isArray(listing.media)) return listing;
-    return { ...listing, media: listing.media.map(item => {
-      const delivery = ready.get(`${listing.id}/${item.assetId}`);
-      return delivery ? { ...item, coverUrl: cdn.url(delivery, 640), detailUrl: cdn.url(delivery, 1920) } : item;
-    }) };
-  });
 }

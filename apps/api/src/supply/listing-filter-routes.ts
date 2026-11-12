@@ -1,6 +1,5 @@
 import { legacyListingSortLabel,listLegacyReadListings,buildMixedListingCandidates,mixedListingBinding,readLegacyListing,hasLegacyReadSnapshots } from "./legacy-listing-read";
-import { attachLegacyPathImages } from "./legacy-path-projection";
-import { attachAccountImageCdn } from "./account-image-cdn";
+import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -55,7 +54,7 @@ export async function handleListingFilters(request:SupplyNodeRequest,response:Su
 export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOptions,query:URLSearchParams) {
   const q=parseListingQueryV2(query,request.originalUrl??request.url??"");requireListingCursorKey(options.listingCursorKey);
   return withPublicListingSnapshot(options.pool,async client=>{
-    const projectMedia = async (items: unknown[]) => attachAccountImageCdn(client, await attachLegacyPathImages(client, items as Record<string, unknown>[]), options.mediaStorage?.accountImageCdn);
+    const projectMedia = (items: PublicListingProjection[]) => projectPublicListingImages(client, items, options.mediaStorage?.accountImageCdn);
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
     // Owner decision (2026-10-18): the public market keeps the old platform status=3
@@ -72,7 +71,7 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
       const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
       await validateListingQuery(client,q,state);
       const sql=buildMixedListingCandidates(q,after,options.legacyPublicAdmission),rows=(await client.query<{id:string;version_id:string;key:string|null;source:string}>(sql.text,sql.values)).rows;
-      const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+      const items:PublicListingProjection[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
       for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
         if(row.source==="legacy"){try{items.push(await readLegacyListing(client,row.id,options.legacyPublicAdmission));}catch(e){if((e as {status?:number}).status!==404)throw e;}continue;}
         if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).filter(r=>r.source!=="legacy").map(r=>r.id));
@@ -85,7 +84,7 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);
     const sql=buildListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
-    const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+    const items:PublicListingProjection[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
     for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
       if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).map(r=>r.id));
       const account=page.account(row.id);if(!account)continue;
