@@ -9,7 +9,7 @@ import {writePrivate} from '../local-auth.mjs';
 import {assertDistributionCoreReadback,assertRegisteredDistributionTarget,isolatedDistributionBuild} from './local-distribution-qualification-plan.mjs';
 import {assertListedRunnerScripts,assertRoundDependencyProof,inspectRoundDependencyLayout} from './local-round-dependencies.mjs';
 import {readRoundListedBatch,validateRoundAccountSet,validateRoundTrialReceipt} from './legacy-listed-round-source.mjs';
-import {validateListedExecutionCheckpoint} from './legacy-listed-execution-plan.mjs';
+import {assertLegacyAutoPublicationPermitted,validateListedExecutionCheckpoint} from './legacy-listed-execution-plan.mjs';
 import {scanEmptyListedSource} from './readback-empty-legacy-listed.mjs';
 import {runListedBatchWorkflow} from './listed-batch-workflow.mjs';
 import {assertNextMigrationWriteReady,loadRegisteredTarget,NEXT_MIGRATION_PROFILE} from './local-target-registry.mjs';
@@ -118,6 +118,7 @@ async function main(){
    const batchBinding={sourceBindingFile:input.sourceBinding.path,sourceBindingSha256:input.sourceBinding.sha256,expectedAccountCount:manifest.batches[index].count,
     batch:{schema:'zzsh.listed-same-capture-batch-binding.v1',manifestFile,manifestSha256:manifestRef.sha256,index:index+1,policyFiles}};
    const selected=await readRoundListedBatch(batchBinding,round,policy,privatePath(round.source.path),canonicalize,legacyPriceInteger);
+   if(mode==='--execute')for(const raw of selected.accounts.values())assertLegacyAutoPublicationPermitted(raw.game_id,dataset.gameBindings);
    const policyCanonical=canonicalize(policy),authorityCanonical=canonicalize(authority);
    for(const item of policy.supplement.accountSourceDigests){const raw=selected.accounts.get(item.id);
     readLegacyListedPolicy(policyCanonical,{proofSha256:sha(policyCanonical),sourceReceiptSha256:round.source.sha256,

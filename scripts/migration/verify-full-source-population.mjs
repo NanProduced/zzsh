@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { assertContinuationCommissionCoverage, assertContinuationSourceCoverage, assertLegacyLiabilitySourceCoverage, isExactLegacyRefundRelationship, NEXT_CONTINUATION_COMMISSION_POLICY, readVerifiedSourceRows, unsupportedLegacyContinuationStatus } from './local-source-adapter.mjs';
 import { assertCapturedPopulation, directFullDomains, partitionSourceKeys, retainedFullDomains } from './full-source-scope.mjs';
-import { assertSelectedScopeForWrite } from './selected-business-scope.mjs';
+import { assertSelectedScopeForWrite, legacyListedIdsDigest } from './selected-business-scope.mjs';
 import { writePrivate } from '../local-auth.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -31,7 +31,8 @@ async function checkedRows(directory,meta,visit){
 }
 
 /** Verify all users and the selected account/order scope from frozen source records, not planner counts. */
-export async function verifySelectedPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){
+export async function verifySelectedPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows,listedProofVersion=2}){
+ assert([0,1,2].includes(listedProofVersion),'SELECTED_SCOPE_LISTED_PROOF_VERSION_INVALID');
  const population=dataset?.population,scope=dataset?.selectedScope;
  assert(population?.schema==='zzsh.local-population-scope.v1'&&population.mode==='SELECTED_BUSINESS_SCOPE'
   &&population.sourceReceiptSha256===dataset.sourceReceiptSha256&&sha(JSON.stringify(population))===dataset.populationSha256
@@ -47,6 +48,23 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   if(name!=='accounts'&&name!=='orders')assert(d.considered===d.captured&&d.excluded===0&&d.consideredIdsSha256===d.capturedIdsSha256,'SELECTED_SCOPE_NON_ORDER_DOMAIN_EXCLUDED');
  }
  const selected={accounts:new Set(scope.write.accounts),orders:new Set(scope.write.orders)};
+ const gameRows=new Map(),gameEntry=source.files?.games,gamePopulation=population.domains?.games;
+ if(listedProofVersion===2&&gameEntry&&gamePopulation){
+  const captured=createHash('sha256');let count=0;
+  await readRows(sourceDir,gameEntry,row=>{
+   assert(typeof row?.id==='string'&&row.id&&!gameRows.has(row.id),'SELECTED_SCOPE_GAME_SOURCE_INVALID');
+   gameRows.set(row.id,row);count++;captured.update(JSON.stringify(row.id)+'\n');
+  });
+  assert(count===gameEntry.rows&&count===gamePopulation.captured&&captured.digest('hex')===gamePopulation.capturedIdsSha256,
+   'SELECTED_SCOPE_GAME_SOURCE_CHANGED');
+ }
+ const bindings=dataset.gameBindings&&typeof dataset.gameBindings==='object'&&!Array.isArray(dataset.gameBindings)?dataset.gameBindings:{};
+ const deltaBindings=Object.entries(bindings).filter(([,code])=>code==='delta');
+ const deltaGame=deltaBindings.length===1?gameRows.get(deltaBindings[0][0]):null;
+ const activeDelta=[...gameRows.values()].filter(row=>row.game_name==='三角洲行动'&&row.is_delete==='0');
+ const gameBindingVerified=listedProofVersion===2&&deltaBindings.length===1&&deltaBindings[0][0]==='1'&&deltaGame?.game_name==='三角洲行动'
+  &&deltaGame.is_delete==='0'&&activeDelta.length===1&&/^[a-f0-9]{64}$/.test(gameEntry?.sha256??'');
+ const deltaGameId=gameBindingVerified?deltaBindings[0][0]:null;
  const verifyContinuationStatus=dataset?.domains?.continuations?.preparedEvidence?.commissionPolicy===NEXT_CONTINUATION_COMMISSION_POLICY;
  const unsupportedStatuses={'2':0,'6':0,'7':0};
  const continuationSources={accounts:[],orders:[],pays:[],tradePolicy:[]},continuationCommissions=[],sourceRefunds=[];
@@ -62,9 +80,9 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
    else if(name==='accounts'){
     assert(['status','is_delete','user_id','no'].every(field=>Object.hasOwn(row,field)),'SELECTED_SCOPE_ACCOUNT_FIELDS_MISSING');
     assert(['0','1','2','3','4','5','6'].includes(row.status)&&['0','1'].includes(row.is_delete),'SELECTED_SCOPE_ACCOUNT_STATE_UNKNOWN');
-    const source=selected.accounts.has(row.id)?Object.fromEntries(['user_id','no','status','is_delete','default_consume_type','price_tenant',
-     'extra_goods_total_price_tenant','deposit_amount','rental_days'].map(field=>[field,row[field]])):undefined;
-    accounts.set(row.id,{listed:row.status==='3'&&row.is_delete==='0',source});
+    const source=selected.accounts.has(row.id)?Object.fromEntries(['user_id','game_id','no','status','is_delete','default_consume_type','price_tenant',
+     'extra_goods_total_price_tenant','deposit_amount','rental_days','update_time'].map(field=>[field,row[field]])):undefined;
+    accounts.set(row.id,{listed:row.status==='3'&&row.is_delete==='0',gameId:row.game_id,source});
     if(verifyContinuationStatus&&selected.accounts.has(row.id))continuationSources.accounts.push(row);
    }else if(name==='orders'){
     assert(['accounts_id','pay_is','user_id','order_sn'].every(field=>Object.hasOwn(row,field)),'SELECTED_SCOPE_ORDER_FIELDS_MISSING');
@@ -103,15 +121,22 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
  }
  for(const [id,account] of accounts)
   assert(selected.accounts.has(id)===(account.listed||paidAccounts.has(id)),'SELECTED_SCOPE_SOURCE_ACCOUNT_DISPOSITION_MISMATCH');
- const ready={users:[],accounts:[],orders:[]},isolated={users:[],accounts:[],orders:[]},accountSnapshots={compared:0,unavailable:0};
+ const ready={users:[],accounts:[],orders:[]},isolated={users:[],accounts:[],orders:[]},accountSnapshots={compared:0,unavailable:0},listedWithoutSnapshot=new Set();
  for(const name of ['users','accounts','orders'])if(dataset.files?.[name])await readRows(datasetDir,dataset.files[name],row=>{
   if(name==='accounts'){
    const source=accounts.get(row.sourceId)?.source;
    assert(source&&row.ownerLegacyId===source.user_id&&row.sourceStatus===source.status&&row.sourceDeleted===(source.is_delete==='1')
     &&row.businessNo===(source.no===null||source.no===''?null:source.no)&&Object.hasOwn(row,'snapshot'),'SELECTED_SCOPE_ACCOUNT_SOURCE_MISMATCH');
-   if(row.snapshot===null)accountSnapshots.unavailable++;
+   if(gameBindingVerified&&(typeof source.game_id!=='string'||bindings[source.game_id]!==row.gameCode))
+    throw new Error('SELECTED_SCOPE_ACCOUNT_GAME_BINDING_MISMATCH');
+   if(row.snapshot===null||(listedProofVersion===2&&!row.sourceUpdatedAt)){accountSnapshots.unavailable++;if(accounts.get(row.sourceId)?.listed)listedWithoutSnapshot.add(row.sourceId);}
    else{
     const snapshot=row.snapshot;
+    if(listedProofVersion===2){
+     const timestamp=source.update_time;
+     assert(typeof timestamp==='string'&&/^[1-9]\d{0,23}$/.test(timestamp)&&BigInt(timestamp)*1000n<=253402300799999n
+      &&row.sourceUpdatedAt===new Date(Number(BigInt(timestamp)*1000n)).toISOString(),'SELECTED_SCOPE_ACCOUNT_SNAPSHOT_MISMATCH');
+    }
     assert(snapshot&&typeof snapshot==='object'&&!Array.isArray(snapshot)&&/^[1-5]$/.test(source.default_consume_type??'')
      &&snapshot.schema==='legacy-listing-read-v1'&&snapshot.resourceNo===row.businessNo
      &&snapshot.haffRentYuan===source.price_tenant&&snapshot.goodsYuan===source.extra_goods_total_price_tenant
@@ -133,6 +158,53 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   assert(expected?.source===retained.size&&expected.ready===partition.ready&&expected.isolated===partition.isolated,
    'SELECTED_SCOPE_INPUT_COUNTS_MISMATCH');
   result[name]={captured:sourceSet.size,retained:partition.captured,excluded:sourceSet.size-partition.captured,ready:partition.ready,isolated:partition.isolated};
+ }
+ const readyAccounts=new Set(ready.accounts),isolatedAccounts=new Set(isolated.accounts);
+ const legacyListed={scope:'ALL_CAPTURED_GAMES',sourceCount:0,readyWithSnapshot:0,readyWithoutSnapshot:0,isolated:0};
+ const all={ids:[],ready:[],withSnapshot:[],withoutSnapshot:[],isolated:[]};
+ const delta={all:[],ready:[],withSnapshot:[],withoutSnapshot:[],isolated:[]},other=[],unknown=[],otherMissing=[],otherIsolated=[],unknownMissing=[],unknownIsolated=[];
+ for(const [id,account] of accounts)if(account.listed){
+  legacyListed.sourceCount++;all.ids.push(id);
+  const isDelta=gameBindingVerified&&account.gameId===deltaGameId;
+  const otherGame=gameBindingVerified&&typeof account.gameId==='string'&&account.gameId!==deltaGameId&&gameRows.get(account.gameId)?.is_delete==='0'
+   &&typeof gameRows.get(account.gameId)?.game_name==='string'&&gameRows.get(account.gameId).game_name.trim()!=='';
+  if(isDelta)delta.all.push(id);else if(otherGame)other.push(id);else unknown.push(id);
+  if(readyAccounts.has(id)){
+   all.ready.push(id);if(isDelta)delta.ready.push(id);
+   if(listedWithoutSnapshot.has(id)){
+    legacyListed.readyWithoutSnapshot++;all.withoutSnapshot.push(id);
+    if(isDelta)delta.withoutSnapshot.push(id);else if(otherGame)otherMissing.push(id);else unknownMissing.push(id);
+   }
+   else {legacyListed.readyWithSnapshot++;all.withSnapshot.push(id);if(isDelta)delta.withSnapshot.push(id);}
+  }
+  else if(isolatedAccounts.has(id)){
+   legacyListed.isolated++;all.isolated.push(id);
+   if(isDelta)delta.isolated.push(id);else if(otherGame)otherIsolated.push(id);else unknownIsolated.push(id);
+  }
+  else throw new Error('SELECTED_SCOPE_LISTED_ACCOUNT_DISPOSITION_MISSING');
+ }
+ if(listedProofVersion!==2)legacyListed.status=legacyListed.readyWithoutSnapshot||legacyListed.isolated?'SOURCE_REVIEW_REQUIRED':'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN';
+ else {
+  const hex=value=>/^[a-f0-9]{64}$/.test(value??'');
+  const binding={sourceReceiptSha256:dataset.sourceReceiptSha256,sourceAccountsSha256:source.files.accounts?.sha256??null,
+   sourceGamesSha256:gameEntry?.sha256??null,datasetAccountsSha256:dataset.files?.accounts?.sha256??null,
+   gameBindingsSha256:sha(JSON.stringify(bindings)),gameBindingStatus:gameBindingVerified?'VERIFIED':'REVIEW_REQUIRED'};
+  const inputsBound=['sourceReceiptSha256','sourceAccountsSha256','sourceGamesSha256','datasetAccountsSha256'].every(key=>hex(binding[key]));
+  legacyListed.schema='zzsh.legacy-listed-source-scope.v2';legacyListed.binding=binding;
+  legacyListed.sourceIdsSha256=legacyListedIdsDigest(all.ids);legacyListed.readyMappedIdsSha256=legacyListedIdsDigest(all.ready);
+  legacyListed.readyWithSnapshotIdsSha256=legacyListedIdsDigest(all.withSnapshot);
+  legacyListed.readyWithoutSnapshotIdsSha256=legacyListedIdsDigest(all.withoutSnapshot);legacyListed.isolatedIdsSha256=legacyListedIdsDigest(all.isolated);
+  legacyListed.delta=gameBindingVerified?{sourceCount:delta.all.length,readyWithSnapshot:delta.withSnapshot.length,
+   readyWithoutSnapshot:delta.withoutSnapshot.length,isolated:delta.isolated.length,sourceIdsSha256:legacyListedIdsDigest(delta.all),
+   readyMappedIdsSha256:legacyListedIdsDigest(delta.ready),readyWithSnapshotIdsSha256:legacyListedIdsDigest(delta.withSnapshot),
+   readyWithoutSnapshotIdsSha256:legacyListedIdsDigest(delta.withoutSnapshot),isolatedIdsSha256:legacyListedIdsDigest(delta.isolated),
+   status:delta.withoutSnapshot.length||delta.isolated.length||unknown.length||!inputsBound?'SOURCE_REVIEW_REQUIRED':'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'}:null;
+  legacyListed.otherGames={sourceCount:other.length,sourceIdsSha256:legacyListedIdsDigest(other),
+   readyWithoutSnapshot:otherMissing.length,readyWithoutSnapshotIdsSha256:legacyListedIdsDigest(otherMissing),isolated:otherIsolated.length,isolatedIdsSha256:legacyListedIdsDigest(otherIsolated)};
+  legacyListed.unknownGame={sourceCount:unknown.length,sourceIdsSha256:legacyListedIdsDigest(unknown),
+   readyWithoutSnapshot:unknownMissing.length,readyWithoutSnapshotIdsSha256:legacyListedIdsDigest(unknownMissing),isolated:unknownIsolated.length,isolatedIdsSha256:legacyListedIdsDigest(unknownIsolated)};
+  legacyListed.status=legacyListed.readyWithoutSnapshot||legacyListed.isolated||unknown.length||!gameBindingVerified||!inputsBound
+   ?'SOURCE_REVIEW_REQUIRED':'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN';
  }
  const readyUsers=new Set(ready.users),readyOrders=new Set(ready.orders),refundParents={captured:0,retainedOrder:0,subjectIsolated:0,relationshipMatched:0,relationshipUnresolved:0},refundIds=new Set(),refundDigest=createHash('sha256');
  assert(source.files?.refunds&&population.domains?.refunds,'SELECTED_SCOPE_SOURCE_DOMAIN_MISSING');
@@ -166,7 +238,7 @@ export async function verifySelectedPopulationFiles({datasetDir,sourceDir,datase
   liabilitySource=assertLegacyLiabilitySourceCoverage(liabilities,continuationSources.orders,sourceRefunds,readyOrders);
   assert.equal(dataset.domains?.liabilities?.source,liabilitySource.total,'SELECTED_SCOPE_LIABILITY_SOURCE_COUNT_DRIFT');
  }
- return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,refundParents,
+ return {status:'SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN',...result,accountSnapshots,...(listedProofVersion?{legacyListed}:{}),refundParents,
   ...(verifyContinuationStatus?{liabilitySource,continuationSource,continuationCommissions:continuationCommissionsProof,unsupportedContinuations:{...unsupportedStatuses,total:Object.values(unsupportedStatuses).reduce((a,b)=>a+b,0)}}:{}),sourceConnections:0,targetConnections:0,targetWrites:0};
 }
 export async function verifyPopulationFiles({datasetDir,sourceDir,dataset,source,readRows=checkedRows}){
