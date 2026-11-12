@@ -58,6 +58,8 @@
 
 维护命令走 `GET/POST /api/v1/admin/distribution/maintenance`：GET `/accruals?limit=` 只读检查已过账但缺失/冲突的 Original 经济根；POST `/accruals/replay` 以 1–100 个原订单重放同一 `accrue`；POST `/due-settlements` 以 1–100 上界执行 `settleDue`。三者都要求 `personal.distribution.policy.manage`、有效管理员和游戏对象范围；不接受全表调度器，也不在页面 GET 中写钱。GET 只报告 `MISSING/PARTIAL/CONFLICT/SKIPPED/UNKNOWN`，不代替修复。
 
+固定手续费候选增加按原结算过账恢复的计佣任务：过账与任务在同一事务登记，付款时冻结的邀请关系和比例不变，固定费订单按结算后的手续费减会员优惠确定佣金基数及最终门槛；极速和取消单不计佣。任务只有在原计佣明细、回执及账本完整匹配时才能完成，依据不足转人工核对。到期批次保留原请求键；结果未知的原计划不参与新批次，其他订单可以继续。该结构仍是候选迁移，启用前须完成正式版本账、runtime 权限及并发验收。
+
 场景口径：未付款取消没有冻结 basis 或 posting，不计佣；未开租终止在存在正额佣金时 fail-closed（现有 `earning_count` 校验），不先 VOID 绕过；正常结算退款只核销租客应退责任，不改变 posting 的平台贡献，因此不重复扣佣；结算后退款/更正若需要部分冲回，当前合同只支持“同一原根全额 REVOKE/RECOVER”，部分比例更正尚未定义，不能以任意全额 REVOKE 代替。已入账追偿继续走原 `rental_referral_reversal_source` → `REVOKE`（余额不足转 `RECOVERY_REQUIRED`）→ 原来源 `RECOVER`，冲回声明仍只允许维护 owner 角色执行。
 
 v2 UNIFORM、支付依据推导和NATIVE账本/冲回scope要求目标已安装0121–0123及最终runtime ACL，见[前向迁移与验收合同](../../apps/api/migrations/candidates/distribution-business-closure-1/README.md)。源码登记不替代目标的结构/权限/业务验收，已安装也不等于有获批经营政策；未满足时不得开放政策提交或资金处理。

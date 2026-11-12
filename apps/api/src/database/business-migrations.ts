@@ -8,6 +8,7 @@ import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
 import { fixedFeeSupportCancelContractSql,supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
+import { distributionAccrualTaskAbsentSql, distributionAccrualTaskContractSql } from "../finance/distribution-accrual-tasks";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -475,6 +476,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
       GRANT UPDATE(level_code,policy_version_id,commission_frozen,revision) ON zzsh_order.distribution_participant TO ${runtimeUser};
       GRANT UPDATE(active) ON zzsh_order.distribution_invite_code TO ${runtimeUser};`);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
+  await configureDistributionAccrualTaskPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);
   await configureChannelRefundPrivileges(pool, runtimeRole);
@@ -785,6 +787,31 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
     GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
       zzsh_order.earning_expected_lines(text) TO ${role};
   `);
+}
+
+/** Preserve the old prefix; a partial accrual contract must not receive runtime grants. */
+export async function configureDistributionAccrualTaskPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const row = (await pool.query(`SELECT ${distributionAccrualTaskAbsentSql} AS absent,
+    ${distributionAccrualTaskContractSql} AS ready`)).rows[0];
+  if (!row || typeof row.absent !== 'boolean' || typeof row.ready !== 'boolean')
+    throw new Error('Distribution accrual task inventory is unavailable');
+  if (row.absent) return;
+  if (!row.ready) throw new Error('Distribution accrual task contract is partially deployed');
+  const table = 'zzsh_order.distribution_accrual_task';
+  const columns = ['posting_id', 'state', 'reason_code', 'next_attempt_at', 'created_at', 'updated_at'];
+  await resetRuntimeTablePrivileges(pool, table, 'PUBLIC', { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
+  await pool.query(`GRANT INSERT(posting_id) ON ${table} TO ${role};
+    GRANT UPDATE(state,reason_code,next_attempt_at,updated_at) ON ${table} TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.guard_distribution_accrual_task(),
+      zzsh_order.enqueue_distribution_accrual_task(),zzsh_order.guard_referral_earning_task(),
+      zzsh_order.derive_frozen_referral_accrual(text),zzsh_order.frozen_referral_earning_seed(jsonb,jsonb) FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.derive_frozen_referral_accrual(text),
+      zzsh_order.frozen_referral_earning_seed(jsonb,jsonb) TO ${role};`);
+  const runtimeContract = distributionAccrualTaskContractSql.replaceAll('current_user', '$1::name');
+  if ((await pool.query(`SELECT ${runtimeContract} AS ready`, [runtimeRole])).rows[0]?.ready !== true)
+    throw new Error('Distribution accrual task runtime privileges are incomplete');
 }
 
 /** Optional schema: no-op on the old prefix; fail on partial deployment. */

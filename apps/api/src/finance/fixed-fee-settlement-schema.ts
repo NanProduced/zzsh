@@ -1,4 +1,5 @@
 import type {PoolClient} from 'pg';
+import {distributionAccrualTaskContractSql} from './distribution-accrual-tasks';
 import {fixedFeeSupportCancelContractSql,supportPoststartTriggersSql} from './support-poststart-schema';
 
 /** Fixed-fee orders may advance only when their accounting and cancellation guards are installed together. */
@@ -14,7 +15,7 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
    ('zzsh_order.check_settlement_posting_batch()','zzsh_order.settlement_posting','settlement-version-v4','proposedPlatformServiceFee'),
    ('zzsh_order.derive_payment_referral_inputs(text)','zzsh_order.payment_distribution_basis','IN (''2''::jsonb,''4''::jsonb)','ELSIF (raw_amounts[i]=0 OR raw_amounts[i]<minimum) AND o.quote_snapshot->>''schemaVersion'' IS DISTINCT FROM ''4'''),
    ('zzsh_order.guard_payment_distribution_basis()','zzsh_order.payment_distribution_basis','payment-distribution-basis.v2','fixedFeePricing'),
-   ('zzsh_order.guard_rental_referral_earning()','zzsh_order.rental_referral_earning','payment-distribution-basis.v2','fixed fee commission lacks a bound completed settlement')
+   ('zzsh_order.guard_rental_referral_earning()','zzsh_order.rental_referral_earning','derive_frozen_referral_accrual','frozen_referral_earning_seed')
   ) required(signature,relation,first_marker,second_marker) WHERE NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass(required.relation)
    WHERE p.oid=to_regprocedure(required.signature) AND p.proowner=c.relowner AND NOT p.prosecdef
     AND position(required.first_marker IN p.prosrc)>0 AND position(required.second_marker IN p.prosrc)>0))
@@ -31,7 +32,7 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
     AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.type::smallint
     AND t.tgdeferrable=required.deferred AND t.tginitdeferred=required.deferred
     AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qual))
-  AND (${supportPoststartTriggersSql})=12 AND (${fixedFeeSupportCancelContractSql})
+  AND (${supportPoststartTriggersSql})=12 AND (${fixedFeeSupportCancelContractSql}) AND (${distributionAccrualTaskContractSql})
   AND EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_order.channel_refund_intent')
    AND c.conname='channel_refund_current_basis_only' AND c.convalidated
    AND position('SUPPORT_CANCELLATION' IN pg_get_constraintdef(c.oid))>0 AND position('POSTING' IN pg_get_constraintdef(c.oid))>0)

@@ -9,7 +9,22 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureFixedFeePersonalPrivileges, configureFixedFeeSupportCancellationPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureDistributionAccrualTaskPrivileges, configureFixedFeePersonalPrivileges, configureFixedFeeSupportCancellationPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+
+test("distribution accrual privileges reject a partial contract and grant only task operations",async()=>{
+  for(const [absent,ready] of [[true,false],[false,false]] as const){
+    const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[{absent,ready}]};}} as unknown as Pool;
+    if(absent)await configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime');
+    else await assert.rejects(configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime'),/partially deployed/);
+    assert.equal(calls.length,1,'an absent or partial contract receives no grants');
+  }
+  const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[sql.includes(' AS absent,')?{absent:false,ready:true}:{ready:true}]};}} as unknown as Pool;
+  await configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime');
+  const grants=calls.find(sql=>sql.includes('GRANT INSERT(posting_id)'))!;
+  assert.match(grants,/GRANT UPDATE\(state,reason_code,next_attempt_at,updated_at\)/);
+  assert.doesNotMatch(grants,/GRANT (DELETE|TRUNCATE|UPDATE\(posting_id)/);
+  assert.match(grants,/GRANT EXECUTE ON FUNCTION zzsh_order\.derive_frozen_referral_accrual/);
+});
 
 test("fixed-fee order privileges reject partially installed guards before any grant",async()=>{
   const complete={verifier:true,common:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};

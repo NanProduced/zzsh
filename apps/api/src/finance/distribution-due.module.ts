@@ -1,12 +1,16 @@
 import { DynamicModule, Inject, Injectable, Module, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { businessFeatureEnabled, ConfigurationError } from '../config/config';
 import type { DistributionEarningStore, MaintenanceOperator } from './distribution-earning-store';
+import { DISTRIBUTION_DUE_LOCK_KEY, DistributionAccrualSessionLost, runDistributionAccrualTasks } from './distribution-accrual-tasks';
+import { DistributionMaintenanceCommitUnknown } from './distribution-maintenance-batch';
 import { LegacyCommissionCommitUnknown, runLegacyCommissionDuePage, type LegacyCommissionCursor } from './legacy-commission-due-worker';
 
 export type DistributionDueModuleOptions = { pool: Pool; store: DistributionEarningStore; intervalMs: number; batchLimit: number; workerId: string; legacyDue?:boolean };
-const LOCK_KEY = '806007';
+const LOCK_KEY = DISTRIBUTION_DUE_LOCK_KEY;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const dueRequestId = (workerId: string) => `due_${createHash('sha256').update(workerId).digest('hex').slice(0,16)}_${randomUUID().replaceAll('-','')}`;
 export function loadDistributionDueRuntime(pool: Pool | undefined, store: DistributionEarningStore | undefined, env: NodeJS.ProcessEnv = process.env): DistributionDueModuleOptions | undefined {
   if (!businessFeatureEnabled(env, 'DISTRIBUTION_DUE_WORKER_ENABLED')) return undefined;
   if (!pool || !store) throw new ConfigurationError('DISTRIBUTION_DUE_WORKER_ENABLED=true requires explicit NATIVE distribution assembly');
@@ -60,18 +64,19 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
       return client;
     } catch { client.release(true); return null; }
   }
-  private async releaseLock(): Promise<void> {
+  private async releaseLock(destroy = false): Promise<void> {
     const client = this.locking;
     this.locking = null;
     const lost = this.lockLost;
     this.lockLost = null;
     if (!client) return;
     if (lost) { client.removeListener('error', lost); client.removeListener('end', lost); }
+    if (destroy) { try { client.release(true); } catch { /* already destroyed */ } return; }
     let released = false;
     try { released = (await client.query('SELECT pg_advisory_unlock($1::bigint) AS released', [LOCK_KEY])).rows[0]?.released === true; } catch { /* drop an unusable session below */ }
     try { client.release(!released); } catch { /* already destroyed sessions have no pool lease */ }
   }
-  /** One drive cycle: holding the session lock is the only execution right, and an unfinished original batch always wins. */
+  /** Recover original batches first; an unresolved item cannot block unrelated due earnings. */
   async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
@@ -80,12 +85,23 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
         const client = await this.ensureLock();
         if (!client) return;
         const operator = this.operator;
-        const unfinished = await this.options.store.findUnfinishedBatch(this.options.pool, { operator, client });
+        const accrual = await runDistributionAccrualTasks(client, this.options.store, operator, this.options.batchLimit,
+          () => !this.stopping && this.locking === client);
+        if (!accrual.available) console.error(JSON.stringify({ event: 'distribution.accrual.schema_unavailable' }));
+        else if (accrual.examined) console.log(JSON.stringify({ event: 'distribution.accrual.tasks', ...accrual }));
+        const unfinished = await this.options.store.findUnfinishedBatch(this.options.pool, { operator, client, allSystemWorkers: true });
+        const originalOperator = unfinished?.operatorUserId ? { ...operator, userId: unfinished.operatorUserId } : operator;
         const result = unfinished
-          ? await this.options.store.resumeBatch(this.options.pool, { requestId: unfinished.requestId, operator, client })
-          : await this.options.store.runDueBatch(this.options.pool, { limit: this.options.batchLimit, requestId: `due_${this.options.workerId}_${Date.now()}`, operator, client });
+          ? await this.options.store.resumeBatch(this.options.pool, { requestId: unfinished.requestId, operator: originalOperator, client })
+          : await this.options.store.runDueBatch(this.options.pool, { limit: this.options.batchLimit, requestId: dueRequestId(this.options.workerId), operator, client });
         if (result.batch.state === 'UNKNOWN') console.error(JSON.stringify({ event: 'distribution.due.unknown', requestId: result.batch.requestId, notAttempted: result.batch.notAttempted, recovery: 'RESUME_ORIGINAL_KEY' }));
         else if (result.batch.state === 'COMPLETE' && result.batch.results.length && !unfinished) console.log(JSON.stringify({ event: 'distribution.due.complete', requestId: result.batch.requestId, attempted: result.batch.results.length }));
+        if (unfinished && result.batch.state === 'UNKNOWN' && !this.stopping && this.locking === client) {
+          const independent = await this.options.store.runDueBatch(this.options.pool, {
+            limit: this.options.batchLimit, requestId: dueRequestId(this.options.workerId), operator, client,
+          });
+          if (independent.batch.state === 'UNKNOWN') console.error(JSON.stringify({ event: 'distribution.due.unknown', requestId: independent.batch.requestId, notAttempted: independent.batch.notAttempted, recovery: 'RESUME_ORIGINAL_KEY' }));
+        }
         if(this.options.legacyDue && !this.stopping && this.locking===client){
           const legacy=await runLegacyCommissionDuePage(client,this.legacyCursor,this.options.batchLimit,()=>this.stopping||this.locking!==client);
           this.legacyCursor=legacy.cursor;
@@ -95,7 +111,8 @@ export class DistributionDueService implements OnModuleInit, OnApplicationShutdo
       } catch (error) {
         // An exception may sit after the money commit, so the key is never replaced here; the next tick resumes it.
         console.error(JSON.stringify({ event: 'distribution.due.failed', reason: error instanceof Error ? error.message : String(error), recovery: 'RESUME_ORIGINAL_KEY' }));
-        if (this.stopping || error instanceof LegacyCommissionCommitUnknown) await this.releaseLock();
+        if (this.stopping || error instanceof LegacyCommissionCommitUnknown || error instanceof DistributionAccrualSessionLost || error instanceof DistributionMaintenanceCommitUnknown)
+          await this.releaseLock(error instanceof LegacyCommissionCommitUnknown || error instanceof DistributionAccrualSessionLost || error instanceof DistributionMaintenanceCommitUnknown);
       } finally { this.running = false; }
     })();
     await this.inFlight;

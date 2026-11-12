@@ -19,6 +19,7 @@ import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
 import { fixedFeeSettlementSchemaReady } from "../finance/fixed-fee-settlement-schema";
+import { assertDistributionAccrualTask } from "../finance/distribution-accrual-tasks";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
@@ -2007,6 +2008,7 @@ async function postReadySettlement(
       platformContribution.toString(), fee.toString(), manualReason, version.approvalRequestId,
       approval?.requestedBy ?? null, approval?.decidedBy ?? null, approval?.expiresAt ?? null, approval?.payloadHash ?? null, postedAt],
   )).rows[0]!;
+  await assertDistributionAccrualTask(client, postingId, snapshot.schema === "settlement-version-v4");
 
   const entries: Array<Record<string, unknown>> = [];
   addPostingEntry(entries, "CAPTURED_PAYMENT_SOURCE", -captured, {

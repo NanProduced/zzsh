@@ -4,10 +4,12 @@ import { withTransaction, recordAudit } from '../auth/security-core';
 import { canonicalize } from '../supply/content-hash';
 import { conflict, forbidden, invalid, notFound } from '../supply/supply-util';
 import type { MaintenanceBatch, MaintenanceOperator } from './distribution-earning-store';
+import { distributionAccrualTaskSchema } from './distribution-accrual-tasks';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const unusableClients = new WeakSet<PoolClient>();
+export class DistributionMaintenanceCommitUnknown extends Error {}
 type Operation = 'ACCRUALS_REPLAY' | 'DUE_SETTLE';
 /** Money bodies run on the caller's client so a batch never borrows a second pooled connection. */
 type Callbacks = {
@@ -23,6 +25,18 @@ type CommandInput = { requestId: string; operator: MaintenanceOperator; gameIds?
 /** One namespace per actor: the fingerprint carries the operation, so a key can never name two different commands. */
 const scopeKey = (operator: MaintenanceOperator) => JSON.stringify([operator.system ? 'system' : 'admin', operator.userId, 'distribution.maintenance', null]);
 const auditActor = (operator: MaintenanceOperator) => operator.system ? { actorType: 'system', actorId: operator.userId } : { actorType: 'admin', actorId: operator.userId, sessionId: operator.sessionId };
+/** Unresolved original plans retain their earnings until their own receipt is recovered. */
+export const unreservedDueEarningSql = `NOT EXISTS (SELECT 1 FROM zzsh_supply.idempotency_record pending
+  WHERE pending.response_status<>200
+    AND (pending.scope_key LIKE '["system",%' OR pending.scope_key LIKE '["admin",%')
+    AND pending.scope_key LIKE '%,"distribution.maintenance",null]'
+    AND pending.response_body->>'operation'='DUE_SETTLE'
+    AND (jsonb_typeof(pending.response_body#>'{plan,earningIds}') IS DISTINCT FROM 'array'
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(pending.response_body#>'{plan,earningIds}')='array'
+        THEN pending.response_body#>'{plan,earningIds}' ELSE '[]'::jsonb END) AS original(item)
+        WHERE jsonb_typeof(original.item) IS DISTINCT FROM 'object'
+          OR COALESCE(original.item->>'earningId','')='' OR COALESCE(original.item->>'version','')=''
+          OR original.item->>'earningId'=e.id)))`;
 const failureCode = (error: unknown) => {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'EARNING_WRITE_FAILED';
@@ -55,8 +69,13 @@ async function assertPlanScope(client: PoolClient, operator: MaintenanceOperator
 async function onClient<T>(client: PoolClient, run: () => Promise<T>) {
   if (unusableClients.has(client)) throw conflict('Original transaction requires receipt recovery on a new connection');
   await client.query('BEGIN');
-  try { const value = await run(); await client.query('COMMIT'); return value; }
+  let commitRequested = false;
+  try { const value = await run(); commitRequested = true; await client.query('COMMIT'); return value; }
   catch (error) {
+    if (commitRequested) {
+      unusableClients.add(client);
+      throw new DistributionMaintenanceCommitUnknown('Distribution commit outcome is unknown; recover the original receipt', { cause: error });
+    }
     try { await client.query('ROLLBACK'); } catch { unusableClients.add(client); }
     throw error;
   }
@@ -106,9 +125,14 @@ async function plan(client: PoolClient, operation: Operation, input: CommandInpu
   let planValue: MaintenanceBatch['plan'];
   if (operation === 'DUE_SETTLE') {
     if (!Number.isSafeInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 100) throw invalid('Bounded due batch required');
+    const taskSchema = await distributionAccrualTaskSchema(client);
+    if (taskSchema === 'PARTIAL') throw conflict('Distribution accrual task contract is incomplete');
+    const tasksAvailable = taskSchema === 'READY';
     const rows = (await client.query(`SELECT e.id,e.version::text AS version FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
       WHERE e.state='PENDING' AND e.due_at<=clock_timestamp() AND ($1::text[] IS NULL OR e.order_id=ANY($1)) AND ($2::text[] IS NULL OR o.game_id=ANY($2))
+      ${tasksAvailable?"AND o.status='COMPLETED' AND EXISTS(SELECT 1 FROM zzsh_order.distribution_accrual_task t WHERE t.posting_id=e.posting_id AND t.state='DONE')":""}
       ${callbacks.registeredAdmission?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=e.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$4 AND a.approval_digest=$5 AND a.active)":""}
+      AND ${unreservedDueEarningSql}
       ORDER BY e.due_at,e.id LIMIT $3`, [callbacks.local&&!callbacks.registeredAdmission ? [...callbacks.allowedOrderIds] : null, gameScope, input.limit,...(callbacks.registeredAdmission?[callbacks.registeredAdmission.resourceOid,callbacks.registeredAdmission.approvalDigest]:[])])).rows;
     planValue = { earningIds: rows.map((row: any) => ({ earningId: row.id, version: String(row.version) })) };
   } else {
@@ -162,17 +186,17 @@ async function execute(client: PoolClient, batch: MaintenanceBatch, operator: Ma
       const rejected = terminalRejection(error);
       const nextResults = [...current.results.filter(resultValue => resultValue.id !== id), { id, ...(current.operation === 'DUE_SETTLE' ? { earningId: item.earningId } : { orderId: item.orderId }),
         status: rejected ? 'REJECTED' : 'UNKNOWN', errorCode: failureCode(error), ...(rejected ? {} : { recoveryRequired: true }) }];
-      current = { ...current, state: rejected ? current.state : 'UNKNOWN', results: nextResults, notAttempted: items.length - nextResults.length, updatedAt: new Date().toISOString() };
-      await save(rejected ? 202 : 503);
-      if (!rejected) return current;
+      current = { ...current, state: nextResults.some(value => value.status === 'UNKNOWN') ? 'UNKNOWN' : current.state, results: nextResults, notAttempted: items.length - nextResults.length, updatedAt: new Date().toISOString() };
+      await save(current.state === 'UNKNOWN' ? 503 : 202);
       continue;
     }
     const nextResults = [...current.results.filter(resultValue => resultValue.id !== id), result];
-    current = { ...current, state: 'RUNNING', results: nextResults, notAttempted: items.length - nextResults.length, updatedAt: new Date().toISOString() };
-    await save(202);
+    current = { ...current, state: nextResults.some(value => value.status === 'UNKNOWN') ? 'UNKNOWN' : 'RUNNING', results: nextResults, notAttempted: items.length - nextResults.length, updatedAt: new Date().toISOString() };
+    await save(current.state === 'UNKNOWN' ? 503 : 202);
   }
-  current = { ...current, state: 'COMPLETE', notAttempted: 0, updatedAt: new Date().toISOString() };
-  await save(200);
+  const unknown = current.results.some(value => value.status === 'UNKNOWN');
+  current = { ...current, state: unknown ? 'UNKNOWN' : 'COMPLETE', notAttempted: 0, updatedAt: new Date().toISOString() };
+  await save(unknown ? 503 : 200);
   return current;
 }
 /** Plan + execute under one lock acquisition, so no window lets a second command re-plan the same key. */
@@ -217,12 +241,24 @@ export function createMaintenanceBatchRunner(callbacks: Callbacks) {
       if (!result) throw conflict('Distribution batch is already running');
       return result;
     },
-    async findUnfinishedBatch(pool: Pool, input: { operator: MaintenanceOperator; client?: PoolClient }) {
+    async findUnfinishedBatch(pool: Pool, input: { operator: MaintenanceOperator; client?: PoolClient; allSystemWorkers?: boolean }) {
+      if (input.allSystemWorkers && (!input.operator.system || !/^distribution-due-[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.operator.userId))) {
+        throw forbidden('System distribution worker required');
+      }
       const work = async (client: PoolClient) => {
-        const found = await client.query(`SELECT key,response_status AS status,response_body AS body FROM zzsh_supply.idempotency_record
-          WHERE scope_key=$1 AND response_status<>200 ORDER BY created_at DESC LIMIT 1`, [scopeKey(input.operator)]);
-        const row = found.rows[0] as { key: string; status: number; body: MaintenanceBatch } | undefined;
-        return row ? { requestId: row.key, status: Number(row.status), operation: row.body.operation } : null;
+        const found = await client.query(`SELECT scope_key,key,response_status AS status,response_body AS body FROM zzsh_supply.idempotency_record
+          WHERE ${input.allSystemWorkers ? `scope_key LIKE '["system","distribution-due-%'` : 'scope_key=$1'} AND response_status<>200
+          ORDER BY ${input.allSystemWorkers ? "COALESCE(NULLIF(response_body->>'updatedAt',''),to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')) ASC,created_at ASC" : 'created_at DESC'},key LIMIT 1`,
+          input.allSystemWorkers ? [] : [scopeKey(input.operator)]);
+        const row = found.rows[0] as { scope_key: string; key: string; status: number; body: MaintenanceBatch } | undefined;
+        if (!row) return null;
+        if (!input.allSystemWorkers) return { requestId: row.key, status: Number(row.status), operation: row.body.operation };
+        let scope: unknown;
+        try { scope = JSON.parse(row.scope_key); } catch { throw conflict('Original distribution worker scope is invalid'); }
+        if (!Array.isArray(scope) || scope.length !== 4 || scope[0] !== 'system' || typeof scope[1] !== 'string'
+            || !/^distribution-due-[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(scope[1])
+            || scope[2] !== 'distribution.maintenance' || scope[3] !== null) throw conflict('Original distribution worker scope is invalid');
+        return { requestId: row.key, status: Number(row.status), operation: row.body.operation, operatorUserId: scope[1] };
       };
       return input.client ? onClient(input.client, () => work(input.client!)) : withTransaction(pool, work);
     },
