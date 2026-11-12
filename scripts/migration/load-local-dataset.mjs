@@ -143,9 +143,24 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
 }
 if (execute) assertNextMigrationWriteReady(registered);
 if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
-
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
+const usesSystemUser = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemUserId === "string"));
+let systemUserMigration = null;
+if (usesSystemUser) {
+    try { systemUserMigration = mod("legacy-load/system-user-migration"); }
+    catch { throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED"); }
+}
+if (usesSystemUser
+    && (typeof systemUserMigration?.systemUserMigrationId !== "function" || typeof systemUserMigration?.withSystemUserMigrationBatch !== "function"))
+    throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED");
+const systemUserTarget = systemUserMigration ? {
+    systemIdentifier: registered.instance?.systemIdentifier, databaseOid: registered.oid, marker: registered.marker,
+    nonce: registered.nonce, roleOid: registered.migrationRoleOid,
+} : null;
+const systemUserId = systemUserMigration && systemUserTarget ? systemUserMigration.systemUserMigrationId(sha(manifestBytes), systemUserTarget) : null;
+
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
+    ...(systemUserId ? {systemUserId} : {}),
     ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
@@ -377,7 +392,7 @@ async function runBatches(domain, items, chunkBody, batchSize = 500) {
 }
 async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
     return runItems(domain, readRows(file), body, batchSize); }
-async function applyUser(row, profiles, batchSubjects) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, actor);
+async function applyUser(row, profiles, batchSubjects, userActor = actor) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, userActor);
     if (batchSubjects && result.userId !== row.userId) throw new Error("LEGACY_IDENTITY_SOURCE_BINDING_CONFLICT");
     if (row.trustedIdentityNumber) {
     const wanted = subject.identitySubjectDigest(row.trustedIdentityNumber, subjectKey);
@@ -407,35 +422,48 @@ async function applyUsers() {
     const proof = nextProfile ? await preflightBoundSourceBatches(file, manifest.files.users, 100) : null;
     const rows = proof ? readBoundSourceBatches(file, manifest.files.users, proof) : readRows(file);
     return runBatches("users", rows, async (batch, start) => {
-        const results = [], profiles = [], batchSubjects = registered.migrationProfile === NEXT_MIGRATION_PROFILE && hasIdentityProfiles ? [] : null;
-        if (batchSubjects) {
-            assertRoundWindow();
-            await mod("auth/admin-auth-session").assertAdminCommandAuthorizedInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
-            await mod("finance/personal-finance-maintenance").authorizeFinanceMaintenance(client, actor);
-            assertRoundWindow();
-            const userMigration = mod("supply/legacy-user-migration"), ids = batch.map(row => {
-                const evidence = row.input?.evidence;
-                if (!evidence || row.sourceId !== evidence.legacyId || row.sourceDigest !== evidence.sourceDigest
-                    || row.userId !== userMigration.legacyOwnerUserId(evidence.sourceSystem, evidence.sourceEntity, evidence.legacyId))
-                    throw new Error("LEGACY_IDENTITY_SOURCE_BINDING_CONFLICT");
-                return row.userId;
-            });
-            if (new Set(ids).size !== ids.length) throw new Error("LEGACY_IDENTITY_DUPLICATE_USER");
-            await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE', [ids]);
-            assertRoundWindow();
+        const userMigration = mod("supply/legacy-user-migration");
+        const admitted = new Set(), userIds = new Set();
+        if (nextProfile) for (const row of batch) {
+            const e = row.input?.evidence;
+            if (!e || row.sourceId !== e.legacyId || row.sourceDigest !== e.sourceDigest
+                || row.userId !== userMigration.legacyOwnerUserId(e.sourceSystem, e.sourceEntity, e.legacyId)
+                || typeof row.input.evidenceDigest !== "string" || !/^[a-f0-9]{64}$/.test(row.input.evidenceDigest))
+                throw new Error("LEGACY_SYSTEM_USER_SOURCE_BINDING_INVALID");
+            if (userIds.has(row.userId)) throw new Error("LEGACY_IDENTITY_DUPLICATE_USER");
+            userIds.add(row.userId);
+            const key = JSON.stringify([e.sourceSystem, e.sourceEntity, e.legacyId, e.sourceDigest, row.input.evidenceDigest]);
+            admitted.add(key);
         }
-        for (const [offset, row] of batch.entries()) {
-            try { results.push(await applyUser(row, profiles, batchSubjects)); }
-            catch (error) { try { event({ event: "STRICT_ROW_REJECTED", domain: "users", index: start + offset, status: error?.status ?? null }); } catch { } throw error; }
-        }
-        if (profiles.length) {
-            try {
-                if (batchSubjects) await subject.recordLegacyIdentitySubjects(client, batchSubjects, subjectKey);
-                await identityProfile.recordLegacyIdentityProfiles(client, profiles, profileKey, subjectKey);
+        const userActor = nextProfile ? {
+            kind: "SYSTEM_USER_MIGRATION", id: systemUserId, sourceDatasetSha256: sha(manifestBytes), target: systemUserTarget,
+            requestId: "core-legacy-dataset-" + expectedOid,
+            assertMigrationFence: async targetClient => { assertRoundWindow(); if (!fenceHeld || !fenceEpoch) throw new Error("TARGET_FENCE_EPOCH_LOST");
+                await assertMigrationFenceHeld(targetClient, registered, fenceEpoch); assertRoundWindow(); },
+            assertSourceEvidence: async source => { if (!admitted.has(JSON.stringify([source.sourceSystem, source.sourceEntity, source.legacyId, source.sourceDigest, source.evidenceDigest])))
+                throw new Error("LEGACY_SYSTEM_USER_SOURCE_NOT_ADMITTED"); },
+        } : actor;
+        const applyBatch = async () => {
+            const results = [], profiles = [], batchSubjects = nextProfile && hasIdentityProfiles ? [] : null;
+            if (batchSubjects) {
+                assertRoundWindow();
+                await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE', [[...userIds]]);
+                assertRoundWindow();
             }
-            catch (error) { try { event({ event: "STRICT_BATCH_REJECTED", domain: "users", start, count: profiles.length, status: error?.status ?? null }); } catch { } throw error; }
-        }
-        return results;
+            for (const [offset, row] of batch.entries()) {
+                try { results.push(await applyUser(row, profiles, batchSubjects, userActor)); }
+                catch (error) { try { event({ event: "STRICT_ROW_REJECTED", domain: "users", index: start + offset, status: error?.status ?? null }); } catch { } throw error; }
+            }
+            if (profiles.length) {
+                try {
+                    if (batchSubjects) await subject.recordLegacyIdentitySubjects(client, batchSubjects, subjectKey);
+                    await identityProfile.recordLegacyIdentityProfiles(client, profiles, profileKey, subjectKey);
+                }
+                catch (error) { try { event({ event: "STRICT_BATCH_REJECTED", domain: "users", start, count: profiles.length, status: error?.status ?? null }); } catch { } throw error; }
+            }
+            return results;
+        };
+        return nextProfile ? systemUserMigration.withSystemUserMigrationBatch(client, userActor, applyBatch) : applyBatch();
     }, 100);
 }
 async function applyAccounts() { await runPhase("accounts", async (row) => { const gameId = gameIds.get(row.gameCode); if (!gameId)

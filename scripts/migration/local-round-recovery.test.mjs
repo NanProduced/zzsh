@@ -90,6 +90,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   if (unicodeFirst) userRows[0].input.note = "合成\u2028昵称\u2029保留";
   if (verifiedFirst) Object.assign(userRows[0], { userId: "synthetic-user-101", sourceDigest: "a".repeat(64), trustedIdentityNumber: "99000019900101123X",
     legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: "101", sourceDigest: "a".repeat(64), status: { realNameBound: true } } } });
+  if (migrationProfile === NEXT_MIGRATION_PROFILE) for (const row of userRows) row.input.evidenceDigest = "b".repeat(64);
   if (failure === "missing-identity-profile") delete userRows[0].legacyIdentityProfile;
   if (failure === "duplicate-identity-user") userRows[1] = structuredClone(userRows[0]);
   const put = (file, value) => files.set(file, JSON.stringify(value));
@@ -167,8 +168,12 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
     "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
       importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){} },
-    "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, migrateLegacyOwner(_client, row) {
-      if (migrationProfile === NEXT_MIGRATION_PROFILE) commands.push("SYNTHETIC_MIGRATE_USER");
+    "legacy-load/system-user-migration": { systemUserMigrationId(source, target) { return "synthetic-system-" + sha(JSON.stringify([source,target])); },
+      async withSystemUserMigrationBatch(c, acting, body) { commands.push("SYSTEM_USER_BATCH"); if (failure === "batch-actor-lost") throw Object.assign(Error("system actor unavailable"), {status:403});
+        await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; } },
+    "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, async migrateLegacyOwner(_client, row, acting) {
+      if (migrationProfile === NEXT_MIGRATION_PROFILE) { assert.equal(acting.kind,"SYSTEM_USER_MIGRATION");
+        await acting.assertSourceEvidence({sourceSystem:row.evidence.sourceSystem,sourceEntity:row.evidence.sourceEntity,legacyId:row.evidence.legacyId,sourceDigest:row.evidence.sourceDigest,evidenceDigest:row.evidenceDigest}); commands.push("SYNTHETIC_MIGRATE_USER"); }
       if (row.id === 2 && ["rejected", "lost-rollback"].includes(failure)) throw Object.assign(Error("original rejection"), { status: 409 });
       if (unicodeFirst && row.id === 1) { assert.equal(row.note, "合成\u2028昵称\u2029保留"); commands.push("UNICODE_SOURCE_PRESERVED"); }
       return { replayed: false, ...(row.evidence.legacyId ? { userId: "synthetic-user-" + row.evidence.legacyId } : {}) };
@@ -274,7 +279,7 @@ test('next-profile core batches acquire the transaction fence before writes and 
   assert(applied.commands.indexOf('USER_SOURCE_BOUND_READ') < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
-  assert(applied.commands.indexOf('BATCH_ACTOR_LOCK') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));
+  assert(applied.commands.indexOf('SYSTEM_USER_BATCH') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));
   assert(applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')) < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
   assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('SYNTHETIC_IDENTITY_SUBJECT_BATCH'));
   assert(!applied.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
@@ -283,6 +288,17 @@ test('next-profile core batches acquire the transaction fence before writes and 
   const rejected = await load({ ...options, failure:'fence-lost' });
   assert.equal(rejected.state.status, 'FAILED_ROLLED_BACK'); assert(rejected.commands.includes('ROLLBACK'));
   assert(!rejected.commands.includes('COMMIT')); assert(!rejected.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
+});
+
+test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
+  const options = { instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, verifiedFirst:true };
+  const failed = await load({ ...options, failure:'lost-commit', exitAfterUsers:true });
+  assert.equal(failed.state.status, 'COMMIT_UNKNOWN'); assert.match(failed.state.binding.systemUserId, /^synthetic-system-/);
+  const recovered = await load({ ...options, previous:failed, recover:true });
+  assert.ifError(recovered.error); assert.equal(recovered.exit, undefined);
+  const receipt = JSON.parse([...recovered.files].find(([file]) => file.startsWith(path.join(out, 'recovery-')))[1]);
+  assert.equal(receipt.binding.systemUserId, failed.state.binding.systemUserId); assert.equal(receipt.knowledge, 'EXACT_PENDING_KEYS_REQUIRE_INSPECTION');
+  assert(!recovered.commands.includes('SYNTHETIC_MIGRATE_USER')); assert(!recovered.commands.includes('COMMIT'));
 });
 
 test("a retained successful payment conflicting with the order flag stops before any connection or target write",async()=>{
@@ -338,7 +354,7 @@ test("strict loader preserves Unicode separators in prepared JSONL", async () =>
 test("NEXT lost actor authorization rolls back before locking users", async () => {
   const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
     fenceFixture:true, verifiedFirst:true, failure:'batch-actor-lost' });
-  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("BATCH_ACTOR_LOCK"));
+  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYSTEM_USER_BATCH"));
   assert(result.commands.includes("ROLLBACK")); assert(!result.commands.some(sql=>sql.includes('ORDER BY id COLLATE')));
   assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
 });
@@ -346,7 +362,7 @@ test("NEXT lost actor authorization rolls back before locking users", async () =
 test("NEXT window expiry during user lock rolls back before migration writes", async () => {
   const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
     fenceFixture:true, verifiedFirst:true, failure:'window-expired-after-prelock' });
-  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("BATCH_ACTOR_LOCK"));
+  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYSTEM_USER_BATCH"));
   assert(result.commands.some(sql=>sql.includes('ORDER BY id COLLATE'))); assert(result.commands.includes("ROLLBACK"));
   assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
 });
