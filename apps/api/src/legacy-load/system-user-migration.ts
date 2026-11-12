@@ -97,7 +97,8 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
           AND t.tgtype=required.kind::smallint
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
           AND p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_user_audit()') AND p.proowner=a.relowner AND NOT p.prosecdef
-          AND position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-user-migration:' IN p.prosrc)>0))
+          AND position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-user-migration:' IN p.prosrc)>0
+          AND position('initialAvatar,presetId' IN p.prosrc)>0 AND position('zzsh_supply.profile_avatar' IN p.prosrc)>0))
     ,false) AS authorized
     FROM pg_roles r JOIN pg_class a ON a.oid=to_regclass('zzsh_iam.audit_event')
       JOIN pg_class u ON u.oid=to_regclass('zzsh_auth_user."user"')
