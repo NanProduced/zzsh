@@ -69,17 +69,30 @@ function useWithdrawalIdentity(scope: string, onIdentityFailure?: IdentityFailur
 
 function BankChipSvg() {
   return (
-    <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 36 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <rect width="36" height="28" rx="4" fill="url(#chip-grad-workspace)" />
-      <rect x="0.5" y="0.5" width="35" height="27" rx="3.5" stroke="#D4AF37" strokeOpacity="0.4" />
-      <path d="M0 10H12M0 18H12M24 10H36M24 18H36M12 10C12 14 12 14 12 18M24 10C24 14 24 14 24 18M12 14H24M18 0V10M18 18V28" stroke="#8C6D1F" strokeWidth="1" strokeOpacity="0.6" />
+    <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 34 26" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="34" height="26" rx="4.5" fill="url(#chip-surface-grad)" stroke="#c4a568" strokeWidth="0.8" />
+      <path d="M0 9h11a3 3 0 0 1 3 3v2a3 3 0 0 1-3 3H0" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.65" />
+      <path d="M34 9h-11a3 3 0 0 0-3 3v2a3 3 0 0 0 3 3h11" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.65" />
+      <path d="M17 0v26" stroke="#8a6723" strokeWidth="0.75" strokeDasharray="3 2" opacity="0.45" />
+      <rect x="12.5" y="9.5" width="9" height="7" rx="1.5" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.6" />
       <defs>
-        <linearGradient id="chip-grad-workspace" x1="0" y1="0" x2="36" y2="28" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#F5D77F" />
-          <stop offset="0.5" stopColor="#E5C158" />
-          <stop offset="1" stopColor="#C99E32" />
+        <linearGradient id="chip-surface-grad" x1="0" y1="0" x2="34" y2="26" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#fef3c7" />
+          <stop offset="0.35" stopColor="#fde68a" />
+          <stop offset="0.7" stopColor="#f59e0b" stopOpacity="0.85" />
+          <stop offset="1" stopColor="#d97706" stopOpacity="0.75" />
         </linearGradient>
       </defs>
+    </svg>
+  );
+}
+
+function ContactlessSvg() {
+  return (
+    <svg className="bank-contactless-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8.5 16.5a5 5 0 0 1 0-9" />
+      <path d="M12 19a8.5 8.5 0 0 0 0-14" />
+      <path d="M15.5 21.5a12 12 0 0 0 0-19" />
     </svg>
   );
 }
@@ -200,18 +213,21 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
       <div className="bank-saved">
         <div className="bank-card-realistic">
           <svg className="bank-card-waves" viewBox="0 0 320 200" fill="none" preserveAspectRatio="none" aria-hidden="true">
-            <path d="M-20 130 C 80 80, 160 180, 340 90" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.12" fill="none" />
-            <path d="M-10 160 C 90 110, 180 210, 350 120" stroke="currentColor" strokeWidth="1.5" strokeOpacity="0.08" fill="none" />
-            <circle cx="270" cy="40" r="70" fill="url(#card-glow-workspace)" opacity="0.15" />
+            <path d="M-20 130 C 80 80, 160 180, 340 90" stroke="currentColor" strokeWidth="1.2" strokeOpacity="0.08" fill="none" />
+            <path d="M-10 160 C 90 110, 180 210, 350 120" stroke="currentColor" strokeWidth="1.2" strokeOpacity="0.06" fill="none" />
+            <circle cx="270" cy="40" r="70" fill="url(#card-glow-workspace)" opacity="0.1" />
             <defs>
               <radialGradient id="card-glow-workspace" cx="50%" cy="50%" r="50%">
-                <stop stopColor="#F5D77F" />
+                <stop stopColor="#f59e0b" />
                 <stop offset="100%" stopColor="transparent" />
               </radialGradient>
             </defs>
           </svg>
           <div className="bank-card-top">
-            <span className="bank-card-network">收款银行卡</span>
+            <div className="bank-card-brand">
+              <span className="bank-card-network">收款银行账户</span>
+              <ContactlessSvg />
+            </div>
             <BankChipSvg />
           </div>
           <div className="bank-card-number">{visible.value.binding.cardMask}</div>
@@ -225,6 +241,29 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
         </div>
         <p className="bank-meta">更新于 {timeLabel(visible.value.binding.updatedAt)}</p>
         {!form.open && !activeRecovery && !storageBlocked ? <Button variant="secondary" className="bank-action" onPress={beginEdit}>修改收款资料</Button> : null}
+      </div>
+      <div className="bank-security-tips" aria-label="提现说明">
+        <div className="bank-security-tip-item">
+          <span className="bank-security-tip-icon">⚡</span>
+          <div>
+            <strong>快速审核到账</strong>
+            <p>工作日申请由系统自动复核，预计 2 小时内打款至您的银行账户。</p>
+          </div>
+        </div>
+        <div className="bank-security-tip-item">
+          <span className="bank-security-tip-icon">🛡️</span>
+          <div>
+            <strong>实名一致性保障</strong>
+            <p>收款卡姓名必须与已认证实名完全一致，杜绝资金错付。</p>
+          </div>
+        </div>
+        <div className="bank-security-tip-item">
+          <span className="bank-security-tip-icon">💰</span>
+          <div>
+            <strong>平台免手续费</strong>
+            <p>平台全额补贴结算通道费，提现金额如数到账。</p>
+          </div>
+        </div>
       </div>
     </> : <div className="bank-empty">
       <div className="bank-empty-visual" aria-hidden="true"><span className="bank-card-ghost"><CreditCard size={32} /></span></div>
