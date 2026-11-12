@@ -11,6 +11,7 @@ import { canonicalize } from "./content-hash";
 import { normalizeMainlandPhone } from "../auth/phone-number";
 import { lockLegacySource } from "./legacy-observation";
 import { parseLegacyContactProjection, type LegacyContactProjection } from "../legacy-load/legacy-contact-projection";
+import { authorizeSystemUserMigration, type SystemUserMigrationActor } from "../legacy-load/system-user-migration";
 import {
   conflict,
   forbidden,
@@ -255,20 +256,29 @@ async function authorizeLegacyContactMigrationAdmin(client: PoolClient, actor: L
 export async function migrateLegacyOwner(
   client: PoolClient,
   input: LegacyOwnerMigrationInput,
-  actor: LegacyOwnerMigrationActor,
+  actor: LegacyOwnerMigrationActor | SystemUserMigrationActor,
 ): Promise<LegacyOwnerMigrationResult> {
   const normalized = normalizeLegacyOwnerInput(input);
   const { evidence, evidenceDigest } = normalized;
   const status = derivedStatusValues(evidence.status);
   const idempotencyKey = legacyOwnerMigrationKey(evidence);
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_USER_MIGRATION" ? actor : null;
+  if (systemActor && (evidence.sourceSystem !== "legacy_mysql_restore" || evidence.sourceEntity !== "la_user"
+      || !/^[1-9][0-9]{0,23}$/.test(evidence.legacyId))) throw invalid("Legacy system user source is invalid");
   const result = await withIdempotency(
     client,
-    { realm: "admin", principalId: actor.id, operation: OPERATION_MIGRATE },
+    { realm: systemActor ? "system" : "admin", principalId: actor.id, operation: OPERATION_MIGRATE },
     idempotencyKey,
     fingerprintRequest(OPERATION_MIGRATE, undefined, evidence),
     async () => {
-      await authorizeLegacyMigrationAdmin(client, actor);
-      if (evidence.contactProjection) await authorizeLegacyContactMigrationAdmin(client, actor, true);
+      if (systemActor) await authorizeSystemUserMigration(client, systemActor, {
+        sourceSystem: evidence.sourceSystem, sourceEntity: evidence.sourceEntity, legacyId: evidence.legacyId, sourceDigest: evidence.sourceDigest, evidenceDigest,
+      });
+      else {
+        const admin = actor as LegacyOwnerMigrationActor;
+        await authorizeLegacyMigrationAdmin(client, admin);
+        if (evidence.contactProjection) await authorizeLegacyContactMigrationAdmin(client, admin, true);
+      }
     },
     async () => {
       await lockLegacySource(client, evidence);
@@ -382,9 +392,9 @@ export async function migrateLegacyOwner(
         [userId, status.accountStatus, status.identityStatus, status.ageStatus, MIGRATED_PROVIDER, providerReference, now],
       );
       await recordAudit(client, {
-        actorType: "admin",
+        actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        sessionId: actor.sessionId,
+        ...(systemActor ? { legacyUserMigrationManifestSha256: systemActor.sourceDatasetSha256 } : { sessionId: (actor as LegacyOwnerMigrationActor).sessionId }),
         requestId: actor.requestId,
         action: "user.legacy_owner.migrated",
         objectType: "user",
@@ -396,6 +406,7 @@ export async function migrateLegacyOwner(
           sourceEntity: evidence.sourceEntity,
           legacyId: evidence.legacyId,
           sourceDigest: evidence.sourceDigest,
+          ...(systemActor ? { sourceDatasetSha256: systemActor.sourceDatasetSha256, migrationRunDigest: systemActor.id.slice("legacy-user-migration:".length) } : {}),
           evidenceDigest,
           evidenceRef: evidence.evidenceRef,
           sourceCreatedAt: evidence.sourceCreatedAt,

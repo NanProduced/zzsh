@@ -14,6 +14,7 @@ import {
   type LegacyOwnerMigrationInput,
 } from "../src/supply/legacy-user-migration";
 import { planLegacyContactProjections, type LegacyContactProjection } from "../src/legacy-load/legacy-contact-projection";
+import { systemUserMigrationId, withSystemUserMigrationBatch } from "../src/legacy-load/system-user-migration";
 
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const MOBILE = "19900000001";
@@ -64,7 +65,7 @@ class FakeClient {
   readonly credentials = new Map<string, CredentialRow>();
   readonly identities = new Map<string, IdentityRow>();
   readonly profileAvatars = new Map<string, Record<string, unknown>>();
-  readonly audits: Array<{ object_id: string; action: string; details: Record<string, unknown> }> = [];
+  readonly audits: Array<{ object_id: string; action: string; details: Record<string, unknown>; actorType?: string; sourceManifest?: string }> = [];
   readonly idempotency = new Map<string, { requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>();
   readonly maps = new Map<string, MapRow>();
   readonly bindings = new Map<string, BindingRow>();
@@ -82,6 +83,10 @@ class FakeClient {
   sessionLocked = false;
   scope = true;
   failNextIdempotencyRead = false;
+  systemMigrationAuthorized = true;
+  systemTransactionId = "1234";
+
+  getTransactionStatus() { return "T"; }
 
   constructor() {
     this.maps.set(ACCOUNT_ID, {
@@ -99,6 +104,10 @@ class FakeClient {
   async query<T = Record<string, unknown>>(text: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
     const sql = text.replace(/\s+/g, " ").trim();
     this.queries.push(sql);
+    if (sql.includes("legacy_system_user_audit_insert"))
+      return { rows: [{ authorized: this.systemMigrationAuthorized, transactionId: this.systemTransactionId } as T], rowCount: 1 };
+    if (sql.startsWith("SELECT pg_current_xact_id()"))
+      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true } as T], rowCount: 1 };
     if (sql.includes("pg_advisory_xact_lock") || sql.startsWith("SELECT set_config")) return { rows: [], rowCount: 0 };
     if (sql.startsWith('SELECT s."locked",u."twoFactorEnabled"')) return { rows: [{ locked: this.sessionLocked, twoFactorEnabled: true, suspended: false } as T], rowCount: 1 };
     if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE" } as T], rowCount: 1 };
@@ -184,7 +193,7 @@ class FakeClient {
       return { rows: row ? [{ one: 1 } as T] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.startsWith("INSERT INTO zzsh_iam.audit_event") || sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) {
-      this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])) });
+      this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])), actorType: String(values[1]), ...(values[11] === undefined ? {} : { sourceManifest: String(values[11]) }) });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) {
@@ -290,6 +299,37 @@ test("contact-aware import verifies only the admitted authentication phone", asy
   const result = await migrateLegacyOwner(asClient(fake), { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) }, ACTOR);
   assert.equal(fake.users.get(result.userId)?.phoneNumber, "+86" + MOBILE);
   assert.equal(fake.users.get(result.userId)?.phoneNumberVerified, true);
+});
+
+test("system legacy user import binds each source and checks the batch fence on entry and exit", async () => {
+  const fake = new FakeClient(), sourceDatasetSha256 = "d".repeat(64); let fences = 0, admitted = true;
+  const target = { systemIdentifier: "123", databaseOid: "456", marker: "zzsh:synthetic:v1", nonce: "a".repeat(24), roleOid: "789" };
+  const actor = { kind: "SYSTEM_USER_MIGRATION" as const, id: systemUserMigrationId(sourceDatasetSha256, target),
+    sourceDatasetSha256, target, requestId: "system-user-import", assertMigrationFence: async () => { fences++; },
+    assertSourceEvidence: async () => { if (!admitted) throw Error("SOURCE_NOT_ADMITTED"); } };
+  assert.notEqual(actor.id, systemUserMigrationId(sourceDatasetSha256, { ...target, databaseOid: "457" }));
+  const payload = contactEvidence(evidence()), body = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
+  await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /batch is unavailable/);
+  await withSystemUserMigrationBatch(asClient(fake), actor, async () => {
+    const first = await migrateLegacyOwner(asClient(fake), body, actor), replay = await migrateLegacyOwner(asClient(fake), body, actor);
+    assert.equal(first.replayed, false); assert.equal(replay.replayed, true); assert.equal(fences, 1);
+    admitted = false; await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /SOURCE_NOT_ADMITTED/); admitted = true;
+    fake.systemTransactionId = "9999"; await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /transaction changed/); fake.systemTransactionId = "1234";
+  });
+  assert.equal(fences, 2);
+  const audit = fake.audits.find(row => row.action === "user.legacy_owner.migrated")!;
+  assert.equal(audit.actorType, "system"); assert.equal(audit.sourceManifest, sourceDatasetSha256);
+  assert.equal(audit.details.sourceDatasetSha256, sourceDatasetSha256);
+  let release!: () => void, firstFence = true;
+  const holding = { ...actor, assertMigrationFence: async () => { if (firstFence) { firstFence = false; await new Promise<void>(resolve => { release = resolve; }); } } };
+  const pending = withSystemUserMigrationBatch(asClient(fake), holding, async () => {});
+  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => {}), /already active/);
+  release(); await pending;
+  const changed = { ...actor };
+  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), changed, async () => { changed.assertMigrationFence = async () => {}; }), /batch changed/);
+  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => { fake.systemMigrationAuthorized = false; }), /protected migration role/);
+  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => {}), /protected migration role/);
+  assert.equal(fences, 6);
 });
 
 test("contact-aware importer persists a phone-null real subject and exact legacy alias without inventing a credential", async () => {

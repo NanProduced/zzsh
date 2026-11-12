@@ -154,7 +154,7 @@ export type IdempotencyReplay = { publishRequired: boolean } | null;
 
 export async function withIdempotency(
   client: PoolClient,
-  scope: { realm: "admin" | "user"; principalId: string; operation: string; resourceId?: string },
+  scope: { realm: "admin" | "user" | "system"; principalId: string; operation: string; resourceId?: string },
   key: string,
   fingerprint: string,
   authorize: (replay: IdempotencyReplay) => Promise<boolean | void>,

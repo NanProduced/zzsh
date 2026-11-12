@@ -58,12 +58,14 @@ export async function recordAudit(
     requestId: string;
     reason?: string;
     details?: Record<string, unknown>;
+    legacyUserMigrationManifestSha256?: string;
   },
 ): Promise<void> {
+  const migrationSource = values.legacyUserMigrationManifestSha256;
   await client.query(
     `INSERT INTO "zzsh_iam"."audit_event"
-      ("id", "actor_type", "actor_id", "session_id", "action", "object_type", "object_id", "outcome", "request_id", "reason", "occurred_at", "details")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp(), $11::jsonb)`,
+      ("id", "actor_type", "actor_id", "session_id", "action", "object_type", "object_id", "outcome", "request_id", "reason", "occurred_at", "details"${migrationSource === undefined ? "" : ', "legacy_user_migration_manifest_sha256"'})
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp(), $11::jsonb${migrationSource === undefined ? "" : ", $12"})`,
     [
       `audit_${randomUUID().replaceAll("-", "")}`,
       values.actorType,
@@ -76,6 +78,7 @@ export async function recordAudit(
       values.requestId,
       values.reason ?? null,
       JSON.stringify(values.details ?? {}),
+      ...(migrationSource === undefined ? [] : [migrationSource]),
     ],
   );
 }
