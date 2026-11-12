@@ -7,6 +7,7 @@ type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyI
 export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
 export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
+export type EmptyFinanceSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
 
 export function systemUserMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
   if (typeof sourceDatasetSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceDatasetSha256) || !target
@@ -59,30 +60,50 @@ export function systemOrderMigrationId(sourceDatasetSha256: string, target: Migr
   return `legacy-order-migration:${createHash("sha256").update(userId).digest("hex")}`;
 }
 
-type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor | SystemOrderMigrationActor;
+export type SystemFinanceMigrationActor = Readonly<{
+  kind: "SYSTEM_FINANCE_MIGRATION";
+  id: string;
+  requestId: string;
+  sourceDatasetSha256: string;
+  target: MigrationTarget;
+  fenceEpochSha256: string;
+  assertMigrationFence: (client: PoolClient) => Promise<void>;
+  assertSourceEvidence: (source: EmptyFinanceSource) => Promise<void>;
+}>;
+
+export function systemFinanceMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
+  const userId = systemUserMigrationId(sourceDatasetSha256, target);
+  return `legacy-finance-migration:${createHash("sha256").update(userId).digest("hex")}`;
+}
+
+type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor | SystemOrderMigrationActor | SystemFinanceMigrationActor;
 const activeBatches = new WeakMap<PoolClient, { actor: SystemMigrationActor; transactionId: string | null;
-  fence: SystemMigrationActor["assertMigrationFence"]; source: SystemMigrationActor["assertSourceEvidence"]; binding: string }>();
+  fence: SystemMigrationActor["assertMigrationFence"]; source: SystemMigrationActor["assertSourceEvidence"]; binding: string; readOnly: boolean }>();
 
 function expectedActorId(actor: SystemMigrationActor): string {
   if (actor.kind === "SYSTEM_USER_MIGRATION") return systemUserMigrationId(actor.sourceDatasetSha256, actor.target);
   if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION") return systemAccountMigrationId(actor.sourceDatasetSha256, actor.target);
   if (actor.kind === "SYSTEM_ORDER_MIGRATION") return systemOrderMigrationId(actor.sourceDatasetSha256, actor.target);
+  if (actor.kind === "SYSTEM_FINANCE_MIGRATION") return systemFinanceMigrationId(actor.sourceDatasetSha256, actor.target);
   throw forbidden("Legacy system migration kind is invalid");
 }
 function actorBinding(actor: SystemMigrationActor): string {
   return JSON.stringify([actor.kind,actor.id,actor.requestId,actor.sourceDatasetSha256,actor.target.systemIdentifier,
-    actor.target.databaseOid,actor.target.marker,actor.target.nonce,actor.target.roleOid]);
+    actor.target.databaseOid,actor.target.marker,actor.target.nonce,actor.target.roleOid,
+    actor.kind === "SYSTEM_FINANCE_MIGRATION" ? actor.fenceEpochSha256 : null]);
 }
 
-async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Promise<string> {
+async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, readOnly = false): Promise<string> {
   if (client.getTransactionStatus() !== "T" || actor.id !== expectedActorId(actor)
       || typeof actor.requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(actor.requestId)
       || typeof actor.assertMigrationFence !== "function" || typeof actor.assertSourceEvidence !== "function") {
     throw forbidden("Legacy system migration source is invalid");
   }
   await actor.assertMigrationFence(client);
-  const row = (await client.query<{ authorized: boolean; transactionId: string }>(`SELECT pg_current_xact_id()::text AS "transactionId", COALESCE(
+  const transactionIdentity = readOnly ? `(SELECT virtualtransaction::text FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='virtualxid' AND granted LIMIT 1)` : `pg_current_xact_id()::text`;
+  const row = (await client.query<{ authorized: boolean; transactionId: string }>(`SELECT ${transactionIdentity} AS "transactionId", COALESCE(
     current_user=session_user AND r.rolcanlogin AND NOT r.rolinherit AND NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole AND NOT r.rolbypassrls
+    ${readOnly ? "AND current_setting('transaction_read_only')='on' AND current_setting('transaction_isolation') IN ('repeatable read','serializable') AND pg_current_xact_id_if_assigned() IS NULL" : "AND current_setting('transaction_read_only')='off'"}
     AND r.oid::text=$1 AND d.oid::text=$2 AND shobj_description(d.oid,'pg_database')=$3
     AND current_setting('zzsh.regression_run',true)=$4 AND (SELECT system_identifier::text FROM pg_control_system())=$5
     AND r.oid=a.relowner AND r.oid=u.relowner AND current_setting('session_replication_role')='origin'
@@ -105,7 +126,7 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
       JOIN pg_class u ON u.oid=to_regclass('zzsh_auth_user."user"')
       JOIN pg_database d ON d.datname=current_database() WHERE r.rolname=current_user`,
     [actor.target.roleOid, actor.target.databaseOid, actor.target.marker, actor.target.nonce, actor.target.systemIdentifier])).rows[0];
-  if (row?.authorized !== true) throw forbidden("Legacy system migration requires the protected migration role");
+  if (row?.authorized !== true || typeof row.transactionId !== "string" || !row.transactionId) throw forbidden("Legacy system migration requires the protected migration role");
   if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION" || actor.kind === "SYSTEM_ORDER_MIGRATION") {
     const accountGuard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(
       (SELECT count(*)=4 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.rental_account'),
@@ -150,23 +171,44 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
       ,false) AS authorized FROM pg_roles r JOIN pg_class o ON o.oid=to_regclass('zzsh_order.legacy_order_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
     if (orderGuard?.authorized !== true) throw forbidden("Legacy system order migration requires protected source guards");
   }
+  if (actor.kind === "SYSTEM_FINANCE_MIGRATION") {
+    if (!/^[a-f0-9]{64}$/.test(actor.fenceEpochSha256)) throw forbidden("Legacy system finance fence epoch is invalid");
+    const financeGuard = (await client.query<{authorized:boolean}>(`SELECT COALESCE(
+      (SELECT count(*)=3 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.personal_finance_observation_coverage'),
+        to_regclass('zzsh_order.personal_finance_observation'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
+      AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()')
+        AND position('legacy-finance-migration:' IN p.prosrc)>0 AND position('finance.history.empty_batch.imported' IN p.prosrc)>0)
+      AND NOT EXISTS (SELECT 1 FROM (VALUES
+        (c.oid,'history_coverage_guard',7,'zzsh_order.guard_finance_history_coverage()',false),
+        (c.oid,'history_coverage_immutable',27,'zzsh_order.finance_immutable()',false),
+        (c.oid,'history_coverage_read_revision',5,'zzsh_order.finance_history_coverage_read_revision()',true),
+        (to_regclass('zzsh_order.personal_finance_observation'),'a_history_subject_lock',7,'zzsh_order.lock_finance_history_subject()',false)
+      ) required(relation,name,kind,fn,definer) WHERE NOT EXISTS (
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation
+          AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
+          AND t.tgqual IS NULL AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND p.prosecdef=required.definer
+          AND (required.fn<>'zzsh_order.guard_finance_history_coverage()' OR
+            (position('current_user<>owner_name' IN p.prosrc)>0 AND position('source_count' IN p.prosrc)>0))))
+      ,false) AS authorized FROM pg_roles r JOIN pg_class c ON c.oid=to_regclass('zzsh_order.personal_finance_observation_coverage') WHERE r.rolname=current_user`)).rows[0];
+    if (financeGuard?.authorized !== true) throw forbidden("Legacy system finance migration requires protected coverage guards");
+  }
   return row.transactionId;
 }
 
 /** The caller owns the transaction and must not commit inside the batch callback. */
-async function withSystemMigrationBatch<T>(client: PoolClient, actor: SystemMigrationActor, work: () => Promise<T>): Promise<T> {
+async function withSystemMigrationBatch<T>(client: PoolClient, actor: SystemMigrationActor, work: () => Promise<T>, readOnly = false): Promise<T> {
   if (activeBatches.has(client)) throw forbidden("Legacy system migration batch is already active");
-  const context = { actor, transactionId: null as string | null, fence: actor.assertMigrationFence, source: actor.assertSourceEvidence, binding: actorBinding(actor) };
+  const context = { actor, transactionId: null as string | null, fence: actor.assertMigrationFence, source: actor.assertSourceEvidence, binding: actorBinding(actor), readOnly };
   activeBatches.set(client, context);
   try {
-    const transactionId = await verifyBatch(client, actor);
+    const transactionId = await verifyBatch(client, actor, readOnly);
     if (actorBinding(actor) !== context.binding) throw forbidden("Legacy system migration batch changed");
     context.transactionId = transactionId;
     const result = await work();
     const batch = activeBatches.get(client);
     if (!batch || batch.actor !== actor || batch.fence !== actor.assertMigrationFence || batch.source !== actor.assertSourceEvidence || batch.binding !== actorBinding(actor))
       throw forbidden("Legacy system migration batch changed");
-    if (await verifyBatch(client, actor) !== transactionId) throw forbidden("Legacy system migration transaction changed");
+    if (await verifyBatch(client, actor, readOnly) !== transactionId) throw forbidden("Legacy system migration transaction changed");
     return result;
   } finally { if (activeBatches.get(client) === context) activeBatches.delete(client); }
 }
@@ -183,19 +225,29 @@ export function withSystemOrderMigrationBatch<T>(client: PoolClient, actor: Syst
   if (actor.kind !== "SYSTEM_ORDER_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   return withSystemMigrationBatch(client, actor, work);
 }
+export function withSystemFinanceMigrationBatch<T>(client: PoolClient, actor: SystemFinanceMigrationActor, work: () => Promise<T>): Promise<T> {
+  if (actor.kind !== "SYSTEM_FINANCE_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  return withSystemMigrationBatch(client, actor, work);
+}
+export function withSystemFinanceRecoveryBatch<T>(client: PoolClient, actor: SystemFinanceMigrationActor, work: () => Promise<T>): Promise<T> {
+  if (actor.kind !== "SYSTEM_FINANCE_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  return withSystemMigrationBatch(client, actor, work, true);
+}
 
-async function authorizeSystemMigration(client: PoolClient, actor: SystemMigrationActor, validateSource: () => Promise<void>): Promise<void> {
+async function authorizeSystemMigration(client: PoolClient, actor: SystemMigrationActor, validateSource: () => Promise<void>, readOnly = false): Promise<void> {
   const batch = activeBatches.get(client);
   if (!batch || batch.transactionId === null || batch.actor !== actor || batch.fence !== actor.assertMigrationFence || batch.source !== actor.assertSourceEvidence || batch.binding !== actorBinding(actor)
-      || actor.id !== expectedActorId(actor) || client.getTransactionStatus() !== "T") {
+      || batch.readOnly !== readOnly || actor.id !== expectedActorId(actor) || client.getTransactionStatus() !== "T") {
     throw forbidden("Legacy system migration batch is unavailable");
   }
   await validateSource();
   if (batch.binding !== actorBinding(actor) || batch.fence !== actor.assertMigrationFence || batch.source !== actor.assertSourceEvidence)
     throw forbidden("Legacy system migration batch changed");
-  const row = (await client.query<{ transactionId: string; nonce: string; direct: boolean }>(`SELECT pg_current_xact_id()::text AS "transactionId",
-    current_setting('zzsh.regression_run',true) AS nonce,current_user=session_user AS direct`)).rows[0];
-  if (row?.transactionId !== batch.transactionId || row.nonce !== actor.target.nonce || row.direct !== true) {
+  const transactionIdentity = readOnly ? `(SELECT virtualtransaction::text FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='virtualxid' AND granted LIMIT 1)` : `pg_current_xact_id()::text`;
+  const row = (await client.query<{ transactionId: string; nonce: string; direct: boolean; mode: boolean }>(`SELECT ${transactionIdentity} AS "transactionId",
+    current_setting('zzsh.regression_run',true) AS nonce,current_user=session_user AS direct,
+    ${readOnly ? "current_setting('transaction_read_only')='on' AND current_setting('transaction_isolation') IN ('repeatable read','serializable') AND pg_current_xact_id_if_assigned() IS NULL" : "current_setting('transaction_read_only')='off'"} AS mode`)).rows[0];
+  if (row?.transactionId !== batch.transactionId || row.nonce !== actor.target.nonce || row.direct !== true || row.mode !== true) {
     throw forbidden("Legacy system migration transaction changed");
   }
 }
@@ -219,4 +271,10 @@ export function authorizeSystemOrderMigration(client: PoolClient, actor: SystemO
       || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.bindingDigest))
     throw forbidden("Legacy system order source is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
+}
+export function authorizeSystemEmptyFinanceMigration(client: PoolClient, actor: SystemFinanceMigrationActor, source: EmptyFinanceSource, readOnly = false): Promise<void> {
+  if (actor.kind !== "SYSTEM_FINANCE_MIGRATION" || !/^[a-f0-9]{64}$/.test(source.inputsDigest)
+      || !/^[a-f0-9]{64}$/.test(source.inputSha256) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(source.cutoff)
+      || !Number.isFinite(Date.parse(source.cutoff))) throw forbidden("Legacy system finance source is invalid");
+  return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source),readOnly);
 }

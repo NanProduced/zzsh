@@ -14,7 +14,7 @@ import {
   type LegacyOwnerMigrationInput,
 } from "../src/supply/legacy-user-migration";
 import { planLegacyContactProjections, type LegacyContactProjection } from "../src/legacy-load/legacy-contact-projection";
-import { systemUserMigrationId, withSystemUserMigrationBatch } from "../src/legacy-load/system-user-migration";
+import { systemUserMigrationId, withSystemUserMigrationBatch, systemFinanceMigrationId, withSystemFinanceRecoveryBatch, authorizeSystemEmptyFinanceMigration } from "../src/legacy-load/system-user-migration";
 
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const MOBILE = "19900000001";
@@ -106,8 +106,11 @@ class FakeClient {
     this.queries.push(sql);
     if (sql.includes("legacy_system_audit_insert"))
       return { rows: [{ authorized: this.systemMigrationAuthorized, transactionId: this.systemTransactionId } as T], rowCount: 1 };
+    if (sql.includes("history_coverage_guard")) return { rows: [{ authorized: true } as T], rowCount: 1 };
     if (sql.startsWith("SELECT pg_current_xact_id()"))
-      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true } as T], rowCount: 1 };
+      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true, mode: true } as T], rowCount: 1 };
+    if (sql.startsWith("SELECT (SELECT virtualtransaction"))
+      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true, mode: true } as T], rowCount: 1 };
     if (sql.includes("pg_advisory_xact_lock") || sql.startsWith("SELECT set_config")) return { rows: [], rowCount: 0 };
     if (sql.startsWith('SELECT s."locked",u."twoFactorEnabled"')) return { rows: [{ locked: this.sessionLocked, twoFactorEnabled: true, suspended: false } as T], rowCount: 1 };
     if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE" } as T], rowCount: 1 };
@@ -332,6 +335,16 @@ test("system legacy user import binds each source and checks the batch fence on 
   await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => { fake.systemMigrationAuthorized = false; }), /protected migration role/);
   await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => {}), /protected migration role/);
   assert.equal(fences, 6);
+});
+
+test("read-only system recovery rejects a changed transaction",async()=>{
+  const fake=new FakeClient(),target={systemIdentifier:"123",databaseOid:"456",marker:"zzsh:synthetic:v1",nonce:"a".repeat(24),roleOid:"789"};
+  const sourceDatasetSha256="d".repeat(64),actor={kind:"SYSTEM_FINANCE_MIGRATION" as const,id:systemFinanceMigrationId(sourceDatasetSha256,target),
+    sourceDatasetSha256,target,fenceEpochSha256:"e".repeat(64),requestId:"recovery",assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+  const source={inputsDigest:"a".repeat(64),inputSha256:"b".repeat(64),cutoff:"2026-01-01T00:00:00.000Z"};
+  await assert.rejects(withSystemFinanceRecoveryBatch(asClient(fake),actor,async()=>{
+    fake.systemTransactionId="different";await authorizeSystemEmptyFinanceMigration(asClient(fake),actor,source,true);
+  }),/transaction changed/);
 });
 
 test("contact-aware importer persists a phone-null real subject and exact legacy alias without inventing a credential", async () => {

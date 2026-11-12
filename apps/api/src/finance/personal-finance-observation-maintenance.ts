@@ -6,6 +6,7 @@ import {conflict,ensureOnlyFields,fingerprintRequest,invalid,withIdempotency} fr
 import {authorizeFinanceMaintenance,assertFinanceMaintenanceResource,authorizeMaintenanceBatch,closeMaintenanceBatch,isReviewedFinanceMaintenanceEndpoint,isReviewedFinanceMaintenanceResource,type FinanceOpeningReview} from './personal-finance-maintenance';
 import {prepareHistoricalObservation} from './personal-finance-read';
 import {OBSERVATION_ENTITIES,prepareObservationCoverage,assertFinanceSingleCutoff,type ObservationCoverageInput} from './personal-finance-coverage';
+import {authorizeSystemEmptyFinanceMigration,systemFinanceMigrationId,type SystemFinanceMigrationActor} from '../legacy-load/system-user-migration';
 
 type Actor={userId:string;sessionId:string;requestId:string};
 export type ObservationImportInput={coverage:ObservationCoverageInput;observations:Record<string,unknown>[]};
@@ -182,7 +183,7 @@ async function emptyReceiptFacts(client:PoolClient,actor:Actor,plans:ReturnType<
  });
 }
 
-async function lockReviewedEmptySubjects(client:PoolClient,plans:ReturnType<typeof emptyPlans>,r:ObservationImportReview,scopeKey:string){
+async function lockReviewedEmptySubjects(client:PoolClient,plans:ReturnType<typeof emptyPlans>,r:Pick<ObservationImportReview,'cutoff'>,scopeKey:string){
  await client.query(`/* finance empty original key locks */ SELECT pg_advisory_xact_lock(hashtextextended(k,0)) FROM unnest($1::text[]) WITH ORDINALITY keys(k,n) ORDER BY n`,[plans.map(p=>JSON.stringify(['supply-idempotency',scopeKey,p.plan.key]))]);
  const subjects=[...new Set(plans.map(p=>p.plan.coverage.userId))].sort();
  if((await client.query(`/* finance empty subject locks */ SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id COLLATE "C" FOR UPDATE`,[subjects])).rowCount!==subjects.length)throw conflict('Empty batch subject is not mapped');
@@ -242,26 +243,130 @@ export function compactEmptyFinanceBatchProof(inputs:ObservationImportInput[],r:
  return {batchId,body,fingerprint:sha(canonicalize([compactEmptyOperation,batchId,body]))};
 }
 
+/** System migration records one receipt per proved-empty batch; it never posts money. */
+export function systemCompactEmptyFinanceBatchProof(inputs:ObservationImportInput[],actor:SystemFinanceMigrationActor){
+ if(actor.kind!=='SYSTEM_FINANCE_MIGRATION'||actor.id!==systemFinanceMigrationId(actor.sourceDatasetSha256,actor.target)
+  ||typeof actor.requestId!=='string'||!identifier.test(actor.requestId)||!Array.isArray(inputs)||!inputs.length)
+  throw invalid('Compact system source is invalid');
+ emptyPlans(inputs);const first=inputs[0]!.coverage;
+ if(!digest.test(first.inputSha256)||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(first.cutoff)
+  ||!Number.isFinite(Date.parse(first.cutoff))||inputs.some(input=>input.coverage.inputSha256!==first.inputSha256||input.coverage.cutoff!==first.cutoff))
+  throw invalid('Compact system source does not share one input and cutoff');
+ const value={schema:'finance-empty-coverage-batch.system.v1',sourceSystem:'legacy_mysql_restore',sourceEntity:'EMPTY_FINANCE_COVERAGE',
+  sourceDatasetSha256:actor.sourceDatasetSha256,migrationRunDigest:actor.id.slice('legacy-finance-migration:'.length),
+  inputsDigest:sha(canonicalize(inputs)),inputSha256:first.inputSha256,cutoff:first.cutoff,coverageCount:inputs.length,requestId:actor.requestId,
+  target:{systemIdentifier:actor.target.systemIdentifier,oid:actor.target.databaseOid,nonce:actor.target.nonce},financialEffect:'NONE' as const};
+ const batchId='history-empty-batch-'+sha(canonicalize(value)).slice(0,40),body={...value,batchId};
+ return{batchId,body,fingerprint:sha(canonicalize([compactEmptyOperation,batchId,body]))};
+}
+
+export type SystemEmptyReceiptBaseline=Readonly<{kind:'SYSTEM_EMPTY_RECEIPT_BASELINE'}>;
+const systemEmptyBaselines=new WeakMap<object,{client:PoolClient;actor:SystemFinanceMigrationActor;binding:string;
+ fence:SystemFinanceMigrationActor['assertMigrationFence'];source:SystemFinanceMigrationActor['assertSourceEvidence']}>();
+function systemFinanceBinding(actor:SystemFinanceMigrationActor){
+ return canonicalize([actor.id,actor.requestId,actor.sourceDatasetSha256,actor.target,actor.fenceEpochSha256]);
+}
+
+/** One scan per exclusive migration fence; business writers must stay disconnected until it is released. */
+export async function bindSystemEmptyReceiptBaseline(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],readOnly=false):Promise<SystemEmptyReceiptBaseline>{
+ const proof=systemCompactEmptyFinanceBatchProof(inputs,actor),source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ await authorizeSystemEmptyFinanceMigration(client,actor,source,readOnly);
+ const currentScope=JSON.stringify(['system',actor.id,compactEmptyOperation,null]);
+ const row=(await client.query(`/* finance system old receipt baseline */ WITH relevant AS MATERIALIZED (
+  SELECT scope_key FROM zzsh_supply.idempotency_record WHERE position('"finance.history.import"' IN scope_key)>0
+    OR position('"finance.history.empty_batch.import.v1"' IN scope_key)>0)
+  SELECT EXISTS(SELECT 1 FROM relevant WHERE (scope_key::jsonb->>0='admin' AND scope_key::jsonb->>2 IN ('finance.history.import','finance.history.empty_batch.import.v1'))
+    OR (scope_key::jsonb->>0='system' AND (scope_key::jsonb->>2='finance.history.import'
+      OR (scope_key::jsonb->>2='finance.history.empty_batch.import.v1' AND scope_key<>$1)))) AS conflicts`,[currentScope])).rows[0];
+ if(typeof row?.conflicts!=='boolean'||row.conflicts)throw conflict('Existing finance history receipts require review');
+ await authorizeSystemEmptyFinanceMigration(client,actor,source,readOnly);
+ const token=Object.freeze({kind:'SYSTEM_EMPTY_RECEIPT_BASELINE' as const});
+ systemEmptyBaselines.set(token,{client,actor,binding:systemFinanceBinding(actor),fence:actor.assertMigrationFence,source:actor.assertSourceEvidence});return token;
+}
+function assertSystemEmptyReceiptBaseline(client:PoolClient,actor:SystemFinanceMigrationActor,token:SystemEmptyReceiptBaseline){
+ const bound=token&&systemEmptyBaselines.get(token);
+ if(!bound||bound.client!==client||bound.actor!==actor||bound.binding!==systemFinanceBinding(actor)
+  ||bound.fence!==actor.assertMigrationFence||bound.source!==actor.assertSourceEvidence)throw conflict('System finance receipt baseline is unavailable');
+}
+
+async function readCompactCoverage(client:PoolClient,plans:ReturnType<typeof emptyPlans>){
+ const ids=plans.map(p=>p.plan.coverage.id);
+ return (await client.query(`/* finance compact coverage */ SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,
+  (SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count
+  FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[ids])).rows;
+}
+function compactCoverageMatches(coverage:Record<string,any>[],plans:ReturnType<typeof emptyPlans>){
+ const byId=new Map(coverage.map(row=>[row.id,row]));
+ return byId.size===plans.length&&!plans.some(({plan:{coverage:c}})=>{const row=byId.get(c.id);return !row||row.user_id!==c.userId||row.source_kind!==c.sourceKind
+   ||[row.source_count,row.imported_count,row.isolated_count,row.actual_count].some(value=>String(value)!=='0')||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical;});
+}
 async function readCompactEmptyBatch(client:PoolClient,actor:Actor,plans:ReturnType<typeof emptyPlans>,proof:ReturnType<typeof compactEmptyFinanceBatchProof>,lock=false){
  const ids=plans.map(p=>p.plan.coverage.id),oldScope=JSON.stringify(['admin',actor.userId,operation,null]);
  const compactScope=JSON.stringify(['admin',actor.userId,compactEmptyOperation,null]);
  const oldReceipts=(await client.query(`/* finance compact old receipts */ SELECT key FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])`,[oldScope,plans.map(p=>p.plan.key)])).rows;
  const oldAudits=(await client.query(`/* finance compact old audits */ SELECT object_id FROM zzsh_iam.audit_event WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=ANY($1::text[]) LIMIT 1`,[ids])).rows;
  if(oldReceipts.length||oldAudits.length)throw conflict('Compact empty batch overlaps individual import evidence');
- const coverage=(await client.query(`/* finance compact coverage */ SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,
-  (SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count
-  FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[ids])).rows;
+ const coverage=await readCompactCoverage(client,plans);
  const audit=(await client.query(`/* finance compact batch audit */ SELECT actor_id,session_id,request_id,details FROM zzsh_iam.audit_event WHERE action='finance.history.empty_batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=$1 AND actor_type='admin' AND outcome='SUCCESS'`,[proof.batchId])).rows;
  const receipt=(await client.query(`/* finance compact batch receipt */ SELECT request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2${lock?' FOR UPDATE':''}`,[compactScope,proof.batchId])).rows;
  if(!receipt.length){if(coverage.length||audit.length)throw conflict('Compact empty batch has partial original evidence');return{knowledge:'UNKNOWN' as const,receipt:null};}
  if(receipt.length!==1||receipt[0].request_fingerprint!==proof.fingerprint||receipt[0].response_status!==200||receipt[0].publish_required!==false||canonicalize(receipt[0].response_body)!==canonicalize(proof.body)
   ||audit.length!==1||audit[0].actor_id!==actor.userId||audit[0].session_id!==actor.sessionId||audit[0].request_id!==actor.requestId||canonicalize(audit[0].details)!==canonicalize(proof.body)
   ||coverage.length!==plans.length)throw conflict('Compact empty batch original evidence differs');
- const byId=new Map(coverage.map(row=>[row.id,row]));
- if(byId.size!==plans.length||plans.some(({plan:{coverage:c}})=>{const row=byId.get(c.id);return !row||row.user_id!==c.userId||row.source_kind!==c.sourceKind
-   ||[row.source_count,row.imported_count,row.isolated_count,row.actual_count].some(value=>String(value)!=='0')||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical;}))
+ if(!compactCoverageMatches(coverage,plans))
   throw conflict('Compact empty batch coverage differs from its original source');
  return{knowledge:'KNOWN' as const,receipt:{status:200,body:proof.body}};
+}
+
+async function readSystemCompactEmptyBatch(client:PoolClient,actor:SystemFinanceMigrationActor,plans:ReturnType<typeof emptyPlans>,
+ proof:ReturnType<typeof systemCompactEmptyFinanceBatchProof>,lock=false){
+ const ids=plans.map(p=>p.plan.coverage.id),scopeKey=JSON.stringify(['system',actor.id,compactEmptyOperation,null]);
+ const oldAudits=(await client.query(`/* finance compact old audits */ SELECT object_id FROM zzsh_iam.audit_event
+  WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=ANY($1::text[]) LIMIT 1`,[ids])).rows;
+ if(oldAudits.length)throw conflict('Compact empty batch overlaps individual import evidence');
+ const coverage=await readCompactCoverage(client,plans);
+ const audit=(await client.query(`/* finance system compact batch audit */ SELECT actor_type,actor_id,session_id,request_id,details,
+  to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest FROM zzsh_iam.audit_event e
+  WHERE action='finance.history.empty_batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=$1 AND outcome='SUCCESS'`,[proof.batchId])).rows;
+ const receipt=(await client.query(`/* finance system compact batch receipt */ SELECT request_fingerprint,response_status,response_body,publish_required
+  FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2${lock?' FOR UPDATE':''}`,[scopeKey,proof.batchId])).rows;
+ if(!receipt.length){if(coverage.length||audit.length)throw conflict('Compact empty batch has partial original evidence');return{knowledge:'UNKNOWN' as const};}
+ if(receipt.length!==1||receipt[0].request_fingerprint!==proof.fingerprint||receipt[0].response_status!==200||receipt[0].publish_required!==false
+  ||canonicalize(receipt[0].response_body)!==canonicalize(proof.body)||audit.length!==1||audit[0].actor_type!=='system'
+  ||audit[0].actor_id!==actor.id||audit[0].session_id!==null||audit[0].request_id!==actor.requestId
+  ||audit[0].source_manifest!==actor.sourceDatasetSha256||canonicalize(audit[0].details)!==canonicalize(proof.body)
+  ||!compactCoverageMatches(coverage,plans))throw conflict('Compact empty batch original evidence differs');
+ return{knowledge:'KNOWN' as const,receipt:{status:200,body:proof.body}};
+}
+
+/** Internal system source only. The caller owns the transaction and the exact source/fence capability. */
+export async function importSystemCompactEmptyFinanceObservationBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
+ inputs=copy(inputs);const plans=emptyPlans(inputs),proof=systemCompactEmptyFinanceBatchProof(inputs,actor);
+ const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ await authorizeSystemEmptyFinanceMigration(client,actor,source);
+ assertSystemEmptyReceiptBaseline(client,actor,baseline);
+ const oldScope=JSON.stringify(['system',actor.id,operation,null]);
+ await lockReviewedEmptySubjects(client,plans,{cutoff:proof.body.cutoff},oldScope);
+ const result=await withIdempotency(client,{realm:'system',principalId:actor.id,operation:compactEmptyOperation},proof.batchId,proof.fingerprint,
+  async replay=>{const previous=await readSystemCompactEmptyBatch(client,actor,plans,proof,true);if((replay!==null)!==(previous.knowledge==='KNOWN'))throw conflict('Compact empty batch receipt is inconsistent');},
+  async()=>{await setAuditContext(client,'system',actor.id,undefined,actor.requestId);await insertEmptyCoverages(client,plans);
+   await recordAudit(client,{actorType:'system',actorId:actor.id,legacyMigrationManifestSha256:actor.sourceDatasetSha256,
+    requestId:actor.requestId,action:'finance.history.empty_batch.imported',objectType:'personal_finance_observation_coverage_batch',
+    objectId:proof.batchId,outcome:'SUCCESS',details:proof.body});return{status:200,body:proof.body};});
+ await authorizeSystemEmptyFinanceMigration(client,actor,source);
+ return{status:result.status,body:{coverageCount:plans.length,created:result.replayed?0:plans.length,replayed:result.replayed?plans.length:0,
+  financialEffect:'NONE' as const,batchId:proof.batchId}};
+}
+
+/** Recovery is read-only and uses the original source, target and batch key. */
+export async function recoverSystemCompactEmptyFinanceObservationBatch(client:PoolClient,actor:SystemFinanceMigrationActor,inputs:ObservationImportInput[],baseline:SystemEmptyReceiptBaseline){
+ inputs=copy(inputs);const plans=emptyPlans(inputs),proof=systemCompactEmptyFinanceBatchProof(inputs,actor);
+ const source={inputsDigest:proof.body.inputsDigest,inputSha256:proof.body.inputSha256,cutoff:proof.body.cutoff};
+ await authorizeSystemEmptyFinanceMigration(client,actor,source,true);
+ assertSystemEmptyReceiptBaseline(client,actor,baseline);
+ const result=await readSystemCompactEmptyBatch(client,actor,plans,proof);
+ await authorizeSystemEmptyFinanceMigration(client,actor,source,true);
+ return{knowledge:result.knowledge,batchId:proof.batchId,receipt:result.knowledge==='KNOWN'?result.receipt:null,financialEffect:'NONE' as const};
 }
 
 /** Next-round empty history keeps per-subject coverage but uses one transaction receipt and audit for the frozen batch. */

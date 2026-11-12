@@ -15,9 +15,7 @@ BEGIN
      OR NEW.actor_type IS DISTINCT FROM 'system' OR NEW.session_id IS NOT NULL OR NEW.object_id IS NULL
      OR NEW.outcome IS DISTINCT FROM 'SUCCESS' OR NEW.details->>'sourceSystem' IS DISTINCT FROM 'legacy_mysql_restore'
      OR NEW.details->>'sourceDatasetSha256' IS DISTINCT FROM NEW.legacy_migration_manifest_sha256
-     OR COALESCE(NEW.details->>'migrationRunDigest','') !~ '^[a-f0-9]{64}$'
-     OR COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
-     OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$' THEN
+     OR COALESCE(NEW.details->>'migrationRunDigest','') !~ '^[a-f0-9]{64}$' THEN
     RAISE EXCEPTION 'legacy system source requires the migration owner' USING ERRCODE='42501';
   END IF;
   IF NEW.action='user.legacy_owner.migrated' THEN
@@ -39,12 +37,28 @@ BEGIN
     IF NEW.object_type IS DISTINCT FROM 'rental_order' OR COALESCE(NEW.details->>'bindingDigest','') !~ '^[a-f0-9]{64}$' THEN
       RAISE EXCEPTION 'legacy order source is invalid' USING ERRCODE='42501';
     END IF;
+  ELSIF NEW.action='finance.history.empty_batch.imported' THEN
+    actor_prefix:='legacy-finance-migration:'; source_entity:='EMPTY_FINANCE_COVERAGE';
+    IF NEW.object_type IS DISTINCT FROM 'personal_finance_observation_coverage_batch'
+       OR NEW.object_id !~ '^history-empty-batch-[a-f0-9]{40}$'
+       OR NEW.details->>'schema' IS DISTINCT FROM 'finance-empty-coverage-batch.system.v1'
+       OR NEW.details->>'batchId' IS DISTINCT FROM NEW.object_id OR NEW.details->>'financialEffect' IS DISTINCT FROM 'NONE'
+       OR COALESCE(NEW.details->>'inputsDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'inputSha256','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'coverageCount','') !~ '^([1-9]|[1-9][0-9]|[1-3][0-9]{2}|400)$' THEN
+      RAISE EXCEPTION 'legacy empty finance source is invalid' USING ERRCODE='42501';
+    END IF;
   ELSE
     RAISE EXCEPTION 'unsupported legacy system source' USING ERRCODE='42501';
   END IF;
   IF NEW.actor_id IS DISTINCT FROM actor_prefix||(NEW.details->>'migrationRunDigest')
      OR NEW.details->>'sourceEntity' IS DISTINCT FROM source_entity THEN
     RAISE EXCEPTION 'legacy system source identity is invalid' USING ERRCODE='42501';
+  END IF;
+  IF NEW.action<>'finance.history.empty_batch.imported'
+     AND (COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
+       OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$') THEN
+    RAISE EXCEPTION 'legacy system source tuple is invalid' USING ERRCODE='42501';
   END IF;
   RETURN NEW;
 END $$;
