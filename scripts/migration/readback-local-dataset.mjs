@@ -1,4 +1,4 @@
-import {assertEmptyCoverageReceiptMode,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,readCompactCoverageEvidence,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
+import {assertEmptyCoverageReceiptMode,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,readCompactCoverageEvidence,readIndividualFinanceHistoryEvidence,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
 import { acquireMigrationTransactionFence, advisoryLockSql, assertCoreSystemMigrationBinding, assertLiveTarget, assertMigrationFenceHeld, assertReadbackTarget, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
@@ -498,7 +498,9 @@ try {
   if (state.phases.financeHistory?.complete && state.fundsSupplement) {
     const phase=state.generatedPhases.financeHistory,bytes=readFileSync(join(dirname(checkpoint),"phases","financeHistory.json"));
     if(hash(bytes)!==phase.sha256)throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
-    const expected=JSON.parse(bytes).flatMap(group=>mod("finance/personal-finance-observation-maintenance").planFinanceObservations(group.input).observations.map(row=>({...row,domain:group.domain})));
+    if(phase.receiptMode!==undefined&&phase.receiptMode!=='ADMIN_INDIVIDUAL_V1')throw new Error("FINANCE_HISTORY_RECEIPT_MODE_UNSUPPORTED");
+    const groups=JSON.parse(bytes),planFinanceObservations=mod("finance/personal-finance-observation-maintenance").planFinanceObservations;
+    const expected=groups.flatMap(group=>planFinanceObservations(group.input).observations.map(row=>({...row,domain:group.domain})));
     const counts={},attemptStatusCounts={};let readableAttempts=0;
     const unresolvedRefunds={expected:0,verified:0,issues:{}};
     for(let i=0;i<expected.length;i+=500){
@@ -517,7 +519,11 @@ try {
     if(state.binding.migrationProfile===NEXT_MIGRATION_PROFILE)report.unresolvedRefundSources={...unresolvedRefunds,scope:'RAW_SOURCE_PRESERVED_NOT_A_CONFIRMED_ORDER_LINK_OR_CHANNEL_REFUND'};
     const actualTotal = (await query("SELECT count(*)::int n FROM zzsh_order.personal_finance_observation WHERE source_system='legacy_mysql_restore'")).rows[0].n;
     if (actualTotal !== expected.length) difference("financeHistory", "COHORT", "OBSERVATION_DENOMINATOR_DIFFERED");
-    report.financialHistory={scope:"source observations only; no wallet posting or channel arrival",counts,walletEffectsFromObservation:false,arrivalVerified:false};
+    const historyEvidence=await readIndividualFinanceHistoryEvidence(query,groups,{userId:state.binding.actorId,sessionId:state.binding.sessionId,
+      requestId:'core-legacy-dataset-'+state.binding.oid,ref:'CORE_FULL_LEGACY_'+state.binding.oid,attempt:'dataset-'+state.binding.datasetSha256.slice(0,16)},planFinanceObservations);
+    for(const item of historyEvidence.differences)difference('financeHistory',item.coverageId,item.reason);
+    report.financialHistory={scope:"source observations only; no wallet posting or channel arrival",counts,
+      coverageEvidence:{expected:historyEvidence.expected,matched:historyEvidence.matched},walletEffectsFromObservation:false,arrivalVerified:false};
   }
   if (state.phases.financeHistory?.complete && !state.fundsSupplement) {
     const preparation = mod("finance/legacy-finance-source-preparation");

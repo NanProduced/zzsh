@@ -79,6 +79,36 @@ export async function readCompactCoverageEvidence(query,expected,actor){
  return{expected:expected.length,matched,differences};
 }
 
+/** The historical observation, its immutable coverage, original receipt and audit are separate facts. */
+export async function readIndividualFinanceHistoryEvidence(query,groups,actor,planFinanceObservations){
+ if(typeof query!=='function'||!Array.isArray(groups)||typeof planFinanceObservations!=='function'
+   ||![actor?.userId,actor?.sessionId,actor?.requestId,actor?.ref,actor?.attempt].every(value=>typeof value==='string'&&value))
+  throw Error('FINANCE_HISTORY_READBACK_INPUT_INVALID');
+ const planned=groups.map(group=>({input:group.input,plan:planFinanceObservations(group.input)}));
+ if(new Set(planned.map(row=>row.plan.key)).size!==planned.length||new Set(planned.map(row=>row.plan.coverage.id)).size!==planned.length)
+  throw Error('FINANCE_HISTORY_READBACK_INPUT_INVALID');
+ const scope=JSON.stringify(['admin',actor.userId,'finance.history.import',null]),differences=[];let matched=0;
+ for(let i=0;i<planned.length;i+=500){
+  const part=planned.slice(i,i+500),ids=part.map(row=>row.plan.coverage.id),keys=part.map(row=>row.plan.key);
+  const coverage=(await query(`SELECT id,user_id,source_kind,source_count,imported_count,isolated_count,body_digest,source_canonical FROM zzsh_order.personal_finance_observation_coverage WHERE id=ANY($1::text[])`,[ids])).rows;
+  const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])`,[scope,keys])).rows;
+  const audits=(await query(`SELECT object_id,actor_type,actor_id,session_id,request_id,outcome,details FROM zzsh_iam.audit_event WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=ANY($1::text[])`,[ids])).rows;
+  const coverageById=Map.groupBy(coverage,row=>row.id),receiptByKey=Map.groupBy(receipts,row=>row.key),auditById=Map.groupBy(audits,row=>row.object_id);
+  for(const {input,plan} of part){
+   const c=plan.coverage,facts=coverageById.get(c.id)??[],receipt=receiptByKey.get(plan.key)??[],audit=auditById.get(c.id)??[],body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:c.importedCount,isolatedCount:c.isolatedCount,financialEffect:'NONE'};
+   const row=facts[0],saved=receipt[0],event=audit[0],details=event?.details;
+   if(facts.length!==1||row.user_id!==c.userId||row.source_kind!==c.sourceKind||row.source_count!==c.sourceCount||row.imported_count!==c.importedCount||row.isolated_count!==c.isolatedCount||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical){differences.push({coverageId:c.id,reason:'HISTORY_COVERAGE_MISSING_OR_CHANGED'});continue;}
+   if(receipt.length!==1||saved.scope_key!==scope||saved.request_fingerprint!==sha(JSON.stringify(['finance.history.import',c.id,input]))||saved.response_status!==200||saved.publish_required!==false||!isDeepStrictEqual(saved.response_body,body)){differences.push({coverageId:c.id,reason:'HISTORY_RECEIPT_MISSING_OR_CHANGED'});continue;}
+   if(audit.length!==1||event.actor_type!=='admin'||event.actor_id!==actor.userId||event.session_id!==actor.sessionId||event.request_id!==actor.requestId||event.outcome!=='SUCCESS'
+    ||details?.bodyDigest!==plan.bodyDigest||details?.coverageBodyDigest!==c.bodyDigest||details?.inputSha256!==c.inputSha256||details?.subjectId!==c.userId||details?.sourceKind!==c.sourceKind
+    ||details?.sourceCount!==c.sourceCount||details?.importedCount!==c.importedCount||details?.isolatedCount!==c.isolatedCount||details?.approvalRef!==actor.ref||details?.attempt!==actor.attempt||details?.financialEffect!=='NONE'){
+     differences.push({coverageId:c.id,reason:'HISTORY_AUDIT_MISSING_OR_CHANGED'});continue;}
+   matched++;
+  }
+ }
+ return{expected:planned.length,matched,differences};
+}
+
 /** Compare a newly derived source chunk with the exact immutable bytes the loader consumed. */
 export function assertRebuiltEmptyCoverageChunk(descriptor, rebuilt, savedBytes) {
   if (!descriptor || !rebuilt || !Buffer.isBuffer(savedBytes) || !Array.isArray(rebuilt.entries)

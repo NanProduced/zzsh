@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {test} from 'node:test';
-import {assertEmptyCoverageReceiptMode,assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,compareCompactCoverageEvidence,readCompactCoverageEvidence,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertEmptyCoverageReceiptMode,assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,compareCompactCoverageEvidence,readCompactCoverageEvidence,readIndividualFinanceHistoryEvidence,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
 import {isExactLegacyRefundRelationship,LEGACY_REFUND_RELATIONSHIP_POLICY} from './local-source-adapter.mjs';
 
 test('a refund relationship needs the original order, user and nonblank matching number',()=>{
@@ -57,6 +58,21 @@ test('compact coverage readback requires the exact physical batch receipt and au
   assert.notDeepEqual(compareCompactCoverageEvidence(expected,receipts,audits,actor).differences,[]);
  assert.throws(()=>compareCompactCoverageEvidence([...expected,...expected],[receipt()],[audit()],actor),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
  assert.throws(()=>compareCompactCoverageEvidence(expected,[receipt()],[audit()],{}),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
+});
+
+test('individual history readback requires its original coverage, receipt and audit',async()=>{
+ const actor={userId:'admin',sessionId:'session',requestId:'request',ref:'review',attempt:'attempt'},input={example:'source'};
+ const c={id:'coverage',userId:'user',sourceKind:'HISTORICAL_WITHDRAWAL',sourceCount:1,importedCount:1,isolatedCount:0,bodyDigest:'coverage-digest',canonical:'source',inputSha256:'input-digest'},plan={coverage:c,key:'key',bodyDigest:'body-digest'};
+ const body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:1,isolatedCount:0,financialEffect:'NONE'};
+ const coverage={id:c.id,user_id:c.userId,source_kind:c.sourceKind,source_count:1,imported_count:1,isolated_count:0,body_digest:c.bodyDigest,source_canonical:c.canonical};
+ const receipt={scope_key:JSON.stringify(['admin',actor.userId,'finance.history.import',null]),key:plan.key,request_fingerprint:createHash('sha256').update(JSON.stringify(['finance.history.import',c.id,input])).digest('hex'),response_status:200,response_body:body,publish_required:false};
+ const audit={object_id:c.id,actor_type:'admin',actor_id:actor.userId,session_id:actor.sessionId,request_id:actor.requestId,outcome:'SUCCESS',details:{...body,coverageBodyDigest:c.bodyDigest,inputSha256:c.inputSha256,sourceCount:1,approvalRef:actor.ref,attempt:actor.attempt}};
+ const query=(rows)=>async sql=>({rows:sql.includes('observation_coverage WHERE')?rows.coverage:sql.includes('idempotency_record')?rows.receipts:rows.audits});
+ const groups=[{input}],getPlan=()=>plan,all={coverage:[coverage],receipts:[receipt],audits:[audit]};
+ assert.deepEqual(await readIndividualFinanceHistoryEvidence(query(all),groups,actor,getPlan),{expected:1,matched:1,differences:[]});
+ for(const rows of [{...all,coverage:[]},{...all,receipts:[{...receipt,request_fingerprint:'changed'}]},{...all,audits:[]},{...all,audits:[audit,audit]}])
+  assert.equal((await readIndividualFinanceHistoryEvidence(query(rows),groups,actor,getPlan)).matched,0);
+ await assert.rejects(readIndividualFinanceHistoryEvidence(query(all),[...groups,...groups],actor,getPlan),/FINANCE_HISTORY_READBACK_INPUT_INVALID/);
 });
 
 test('system compact coverage readback binds the system source and original receipt',async()=>{
