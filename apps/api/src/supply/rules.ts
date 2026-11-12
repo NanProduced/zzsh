@@ -435,6 +435,15 @@ export function assertSettlementResourcePrices(mode:unknown,rows:readonly Settle
   }
 }
 
+/** Every enabled resource must have a price, including items absent from the original listing. */
+export async function assertPriceVersionResources(client:PoolClient,gameId:string,priceVersionId:string,mode:unknown):Promise<void> {
+  const rows=(await client.query<SettlementResourcePrice>(`SELECT i.name,i.unit,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",
+    p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount"
+    FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD'
+    WHERE i.game_id=$1 AND i.enabled AND i.unit<>'HAFF_BASE' ORDER BY i.id FOR SHARE OF i`,[gameId,priceVersionId])).rows;
+  assertSettlementResourcePrices(mode,rows);
+}
+
 export async function activateRelease(
   client: PoolClient,
   adminUserId: string,
@@ -467,11 +476,7 @@ export async function activateRelease(
   if(!priceMeta)throw invalid('价格规则不存在');
   // shortcut: fixed-fee publication stays closed until scheduled policy and ledger guards are installed.
   if (priceMeta.fixedFeeRates !== null && priceMeta.fixedFeeRates !== undefined) throw conflict("固定手续费政策尚未开放发布");
-  const settlementItems=(await client.query<SettlementResourcePrice>(`SELECT i.name,i.unit,p.pricing_kind AS "pricingKind",p.unit_quantity::text AS "unitQuantity",
-    p.buyer_unit_amount::text AS "buyerUnitAmount",p.owner_unit_amount::text AS "ownerUnitAmount"
-    FROM zzsh_supply.billable_item i LEFT JOIN zzsh_supply.price_line p ON p.item_id=i.id AND p.price_version_id=$2 AND p.customer_tier='STANDARD'
-    WHERE i.game_id=$1 AND i.enabled AND i.unit<>'HAFF_BASE' ORDER BY i.id FOR SHARE OF i`,[gameId,priceVersionId])).rows;
-  assertSettlementResourcePrices(priceMeta.mode,settlementItems);
+  await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
   const pricePolicy=priceMeta.policy;
   if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
   const nextGeneration = await client.query<{ generation: string }>(

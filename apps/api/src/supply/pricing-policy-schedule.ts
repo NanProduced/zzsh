@@ -5,6 +5,7 @@ import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } f
 import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { effectivePublicationStateSql } from "./listing-query";
+import { assertPriceVersionResources } from "./rules";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 type PriceVersion = { id: string; mode: string; status: string; haffRule: unknown; rates: unknown };
@@ -199,6 +200,7 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
     FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 AND pricing_model='FIXED_FEE'`, [input.gameId])).rows[0];
   if (!current || current.generation !== input.expectedGeneration) throw conflict("价格政策版本已变化，请刷新后重试");
   const generation = (BigInt(current.generation) + 1n).toString();
+  await assertPriceVersionResources(client,input.gameId,price.id,price.mode);
   const timeline = await readFixedFeeTimeline(client, input.gameId, { from: effectiveAt, fee: { effectiveAt, generation, rates, haffRule: price.haffRule } });
   if (!timeline) throw conflict("固定手续费政策无法核实");
   const validation = validateFixedFeeTimeline(timeline);
