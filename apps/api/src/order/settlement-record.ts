@@ -18,7 +18,7 @@ import { assertGameScope, conflict, forbidden, invalid, notFound } from "../supp
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
-import { fixedFeeSettlementSchemaReady } from "../finance/fixed-fee-settlement-schema";
+import { fixedFeeSettlementSchemaReady, scheduledSpreadSettlementSchemaReady } from "../finance/fixed-fee-settlement-schema";
 import { assertDistributionAccrualTask } from "../finance/distribution-accrual-tasks";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
@@ -316,6 +316,8 @@ async function availableSettlementBasis(client:PoolClient,order:LockedOrder,paym
   const result=basisOrReasons(order,payment,lines);
   if ('basis' in result && result.basis.settlementPricing?.schema==='settlement-pricing-v3' && !await fixedFeeSettlementSchemaReady(client))
     return {reasons:['FIXED_FEE_SETTLEMENT_NOT_ENABLED']};
+  if ('basis' in result && result.basis.personalQuoteSchema === 'personal-quote-v6' && !await scheduledSpreadSettlementSchemaReady(client))
+    return {reasons:['SCHEDULED_SPREAD_SETTLEMENT_NOT_ENABLED']};
   return result;
 }
 

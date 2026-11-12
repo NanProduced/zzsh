@@ -512,6 +512,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
   await configureFixedFeeSupportCancellationPrivileges(pool, runtimeRole);
   await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+  await configureScheduledSpreadPrivileges(pool, runtimeRole);
   const marketPrice = "zzsh_supply.public_market_price(jsonb,text,text)";
   if ((await pool.query("SELECT to_regprocedure($1) AS fn", [marketPrice])).rows[0]?.fn) {
     await pool.query(`REVOKE ALL ON FUNCTION ${marketPrice} FROM PUBLIC, ${runtimeUser};
@@ -576,6 +577,31 @@ export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query
   if(keys.some(key=>inventory[key]!==true))throw new Error("Fixed fee order contract is partially deployed");
   await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
     GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text) TO ${role}`);
+}
+
+/** Grant the scheduled verifier only when both insertion guards and the payout reader agree. */
+export async function configureScheduledSpreadPrivileges(pool: Pick<Pool, "query">, runtimeRole: string) {
+  const verifier = "zzsh_order.assert_scheduled_spread_order_v6(zzsh_order.rental_order)";
+  const state = (await pool.query(`SELECT /* scheduled-spread-acl */
+    EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.rental_order')
+      AND tgname='rental_order_scheduled_spread_personal_guard') AS installed,
+    EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.rental_order')
+      AND tgname='rental_order_personal_guard' AND position('personal-quote-v6' IN pg_get_triggerdef(oid))>0) AS exempt,
+    EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE c.oid=to_regclass('zzsh_order.rental_order') AND t.tgname='rental_order_scheduled_spread_personal_guard'
+        AND p.oid=to_regprocedure('zzsh_order.guard_scheduled_spread_personal_order()')
+        AND p.proowner=c.relowner AND NOT p.prosecdef AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgqual IS NULL
+        AND EXISTS(SELECT 1 FROM pg_proc v WHERE v.oid=to_regprocedure($1) AND v.proowner=c.relowner AND NOT v.prosecdef)
+        AND position('scheduled spread settlement basis differs' IN
+          (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('zzsh_order.check_settlement_posting_batch()')))>0
+        AND position('personal-quote-v6' IN
+          (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('zzsh_order.poststart_full_payout_selected(jsonb,text,text,text,text,text,text)')))>0
+    ) AS ready`, [verifier])).rows[0];
+  if (state?.installed === false && state.exempt === false) return;
+  if (!state?.installed || !state.exempt || !state.ready) throw new Error("Scheduled spread order contract is partially deployed");
+  const role = quoteIdentifier(runtimeRole);
+  await pool.query(`REVOKE ALL ON FUNCTION ${verifier} FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION ${verifier} TO ${role}`);
 }
 
 /**

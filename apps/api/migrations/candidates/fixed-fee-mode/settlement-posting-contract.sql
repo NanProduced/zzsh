@@ -133,6 +133,26 @@ BEGIN
   IF is_fixed IS DISTINCT FROM COALESCE(ord.quote_snapshot#>>'{personal,schema}' = 'personal-quote-v5',false) THEN
     RAISE EXCEPTION 'settlement and order pricing versions differ' USING ERRCODE = '23514';
   END IF;
+  IF ord.quote_snapshot#>>'{personal,schema}'='personal-quote-v6' THEN
+    payout_selected := zzsh_order.poststart_full_payout_selected(ord.quote_snapshot,ord.renter_user_id,ord.owner_user_id,ord.account_id,ord.listing_version_id,ord.content_hash,ord.rule_release_id);
+    snapshot_gross := zzsh_order.settlement_snapshot_cents(ver.input_snapshot #>> '{amounts,ownerGross}');
+    snapshot_fee := zzsh_order.settlement_snapshot_cents(ver.input_snapshot #>> '{amounts,feeAmount}');
+    IF ver.input_snapshot->>'schema' IS DISTINCT FROM 'settlement-version-v3'
+       OR ver.input_snapshot->>'personalQuoteSchema' IS DISTINCT FROM 'personal-quote-v6'
+       OR payout_selected IS NULL OR jsonb_typeof(ver.input_snapshot->'fullPayoutSelected') IS DISTINCT FROM 'boolean'
+       OR payout_selected IS DISTINCT FROM (ver.input_snapshot->>'fullPayoutSelected')::boolean
+       OR snapshot_gross IS NULL OR snapshot_fee IS NULL
+       OR snapshot_gross IS DISTINCT FROM (zzsh_order.settlement_snapshot_cents(ver.input_snapshot#>>'{amounts,haffConsumedOwner}')
+         +zzsh_order.settlement_snapshot_cents(ver.input_snapshot#>>'{amounts,itemConsumedOwner}'))
+       OR snapshot_fee IS DISTINCT FROM (CASE WHEN payout_selected THEN round(snapshot_gross*8/100) ELSE 0 END)
+       OR zzsh_order.settlement_snapshot_cents(ver.input_snapshot#>>'{amounts,ownerNet}') IS DISTINCT FROM snapshot_gross-snapshot_fee
+       OR NOT EXISTS(SELECT 1 FROM zzsh_order.rental_opening op WHERE op.order_id=batch.order_id AND op.id=ver.input_snapshot->>'openingId'
+         AND op.status='CONFIRMED' AND op.version_no::text=ver.input_snapshot->>'openingVersion'
+         AND op.quote_digest=ver.input_snapshot->>'quoteDigest' AND op.payment_digest=ver.input_snapshot->>'paymentDigest')
+    THEN RAISE EXCEPTION 'scheduled spread settlement basis differs' USING ERRCODE='23514'; END IF;
+  ELSIF ver.input_snapshot->>'personalQuoteSchema'='personal-quote-v6' THEN
+    RAISE EXCEPTION 'scheduled spread settlement and order versions differ' USING ERRCODE='23514';
+  END IF;
   IF is_fixed THEN
     IF ord.quote_snapshot->>'schemaVersion' IS DISTINCT FROM '4'
        OR ord.quote_snapshot->>'mode' IS DISTINCT FROM 'PERCENT'

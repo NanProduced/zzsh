@@ -36,22 +36,24 @@ COMMENT ON FUNCTION zzsh_order.guard_fixed_fee_personal_order()
   IS '对固定手续费订单执行版本化确认依据校验；不改变历史订单校验。';
 
 --> statement-breakpoint
--- Candidate only: do not attach this trigger or exempt v6 from the old guard until
--- settlement, cancellation, compensation and runtime ACLs are verified together.
+-- The separate scheduled-spread candidate attaches this trigger after its financial dependencies.
 CREATE FUNCTION zzsh_order.guard_scheduled_spread_personal_order() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE listing_schema integer;
 BEGIN
-  IF TG_OP='INSERT' AND NEW.quote_snapshot#>>'{personal,schema}'='personal-quote-v6' THEN
-    SELECT schema_version INTO listing_schema FROM zzsh_supply.listing_version WHERE id=NEW.listing_version_id AND account_id=NEW.account_id;
-    IF listing_schema IS DISTINCT FROM 2 OR NEW.quote_snapshot->>'schemaVersion' IS DISTINCT FROM '2'
-      OR NEW.quote_snapshot#>>'{settlementPricing,schema}' IS DISTINCT FROM 'settlement-pricing-v1'
-    THEN RAISE EXCEPTION 'scheduled spread order contract mismatch' USING ERRCODE='40001'; END IF;
-    PERFORM zzsh_order.assert_scheduled_spread_order_v6(NEW);
-  ELSIF TG_OP='UPDATE' AND NEW.confirmation_id IS DISTINCT FROM OLD.confirmation_id THEN
+  IF TG_OP='INSERT' THEN
+    IF NEW.quote_snapshot#>>'{personal,schema}'='personal-quote-v6' THEN
+      PERFORM zzsh_order.assert_scheduled_spread_order_v6(NEW);
+    ELSIF EXISTS(SELECT 1 FROM zzsh_supply.listing_version v
+      JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=v.account_id AND pub.source='OWNER_DIRECT'
+      WHERE v.id=NEW.listing_version_id AND v.account_id=NEW.account_id AND v.schema_version=2 AND v.origin='NATIVE'
+        AND v.payload#>>'{quoteValues,mode}'='SPREAD'
+        AND (v.payload ? 'pricingPolicy' OR EXISTS(SELECT 1 FROM zzsh_supply.pricing_policy_schedule p
+          WHERE p.game_id=NEW.game_id AND p.pricing_model='SPREAD' AND p.effective_at<=clock_timestamp()))
+    ) THEN RAISE EXCEPTION 'scheduled spread order requires its versioned confirmation' USING ERRCODE='40001'; END IF;
+  ELSIF NEW.confirmation_id IS DISTINCT FROM OLD.confirmation_id THEN
     RAISE EXCEPTION 'confirmation consumption is immutable' USING ERRCODE='40001';
   END IF;
   RETURN NEW;
 END $$;
 REVOKE ALL ON FUNCTION zzsh_order.guard_scheduled_spread_personal_order() FROM PUBLIC;
 COMMENT ON FUNCTION zzsh_order.guard_scheduled_spread_personal_order()
-  IS '候选价差订单确认守卫；下游与授权完成前不得绑定触发器。';
+  IS '校验独立价差订单的冻结确认，禁止退回旧订单合同绕过生效价目。';

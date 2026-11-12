@@ -56,3 +56,19 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
  ,false) AS ready`)).rows[0];
  return row?.ready===true;
 }
+
+/** Scheduled spread also needs the versioned insertion and full-payout readers. */
+export async function scheduledSpreadSettlementSchemaReady(client: Pick<PoolClient, "query">): Promise<boolean> {
+  const shape = (await client.query(`SELECT
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.assert_scheduled_spread_order_v6(zzsh_order.rental_order)'),'EXECUTE'),false)
+    AND EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
+      AND t.tgname='rental_order_scheduled_spread_personal_guard'
+      AND t.tgfoid=to_regprocedure('zzsh_order.guard_scheduled_spread_personal_order()')
+      AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgqual IS NULL)
+    AND EXISTS(SELECT 1 FROM pg_proc p WHERE
+      p.oid=to_regprocedure('zzsh_order.poststart_full_payout_selected(jsonb,text,text,text,text,text,text)')
+      AND position('personal-quote-v6' IN p.prosrc)>0)
+    AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_order.check_settlement_posting_batch()')
+      AND position('scheduled spread settlement basis differs' IN p.prosrc)>0) AS ready`)).rows[0];
+  return shape?.ready === true && await fixedFeeSettlementSchemaReady(client);
+}

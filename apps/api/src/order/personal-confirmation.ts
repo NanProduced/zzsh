@@ -177,6 +177,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
   const legacy = version.payload.schemaVersion === 3;
   const fixedFee = version.payload.schemaVersion === 4;
+  if (fixedFee && purpose === "WRITE") unavailable("Fixed fee order creation is not enabled");
   if (fixedFee && !options.membershipGrowthReader) unavailable("Fixed fee confirmation requires the current membership policy");
   if (legacy) {
     const source = version.payload.legacyQuote, marker = version.payload.declaration.attributes.legacy_published_reference;
@@ -251,7 +252,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     pricingPolicy={schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:effective!.scheduleId,generation:effective!.generation,effectiveAt:effective!.effectiveAt,priceVersionId:effective!.priceVersionId};
     release={...originalRelease,id:effective!.priceVersionId,mode:"PERCENT",haff_rule:effective!.haffRule as HaffRatioRule,
       commission_rate:effective!.commissionRate,rounding_policy:effective!.roundingPolicy};
-  } else if (version.origin==="NATIVE" && version.payload.schemaVersion===2 && original.mode==="SPREAD") {
+  } else if (version.origin==="NATIVE" && publication?.source==="OWNER_DIRECT" && version.payload.schemaVersion===2 && original.mode==="SPREAD") {
     const schema=(await client.query<{prices:boolean;modes:boolean;rates:boolean}>(`SELECT
       to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
       to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
@@ -263,7 +264,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
       if(!asOfUtc)unavailable("Pricing policy clock is unavailable");
       const effective=await readEffectiveSpreadPrice(client,account.game_id,asOfUtc!);
       if(effective){
-        if(!SCHEDULED_SPREAD_ORDER_ENABLED)unavailable("Scheduled spread settlement contract is not enabled");
+        if(!SCHEDULED_SPREAD_ORDER_ENABLED && purpose === "WRITE")unavailable("Scheduled spread settlement contract is not enabled");
         if(!options.membershipGrowthReader||!ownerDeclaration)unavailable("Scheduled spread confirmation requires the current membership policy");
         pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
         publishedSpreadListing={accountId:account.id,gameId:account.game_id,contentHash:version.content_hash,payload:version.payload,

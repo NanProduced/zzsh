@@ -210,6 +210,7 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
     if (args[0] === "zzsh_order.support_poststart_cancellation") return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
     if (sql.includes("AS absent") && sql.includes("distribution_accrual_task")) return { rows: [{ absent: true, ready: false }] };
     if (sql.includes("cancel_order_after_start_v3")) return { rows: [{ executor: false, helper: false, columns: 0, marker: false, safe: false, triggers: 0 }] };
+    if (sql.includes("scheduled-spread-acl")) return { rows: [{ installed: false, exempt: false, ready: false }] };
     if (sql.includes("assert_fixed_fee_personal_order_v5")) return { rows: [{ verifier:false,common:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false,functions_safe:true }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
