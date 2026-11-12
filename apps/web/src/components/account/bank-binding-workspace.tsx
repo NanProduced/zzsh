@@ -37,7 +37,7 @@ function errorCopy(error: WithdrawalRequestError | null) {
   if (error.status === 403) return "当前账号暂不能进行此操作，已有记录仍可单独查询。";
   if (error.status === 409) return "资料或费用已变化，请刷新后核对；上次申请仍需先确认结果。";
   if (error.status === 400) return "填写的信息不符合要求，请核对后重试。";
-  if (error.status === 503) return "暂时无法查看，请稍后重试。";
+  if (error.status === 503 || error.status === 502 || error.code === "EVIDENCE_UNAVAILABLE") return "服务暂时无法读取，请稍后重试。";
   return "本次未能确认处理结果，请稍后重新查询。";
 }
 
@@ -241,29 +241,6 @@ function BankBindingPanel({ scope, onChanged, onLocked, onIdentityFailure, onBou
         </div>
         <p className="bank-meta">更新于 {timeLabel(visible.value.binding.updatedAt)}</p>
         {!form.open && !activeRecovery && !storageBlocked ? <Button variant="secondary" className="bank-action" onPress={beginEdit}>修改收款资料</Button> : null}
-      </div>
-      <div className="bank-security-tips" aria-label="提现说明">
-        <div className="bank-security-tip-item">
-          <span className="bank-security-tip-icon">⚡</span>
-          <div>
-            <strong>快速审核到账</strong>
-            <p>工作日申请由系统自动复核，预计 2 小时内打款至您的银行账户。</p>
-          </div>
-        </div>
-        <div className="bank-security-tip-item">
-          <span className="bank-security-tip-icon">🛡️</span>
-          <div>
-            <strong>实名一致性保障</strong>
-            <p>收款卡姓名必须与已认证实名完全一致，杜绝资金错付。</p>
-          </div>
-        </div>
-        <div className="bank-security-tip-item">
-          <span className="bank-security-tip-icon">💰</span>
-          <div>
-            <strong>平台免手续费</strong>
-            <p>平台全额补贴结算通道费，提现金额如数到账。</p>
-          </div>
-        </div>
       </div>
     </> : <div className="bank-empty">
       <div className="bank-empty-visual" aria-hidden="true"><span className="bank-card-ghost"><CreditCard size={32} /></span></div>
@@ -697,7 +674,7 @@ function WithdrawalHistorySection({ scope, refreshKey, onIdentityFailure }: { sc
         } catch (error) {
           const e = asError(error);
           if (cursor && e.status === 403) throw new WithdrawalTimelineSourceError(source, "WITHDRAWAL_SOURCE_FORBIDDEN");
-          if (!cursor && (e.status === 403 || e.status === 503 || e.status === 0)) return { items: [], cursor: null, snapshot: null, asOf: null, available: false, coverageKnown: false };
+          if (!cursor && (e.status === 403 || e.status === 404 || e.status === 502 || e.status === 503 || e.status === 0 || e.code === "EVIDENCE_UNAVAILABLE")) return { items: [], cursor: null, snapshot: null, asOf: null, available: false, coverageKnown: false };
           throw error;
         }
       });

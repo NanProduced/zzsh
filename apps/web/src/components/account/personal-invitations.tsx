@@ -104,21 +104,19 @@ export function PersonalInvitations({scope}:{scope:string}){
           <button className="button secondary" type="button" disabled={!value?.ownCode.code||busy} onClick={()=>void copy(true)}><Link2 size={15} aria-hidden="true"/>复制邀请链接</button>
         </div>
       </section>
-      <section className="account-module-card invitation-parent">
-        <div className="invitation-card-header">
-          <h3>佣金上级</h3>
-          {value?.leader.knowledge==='KNOWN_PARENT'?(
+      {value?.leader.knowledge === 'KNOWN_PARENT' ? (
+        <section className="account-module-card invitation-parent">
+          <div className="invitation-card-header">
+            <h3>佣金上级</h3>
             <span className="invitation-bound-badge">
               <ShieldCheck size={13} aria-hidden="true" />
               已生效
             </span>
-          ):null}
-        </div>
-        <strong className={`invitation-parent-status state-${value?.leader.knowledge||'unknown'}`}>{value?.leader.knowledge==='KNOWN_PARENT'?'已绑定':value?.leader.knowledge==='KNOWN_NONE'?'尚未绑定':'关系待确认'}</strong>
-        {value?.leader.knowledge==='KNOWN_NONE'&&bindingEnabled?<p>绑定后无法更换，请确认对方信息。</p>:null}
-        {value?.leader.knowledge==='KNOWN_NONE'&&bindingEnabled?<form onSubmit={submit} className="invitation-bind-form"><label htmlFor="leader-invitation-code">上级邀请码</label><input id="leader-invitation-code" autoComplete="off" maxLength={30} placeholder="填写对方的邀请码" value={code} disabled={busy||pending||!bindingEnabled} onChange={e=>{setCode(e.target.value);setAccepted(false);}}/><label className="invitation-confirm"><input type="checkbox" checked={accepted} disabled={busy||pending||!bindingEnabled} onChange={e=>setAccepted(e.target.checked)}/><span>我确认绑定后不能更换上级</span></label><button className="button primary" type="submit" disabled={busy||pending||!accepted||!code.trim()||!bindingEnabled}>绑定上级</button></form>:value?.leader.knowledge==='KNOWN_NONE'?<p>暂时无法绑定上级。</p>:null}
-        <p className="invitation-source">注册邀请：{value?.inviter.knowledge==='KNOWN_PARENT'?'已记录':value?.inviter.knowledge==='KNOWN_NONE'?'注册时未填写邀请码':'待确认'}</p>
-      </section>
+          </div>
+          <strong className="invitation-parent-status state-KNOWN_PARENT">已绑定</strong>
+          <p className="invitation-source">注册邀请：{value?.inviter.knowledge === 'KNOWN_PARENT' ? '已记录' : value?.inviter.knowledge === 'KNOWN_NONE' ? '注册时未填写邀请码' : '待确认'}</p>
+        </section>
+      ) : null}
     </div>
   </div>
 

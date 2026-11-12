@@ -491,13 +491,15 @@ function benefitItems(selected: TrackTier, actual: TrackTier | null, data: Membe
       title: item.label, badge: "当前权益", highlight: item.value,
       subtext: "以当前生效政策及个人报价为准。", icon: item.label.includes("押金") ? "deposit" : "pricing",
     }));
+    // Canonical sort: deposit card on the left, pricing card on the right
+    items.sort((a, b) => (a.icon === "deposit" ? -1 : b.icon === "deposit" ? 1 : 0));
     return items.length ? { items, note: null } : { items: null, note: "当前档权益暂时无法读取。" };
   }
   const row = data.comparison?.find((item) => COMPARISON_LABEL_TO_TIER[item.tier] === selected);
   if (!row) return { items: null, note: "该档权益暂时无法展示。" };
   return { items: [
-    { title: "租赁优惠", badge: "等级权益", highlight: row.pricing, subtext: "以个人确认报价为准。", icon: "pricing" },
     { title: "租客押金", badge: "等级权益", highlight: row.deposit, subtext: "以适用资格和个人报价为准。", icon: "deposit" },
+    { title: "租赁优惠", badge: "等级权益", highlight: row.pricing, subtext: "以个人确认报价为准。", icon: "pricing" },
   ], note: null };
 }
 
@@ -647,10 +649,14 @@ function EntitlementSection({ data, entitlements }: { data?: MembershipGrowthDat
 function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
   const [scope, setScope] = useState<GrowthConsumptionScope>("LIFETIME");
   const [retry, setRetry] = useState(0);
+  const [visibleCount, setVisibleCount] = useState(5);
   const key = `${data.subjectId ?? ""}:${data.asOf}:${scope}`;
   const [state, setState] = useState<{ key: string; page?: MembershipGrowthConsumption; error?: string; loading: boolean }>({ key, loading: true });
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   const shown = state.key === key ? state : { key, loading: true };
+  useEffect(() => {
+    setVisibleCount(5);
+  }, [scope]);
   useEffect(() => {
     const mine = ++generation.current;
     controller.current?.abort();
@@ -675,12 +681,28 @@ function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
       if (mine !== generation.current || abort.signal.aborted) return;
       if (next.snapshotVersion !== page.snapshotVersion || next.asOf !== page.asOf || next.total !== page.total || next.nextCursor === page.nextCursor || next.items.some((item) => page.items.some((prior) => prior.id === item.id))) throw new MembershipGrowthRequestError(409, null);
       setState({ key, page: { ...next, items: [...page.items, ...next.items] }, loading: false });
+      setVisibleCount((c) => c + 5);
     } catch (error) {
       if (mine !== generation.current || abort.signal.aborted) return;
       const stale = error instanceof MembershipGrowthRequestError && [401, 403, 409].includes(error.status);
       setState({ key, ...(stale ? {} : { page }), loading: false, error: stale ? "身份或消费依据已变化，请重新读取明细。" : "后续明细读取失败，已显示的记录保留。" });
     }
   }
+
+  const items = page?.items ?? [];
+  const displayedItems = items.slice(0, visibleCount);
+  const hasMoreLocal = items.length > visibleCount;
+  const hasMoreRemote = Boolean(page?.nextCursor);
+  const canLoadMore = hasMoreLocal || hasMoreRemote;
+
+  const handleLoadMore = () => {
+    if (hasMoreLocal) {
+      setVisibleCount((c) => c + 5);
+    } else if (hasMoreRemote) {
+      void loadMore();
+    }
+  };
+
   return <div className="mc-consumption-details">
     <div className="mc-detail-scopes" role="group" aria-label="消费明细范围">
       <button type="button" className="mc-button" aria-pressed={scope === "LIFETIME"} onClick={() => setScope("LIFETIME")}>累计有效消费</button>
@@ -699,14 +721,14 @@ function ConsumptionDetails({ data }: { data: MembershipGrowthData }) {
         <div className="mc-consumption-metric"><span>折算成长积分</span><strong>合计 {page.points} 积分</strong></div>
       </div>
       {page.total === 0 ? <div className="mc-consumption-empty" role="status"><p>{scope === "LIFETIME" ? "累计没有有效消费记录" : "当前窗口没有有效消费记录"}</p><span>完成结算的有效消费会出现在这里。</span></div> : <ul className="mc-contributions">
-        {page.items.map((item) => <li key={item.id} className="mc-contribution-row">
+        {displayedItems.map((item) => <li key={item.id} className="mc-contribution-row">
           <span className="mc-contribution-label">{item.label}<em>{item.withinWindow ? "计入近90天" : "仅计入累计"}{item.corrected ? ` · 已更正至第${item.revision}版` : ""}</em></span>
           <span className="mc-contribution-time">{formatBeijingDateTime(item.effectiveAt)}{scope === "ROLLING" ? ` · 退出窗口 ${formatBeijingDate(item.expiresAt)}` : ""}</span>
           <strong className="mc-contribution-amount">{yuanFromCents(item.amountCents)}</strong>
         </li>)}
       </ul>}
-      <p className="mc-consumption-foot">已加载 {page.items.length} / {page.total} 条有效消费依据{page.sourceSummary.pendingCount > 0 || page.sourceSummary.excludedCount > 0 ? `（${page.sourceSummary.pendingCount > 0 ? `${page.sourceSummary.pendingCount} 条未结算` : ""}${page.sourceSummary.pendingCount > 0 && page.sourceSummary.excludedCount > 0 ? "，" : ""}${page.sourceSummary.excludedCount > 0 ? `${page.sourceSummary.excludedCount} 条已排除` : ""}均不计入）` : null}。</p>
-      {page.nextCursor ? <button type="button" className="mc-button" disabled={shown.loading} onClick={() => { void loadMore(); }}>{shown.loading ? "正在读取…" : "加载更多消费依据"}</button> : null}
+      <p className="mc-consumption-foot">已展示 {displayedItems.length} 条 · 共已加载 {page.items.length} / {page.total} 条有效消费依据{page.sourceSummary.pendingCount > 0 || page.sourceSummary.excludedCount > 0 ? `（${page.sourceSummary.pendingCount > 0 ? `${page.sourceSummary.pendingCount} 条未结算` : ""}${page.sourceSummary.pendingCount > 0 && page.sourceSummary.excludedCount > 0 ? "，" : ""}${page.sourceSummary.excludedCount > 0 ? `${page.sourceSummary.excludedCount} 条已排除` : ""}均不计入）` : null}。</p>
+      {canLoadMore ? <button type="button" className="mc-button" disabled={shown.loading} onClick={handleLoadMore}>{shown.loading ? "正在读取…" : "加载更多消费依据"}</button> : null}
     </> : null}
   </div>;
 }

@@ -512,6 +512,8 @@ test("real consumption detail renders cumulative1353 and switches to a known emp
     const detail = () => view.host.querySelector(".mc-consumption-details");
     assert.match(detail().textContent, /合计 1353 积分/);
     assert.match(detail().textContent, /已加载 6 \/ 6/);
+    assert.equal(detail().querySelectorAll(".mc-contribution-row").length, 5);
+    await view.click('.mc-consumption-details > button'); await settleHistory();
     assert.equal(detail().querySelectorAll(".mc-contribution-row").length, 6);
     assert.match(detail().textContent, /不是历史积分发放流水/);
     await view.click('[aria-label="消费明细范围"] button:nth-child(2)'); await settleHistory();

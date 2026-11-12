@@ -23,9 +23,19 @@
 
 .invitation-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 20px;
+}
+
+.invitation-workbench:has(.invitation-parent) {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+}
+
+@media (max-width: 860px) {
+  .invitation-workbench:has(.invitation-parent) {
+    grid-template-columns: 1fr;
+  }
 }
 
 .personal-invitations h3 {
