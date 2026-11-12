@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
+import { preflightBoundSourceBatches, readBoundSourceBatches } from "./local-source-adapter.mjs";
 
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 
@@ -21,9 +22,13 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   if (hash(bytes) !== manifestSha256) throw new Error("OPENING_PROOF_MANIFEST_SHA_MISMATCH");
   const plan = JSON.parse(bytes);
   if (plan.status !== "REVIEWED_CANDIDATES_TARGET_NOT_RUN" || plan.datasetSha256 !== ctx.state.binding.datasetSha256 || plan.file !== basename(plan.file)) throw new Error("OPENING_PROOF_NOT_BOUND");
-  const file = join(path, plan.file), digest = createHash("sha256");
-  for await (const bytes of createReadStream(file)) digest.update(bytes);
-  if (digest.digest("hex") !== plan.sha256) throw new Error("OPENING_PROOF_FILE_SHA_MISMATCH");
+  const file = join(path, plan.file);
+  const entry = {sha256:plan.sha256,rows:plan.stats?.subjects};
+  const sourceProof = ctx.isNextMigration === true ? await preflightBoundSourceBatches(file,entry,200) : null;
+  if (!sourceProof) {
+    const digest = createHash("sha256");for await (const bytes of createReadStream(file)) digest.update(bytes);
+    if (digest.digest("hex") !== plan.sha256) throw new Error("OPENING_PROOF_FILE_SHA_MISMATCH");
+  }
   ctx.state.additiveInputs ??= {};
   if (ctx.state.additiveInputs.opening?.manifestSha256 && ctx.state.additiveInputs.opening.manifestSha256 !== manifestSha256) throw new Error("OPENING_CHECKPOINT_INPUT_CHANGED");
   const module = ctx.mod("finance/personal-finance-maintenance"), canonical = ctx.mod("supply/content-hash").canonicalize;
@@ -33,7 +38,7 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId }, resource: openingReviewResource(ctx), notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };
   const expected = { subjects: 0, positive: 0, zero: 0, amountCents: 0n, isolated: [] };
   async function* candidates() {
-    for await (const row of ctx.readRows(file)) {
+    for await (const row of (sourceProof ? readBoundSourceBatches(file,entry,sourceProof) : ctx.readRows(file))) {
       if (row.state !== "CANDIDATE") { expected.isolated.push({ sourceId: row.sourceId, reason: row.reason }); continue; }
       const value = BigInt(row.input.proof.availableCents);
       expected.subjects++; expected.amountCents += value;

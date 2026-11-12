@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { win32 as path } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
-import { openingReviewResource } from "./local-target-opening.mjs";
+import { applyOpeningDomain, openingReviewResource } from "./local-target-opening.mjs";
 
 const source = readFileSync(new URL("./local-target-opening.mjs", import.meta.url), "utf8")
   .replace(/^import .*;$/gm, "").replace(/^export /gm, "");
@@ -55,4 +55,20 @@ test("unsafe or absent cause codes never enter the migration receipt", async () 
     assert.equal(error.code, "TARGET_REVIEWED_OPENING_REJECTED");
     assert.equal(error.cause, undefined);
   }
+});
+
+test("next-round opening stops if the source changes after preflight", {skip:process.platform!=="win32"||!existsSync("E:/zzsh-local-state/restricted")}, async t=>{
+  const dir=mkdtempSync("E:/zzsh-local-state/restricted/opening-source-synthetic-"),file=path.join(dir,"openings.jsonl"),manifestFile=path.join(dir,"manifest.json");
+  t.after(()=>{for(const f of [file,manifestFile])if(existsSync(f)){assert(lstatSync(f).isFile()&&!lstatSync(f).isSymbolicLink());unlinkSync(f)}rmdirSync(dir)});
+  const row={sourceId:"1",state:"CANDIDATE",input:{proof:{availableCents:"0"}}},bytes=Buffer.from(JSON.stringify(row)+"\n");writeFileSync(file,bytes);
+  const manifest=Buffer.from(JSON.stringify({status:"REVIEWED_CANDIDATES_TARGET_NOT_RUN",datasetSha256:"dataset",file:"openings.jsonl",
+    sha256:sha(bytes),stats:{subjects:1,candidate:1,reviewRequired:0}}));writeFileSync(manifestFile,manifest);
+  let writes=0;
+  const ctx={isNextMigration:true,targetPort:55433,actor:{userId:"actor",sessionId:"session"},
+    state:{binding:{oid:"42",datasetSha256:"dataset"},resource:{owner:"owner",marker:"marker",role:"role",role_oid:"43"}},
+    mod:()=>({canonicalize:JSON.stringify}),save(){},async runBatches(_phase,candidates){
+      writeFileSync(file,JSON.stringify({...row,input:{proof:{availableCents:"100"}}})+"\n");
+      for await(const _ of candidates)writes++;
+    }};
+  await assert.rejects(applyOpeningDomain(ctx,dir,sha(manifest)),/SOURCE_(?:BATCH|STREAM)_CHANGED/);assert.equal(writes,0);
 });

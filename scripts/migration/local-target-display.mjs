@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { resolve, join, basename, dirname } from "node:path";
-import { assertDisplayCaptureCoverage, assertDisplayCaptureRow, verifyDisplayCaptureInputs } from "./local-source-adapter.mjs";
+import { assertDisplayCaptureCoverage, assertDisplayCaptureRow, verifyDisplayCaptureInputs, preflightBoundSourceBatches, readBoundSourceBatches } from "./local-source-adapter.mjs";
 
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 
@@ -24,9 +24,13 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
     ctx.state.displayCapturePreflight=await verifyDisplayCaptureInputs({sourceDir,sourceEntry:source.files?.accounts,
       accountsDir:dirname(ctx.domainFile('accounts')),accountsEntry:ctx.manifest.files?.accounts,displayDir:path,display:manifest,canonicalize:contentHash.canonicalize});
   }
-  const file = join(path, manifest.file), digest = createHash("sha256");
-  for await (const bytes of createReadStream(file)) digest.update(bytes);
-  if (digest.digest("hex") !== manifest.sha256) throw new Error("DISPLAY_INPUT_SHA_MISMATCH");
+  const file = join(path, manifest.file);
+  const entry = {sha256:manifest.sha256,rows:manifest.rows};
+  const sourceProof = ctx.isNextMigration === true ? await preflightBoundSourceBatches(file,entry,100) : null;
+  if (!sourceProof) {
+    const digest = createHash("sha256");for await (const bytes of createReadStream(file)) digest.update(bytes);
+    if (digest.digest("hex") !== manifest.sha256) throw new Error("DISPLAY_INPUT_SHA_MISMATCH");
+  }
   ctx.state.additiveInputs ??= {};
   if (ctx.state.additiveInputs.display && ctx.state.additiveInputs.display.manifestSha256 !== manifestSha256) throw new Error("DISPLAY_CHECKPOINT_INPUT_CHANGED");
   ctx.state.additiveInputs.display = { directory: path, manifestSha256, extractSha256: manifest.extractSha256, rows: manifest.rows };
@@ -35,7 +39,7 @@ export async function applyDisplayDomain(ctx, directory, manifestSha256) {
   const writer = ctx.mod("supply/legacy-listing-read").recordLegacyDisplaySnapshot;
   const idFor = row => accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId);
   let bindings;
-  await ctx.runItems("accountDisplay", ctx.readRows(file), async row => {
+  await ctx.runItems("accountDisplay", sourceProof ? readBoundSourceBatches(file,entry,sourceProof) : ctx.readRows(file), async row => {
     if(ctx.manifest.identityProfiles)assertDisplayCaptureRow(row.snapshot);
     const id = idFor(row), original = bindings.get(id);
     if (!original) { const error = new Error("TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"); error.status = 409; error.code = "TARGET_ACCOUNT_SNAPSHOT_NOT_MAPPED"; throw error; }

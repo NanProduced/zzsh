@@ -662,12 +662,12 @@ try {
         }
         else if (openingOnly) {
             const { applyOpeningDomain } = await import("./local-target-opening.mjs");
-            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, targetPort: registered.port ?? registered.instance?.port ?? null }, option("--opening-proof"), option("--opening-proof-sha"));
+            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, targetPort: registered.port ?? registered.instance?.port ?? null }, option("--opening-proof"), option("--opening-proof-sha"));
             state.status = "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (displayOnly) {
             const { applyDisplayDomain } = await import("./local-target-display.mjs");
-            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, option("--display-plan"), option("--display-plan-sha"));
+            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE }, option("--display-plan"), option("--display-plan-sha"));
             state.status = "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED";
         }
         else {
