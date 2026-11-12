@@ -128,6 +128,8 @@ function fixture(options:{failAcl?:boolean;failLinkGuard?:boolean;rollbackFails?
   if(sql.includes("to_regprocedure('zzsh_supply.guard_legacy_listing_capture_fact()')"))return{rows:[{present:false,guard:false,triggers:0}]};
   if(sql.includes("to_regprocedure('zzsh_order.guard_settlement_refund_policy()')"))return{rows:[{present:false,guard:false,posting_columns:0}]};
   if(sql.includes("to_regclass('zzsh_order.native_refund_review_resolution')"))return{rows:[{present:false,function_present:false,function_ready:false,trigger_ready:false}]};
+  if(args[0]==='zzsh_order.order_compensation_posting')return{rows:[{present:false,executor:false,verifier:false,triggers:0,functions_safe:false,incident_index:false}]};
+  if(args[0]==='zzsh_order.support_poststart_cancellation')return{rows:[{present:false,functions:0,triggers:0,executor_safe:false}]};
   if(sql==='BEGIN'){assert.equal(pending,null);pending=copy(durable);return{rows:[]};}
   if(sql==='ROLLBACK'){if(options.rollbackFails)throw rollbackFault;pending=null;return{rows:[]};}
   if(sql==='COMMIT'){assert(pending);if(options.commitFailure==='before')throw commitFault;durable=pending;pending=null;if(options.commitFailure==='after')throw commitFault;return{rows:[]};}
@@ -154,7 +156,8 @@ function fixture(options:{failAcl?:boolean;failLinkGuard?:boolean;rollbackFails?
  }
  const client={query:(sql:string,args:any[])=>query('client',sql,args),release:(discard?:unknown)=>releases.push(discard)};
  const pool={query:(sql:string,args:any[])=>query('pool',sql,args),connect:async()=>{connects++;if(options.connectFails)throw connectFault;return client;}};
- const exports:Record<string,any>={},nativeRequire=createRequire(runnerPath);
+ const exports:Record<string,any>={};
+ const nativeRequire=createRequire(resolve('dist/src/database/business-migrations.js'));
  const require=(id:string)=>id==='drizzle-orm/node-postgres'?{drizzle:(input:unknown)=>{assert.equal(input,pool);return input;}}:id==='drizzle-orm/node-postgres/migrator'?{migrate:async(input:unknown)=>{assert.equal(input,pool);if(options.migrationFails)throw migrationFault;if(!migrated){seed();modelInitialCleanup();migrated=true;}migrationVisibility.push(copy(durable));}}:id==='./business-migration-compat'?{matchesKnown0155LineEndings:()=>false}:nativeRequire(id);
  runInNewContext(transpileModule(runnerSource,{compilerOptions:{module:ModuleKind.CommonJS,target:ScriptTarget.ES2022}}).outputText,{exports,require,__dirname:resolve('src/database')});
  const run=()=>exports.runBusinessMigrations(pool,{runtimeUser:runtime,migrationsFolder:resolve('migrations/business')}) as Promise<void>;

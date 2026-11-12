@@ -262,7 +262,7 @@ export type UserRentalAccountItem = {
   accountId: string;
   displayNo: string | null;
   game: { id: string; code: string; name: string };
-  lifecycle: "ACTIVE" | "ARCHIVED";
+  lifecycle: "ACTIVE" | "ARCHIVED" | "DELISTED";
   ownerPaused: boolean;
   staffRestricted: boolean;
   restrictionReason: string | null;
@@ -686,6 +686,8 @@ export type ContentDraftSummary = {
   title: string;
   summary: string;
   body: string;
+  /** P2 plate 合同正文：{ format:"plate", schemaVersion:1, document, mediaIds, anchorAliases? }；body 为服务端纯文本投影。 */
+  payload?: { format?: string; schemaVersion?: number; document?: import("@zzsh/content/plate").PlateDocumentEnvelope; mediaIds?: string[]; anchorAliases?: Record<string, string> } | null;
   updateSettings?: import('@zzsh/content/updates').UpdateSettings;
   bodyMedia?: Record<string, string | null>;
   coverMediaId: string | null;
@@ -764,7 +766,7 @@ export type AdminOrder = {
   paymentOpen: boolean;
   cancelOpen: boolean;
   paidAt?: string | null;
-  cancelReason?: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | null;
+  cancelReason?: "USER" | "TIMEOUT" | "PRESTART_TERMINATED" | "MANUAL_CLOSE" | "SUPPORT_CANCELLED_REFUND" | "SUPPORT_UNPAID" | "SUPPORT_AFTER_START_CANCELLED" | "OWNER_DELISTED" | null;
   cancelledAt?: string | null;
   ownerUserId: string;
   renterUserId: string;
@@ -840,7 +842,7 @@ export function isStepUpBody(body: Record<string, unknown> | undefined): boolean
   return !!body && typeof body.totpCode === "string" && typeof body.password === "string";
 }
 
-export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT" | "DELETE", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
+export async function adminRequest<T>(path: string, body?: Record<string, unknown>, method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", extraHeaders: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   const verb = method ?? (body === undefined ? "GET" : "POST");
   const stepUp = verb !== "GET" && isStepUpBody(body);
@@ -965,6 +967,7 @@ export type AdminOrderPaymentSummary = {
     providerPaidAtRaw: string | null; providerTimeZone: "UNCONFIRMED" | "EXPLICIT_OFFSET"; providerPaidAt?: string | null;
     providerTimeOffsetMinutes?: number; evidenceRef: string; observedAt: string } | null;
   acceptance: { state: "APPLIED" | "REVIEW_REQUIRED" | "PENDING" | "NONE"; confirmationId: string | null; reasonCode: string | null } | null;
+  anomalies?: { status: "AVAILABLE" | "SCHEMA_NOT_DEPLOYED"; items: Array<{ disposition: "APPLIED" | "REVIEW_REQUIRED" | null }> | null } | null;
   conflicts: { kind: "CHANNEL_STATUS_CONFLICT" | "STALE" | "LATE" | "DUPLICATE"; observedAt: string; evidenceRef: string | null }[] | null;
   recovery: { mode: "NONE" | "ORIGINAL_NUMBER_QUERY"; manualQueryOpen: false; lastAttemptAt: null; attempts: null } | null;
   settlement: "NOT_INTEGRATED"; unknowns: string[] | null; updatedAt: string | null;

@@ -157,12 +157,13 @@ export const supplyBlockerMessages: Record<string, string> = {
   REQUIRED_ITEM_UNPRICED: "必填物品缺少当前价目，暂不能报价",
   FUNDING_UNKNOWN: "押金与赔付依据尚未确认",
   ACCOUNT_NOT_PUBLISHABLE: "历史异常或归档资料需先处理",
-  LEGACY_LISTING_RELIST_REQUIRED: "平台规则已调整，请重新填写账号资料后上架",
+  ACCOUNT_DELISTED: "账号已下架，如需出租请重新填写上架资料",
+  LEGACY_LISTING_RELIST_REQUIRED: "历史账号仅保留记录，如需出租请重新填写上架资料",
   PUBLISHER_BAIL_UNCONFIRMED: "暂时无法确认保证金状态，请稍后重新读取",
   OCCUPIED: "账号当前被占用",
   OCCUPANCY_UNKNOWN: "暂不能确认账号是否空闲",
   REVIEW_REQUIRED: "等待资料审核",
-  OWNER_PAUSED: "号主已暂停接单",
+  OWNER_PAUSED: "原账号状态待核，请联系客服",
   STAFF_RESTRICTED: "客服限制尚未解除",
   CONFIRMATION_OR_MEDIA_REQUIRED: "需完成规则确认或图片技术校验",
   PUBLICATION_REQUIRED: "公开发布事实尚未形成",
@@ -336,6 +337,7 @@ export async function supplyRequest<T>(
   return body as T;
 }
 const id = (value: string) => encodeURIComponent(value);
+export const mediaAccessUrl = (assetId: string) => `/api/supply/media/${id(assetId)}/access?delivery=direct`;
 /**
  * `/me/accounts` pages by `after` (the previous page's last id). Older callers sent `cursor`,
  * which this endpoint ignores — that silently repeated the first page instead of advancing.
@@ -421,7 +423,7 @@ export const supplyApi = {
     ),
   mine: (accountId: string, signal?: AbortSignal) =>
     supplyRequest<MySupply>("/accounts/" + id(accountId), { signal }),
-  operationResult: async (action: "pause" | "resume" | "withdraw", accountId: string, body: Record<string, unknown>, key: string, signal?: AbortSignal) => {
+  operationResult: async (action: "pause" | "resume" | "withdraw" | "delist", accountId: string, body: Record<string, unknown>, key: string, signal?: AbortSignal) => {
     const operation = `supply.publication.${action}`;
     const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([operation, accountId, body])));
     const fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
@@ -474,23 +476,10 @@ export const supplyApi = {
       idempotencyKey: key,
       signal,
     }),
-  setPaused: (
-    accountId: string,
-    paused: boolean,
-    expectedRevision: string,
-    key: string,
-    reason?: string,
-    signal?: AbortSignal,
-  ) =>
-    supplyRequest<MySupply>(
-      "/accounts/" + id(accountId) + (paused ? "/pause" : "/resume"),
-      {
-        method: "POST",
-        body: { expectedRevision, ...(reason ? { reason } : {}) },
-        idempotencyKey: key,
-        signal,
-      },
-    ),
+  delist: (accountId: string, expectedRevision: string, key: string, signal?: AbortSignal) =>
+    supplyRequest<MySupply>("/accounts/" + id(accountId) + "/delist", {
+      method: "POST", body: { expectedRevision }, idempotencyKey: key, signal,
+    }),
   saveDraft: (
     accountId: string,
     body: DraftInput & { expectedRevision: string },
@@ -518,6 +507,13 @@ export const supplyApi = {
     }),
 };
 
+type SupplyMediaUploadIntent = {
+  intentId: string;
+  uploadToken: string;
+  transport?: "OSS_POST";
+  ossUpload?: { method: "POST"; url: string; fields: Record<string, string> } | null;
+};
+
 export async function uploadSupplyMedia(input: {
   gameId: string;
   accountId: string;
@@ -525,10 +521,11 @@ export async function uploadSupplyMedia(input: {
   file: Blob;
   intentKey: string;
   uploadKey: string;
+  transport?: "OSS_POST";
   signal?: AbortSignal;
   beforeBytesUpload?: () => Promise<boolean>;
 }): Promise<{ assetId: string; purpose: string; reviewState: string } | null> {
-  const intent = await supplyRequest<{ intentId: string; uploadToken: string }>(
+  const intent = await supplyRequest<SupplyMediaUploadIntent>(
     "/media/upload-intents",
     {
       method: "POST",
@@ -538,12 +535,45 @@ export async function uploadSupplyMedia(input: {
         purpose: input.purpose,
         mime: input.file.type,
         size: input.file.size,
+        ...(input.transport ? { transport: input.transport } : {}),
       },
       idempotencyKey: input.intentKey,
       signal: input.signal,
     },
   );
+  if (intent.transport !== input.transport) throw new SupplyRequestError(502, null, input.uploadKey);
   if (input.beforeBytesUpload && !(await input.beforeBytesUpload())) return null;
+  if (intent.transport === "OSS_POST") {
+    const digest = await crypto.subtle.digest("SHA-256", await input.file.arrayBuffer());
+    const contentHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    let uncertainUpload = false;
+    if (intent.ossUpload) {
+      const { url, fields, method } = intent.ossUpload;
+      const target = new URL(url);
+      if (method !== "POST" || target.protocol !== "https:" || target.username || target.password
+        || target.pathname !== "/" || target.search || target.hash) throw new SupplyRequestError(502, null, input.uploadKey);
+      const form = new FormData();
+      for (const [field, value] of Object.entries(fields)) form.append(field, value);
+      form.append("file", input.file, "image");
+      let uploaded: Response | undefined;
+      try {
+        uploaded = await fetch(target, { method, body: form, credentials: "omit", redirect: "error", signal: input.signal });
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        uncertainUpload = true;
+      }
+      if (uploaded && !uploaded.ok && uploaded.status !== 409) throw new SupplyRequestError(uploaded.status, null, input.uploadKey);
+    }
+    if (input.beforeBytesUpload && !(await input.beforeBytesUpload())) return null;
+    try {
+      return await supplyRequest("/media/uploads/" + id(intent.intentId) + "/complete", {
+        method: "POST", body: { uploadToken: intent.uploadToken, contentHash }, idempotencyKey: input.uploadKey, signal: input.signal,
+      });
+    } catch (error) {
+      if (uncertainUpload && error instanceof SupplyRequestError && error.status === 409) throw new SupplyRequestError(0, null, input.uploadKey);
+      throw error;
+    }
+  }
   let response: Response;
   try {
     response = await fetch("/api/supply/media/uploads/" + id(intent.intentId), {

@@ -1,5 +1,5 @@
 import { legacyListingSortLabel,listLegacyReadListings,buildMixedListingCandidates,mixedListingBinding,readLegacyListing,hasLegacyReadSnapshots } from "./legacy-listing-read";
-import { attachLegacyPathImages } from "./legacy-path-projection";
+import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readAdminContext,assertAdminContextInTransaction } from "../auth/auth-security";
 import { loadEffectiveAdminAccess,requirePermission,ADMIN_PERMISSION } from "../auth/admin-authorization";
 import { withTransaction,recordAudit,setAuditContext } from "../auth/security-core";
@@ -54,41 +54,41 @@ export async function handleListingFilters(request:SupplyNodeRequest,response:Su
 export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOptions,query:URLSearchParams) {
   const q=parseListingQueryV2(query,request.originalUrl??request.url??"");requireListingCursorKey(options.listingCursorKey);
   return withPublicListingSnapshot(options.pool,async client=>{
+    const projectMedia = (items: PublicListingProjection[]) => projectPublicListingImages(client, items, options.mediaStorage?.accountImageCdn);
     const state=await readListingState(client,q.gameId);
     for(const k of ["filterRevision","catalogRevision","ruleReleaseId"] as const)if(q[k]!==null&&q[k]!==state[k])throw conflict("Listing metadata revision changed");
-    // Owner decision (2026-10-18): the public market keeps the old platform status=3
-    // "listed" rows visible as read-only historical data. They never become
-    // quotable or orderable; readLegacyListing owns those guards.
+    // Retired Delta imports never enter public candidates; other admitted legacy
+    // sources remain read-only and cannot be quoted or ordered.
     if(state.legacyReadOnly){
       await validateListingQuery(client,q,state);
       const configuredLabel=state.config!.sorts.find(s=>s.key===q.sort)?.label??null;
       const page=await listLegacyReadListings(client,q,options.listingCursorKey!,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,sortLabel:legacyListingSortLabel(q.sort,configuredLabel)},options.legacyPublicAdmission);
-      return {...page,items:await attachLegacyPathImages(client,page.items as Record<string,unknown>[])};
+      return {...page,items:await projectMedia(page.items)};
     }
     if(state.mixed){
       const binding=mixedListingBinding(q,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId!},options.legacyPublicAdmission);
       const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
       await validateListingQuery(client,q,state);
       const sql=buildMixedListingCandidates(q,after,options.legacyPublicAdmission),rows=(await client.query<{id:string;version_id:string;key:string|null;source:string}>(sql.text,sql.values)).rows;
-      const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+      const items:PublicListingProjection[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
       for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
         if(row.source==="legacy"){try{items.push(await readLegacyListing(client,row.id,options.legacyPublicAdmission));}catch(e){if((e as {status?:number}).status!==404)throw e;}continue;}
         if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).filter(r=>r.source!=="legacy").map(r=>r.id));
         const account=page.account(row.id);if(!account)continue;
         try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
       const more=scanned<rows.length||rows.length===200;
-      return {queryVersion:2,items:await attachLegacyPathImages(client,items as Record<string,unknown>[]),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+      return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
     }
     const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"RENTABLE_ONLY",gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);
     const sql=buildListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
-    const items:unknown[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
+    const items:PublicListingProjection[]=[];let last:ListingPosition|null=null,scanned=0;const page=listingCandidatePage(client);
     for(let i=0;i<rows.length&&items.length<q.limit;i++){const row=rows[i]!;last={id:row.id,key:row.key,isNull:row.key===null};scanned++;
       if(!page.has(row.id))await page.load(rows.slice(i,i+q.limit).map(r=>r.id));
       const account=page.account(row.id);if(!account)continue;
       try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
     const more=scanned<rows.length||rows.length===200;
-    return {queryVersion:2,items:await attachLegacyPathImages(client,items as Record<string,unknown>[]),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+    return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
   });
 }

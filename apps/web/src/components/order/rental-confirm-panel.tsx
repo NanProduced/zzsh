@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, ChevronDown, Clock3, FileText, RotateCw, ShieldCheck, WalletCards, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronRight, Clock3, FileText, RotateCw, ShieldCheck, WalletCards, X } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { orderApi, orderIntentKey, OrderRequestError, type PersonalRentalQuote, type RentalPricePreview, type FullPayoutTerms, type FullPayoutTermsAcceptance } from "@/lib/order-client";
+import { orderApi, orderIntentKey, OrderRequestError, type Order, type PersonalRentalQuote, type RentalPricePreview, type FullPayoutTerms, type FullPayoutTermsAcceptance } from "@/lib/order-client";
 import { clearIntent, isIntentStale, loadIntent, saveIntent } from "@/lib/order-intents";
 import { formatMoneyLabel } from "@/lib/listing-view";
 import { supplyApi } from "@/lib/supply-client";
@@ -13,6 +13,7 @@ import { useIdentityReset } from "@/components/session/identity-reset";
 import { RentalPriceSummary, MembershipBenefitsCard, type ReferenceFees } from "./rental-price-summary";
 import { moneyText,paymentObservation,personalMembershipLabel,membershipBenefitPresentation,depositReductionCents } from "@/lib/order-display";
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
+import { PaymentDialog } from "@/components/order/payment-dialog";
 
 type AgreementInfo = { id: string; title: string; body: string; digest: string };
 type StoredContext = { payable?: string; tier?: string; deposit?: string; expiresAt?: string; disclosure?: string };
@@ -28,7 +29,7 @@ type PreviewState =
       message: string;
       requestId?: string;
       canRetry: boolean;
-      action?: "refresh" | "back";
+      action?: "refresh" | "back" | "orders";
       retryAfter?: number;
     };
 
@@ -38,7 +39,7 @@ type Stage =
   | { kind: "quoted"; quote: PersonalRentalQuote; agreement: AgreementInfo | null; agreementProblem: string | null }
   | { kind: "creating"; quote: PersonalRentalQuote | null }
   | { kind: "create-unknown"; context: StoredContext; message: string; stale: boolean }
-  | { kind: "created"; quote: PersonalRentalQuote; orderId: string }
+  | { kind: "created"; quote: PersonalRentalQuote; order: Order }
   | { kind: "pay-unknown"; orderId: string; message: string }
   | { kind: "paid"; orderId: string }
   | { kind: "review"; orderId: string; reason: string | null }
@@ -280,6 +281,7 @@ export function RentalConfirmPanel({
   reference,
   fullPayoutSelected = false,
   autoPreview = false,
+  autoStart = false,
 }: {
   accountId: string;
   gameId?: string | null;
@@ -288,14 +290,18 @@ export function RentalConfirmPanel({
   reference?: ReferenceFees;
   fullPayoutSelected?: boolean;
   autoPreview?: boolean;
+  autoStart?: boolean;
 }) {
   const session = useUserSession();
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
+  const [payOpen, setPayOpen] = useState(false);
+  const [paymentAccepted, setPaymentAccepted] = useState(false);
+  const [paymentCancelled, setPaymentCancelled] = useState(false);
   const [previewState, setPreviewState] = useState<PreviewState>({ status: "idle" });
   const [retryClock, setRetryClock] = useState(() => Date.now());
   const [priceChangeNotice, setPriceChangeNotice] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [agreementOpen, setAgreementOpen] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
   const createKey = useRef<string | null>(null);
   const quoteGeneration = useRef(0);
   const previewGeneration = useRef(0);
@@ -315,7 +321,7 @@ export function RentalConfirmPanel({
     previewAbortRef.current?.abort();
     isFetchingPreviewRef.current = false;
     lastPreviewStartRef.current = 0;
-    setAgreementOpen(false);
+    setTermsOpen(false);
     setAgreementAccepted(false);
     setPriceChangeNotice(null);
     setPreviewState({ status: "idle" });
@@ -419,7 +425,7 @@ export function RentalConfirmPanel({
       }
 
       let canRetry = typed.status === 0 || typed.status >= 500;
-      let action: "refresh" | "back" | undefined;
+      let action: "refresh" | "back" | "orders" | undefined;
       let friendlyMessage = "报价服务暂时不可用，请稍后重试。";
       if (typed.code === "MEMBERSHIP_UNKNOWN") {
         friendlyMessage = "个人权益暂时无法核对，请稍后重试。";
@@ -428,9 +434,9 @@ export function RentalConfirmPanel({
         canRetry = false;
         action = "refresh";
       } else if (typed.code === "OCCUPIED") {
-        friendlyMessage = "账号当前已被占用，可以看看其他账号。";
+        friendlyMessage = "账号当前已被占用。如果你刚创建了待支付订单，请到租入订单继续支付；否则可以看看其他账号。";
         canRetry = false;
-        action = "back";
+        action = "orders";
       } else if (typed.status === 403) {
         friendlyMessage = "当前身份暂不具备租用资格。";
         action = "back";
@@ -596,6 +602,19 @@ export function RentalConfirmPanel({
     }
   }, [accountId, gameId, releaseId, userId, isCurrent, versionId, session, payoutGateOpen, payoutAcceptance, autoPreview, stage]);
 
+  /**
+   * The account detail page opts into a single checkout entry: once the payout gate is open and
+   * the read-only preview is ready, fetch the final quote without a second "rent" click. The
+   * tests and other callers stay on the explicit idle action because autoStart defaults to false.
+   */
+  const autoQuoteStarted = useRef(false);
+  useEffect(() => {
+    if (!autoStart || !autoPreview || !userId || !payoutGateOpen || autoQuoteStarted.current || stage.kind !== "idle") return;
+    if (previewState.status !== "ready") return;
+    autoQuoteStarted.current = true;
+    void requote();
+  }, [autoStart, autoPreview, userId, payoutGateOpen, stage.kind, previewState.status, requote]);
+
   const sendCreate = useCallback(async (quote: PersonalRentalQuote) => {
     if (!userId) return;
     const acting = userId;
@@ -635,8 +654,11 @@ export function RentalConfirmPanel({
       if (!isCurrent(acting) || target !== currentQuoteTarget.current) return;
       clearIntent(acting, "order.create.v2", accountId);
       createKey.current = null;
-      setStage({ kind: "created", quote, orderId: order.id });
-      // Immediate local payment is offered on the created panel; the order page remains authoritative.
+      setPaymentAccepted(false);
+      setPaymentCancelled(false);
+      setStage({ kind: "created", quote, order });
+      setPayOpen(true);
+      // The created order opens the payment dialog; the order page remains authoritative.
     } catch (error) {
       if (!isCurrent(acting)) return;
       const typed = errorOf(error);
@@ -852,6 +874,7 @@ export function RentalConfirmPanel({
         {stage.canRequote ? <button type="button" className="button secondary button--sm" onClick={() => void requote()}><RotateCw size={14} aria-hidden="true" />重新确认</button> : null}
         {!stage.canRequote && !stage.orderId && !userId ? <Link className="button secondary button--sm" href={`/login?next=${encodeURIComponent(`/accounts/${accountId}`)}`}>去登录</Link> : null}
         {!stage.canRequote && !stage.orderId && userId && stage.action === "orders" ? <Link className="button secondary button--sm" href="/account?view=rentals">查看租入订单</Link> : null}
+        {stage.action === "orders" ? <Link className="button quiet button--sm" href="/accounts">返回账号列表</Link> : null}
         {!stage.canRequote && !stage.orderId && userId && stage.action === "refresh" ? <button type="button" className="button secondary button--sm" onClick={() => window.location.reload()}>刷新账号资料</button> : null}
         {!stage.canRequote && !stage.orderId && userId && (stage.action === "back" || !stage.action) ? <Link className="button secondary button--sm" href="/accounts">返回账号列表</Link> : null}
       </div>
@@ -892,15 +915,20 @@ export function RentalConfirmPanel({
     </div>;
 
     if (stage.kind === "created") {
-      const orderId = stage.orderId;
-      return <div className="rental-confirm rental-confirm--quote">
-        <div className="rental-confirm-head"><strong>订单已创建</strong><span className="rental-confirm-tier">{orderId}</span></div>
-        <p className="rental-confirm-total-line">预计合计 {formatMoneyLabel(stage.quote.quote?.tenantPayableTotal ?? null) ?? "以服务端确认为准"}</p>
-        <p className="detail-stage-note">请在订单中选择可用的支付方式。付款后还需客服协助确认开租。</p>
-        <div className="rental-confirm-actions">
-          <div className="rental-confirm-primary-action">{dockPrice}<Link className="button rental-confirm-primary" href={orderHref(orderId)}>前往订单支付</Link></div>
+      const created = stage.order;
+      const total = formatMoneyLabel(created.amounts?.totalDue ?? stage.quote.quote?.tenantPayableTotal ?? null);
+      return <>
+        <div className="rental-confirm rental-confirm--quote">
+          <div className="rental-confirm-head"><strong>{paymentCancelled ? "订单已取消" : paymentAccepted ? "支付已接纳" : "订单已创建"}</strong><span className="rental-confirm-tier">{created.displayNo ?? "订单号待确认"}</span></div>
+          <p className="rental-confirm-total-line">本次应付 {total ?? "以服务端确认为准"}</p>
+          <p className="detail-stage-note">{paymentCancelled ? "订单已取消，账号占用已解除。可查看订单或返回账号列表。" : paymentAccepted ? "订单状态以服务端记录为准；付款后仍需客服协助确认开租。" : "订单已保留。关闭付款窗口后，可在个人中心“待支付”继续付款；付款后还需客服协助确认开租。"}</p>
+          <div className="rental-confirm-actions">
+            {!paymentAccepted && !paymentCancelled ? <div className="rental-confirm-primary-action"><button type="button" className="button rental-confirm-primary" onClick={() => setPayOpen(true)}>继续支付{total ? ` ${total}` : ""}</button></div> : null}
+            <Link className="button quiet button--sm" href={orderHref(created.id)}>查看订单</Link>
+          </div>
         </div>
-      </div>;
+        <PaymentDialog order={created} party="renter" open={payOpen} onOpenChange={setPayOpen} onChanged={() => {}} onAccepted={() => setPaymentAccepted(true)} onCancelled={() => { setPaymentCancelled(true); setPayOpen(false); }} />
+      </>;
     }
 
     const quote = stage.quote;
@@ -931,26 +959,37 @@ export function RentalConfirmPanel({
       </dl>
       </> : null}
       <PayoutTerms state={payout} accepted={payoutAccepted} locked onAccept={setPayoutAccepted} />
-      <details className="rental-confirm-terms"><summary>费用与适用条款<ChevronDown size={16} aria-hidden="true" /></summary>
-        <p className="rental-confirm-disclosure"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
-        {disclosure ? <p className="rental-confirm-terms-meta">披露版本 {disclosure.disclosureVersion} · 与本次确认凭据绑定</p> : null}
-        {stage.agreement ? <>
-          <button type="button" className="button quiet button--sm" aria-expanded={agreementOpen} onClick={() => setAgreementOpen((open) => !open)}>
-            <FileText size={14} aria-hidden="true" />{agreementOpen ? `收起协议全文（${stage.agreement.title}）` : `查看本次适用协议全文（${stage.agreement.title}）`}
-          </button>
-          {agreementOpen ? <div className="rental-confirm-agreement" role="region" aria-label="适用协议全文">
-            <p><strong>{stage.agreement.title}</strong></p>
-            <pre>{stage.agreement.body}</pre>
-            <p className="rental-confirm-terms-meta">协议摘要 {stage.agreement.digest.slice(0, 16)}… · 版本 {stage.agreement.id}</p>
-          </div> : null}
-        </> : null}
-        {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
-      </details>
+      <button type="button" className="rental-terms-open" onClick={() => setTermsOpen(true)}>
+        <FileText size={14} aria-hidden="true" />查看费用与适用条款<ChevronRight size={14} aria-hidden="true" />
+      </button>
+      {termsOpen ? <Dialog.Root open onOpenChange={setTermsOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="modal-overlay" />
+          <Dialog.Content className="rental-terms-dialog rental-terms-dialog--terms" aria-describedby={undefined}>
+            <div className="rental-terms-dialog-head">
+              <Dialog.Title className="rental-terms-dialog-title"><FileText size={18} aria-hidden="true" /><span>费用与适用条款</span></Dialog.Title>
+              <Dialog.Close asChild><button type="button" className="rental-terms-dialog-close-btn" aria-label="关闭条款"><X size={18} aria-hidden="true" /></button></Dialog.Close>
+            </div>
+            <div className="rental-terms-dialog-body">
+              <p className="rental-terms-dialog-copy"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
+              {stage.agreement ? <section className="rental-terms-dialog-agreement">
+                <h3>{stage.agreement.title}</h3>
+                <pre>{stage.agreement.body}</pre>
+              </section> : <p className="detail-stage-note">本单适用协议暂时无法读取。</p>}
+              {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
+            </div>
+            <div className="rental-terms-dialog-footer">
+              <Dialog.Close asChild><button type="button" className="button primary">关闭</button></Dialog.Close>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root> : null}
+      {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
       <label className="rental-confirm-consent"><input type="checkbox" checked={agreementAccepted} disabled={!stage.agreement || Boolean(stage.agreementProblem)} onChange={(event) => setAgreementAccepted(event.target.checked)} /><span>我已阅读并同意本单适用协议{stage.agreement ? `《${stage.agreement.title}》` : ""}</span></label>
-      <p className="rental-confirm-expiry"><Clock3 size={14} aria-hidden="true" />确认凭据 {countdown(quote.expiresAt, now) ?? "有效期以服务端为准"}；会员、规则或资格变化后需要重新确认。</p>
+      {expired ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />报价已过期，请重新报价。</p> : null}
       <div className="rental-confirm-actions">
         <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button></div>
-        <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button>
+        {expired || priceChangeNotice ? <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button> : null}
         <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button>
       </div>
     </div>;

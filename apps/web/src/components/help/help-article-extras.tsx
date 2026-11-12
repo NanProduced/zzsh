@@ -36,7 +36,12 @@ export function HelpToc({ sections, variant }: { sections: readonly { id: string
     <ul className="help-toc-list">
       {sections.map((section) => (
         <li key={section.id} data-depth={section.depth ?? 2}>
-          <a href={`#${section.id}`} aria-current={current === section.id ? "true" : undefined}>
+          <a href={`#${section.id}`} aria-current={current === section.id ? "true" : undefined} onClick={variant === "inline" ? (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            const details = event.currentTarget.closest("details");
+            details?.removeAttribute("open");
+            details?.querySelector("summary")?.focus({ preventScroll: true });
+          } : undefined}>
             {section.title}
           </a>
         </li>

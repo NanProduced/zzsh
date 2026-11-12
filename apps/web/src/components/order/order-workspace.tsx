@@ -24,7 +24,7 @@ function emptyListState(scope: string): ListState {
  * current identity, party, filter and account context. Rendering is delegated to the list and
  * detail views so that neither can grow its own read state.
  */
-export function OrderWorkspace({ party, orderId, status: statusParam, accountId, source, filters = {} }: { party: OrderParty; orderId?: string; status?: string; accountId?: string; source?: string; filters?: OrderSearchFilters }) {
+export function OrderWorkspace({ party, orderId, status: statusParam, accountId, source, pay, filters = {} }: { party: OrderParty; orderId?: string; status?: string; accountId?: string; source?: string; pay?: string; filters?: OrderSearchFilters }) {
   const auth = useAuthOverlay();
   const router = useRouter();
   const session = useUserSession();
@@ -191,6 +191,6 @@ export function OrderWorkspace({ party, orderId, status: statusParam, accountId,
 
   if (session.status !== "authenticated" || !session.userId) return <section className="order-session-guard" role="status"><LockKeyhole size={22} aria-hidden="true" /><h2>正在确认订单身份</h2><p>确认期间不会展示上一位用户的订单数据。</p></section>;
   if (orderId && source === "legacy") return <LegacyOrderWorkspace party={party} orderId={orderId} accountId={accountId} status={status} filters={filters} onOrderChanged={() => void loadFirst(false)} />;
-  if (orderId && detail) return <OrderDetail party={party} status={status} accountId={accountId} orderId={orderId} filters={filters} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
+  if (orderId && detail) return <OrderDetail party={party} status={status} accountId={accountId} orderId={orderId} filters={filters} payRequested={pay === "1"} state={detail} onRetry={() => setDetailReload((value) => value + 1)} onLogin={login} onChanged={() => setDetailReload((value) => value + 1)} />;
   return <OrderListPanel party={party} status={status} accountId={accountId} filters={filters} onApplyFilters={next=>router.push(orderUrl(party,status,accountId,undefined,undefined,next),{scroll:false})} state={visibleListState} onRefresh={retryList} onRetryList={retryList} onLoadMore={() => void loadMore()} onLogin={login} onReauthorize={() => session.revalidate()} onOpen={onOpen} />;
 }

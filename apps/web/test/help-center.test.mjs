@@ -1,14 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allHelpArticles, getHelpArticle, listFeaturedArticles, listHelpArticlesByCategory, resolveRelated } from "../src/content/help/index.ts";
-import { searchHelpArticles } from "../src/content/help/search.ts";
+import { listFeaturedArticles as listFeaturedArticlesBase, listHelpArticlesByCategory as listHelpArticlesByCategoryBase, resolveRelated as resolveRelatedBase } from "../src/content/help/index.ts";
+import { searchHelpArticles as searchHelpArticlesBase } from "../src/content/help/search.ts";
 import { legacyHelpHashMap, legacySiteUrlMap, resolveLegacyHash } from "../src/content/help/legacy-links.ts";
 import { helpAuxCategories, helpCategories, helpCategoryLabel } from "../src/content/help/types.ts";
-import { buildHelpNavData, toArticleCard } from "../src/components/help/nav-data.ts";
+import { buildHelpNavData, findHelpGroup, flattenHelpNavArticles, toArticleCard } from "../src/components/help/nav-data.ts";
 import { stripHelpSearchQuery } from "../src/components/help/help-url.ts";
+import { defaultHelpArticles, defaultHelpTree, getDefaultHelpArticle } from "./help-defaults.mjs";
 
-test("slugs are unique and every article has required metadata", async () => {
-  const { inspectMarkdown } = await import("@zzsh/content/markdown");
+// P2：用户端帮助不再有运行时代码默认；离线用例以已确认 defaults 投影出的文章为语料。
+const allHelpArticles = defaultHelpArticles;
+const getHelpArticle = getDefaultHelpArticle;
+const searchHelpArticles = (query) => searchHelpArticlesBase(query, allHelpArticles);
+const listFeaturedArticles = () => listFeaturedArticlesBase(allHelpArticles);
+const listHelpArticlesByCategory = (category) => listHelpArticlesByCategoryBase(category, allHelpArticles);
+const resolveRelated = (article) => resolveRelatedBase(article, allHelpArticles);
+
+/** 收集 Plate 文档中所有可渲染锚点（content-<node.id>），用于校验旧锚点映射。 */
+function renderedAnchorIds(article) {
+  const ids = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (typeof node.id === "string") ids.add(`content-${node.id}`);
+    for (const child of node.children ?? []) walk(child);
+  };
+  for (const node of article.document.value ?? []) walk(node);
+  return ids;
+}
+
+test("slugs are unique and every article has required metadata", () => {
   const slugs = new Set(allHelpArticles.map((a) => a.slug));
   assert.equal(slugs.size, allHelpArticles.length);
   const categories = new Set([...helpCategories, ...helpAuxCategories].map((c) => c.id));
@@ -17,17 +37,12 @@ test("slugs are unique and every article has required metadata", async () => {
     assert.ok(categories.has(article.category), `${article.slug} category`);
     assert.ok(article.audience.length > 0, article.slug);
     assert.match(article.updatedAt, /^\d{4}-\d{2}-\d{2}$/, article.slug);
-    if (article.format === "markdown") {
-      const document = await inspectMarkdown(article.markdown);
-      assert.ok(article.markdown.length > 0 && document.toc.length > 0, article.slug);
-      assert.equal(new Set(document.toc.map(item => item.id)).size, document.toc.length, `${article.slug} heading IDs`);
-      for (const target of Object.values(article.anchorAliases ?? {})) assert.ok(document.toc.some(item => item.id === target), `${article.slug} old section target`);
-    } else {
-      assert.ok(article.sections.length > 0, article.slug);
-      const sectionIds = new Set(article.sections.map((s) => s.id));
-      assert.equal(sectionIds.size, article.sections.length, `${article.slug} section anchor uniqueness`);
-      for (const section of article.sections) assert.ok(section.blocks.length > 0, `${article.slug}#${section.id}`);
-    }
+    assert.equal(article.format, "plate", article.slug);
+    assert.ok(article.document && article.plainText.length > 0, article.slug);
+    const tocIds = article.toc.map((item) => item.id);
+    assert.equal(new Set(tocIds).size, tocIds.length, `${article.slug} heading IDs`);
+    const anchors = renderedAnchorIds(article);
+    for (const target of Object.values(article.anchorAliases ?? {})) assert.ok(anchors.has(target), `${article.slug} old section target ${target}`);
   }
 });
 
@@ -44,11 +59,11 @@ test("related and featured references resolve to real articles", () => {
 });
 
 test("nav data groups every article exactly once", () => {
-  const nav = buildHelpNavData(allHelpArticles);
-  const grouped = [...nav.categories, ...nav.aux].flatMap((c) => c.articles.map((a) => a.slug));
+  const nav = buildHelpNavData(defaultHelpTree());
+  const grouped = flattenHelpNavArticles(nav).map(article => article.slug);
   assert.equal(grouped.length, allHelpArticles.length);
   assert.equal(new Set(grouped).size, allHelpArticles.length);
-  for (const group of [...nav.categories, ...nav.aux]) assert.ok(group.articles.length > 0, group.id);
+  for (const group of nav.entries) assert.ok(group.children.length > 0, group.id);
 });
 
 test("legacy /help anchors map to real articles", () => {
@@ -87,7 +102,7 @@ test("UX22 U01: withdrawal help keeps no manual review without treating availabl
   assert.match(text, /不设人工.*审核/);
   assert.match(text, /身份.*资格.*渠道/);
   assert.match(text, /可用余额不等于可提现金额/);
-  assert.match(text, /待确认/);
+  assert.match(text, /暂未确认|待核/);
   assert.match(text, /结果未知/);
   assert.doesNotMatch(JSON.stringify(getHelpArticle("fees-settlement")), /可立即申请提现/);
 });
@@ -139,13 +154,13 @@ test("article cards keep public fields only", () => {
   }
 });
 
-test("featured questions match canonical 6 items from design spec", () => {
+test("featured questions prioritize first rental, publishing and the two fee questions", () => {
   const expected = [
     "rental-getting-started",
-    "rental-check-before-order",
+    "publish-prepare",
     "fees-early-end",
     "fees-refund-status",
-    "publish-prepare",
+    "rental-check-before-order",
     "account-recovery",
   ];
   const featured = listFeaturedArticles().map((a) => a.slug);
@@ -153,7 +168,7 @@ test("featured questions match canonical 6 items from design spec", () => {
 });
 
 test("long vs short article detection correctly distinguishes TOC requirements", async () => {
-  const { isLongArticle, articleBreadcrumb } = await import("../src/components/help/nav-data.ts");
+  const { hasArticleToc, isLongArticle, articleBreadcrumb } = await import("../src/components/help/nav-data.ts");
   const longArticle = getHelpArticle("rental-getting-started");
   const shortArticle = getHelpArticle("minor-protection");
   assert.ok(longArticle);
@@ -162,8 +177,10 @@ test("long vs short article detection correctly distinguishes TOC requirements",
   const projectedLong = await publicHelpArticle({ state: "available", payload: { ...longArticle, kind: "guide" }, media: [] });
   assert.equal(isLongArticle(projectedLong), true);
   assert.equal(isLongArticle(shortArticle), false);
+  assert.equal(hasArticleToc(projectedLong), true);
+  assert.equal(hasArticleToc({ ...projectedLong, toc: [], plainText: "长文".repeat(1000) }), false);
 
-  const crumbs = articleBreadcrumb(longArticle);
+  const crumbs = articleBreadcrumb(longArticle, buildHelpNavData(defaultHelpTree()));
   assert.equal(crumbs.length, 3);
   assert.equal(crumbs[2].label, "租号与使用");
   // Does not duplicate long article title in breadcrumb
@@ -183,7 +200,8 @@ async function helpPageRenderer() {
     if (name === "next/link") return ({ children, ...props }) => React.createElement("a", props, children);
     if (name === "@/content/help/types") return { helpCategories, helpCategoryLabel };
     if (name === "./help-shell") return { HelpShell: ({ topContent, children }) => React.createElement(React.Fragment, null, topContent, children) };
-    if (name === "./help-nav") return { HelpNavAside: () => null, HelpNavDrawer: () => null };
+    if (name === "./help-nav") return { HelpNavAside: () => null, HelpNavDrawer: () => null, helpFolderIcon: () => () => null };
+    if (name === "./nav-data") return { findHelpGroup, flattenHelpNavArticles };
     if (name === "./help-article-extras") return { LegacyHashHandler: () => null };
     if (name === "@/components/support/support-contact-button") return { SupportContactButton: ({ children, ...props }) => React.createElement("button", props, children) };
     return native(name);
@@ -193,7 +211,7 @@ async function helpPageRenderer() {
 
 test("help home only links to currently public articles and has an explicit empty-publication state", async () => {
   const renderPage = await helpPageRenderer();
-  const render = articles => renderPage({ view: { kind: "home", featured: [] }, navData: buildHelpNavData(articles), query: "", legacyHashMap: {} });
+  const render = articles => renderPage({ view: { kind: "home", featured: [] }, navData: buildHelpNavData(defaultHelpTree(articles)), query: "", legacyHashMap: {} });
   const empty = render([]);
   assert.match(empty, /当前暂无公开帮助文档/);
   assert.doesNotMatch(empty, /href="\/help\/(?:rental-getting-started|publish-prepare|fees-refund-status|terms-and-privacy)"/);
@@ -204,8 +222,9 @@ test("help home only links to currently public articles and has an explicit empt
   assert.match(full, /<form(?=[^>]*action="\/help")(?=[^>]*method="get")(?=[^>]*role="search")[^>]*>/);
   assert.match(full, /type="search"[^>]+name="q"/);
   assert.equal((full.match(/class="help-home-category-card"/g) ?? []).length, 6);
-  assert.match(full, /class="help-home-category-card" href="\/help\/rental-getting-started"/);
-  assert.match(full, /class="help-home-category-card" href="\/help\/fees-overview"/);
+  assert.match(full, /<details class="help-home-category-card"><summary>/);
+  assert.match(full, /href="\/help\?category=rental"/);
+  assert.match(full, /href="\/help\?category=fees"/);
   assert.match(full, /查看平台协议与规则/);
   assert.doesNotMatch(full, /平台动态|\/updates/);
 });
@@ -214,7 +233,7 @@ test("search results name auxiliary agreement categories in Chinese", async () =
   const article = getHelpArticle("terms-and-privacy");
   assert.ok(article);
   const render = await helpPageRenderer();
-  const html = render({ view: { kind: "search", query: "协议", hits: [toArticleCard(article)] }, navData: buildHelpNavData([article]), query: "协议", legacyHashMap: {} });
+  const html = render({ view: { kind: "search", query: "协议", hits: [toArticleCard(article)] }, navData: buildHelpNavData(defaultHelpTree([article])), query: "协议", legacyHashMap: {} });
   assert.match(html, /href="\/help\/terms-and-privacy"/);
   assert.match(html, /class="help-audience-badge">协议与规则<\/span>/);
   assert.doesNotMatch(html, />agreement</);

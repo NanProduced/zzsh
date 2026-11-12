@@ -1,16 +1,19 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
 import type { ListingCursorKey } from "../supply/listing-cursor";
+import { assertEcsTestDemoResource, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 
 import { ADMIN_PERMISSION, requirePermission } from "../auth/admin-authorization";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
 import { assertUserContextInTransaction, readUserContext } from "../auth/user-identity";
+import { USER_LISTING_OBLIGATION_SQL, USER_ORDER_OBLIGATION_SQL } from "../auth/user-obligation-reader";
 import { recordAudit, setAuditContext, withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
 import { canonicalize } from "../supply/content-hash";
 import { decodeId, requireAdminAccess, safely, type SupplyResponse } from "../supply/supply-routes";
-import { assertGameScope, bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, requiredString, sendJson, sha256Hex, type SupplyNodeRequest } from "../supply/supply-util";
+import { assertGameScope, bodyOf, ensureOnlyFields, fingerprintRequest, forbidden, headerValue, invalid, notFound, requiredString, sendJson, sha256Hex, withIdempotency, type SupplyNodeRequest } from "../supply/supply-util";
+import { confirmDemoGuaranteePayment } from "./demo-guarantee";
 import {
   confirmBreach,
   decideRecovery,
@@ -45,9 +48,9 @@ function userEvent(event: Record<string, unknown>) {
 }
 
 async function creditObligationReader(userId: string, client: PoolClient, configured: AuthSecurityOptions["userObligationReader"]): Promise<"NONE" | "PENDING" | "UNKNOWN"> {
-  const listing = await client.query(`SELECT 1 FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id WHERE a.owner_user_id=$1 AND v.review_state IN ('SUBMITTED','APPROVED','PUBLISHED') LIMIT 1`, [userId]);
+  const listing = await client.query(USER_LISTING_OBLIGATION_SQL, [userId]);
   if (listing.rowCount) return "PENDING";
-  const orders = await client.query(`SELECT 1 FROM zzsh_order.rental_order WHERE status IN ('PENDING_PAYMENT','PAID') AND (owner_user_id=$1 OR renter_user_id=$1) LIMIT 1`, [userId]);
+  const orders = await client.query(USER_ORDER_OBLIGATION_SQL, [userId]);
   if (orders.rowCount) return "PENDING";
   return configured ? configured(userId, client) : "NONE";
 }
@@ -94,7 +97,7 @@ async function readRecoveryRequests(client: PoolClient, userId: string) {
   return (await client.query(`SELECT id,status,reason,score_before AS "scoreBefore",completed_orders AS "completedOrders",decision_reason AS "decisionReason",created_at::text AS "createdAt",decided_at::text AS "decidedAt" FROM zzsh_credit.credit_recovery_request WHERE user_id=$1 ORDER BY created_at DESC,id DESC`, [userId])).rows;
 }
 
-export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey }, commandsEnabled = false): void {
+export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthSecurityOptions & { listingCursorKey?: ListingCursorKey; demoFinance?: DemoFinanceResource }, commandsEnabled = false): void {
   const express = app.getHttpAdapter().getInstance();
   const userPrefixes = ["/api/v1/users/me/credit", "/api/bff/user/credit"];
   for (const prefix of userPrefixes) {
@@ -111,7 +114,27 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
           if (method === "GET" && (path === "/" || path === "/overview")) {
             if (url.search) throw notFound();
             const credit = await readCreditSnapshot(client, context.userId, false);
-            return { creditState: credit ? "INITIALIZED" : "NOT_INITIALIZED", credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), guarantees: await ownedGuarantees(client, context.userId, credit ? { score: credit.score, revision: credit.revision } : null), transactions: await readGuaranteeTransactions(client, context.userId) };
+            const guarantees = await ownedGuarantees(client, context.userId, credit ? { score: credit.score, revision: credit.revision } : null);
+            let paymentMode: "SIMULATED" | "UNAVAILABLE" = "UNAVAILABLE";
+            let eligible = new Set<string>();
+            if (commandsEnabled && options.demoFinance) {
+              try {
+                const registration = await assertEcsTestDemoResource(client, options.demoFinance, "READ_ORIGINAL");
+                if (registration.active) {
+                  paymentMode = "SIMULATED";
+                  const ids = guarantees.map(item => item.paymentId).filter((value): value is string => typeof value === "string");
+                  if (ids.length) eligible = new Set((await client.query<{ id: string }>(`SELECT p.id FROM zzsh_order.owner_guarantee_payment p
+                    JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=$2
+                    WHERE p.id=ANY($1::text[]) AND p.owner_user_id=$3 AND p.status='REQUESTED' AND p.provider_request_state='NOT_AUTHORIZED'
+                      AND p.created_at>=s.registered_at AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a
+                        WHERE a.object_type='owner_guarantee_payment' AND a.object_id=p.id AND a.actor_type='user'
+                          AND a.actor_id=p.owner_user_id AND a.action='credit.guarantee.payment_intent_created'
+                          AND a.outcome='SUCCESS' AND a.occurred_at>=s.registered_at)`, [ids, registration.reference, context.userId])).rows.map(row => row.id));
+                }
+              } catch { paymentMode = "UNAVAILABLE"; eligible = new Set(); }
+            }
+            return { creditState: credit ? "INITIALIZED" : "NOT_INITIALIZED", credit: credit ? { ...credit, events: credit.events.map((event) => userEvent(event as unknown as Record<string, unknown>)) } : null, recoveryRequests: await readRecoveryRequests(client, context.userId), paymentMode,
+              guarantees: guarantees.map(item => ({ ...item, demoPaymentEligible: item.paymentId ? eligible.has(item.paymentId) : false })), transactions: await readGuaranteeTransactions(client, context.userId) };
           }
           if (method === "POST" && path === "/recovery-requests") {
             const input = bodyOf(request);
@@ -131,6 +154,23 @@ export function mountCreditGuaranteeRoutes(app: INestApplication, options: AuthS
             const result = await createGuaranteePaymentIntent(client, { accountId, context: null, userId: context.userId, requestKey: key, requestFingerprint: sha256Hex(canonicalize(input)) });
             await recordAudit(client, { actorType: "user", actorId: context.userId, sessionId: context.sessionId, action: "credit.guarantee.payment_intent_created", objectType: "owner_guarantee_payment", objectId: String(result.paymentId), outcome: "SUCCESS", requestId, details: { result: result.duplicate ? "REPLAY" : "APPLIED", providerAction: result.providerAction } });
             return result;
+          }
+          const demoPayment = /^\/accounts\/([^/]+)\/payment-intents\/([^/]+)\/demo-confirm$/.exec(path);
+          if (method === "POST" && demoPayment && options.demoFinance) {
+            if (request.headers.authorization || request.headers.origin !== options.userOrigin || url.search) throw forbidden();
+            await assertEcsTestDemoResource(client, options.demoFinance, "READ_ORIGINAL");
+            ensureOnlyFields(bodyOf(request), []);
+            const accountId = decodeId(demoPayment[1]!), paymentId = decodeId(demoPayment[2]!);
+            const key = validateIdempotencyKey(headerValue(request.headers["idempotency-key"]));
+            const resourceId = paymentId, operation = "demo.guarantee.payment.confirm.v1";
+            const result = await withIdempotency(client, { realm: "user", principalId: context.userId, operation, resourceId }, key,
+              fingerprintRequest(operation, resourceId, { accountId }), async () => {
+                const owned = await client.query(`SELECT p.id FROM zzsh_order.owner_guarantee_payment p
+                  JOIN zzsh_order.owner_guarantee_requirement r ON r.id=p.requirement_id AND r.owner_user_id=p.owner_user_id
+                  WHERE p.id=$1 AND r.account_id=$2 AND p.owner_user_id=$3`, [paymentId, accountId, context.userId]);
+                if (!owned.rowCount) throw notFound();
+              }, async () => ({ status: 200, body: await confirmDemoGuaranteePayment(client, options.demoFinance!, { ...context, requestId }, accountId, paymentId) }));
+            return result.body;
           }
           const refundMatch = /^\/guarantees\/([^/]+)\/refund-requests$/.exec(path);
           if (method === "POST" && refundMatch) {

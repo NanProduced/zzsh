@@ -224,18 +224,18 @@ export class LegacyGrowthOutcomeError extends Error {
 const EXEC_KEY = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 
 /** Runs inside the caller's (Q H4) transaction, on the same client as authorize/audit/idempotency. */
-export async function writePreparedLegacyGrowth(client: Pick<PoolClient, "query">, prepared: Prepared, port: LegacyCoveragePort, executionKey: string): Promise<LegacyGrowthWriteResult> {
+export async function writePreparedLegacyGrowth(client: Pick<PoolClient, "query">, prepared: Prepared, port: LegacyCoveragePort, executionKey: string): Promise<LegacyGrowthWriteResult & { storedRecord: LegacyCoverageRecord }> {
   if (!EXEC_KEY.test(executionKey)) throw new LegacyGrowthConflictError("execution-key-invalid", -1);
   const existing = await port.readForWrite(client, prepared.subjectUserId, executionKey, prepared.fingerprint);
   if (existing?.matchedByKey) {
     if (existing.record.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`execution:${executionKey}`, -1); // same key, changed body
-    return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey };
+    return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey, storedRecord: existing.record };
   }
-  if (existing) return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey: existing.record.executionKey ?? executionKey };
+  if (existing) return { inserted: 0, replayed: prepared.rows.length, coverage: "REPLAYED", fingerprint: existing.record.fingerprint, executionKey: existing.record.executionKey ?? executionKey, storedRecord: existing.record };
   const { inserted, replayed } = await writeLegacyGrowthContributionRows(client, prepared.rows);
   const stored = await port.persist(client, { ...prepared.record, executionKey });
   if (stored.fingerprint !== prepared.fingerprint) throw new LegacyGrowthConflictError(`version:${prepared.fingerprint}`, -1);
-  return { inserted, replayed, coverage: "INSERTED", fingerprint: prepared.fingerprint, executionKey };
+  return { inserted, replayed, coverage: "INSERTED", fingerprint: prepared.fingerprint, executionKey, storedRecord: stored };
 }
 
 /** Caller owns transaction and source authorization; this never writes owner-only historical coverage. */
@@ -267,7 +267,7 @@ export async function runLegacyGrowthBackfill(pool: Pick<Pool, "connect">, prepa
   let commitSent = false, broken = false;
   try {
     await client.query("BEGIN ISOLATION LEVEL READ COMMITTED");
-    const result = await writePreparedLegacyGrowth(client, prepared, port, executionKey);
+    const { storedRecord: _storedRecord, ...result } = await writePreparedLegacyGrowth(client, prepared, port, executionKey);
     commitSent = true;
     await client.query("COMMIT");
     return { ...result, coverageState: prepared.coverageState };

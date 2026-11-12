@@ -102,6 +102,11 @@ test("owner quote and order expose own frozen income without renter private pric
   const rented = projectOrder(row, "renter") as Record<string, any>;
   assert.equal(rented.amounts.rental.amount, "123.45");
   assert.equal(rented.quote.ownerTotal, undefined);
+  const memberRow = { ...row, quoteSnapshot: { ...internal, membershipGrowth: { effectiveTier: "SILVER", policyTier: "SILVER" }, settlementPricing: { payableRatio: "0.98000000" } } } as OrderRow;
+  assert.deepEqual((projectOrder(memberRow, "renter") as Record<string, any>).membership, { tier: "SILVER", payableRatio: "0.98000000" });
+  assert.equal("membership" in (projectOrder(memberRow, "owner") as Record<string, any>), false);
+  const unsafeMember = { ...row, quoteSnapshot: { ...internal, membershipGrowth: { effectiveTier: "ROOT" }, settlementPricing: { payableRatio: "0" } } } as OrderRow;
+  assert.equal("membership" in (projectOrder(unsafeMember, "renter") as Record<string, any>), false);
   const support = projectOrder(row, "admin") as Record<string, any>;
   assert.ok(support.quote.lines[0].buyerAmount); assert.ok(support.quote.lines[0].ownerAmount);
   assert.equal(support.quote.pricingInputs, undefined);

@@ -1,6 +1,6 @@
-import type { ContentBlock, ContentSection } from "@zzsh/content";
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
 
-// 帮助正文保留历史 blocks；新 Markdown 经共享解析投影目录和搜索文本。
+// 帮助正文唯一格式 plate；目录与搜索文本由 extractPlate 投影，不再保留 blocks/markdown。
 
 export const helpCategories = [
   { id: "rental", label: "租号与使用", description: "选号、下单、交付与租用期间的操作" },
@@ -28,6 +28,18 @@ export function helpCategoryLabel(id: AnyHelpCategoryId): string {
       ?? id;
 }
 
+export type PublicHelpTreeNode = {
+  id: string;
+  parentId: string | null;
+  kind: "FOLDER" | "ARTICLE";
+  title: string;
+  slug: string | null;
+  depth: number;
+  sortKey: string;
+  iconKey: string | null;
+  description: string | null;
+};
+
 export type HelpAudience = "renter" | "owner" | "all";
 
 export const audienceLabels: Record<HelpAudience, string> = {
@@ -35,10 +47,6 @@ export const audienceLabels: Record<HelpAudience, string> = {
   owner: "号主",
   all: "全体用户",
 };
-
-export type HelpBlock = ContentBlock;
-
-export type HelpSection = ContentSection;
 
 export type HelpArticle = {
   /** 稳定内部编号，与内容目录一致，例如 R01 */
@@ -54,10 +62,10 @@ export type HelpArticle = {
   keywords: readonly string[];
   /** 真实内容更新日期，ISO YYYY-MM-DD */
   updatedAt: string;
-  sections?: readonly HelpSection[];
-  format?: "markdown" | "blocks";
-  schemaVersion?: number;
-  markdown?: string;
+  format: "plate";
+  schemaVersion: 1;
+  document: PlateDocumentEnvelope;
+  mediaIds: readonly string[];
   anchorAliases?: Readonly<Record<string, string>>;
   toc?: readonly { id: string; title: string; depth: number }[];
   plainText?: string;
@@ -69,4 +77,4 @@ export type HelpArticle = {
   mediaUrls?: Readonly<Record<string, string | null>>;
 };
 
-export type HelpArticleMeta = Omit<HelpArticle, "sections">;
+export type HelpArticleMeta = Omit<HelpArticle, "document">;

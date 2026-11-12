@@ -6,6 +6,7 @@ import type { EcsTestDemoRuntime } from "../finance/ecs-test-demo-runtime";
 import { demoForChannelRequestCapability } from "./channel-payment-store";
 import { runEcsDemoRefundBatch } from "./ecs-demo-refund-service";
 import { runRegisteredControlledWithdrawalBatch } from "../finance/controlled-withdrawal-worker";
+import { runDemoGuaranteeRefundBatch } from "../credit/demo-guarantee";
 import { assertEcsTestDemoResource } from "../finance/ecs-test-demo-resource";
 import { DISTRIBUTION_DUE_LOCK_KEY, runDistributionAccrualTasks } from "../finance/distribution-accrual-tasks";
 
@@ -45,7 +46,7 @@ export class EcsDemoRefundLifecycle implements OnModuleDestroy {
   private nextEarningCheck = 0;
   private earningsNeedReview = false;
 
-  start(pool: Pool, runtime: EcsTestDemoRuntime): void {
+  start(pool: Pool, runtime: EcsTestDemoRuntime, creditGuaranteeEnabled = false): void {
     if (this.timer || this.stopped || demoForChannelRequestCapability(runtime.refund.capability) !== runtime.demo)
       throw new ConfigurationError("ECS_TEST_DEMO_REFUND_WORKER_INVALID");
     const tick = () => {
@@ -55,6 +56,10 @@ export class EcsDemoRefundLifecycle implements OnModuleDestroy {
         catch { console.error("Test simulated refund worker failed; original intents remain queryable"); }
         try { await runRegisteredControlledWithdrawalBatch(pool,runtime.withdrawal.scope,10); }
         catch { console.error("Test simulated withdrawal worker failed; original intents remain queryable"); }
+        if (creditGuaranteeEnabled) try {
+          const result = await runDemoGuaranteeRefundBatch(pool, runtime.demo, 10);
+          if (result.failed) console.error("Test simulated guarantee refund requires review");
+        } catch { console.error("Test simulated guarantee refund worker failed; original intents remain queryable"); }
         if (Date.now()>=this.nextEarningCheck) {
           this.nextEarningCheck=Date.now()+60000;
           let taskPass = false;

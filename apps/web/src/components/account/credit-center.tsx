@@ -5,6 +5,7 @@ import { CreditCard, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useUserSession, useUserSessionStore } from "../session/user-session-provider";
 import { RecoveryAlert, RecordStatus, SkeletonBlock } from "@/components/ui/information";
+import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 import { supplyApi, SupplyRequestError } from "../../lib/supply-client";
 import { formatOrderTime } from "../../lib/order-client";
 import {
@@ -13,12 +14,13 @@ import {
   guaranteeReleasePolicyLabel,
   UNRECOGNIZED_STATE_LABEL,
 } from "@zzsh/ui/display-credit";
-import { CreditRequestError, creditMoney, loadCreditWriteIntent, readMyCredit, type CreditGuarantee, type CreditOverview, type CreditWriteIntent } from "../../lib/credit-guarantee-client";
+import { CreditRequestError, clearCreditWriteIntent, creditMoney, loadCreditWriteIntent, makeCreditWriteIntent, readMyCredit, submitCreditWrite, type CreditGuarantee, type CreditOverview, type CreditWriteIntent } from "../../lib/credit-guarantee-client";
 import "./credit-center.css";
 
 /** 已获权账号摘要。用于给保证金责任提供可辨识名称；与信用主读取解耦，失败不阻塞。 */
 type AccountSummary = { title: string | null; gameName: string | null };
 type AccountSummaryState = { scope: string; entries: Record<string, AccountSummary>; failed: boolean; loading: boolean };
+type GuaranteeCheckout = { scope: string; accountId: string; paymentId: string; amountCents: string };
 
 const SUMMARY_PAGE_LIMIT = "50";
 const SUMMARY_MAX_PAGES = 6;
@@ -67,7 +69,12 @@ export function CreditCenter({ scope }: { scope: string }) {
   const [reload, setReload] = useState(0);
   const transactionsRef = useRef<HTMLDetailsElement | null>(null);
   const [pending, setPending] = useState<CreditWriteIntent | null>(() => loadCreditWriteIntent(scope));
+  const [checkout, setCheckout] = useState<GuaranteeCheckout | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentNotice, setPaymentNotice] = useState("");
   const [summaries, setSummaries] = useState<AccountSummaryState>({ scope, entries: {}, failed: false, loading: false });
+
+  useEffect(() => { setCheckout(null); setPaymentNotice(""); setPaymentBusy(false); }, [scope]);
 
   const identityCurrent = current();
   const data = state.scope === scope && identityCurrent ? state.data : null;
@@ -156,6 +163,53 @@ export function CreditCenter({ scope }: { scope: string }) {
   const score = data?.credit?.score;
   const scoreKnown = typeof score === "number";
   const reloadData = () => setReload((value) => value + 1);
+  const paymentPath = /^\/accounts\/([^/]+)\/payment-intents(?:\/([^/]+)\/demo-confirm)?$/;
+  const executePayment = async (intent: CreditWriteIntent) => {
+    const parts = paymentPath.exec(intent.path);
+    if (!parts || intent.subject !== scope || !current()) return;
+    setPaymentBusy(true); setPaymentNotice("");
+    try {
+      const result = await submitCreditWrite(intent);
+      if (!current() || scopeRef.current !== scope) return;
+      const accountId = decodeURIComponent(parts[1]!);
+      if (!result || typeof result !== "object" || typeof result.paymentId !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(result.paymentId)) throw new CreditRequestError(502, "PAYMENT_RECEIPT_UNAVAILABLE", true);
+      if (parts[2]) {
+        if (result.paymentId !== decodeURIComponent(parts[2]) || result.status !== "CONFIRMED" || result.bankArrival !== "UNKNOWN"
+          || !["ECS_TEST_SIMULATED", "LOCAL_DEMO_SIMULATED"].includes(result.scope)) throw new CreditRequestError(502, "PAYMENT_RECEIPT_UNAVAILABLE", true);
+      } else if (result.status === "REQUESTED" && (typeof result.amountCents !== "string" || !/^[1-9]\d{0,4}$/.test(result.amountCents))) {
+        throw new CreditRequestError(502, "PAYMENT_RECEIPT_UNAVAILABLE", true);
+      }
+      clearCreditWriteIntent(intent);
+      if (loadCreditWriteIntent(scope)) throw new CreditRequestError(0, "WRITE_INTENT_STORAGE_UNAVAILABLE", true);
+      setPending(null);
+      if (parts[2]) { setCheckout(null); setPaymentNotice("模拟缴纳已完成，未发生真实扣款。返回上架页刷新状态后可继续。"); }
+      else if (result.status === "REQUESTED") setCheckout({ scope, accountId, paymentId: result.paymentId, amountCents: result.amountCents });
+      else setPaymentNotice("缴纳记录已有变化，请刷新查看当前状态。");
+      reloadData();
+    } catch (error) {
+      if (!current() || scopeRef.current !== scope) return;
+      setCheckout(null);
+      if (error instanceof CreditRequestError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+        clearCreditWriteIntent(intent); setPending(loadCreditWriteIntent(scope));
+        setPaymentNotice("缴纳操作未完成，请刷新状态；如仍无法处理，请联系客服。");
+        if (error.status === 401) session.revalidate();
+      } else {
+        setPending(loadCreditWriteIntent(scope) ?? intent);
+        setPaymentNotice("本次操作结果暂未确认，请使用原请求查询，避免重复缴纳。");
+      }
+    } finally { if (scopeRef.current === scope) setPaymentBusy(false); }
+  };
+  const startPayment = (accountId: string, paymentId?: string) => {
+    if (!current() || paymentBusy || data?.paymentMode !== "SIMULATED") return;
+    const saved = loadCreditWriteIntent(scope);
+    if (saved) { setPending(saved); setPaymentNotice("请先核对上一次操作结果。"); return; }
+    const path = `/accounts/${encodeURIComponent(accountId)}/payment-intents${paymentId ? `/${encodeURIComponent(paymentId)}/demo-confirm` : ""}`;
+    const intent = makeCreditWriteIntent(scope, path, {});
+    if (!intent.persisted) { setPaymentNotice("无法保存原请求，暂不能提交，请检查浏览器存储。"); return; }
+    setPending(intent); void executePayment(intent);
+  };
+  const visibleCheckout = checkout?.scope === scope && identityCurrent ? checkout : null;
 
   return <section className="account-module credit-center" aria-labelledby="credit-center-heading">
     <header className="account-module-heading fin-header">
@@ -170,7 +224,8 @@ export function CreditCenter({ scope }: { scope: string }) {
         </button>
       </div>
     </header>
-    {identityCurrent && pending?.subject === scope ? <div className="credit-pending" role="status"><strong>{pending.phase === "readback" ? "上次操作已受理，状态待确认" : "上次操作结果待确认"}</strong><span>请先查看处理结果。</span></div> : null}
+    {identityCurrent && pending?.subject === scope ? <div className="credit-pending" role="status"><strong>{pending.phase === "readback" ? "上次操作已受理，状态待确认" : "上次操作结果待确认"}</strong><span>请先查看处理结果。</span>{paymentPath.test(pending.path) ? <button type="button" className="button secondary" disabled={paymentBusy} onClick={() => void executePayment(pending)}>继续原请求</button> : null}</div> : null}
+    {identityCurrent && paymentNotice ? <div className="credit-pending" role="status">{paymentNotice}</div> : null}
     {phase === "loading" ? <div className="account-module-card credit-loading"><SkeletonBlock label="正在读取信用状态" lines={4} /></div> : phase === "error" ? <RecoveryAlert tone="error" live title="信用信息暂时无法读取" problem={state.error}
       impact="请稍后重试。"
       action={<button type="button" className="button secondary" onClick={reloadData}>重试</button>}
@@ -190,9 +245,12 @@ export function CreditCenter({ scope }: { scope: string }) {
           <header><h4><Link href={`/account?view=accounts&accountId=${encodeURIComponent(accountId)}`} scroll={false}>{heading.primary}</Link></h4><span className="credit-account-meta">{[heading.secondary, group.contexts.length > 1 ? `${group.contexts.length} 项保证金要求` : null].filter(Boolean).join(" · ")}</span></header>
           {group.contexts.map(item => <div className="credit-responsibility" key={`${item.versionId}:${item.priceVersionId}:${item.releaseId}`}>
             <div className="credit-responsibility-heading"><strong><RecordStatus tone={guaranteeTone[item.state] ?? "unknown"}>{guaranteeResponsibilityLabel(item.state)}</RecordStatus></strong><span>计算时信用 {item.score ?? "待确认"}</span></div>
-            <dl><div><dt>保证金要求</dt><dd>{item.state === "UNKNOWN" ? "待确认" : creditMoney(item.requiredCents)}</dd></div><div><dt>说明</dt><dd>{item.reasonCode === "PAYMENT_UNDERPAID" ? "已收的款还不够当前要求" : item.state === "NOT_REQUIRED" ? "该账号当前不需要缴保证金。" : item.state === "REQUIRED" ? "还需缴纳保证金才能继续出租。" : item.state === "SATISFIED" ? "保证金已缴足，不计入你的可用余额。" : guaranteeResponsibilityLabel(item.state)}</dd></div></dl><details className="credit-calculation"><summary>查看计算信息</summary><p>参考金额：{creditMoney(item.baseCents)}</p></details>
-            {item.state === "PAYMENT_PENDING" ? <p className="credit-muted">{attemptStatus(item.paymentState)} · {channelStatus(item.paymentProviderState)}，支付结果仍待确认。</p> : null}
-            {["REFUND_REQUESTED", "REFUND_PROCESSING"].includes(item.state) ? <p className="credit-muted">原路退还仍在处理，尚无到账确认。</p> : null}
+            <dl><div><dt>保证金要求</dt><dd>{item.state === "UNKNOWN" ? "待确认" : creditMoney(item.requiredCents)}</dd></div><div><dt>说明</dt><dd>{item.reasonCode === "GUARANTEE_BASIS_CHANGED" ? "报价依据已变化，请联系客服核实已缴保证金。" : item.reasonCode === "GUARANTEE_REVIEW_REQUIRED" ? "保证金收退记录需要核实，请联系客服。" : item.reasonCode === "PAYMENT_UNDERPAID" ? "已收的款还不够当前要求" : item.state === "NOT_REQUIRED" ? "该账号当前不需要缴保证金。" : item.state === "REQUIRED" ? "还需缴纳保证金才能继续出租。" : item.state === "SATISFIED" ? "保证金已缴足，不计入你的可用余额。" : guaranteeResponsibilityLabel(item.state)}</dd></div></dl><details className="credit-calculation"><summary>查看计算信息</summary><p>参考金额：{creditMoney(item.baseCents)}</p></details>
+            {item.state === "REQUIRED" ? data.paymentMode === "SIMULATED" ? <button type="button" className="button secondary" disabled={paymentBusy || Boolean(pending)} onClick={() => startPayment(item.accountId)}>缴纳保证金</button> : <p className="credit-muted">缴纳服务暂不可用，请联系客服。</p> : null}
+            {item.state === "PAYMENT_PENDING" ? item.demoPaymentEligible && data.paymentMode === "SIMULATED" && item.paymentId && item.paymentAmountCents
+              ? <><p className="credit-muted">模拟缴纳尚未确认，可继续完成。</p><button type="button" className="button secondary" disabled={paymentBusy || Boolean(pending)} onClick={() => setCheckout({ scope, accountId:item.accountId, paymentId:item.paymentId!, amountCents:item.paymentAmountCents! })}>继续缴纳</button></>
+              : <p className="credit-muted">{attemptStatus(item.paymentState)} · {channelStatus(item.paymentProviderState)}，支付结果仍待确认。</p> : null}
+            {["REFUND_REQUESTED", "REFUND_PROCESSING"].includes(item.state) ? <p className="credit-muted">{item.refundProviderState === "NOT_AUTHORIZED" ? "退款已登记，暂未提交渠道，请联系客服核对。" : item.refundProviderState === "SUBMITTED" ? "退款已提交渠道，尚无到账确认。" : "退款进度待确认，请联系客服核对。"}</p> : null}
             {item.state === "REFUNDED" ? <p className="credit-muted">已记录退还，到账情况请以收款记录为准。</p> : null}
           </div>)}
           {accountsWithPayments.has(accountId) && group.contexts.some(item => item.state === "REQUIRED") ? <p className="credit-muted">此账号有缴纳记录，<a href="#credit-transactions" onClick={() => { if (transactionsRef.current) transactionsRef.current.open = true; }}>查看记录并核对进度</a>。</p> : null}
@@ -201,14 +259,15 @@ export function CreditCenter({ scope }: { scope: string }) {
       {data.transactions.length ? <details id="credit-transactions" ref={transactionsRef} className="account-module-card credit-transactions"><summary>保证金收退记录</summary><p className="credit-muted">查看缴纳与退还进度。</p>
         <ul>{data.transactions.map(item => <li key={item.requirementId}>
           <strong><Link href={`/account?view=accounts&accountId=${encodeURIComponent(item.accountId)}`} scroll={false}>{accountHeading(item.accountId).primary}</Link></strong>
+          {item.requirementStatus === "RESTRICTED" ? <p className="credit-muted">保证金收退记录需要核实，请联系客服。</p> : null}
           {item.paymentStatus != null || item.refundStatus != null ? <span>{item.paymentStatus != null ? <RecordStatus tone={attemptTone(item.paymentStatus)}>最近收款：{attemptStatus(item.paymentStatus)}</RecordStatus> : null}{item.paymentStatus != null && item.refundStatus != null ? " · " : null}{item.refundStatus != null ? <RecordStatus tone={attemptTone(item.refundStatus)}>最近退还：{attemptStatus(item.refundStatus, true)}</RecordStatus> : null}</span> : null}
           {item.paymentHistory.length ? <details><summary>缴纳记录 {item.paymentHistory.length} 笔</summary><ul>{item.paymentHistory.map(attempt => <li key={attempt.id}>
-            <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status)}</RecordStatus> · {channelStatus(attempt.providerRequestState)}</span>
+            <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status)}</RecordStatus> · {attempt.simulationSource ? "模拟缴纳，未发生真实扣款" : channelStatus(attempt.providerRequestState)}</span>
             <div className="credit-attempt-amounts"><span>申请金额<strong>{creditMoney(attempt.amountCents)}</strong></span><span>已记录金额<strong>{observedMoney(attempt.observedAmountCents)}</strong></span></div>
             <small>支付单号：{businessNo(attempt.merchantOrderNo)} · 创建时间：{recordTime(attempt.createdAt)}</small>
           </li>)}</ul></details> : <p className="credit-muted">暂无可显示的缴纳记录。</p>}
           {item.refundHistory.length ? <details><summary>退还记录 {item.refundHistory.length} 笔</summary><ul>{item.refundHistory.map(attempt => <li key={attempt.id}>
-            <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status, true)}</RecordStatus></span>
+            <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status, true)}</RecordStatus> · {attempt.simulationSource ? "模拟退还，未发生真实退款" : guaranteeProviderRequestLabel("refund", String(attempt.providerRequestState ?? ""))}</span>
             <div className="credit-attempt-amounts"><span>申请退还金额<strong>{creditMoney(attempt.amountCents)}</strong></span><span>到账金额<strong>暂未提供</strong></span></div>
             <small>原支付单号：{businessNo(item.paymentHistory.find(payment => payment.id === attempt.paymentId)?.merchantOrderNo)}</small>
             <small>退还审核：{guaranteeReleasePolicyLabel(String(attempt.releasePolicyState ?? ""))} · 创建时间：{recordTime(attempt.createdAt)}</small>
@@ -224,5 +283,9 @@ export function CreditCenter({ scope }: { scope: string }) {
         </li>)}</ul> : <p className="credit-muted">暂无恢复申请记录。</p>}
       </section>
     </> : null}
+    <ConfirmAlertDialog open={Boolean(visibleCheckout)} onOpenChange={(open) => { if (!open) setCheckout(null); }} title="确认模拟缴纳保证金？"
+      description="测试环境不会发生真实扣款。" consequences={visibleCheckout ? <p>保证金金额：{creditMoney(visibleCheckout.amountCents)}</p> : undefined}
+      cancelLabel="稍后再说" confirmLabel={paymentBusy ? "正在处理…" : "模拟付款"} busy={paymentBusy} confirmDisabled={!identityCurrent || Boolean(pending)}
+      onConfirm={() => { if (visibleCheckout) startPayment(visibleCheckout.accountId, visibleCheckout.paymentId); }} />
   </section>;
 }

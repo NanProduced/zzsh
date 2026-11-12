@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useEffect, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, Info, RefreshCw, RotateCcw, Search } from "lucide-react";
-import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderLine, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
-import { groupedInteger, orderAccountTitle, orderAmountFacts, orderListFulfillmentTag, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
-import { OrderError, OrderStatusBadge, orderTermLabel, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
+import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, Info, MessageCircle, RefreshCw, RotateCcw, Search } from "lucide-react";
+import { orderItemKey, formatOrderTime as timeText, type FulfillmentAssignment, type Order, type OrderPage, type OrderParty, type OrderRequestError, type OrderStatusFilter, type OrderSearchFilters } from "@/lib/order-client";
+import { orderAccountTitle, orderAmountFacts, orderPaymentUrl, orderRentalModeLabel, orderSettlementStageLabel, paymentEntryOpen } from "@/lib/order-display";
+import { OrderError, OrderStatusBadge, orderUrl, STATUS_LABELS } from "@/components/order/order-presentation";
 import { DatePicker, FormSelect } from "@/components/ui/form-controls";
+import { useUserSession } from "@/components/session/user-session-provider";
+import { requestSupportDialog } from "@/components/support/support-dialog-request";
 import "./order.css";
 
 const STAGE_OPTIONS = [
@@ -63,47 +65,6 @@ function shortTime(value: string | null | undefined): string {
  * it is built only from what the order read actually returned, and a line with neither name nor known
  * unit is left as "资源" rather than guessed at.
  */
-function resourceSummary(order: Order, includeHaff = true): string | null {
-  const lines = order.quote?.lines ?? [];
-  if (lines.length === 0) return null;
-  const quantity = (line: OrderLine) => line.quantity ?? line.unitQuantity;
-  const isZero = (line: OrderLine) => {
-    const raw = quantity(line);
-    return typeof raw === "string" && /^\d+$/.test(raw) && BigInt(raw) === 0n;
-  };
-  const haffText = (line: OrderLine): string | null => {
-    const raw = quantity(line);
-    if (line.unit !== "HAFF_BASE" || raw === null || raw === undefined || !/^\d+$/.test(raw)) return null;
-    const value = BigInt(raw), whole = value / 1_000_000n;
-    const fraction = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-    return `哈夫币 ${fraction ? `${whole}.${fraction}` : whole.toString()} M`;
-  };
-  const lineText = (line: OrderLine): string => {
-    const name = line.name!.trim();
-    const raw = quantity(line);
-    if (raw === null || raw === undefined || raw === "") return name;
-    if (!/^\d+$/.test(raw)) return `${name} ${raw}`;
-    return `${name} ×${groupedInteger(raw)}`;
-  };
-  const isHaffLine = (line: OrderLine) => line.unit === "HAFF_BASE" || line.name?.trim() === "哈夫币";
-  const allUnnamed = lines.filter((line) => !line.name?.trim() && !isZero(line));
-  const haff = allUnnamed.find(isHaffLine);
-  const named = lines.filter((line) => Boolean(line.name?.trim()) && !isZero(line) && (includeHaff || !isHaffLine(line)));
-  const unnamed = allUnnamed.filter((line) => includeHaff || !isHaffLine(line));
-  if (named.length === 0) {
-    const otherUnnamed = unnamed.filter((line) => line !== haff);
-    if (!includeHaff) return otherUnnamed.length ? `物资 ${otherUnnamed.length} 项` : null;
-    const haffValue = haff ? haffText(haff) : null;
-    if (haffValue) return [haffValue, ...(otherUnnamed.length ? [`物资 ${otherUnnamed.length} 项`] : [])].join(" · ");
-    return otherUnnamed.length ? `物资 ${otherUnnamed.length} 项` : null;
-  }
-  const parts = named.map((line) => lineText(line));
-  if (includeHaff && haff) parts.push(haffText(haff)!);
-  const otherUnnamed = unnamed.filter((line) => line !== haff).length;
-  if (otherUnnamed) parts.push(`物资 ${otherUnnamed} 项`);
-  return parts.join(" · ");
-}
-
 /**
  * One line of state-specific context under the badge. Nothing here repeats a rule the whole list
  * already states once in the footnote, so a row never has to say "see the detail" to look complete.
@@ -121,7 +82,7 @@ function statusHint(order: Order, status: OrderStatusFilter): string | null {
   }
   if (order.status === "PAID") return order.fulfillmentAssignment ? fulfillmentText(order.fulfillmentAssignment) : "等待客服分配";
   if (order.status === "COMPLETED") return null;
-  if (order.status === "CANCELLED") return "订单已取消";
+  if (order.status === "CANCELLED") return null;
   return "订单状态未记录";
 }
 
@@ -144,48 +105,52 @@ function InlineCopyBtn({ text, label }: { text: string; label: string }) {
 }
 
 function ListRow({ party, order, status, accountId, filters, onOpen }: { party: OrderParty; order: Order; status: OrderStatusFilter; accountId?: string; filters?: OrderSearchFilters; onOpen: (orderId: string, event: ReactMouseEvent<HTMLAnchorElement>) => void }) {
+  const session = useUserSession();
   const facts = orderAmountFacts(order, party);
   const caption = !order.readOnly && party === "renter" && ["PAID", "COMPLETED"].includes(order.status) ? "下单金额" : facts.caption === "下单时号主报价" ? "下单时的出租报价" : facts.caption;
   const hint = statusHint(order, status);
-  const stageTag = orderListFulfillmentTag(order);
   const title = orderAccountTitle(order);
-  const resources = order.source?.origin === "LEGACY" ? null : resourceSummary(order, !title.includes("哈夫币"));
   const modeLabel = orderRentalModeLabel(order);
   const loginMethod = order.listingFacts?.attributeDisplay?.loginMethod;
   // Only the renter, and only while the server still offers the payment entry, is invited to pay.
   const pending = party === "renter" && paymentEntryOpen(order);
-  const action = pending ? "查看并付款" : order.stage?.viewerActionRequired ? "查看并处理" : "查看订单";
+  const inProgress = order.status === "PAID";
+  const legacy = order.source?.origin === "LEGACY";
+  const detailHref = orderUrl(party, status, accountId, order.id, order.source?.origin, filters);
+  const actionHref = legacy ? `${detailHref}#order-legacy-continuation` : detailHref;
+  type QuickAction = { label: string; href?: string; support?: true };
+  const primaryQuick: QuickAction | null = !inProgress ? null : legacy ? { label: "进行结算", href: actionHref } : (() => {
+    switch (order.stage?.code) {
+      case "OPENING_PENDING": return { label: "确认开租", href: actionHref };
+      case "RENTING": return { label: "进行结算", href: actionHref };
+      case "DECISION_PENDING": return { label: "确认结算", href: actionHref };
+      case "INTAKE_PENDING":
+      case "DECISION_WAITING": return { label: "查看结算", href: actionHref };
+      case "DECISION_REJECTED": return { label: "联系客服", support: true };
+      default: return { label: "查看订单", href: detailHref };
+    }
+  })();
+  const action = order.stage?.viewerActionRequired ? "查看并处理" : "查看订单";
+  const titleAction = pending || inProgress ? "查看订单" : action;
+  const openSupport = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    requestSupportDialog("SERVICE", event.currentTarget, session.status === "authenticated" && session.userId
+      ? { userId: session.userId, subjectRef: `order:${order.id}`, recordId: order.id, draftText: `订单 ${order.displayNo ?? order.id}` }
+      : undefined);
+  };
   return <li className="order-row" data-order-status={order.status} data-action-required={order.stage?.viewerActionRequired || pending ? "true" : undefined}>
     <div className="order-row-account">
-      {/* The title link is the row's single focusable target; its click surface covers the whole row. */}
-      <div className="order-row-title-line">
+      {/* The title takes the full line; tags and metadata never wrap around it. */}
+      <Link className="order-row-title" title={title} href={detailHref} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[titleAction, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
+      <p className="order-row-meta">
         {loginMethod ? <span className="order-row-tag order-row-login">{loginMethod}</span> : null}
-        <Link className="order-row-title" href={orderUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} data-order-id={order.id} data-order-key={orderItemKey(order)} aria-label={[action, order.displayNo ? `订单号 ${order.displayNo}` : null, title].filter(Boolean).join("，")} onClick={(event) => onOpen(orderItemKey(order), event)}>{title}</Link>
-        {stageTag ? <span className="order-row-tag order-row-stage" data-fulfillment-stage={stageTag.code}>{stageTag.label}</span> : null}
         {modeLabel ? <span className="order-row-tag" data-mode={order.quote?.rentalMode}>{modeLabel}</span> : null}
         {!order.listingFacts && order.listingFactsUnknownReason ? <span className="order-row-tag">资料未确认</span> : null}
-      </div>
-      {resources ? <p className="order-row-resources">{resources}</p> : null}
-      <p className="order-row-meta">
-        {order.accountDisplayNo ? (
-          <>
-            <span className="order-row-account-no">
-              账号 {order.accountDisplayNo}
-              <InlineCopyBtn text={order.accountDisplayNo} label="账号编号" />
-            </span>
-            <span aria-hidden="true">·</span>
-          </>
-        ) : null}
         <span className="order-row-no">
           订单 {order.displayNo ?? "暂不可用"}
           {order.displayNo ? <InlineCopyBtn text={order.displayNo} label="订单号" /> : null}
         </span>
-        <span aria-hidden="true">·</span>
-        <span>{shortTime(order.createdAt)}</span>
-        <span aria-hidden="true">·</span>
-        <span>{orderTermLabel(order)}</span>
+        <span className="order-row-date">{shortTime(order.createdAt)}</span>
       </p>
-      {party === "owner" && !order.readOnly ? <p className="order-row-meta">租客：{order.renterName ?? "暂不显示"}</p> : null}
     </div>
     {/* Badge and its explanation stay one block so the state column never opens a hole beside a taller account block. */}
     <div className="order-row-state">
@@ -197,7 +162,18 @@ function ListRow({ party, order, status, accountId, filters, onOpen }: { party: 
       <span className="order-row-amount-label">{caption}</span>
       {facts.secondary.length ? <span className="order-row-amount-sub">{facts.secondary.map((line) => <span key={line}>{line.replace("原退款金额记录", "退款记录金额")}</span>)}</span> : null}
     </div>
-    <span className={`order-row-action${pending || order.stage?.viewerActionRequired ? " is-primary" : ""}`} aria-hidden="true">{action}<ChevronRight size={15} /></span>
+    {inProgress ? <div className="order-row-actions">
+      {primaryQuick?.href
+        ? <Link className="order-row-quick" href={primaryQuick.href} scroll={false} aria-label={`${primaryQuick.label}，订单 ${order.displayNo ?? order.id}`}>{primaryQuick.label}</Link>
+        : <button type="button" className="order-row-quick" onClick={openSupport}><MessageCircle size={14} aria-hidden="true" />联系客服</button>}
+      {legacy
+        ? <button type="button" className="order-row-quick-secondary" onClick={openSupport}><MessageCircle size={13} aria-hidden="true" />联系客服</button>
+        : <button type="button" className="order-row-quick-secondary" onClick={() => window.dispatchEvent(new CustomEvent("zzsh:order-groups", { detail: { party, orderId: order.id } }))}><MessageCircle size={13} aria-hidden="true" />打开订单群</button>}
+    </div> : pending ? <div className="order-row-actions">
+      <Link className="order-row-quick is-solid" href={orderPaymentUrl(party, status, accountId, order.id, order.source?.origin, filters)} scroll={false} aria-label="继续支付订单">继续支付<ChevronRight size={15} aria-hidden="true" /></Link>
+    </div> : <div className="order-row-actions">
+      <Link className="order-row-quick is-quiet" href={detailHref} scroll={false} aria-label={`${action}，订单 ${order.displayNo ?? order.id}`}>{action}<ChevronRight size={15} aria-hidden="true" /></Link>
+    </div>}
   </li>;
 }
 

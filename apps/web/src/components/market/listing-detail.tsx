@@ -11,6 +11,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Toast } from "@heroui/react/toast";
 import {
   ArrowRight,
+  ArrowLeft,
   Box,
   CalendarDays,
   Check,
@@ -65,6 +66,8 @@ import {
   type ResourceLine,
 } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
+import { captureOrderSubject, formatOrderMoney, formatOrderTime, isOrderSubjectCurrent, orderApi, orderUrl, type Order } from "@/lib/order-client";
+import { orderAccountTitle, orderPaymentUrl, paymentEntryOpen } from "@/lib/order-display";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { RecommendedAccountsSection } from "./recommended-accounts";
 import { useUserSession } from "@/components/session/user-session-provider";
@@ -100,10 +103,10 @@ const ITEM_ART_MAP: Record<string, string> = {
   legacy_insurance_day: "/art/delta/items/insurance-experience-card-thumb.png",
 };
 
-export function ListingDetail({ accountId }: { accountId: string }) {
+export function ListingDetail({ accountId, fromOrder, fromParty = "renter" }: { accountId: string; fromOrder?: string; fromParty?: "renter" | "owner" }) {
   return (
     <FavoritesProvider>
-      <DetailView accountId={accountId} />
+      <DetailView accountId={accountId} fromOrder={fromOrder} fromParty={fromParty} />
     </FavoritesProvider>
   );
 }
@@ -115,6 +118,7 @@ function DetailImage({
   loading = "lazy",
   onLoad,
   legacy,
+  legacyState,
 }: {
   src: string;
   alt: string;
@@ -122,10 +126,11 @@ function DetailImage({
   loading?: "lazy" | "eager";
   onLoad?: (image: HTMLImageElement) => void;
   legacy?: boolean;
+  legacyState?: "PENDING_IMPORT" | "UNAVAILABLE";
 }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [src]);
-  if (legacy) return <LegacyAccountImage src={src} alt={alt} className={className} loading={loading} />;
+  if (legacy) return <LegacyAccountImage src={src} knownState={legacyState} alt={alt} className={className} loading={loading} />;
   if (failed) {
     return (
       <span className={`detail-image-fallback${className ? ` ${className}` : ""}`}>
@@ -190,6 +195,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
               <DetailImage
                 src={activeMedia.url}
                 legacy={activeMedia.legacy}
+                legacyState={activeMedia.legacyState}
                 alt={`${title}公开展示图，第${index + 1}张`}
                 loading="eager"
               />
@@ -208,6 +214,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
               <DetailImage
                 src={activeMedia.url}
                 legacy={activeMedia.legacy}
+                legacyState={activeMedia.legacyState}
                 alt={`${title}公开展示图大图，第${index + 1}张`}
                 className="detail-preview-image"
                 loading="eager"
@@ -248,7 +255,7 @@ function DetailGallery({ title, media, legacyEmpty = false }: { title: string; m
             aria-pressed={thumbnailIndex === index}
             onClick={() => select(thumbnailIndex)}
           >
-            <DetailImage src={item.url} legacy={item.legacy} alt="" className="detail-gallery-thumb-image" />
+            <DetailImage src={item.coverUrl ?? item.url} legacy={item.legacy} legacyState={item.legacyState} alt="" className="detail-gallery-thumb-image" />
             <span className="detail-gallery-thumb-index">{thumbnailIndex + 1}</span>
           </button>
         ))}
@@ -334,7 +341,15 @@ function loginMethodText(data: ListingDetailData): { text: string; hint: string 
   return { text: raw || "未提供", hint: "由客服协助上号" };
 }
 
-function ReadyDetail({ data }: { data: ListingDetailData }) {
+function linkedOrderTermText(order: Order): string {
+  const seconds = Number(order.termSeconds);
+  if (!order.termSeconds || !Number.isSafeInteger(seconds) || seconds <= 0) return "以订单页为准";
+  if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
+  if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
+  return `${Math.floor(seconds / 60)} 分钟`;
+}
+
+function ReadyDetail({ data, fromOrder, fromParty = "renter" }: { data: ListingDetailData; fromOrder?: string; fromParty?: "renter" | "owner" }) {
   const session = useUserSession();
   const identityKey = session.status === "authenticated" && session.userId ? session.userId : "guest";
   const number = data.displayNo?.trim() || null;
@@ -350,6 +365,31 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   const [noteExpanded, setNoteExpanded] = useState(false);
   const noteRef = useRef<HTMLParagraphElement>(null);
   const [canExpandNote, setCanExpandNote] = useState(false);
+  const [linkedOrder, setLinkedOrder] = useState<Order | null>(null);
+  const [linkedOrderRead, setLinkedOrderRead] = useState<"idle" | "loading" | "ready" | "failed">("idle");
+
+  useEffect(() => {
+    if (fromParty !== "renter" || session.status !== "authenticated" || !session.userId || (data.canCreateOrder !== false && !fromOrder)) {
+      setLinkedOrder(null);
+      setLinkedOrderRead("ready");
+      return;
+    }
+    const subject = captureOrderSubject(session.userId, session.identityVersion);
+    if (!subject) { setLinkedOrderRead("failed"); return; }
+    const controller = new AbortController();
+    setLinkedOrderRead("loading");
+    void orderApi.listUnified(subject, { party: "renter", status: "IN_PROGRESS", accountId: data.id, limit: 5 }, controller.signal)
+      .then((page) => {
+        if (controller.signal.aborted || !isOrderSubjectCurrent(subject, session)) return;
+        const active = page.items.filter((order) => order.status === "PENDING_PAYMENT" || order.status === "PAID");
+        setLinkedOrder(active.find((order) => order.id === fromOrder) ?? active.find((order) => order.status === "PENDING_PAYMENT") ?? active.find((order) => order.status === "PAID") ?? null);
+        setLinkedOrderRead("ready");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && isOrderSubjectCurrent(subject, session)) setLinkedOrderRead("failed");
+      });
+    return () => controller.abort();
+  }, [data.canCreateOrder, data.id, fromOrder, fromParty, session]);
 
   useEffect(() => {
     const el = noteRef.current;
@@ -459,6 +499,10 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
         </Toast.Provider>, document.body,
       ) : null}
       {/* 1. Unified Header */}
+      {fromOrder ? <div className="account-order-return">
+        <Link href={orderUrl("renter", "", data.id, fromOrder)} scroll={false}><ArrowLeft size={15} aria-hidden="true" />返回订单</Link>
+        <span>正在查看订单关联的账号资料</span>
+      </div> : null}
       <header className="account-detail-top">
         <section className="account-detail-info" aria-label="账号摘要">
           <div className="account-heading-row">
@@ -927,24 +971,85 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
               </div>
             </div>
           ) : data.canCreateOrder === false ? (
-            <div className="account-quote-panel">
-              <div className="account-quote-banner">
-                <div className="account-quote-banner-title">
-                  <ReceiptText size={18} aria-hidden="true" />
-                  <h2>公开版本资源费用参考</h2>
+            linkedOrderRead === "loading" ? (
+              <div className="account-quote-panel account-pending-panel" aria-busy="true">
+                <div className="account-pending-status" role="status">正在核对订单状态…</div>
+              </div>
+            ) : linkedOrder ? (
+              linkedOrder.status === "PENDING_PAYMENT" ? (
+                <div className="account-quote-panel account-pending-panel">
+                  <div className="account-quote-banner">
+                    <div className="account-quote-banner-title">
+                      <Clock3 size={18} aria-hidden="true" />
+                      <h2>{paymentEntryOpen(linkedOrder) ? "你有待支付订单" : "待支付订单已到期"}</h2>
+                    </div>
+                    <span className="account-quote-banner-tag">{paymentEntryOpen(linkedOrder) ? "待支付" : "处理中"}</span>
+                  </div>
+                  <div className="account-quote-content">
+                    <p className="account-pending-order-title">{orderAccountTitle(linkedOrder)}</p>
+                    <dl className="account-pending-facts">
+                      <div><dt>订单号</dt><dd>{linkedOrder.displayNo ?? "暂不可用"}</dd></div>
+                      <div><dt>应付金额</dt><dd>{formatOrderMoney(linkedOrder.amounts?.totalDue)}</dd></div>
+                      <div><dt>支付保留至</dt><dd>{linkedOrder.holdUntil ? formatOrderTime(linkedOrder.holdUntil, { timeZoneName: false }) : "以订单页为准"}</dd></div>
+                    </dl>
+                    <p className="detail-stage-note account-readonly">
+                      {paymentEntryOpen(linkedOrder)
+                        ? "账号已为你保留，完成支付后客服会协助开租。关闭页面后可从订单或个人中心继续支付。"
+                        : "支付入口已关闭，账号占用正在释放。你仍可查看订单记录或联系客服。"}
+                    </p>
+                    {paymentEntryOpen(linkedOrder) ? <Link className="button rental-confirm-primary account-pending-pay" href={orderPaymentUrl("renter", "", data.id, linkedOrder.id)}>
+                      继续支付
+                    </Link> : null}
+                    <Link className="button quiet button--sm" href={orderUrl("renter", "", data.id, linkedOrder.id)}>
+                      查看订单
+                    </Link>
+                  </div>
                 </div>
-                <span className="account-quote-banner-tag">暂不可租</span>
+              ) : (
+                <div className="account-quote-panel account-pending-panel account-active-order-panel">
+                  <div className="account-quote-banner">
+                    <div className="account-quote-banner-title">
+                      <Clock3 size={18} aria-hidden="true" />
+                      <h2>此账号正在你的订单中</h2>
+                    </div>
+                    <span className="account-quote-banner-tag">{linkedOrder.stage?.label ?? "租用中"}</span>
+                  </div>
+                  <div className="account-quote-content">
+                    <p className="account-pending-order-title">{orderAccountTitle(linkedOrder)}</p>
+                    <dl className="account-pending-facts">
+                      <div><dt>订单号</dt><dd>{linkedOrder.displayNo ?? "暂不可用"}</dd></div>
+                      <div><dt>约定租期</dt><dd>{linkedOrderTermText(linkedOrder)}</dd></div>
+                      <div><dt>当前状态</dt><dd>{linkedOrder.stage?.label ?? "租用中"}</dd></div>
+                    </dl>
+                    <p className="detail-stage-note account-readonly">
+                      当前不能重复下单。查看订单可处理开租、结算或联系客服。
+                    </p>
+                    <Link className="button rental-confirm-primary account-pending-pay" href={orderUrl("renter", "", data.id, linkedOrder.id)}>
+                      查看订单
+                    </Link>
+                  </div>
+                </div>
+              )
+            ) : (
+              <div className="account-quote-panel">
+                <div className="account-quote-banner">
+                  <div className="account-quote-banner-title">
+                    <ReceiptText size={18} aria-hidden="true" />
+                    <h2>公开版本资源费用参考</h2>
+                  </div>
+                  <span className="account-quote-banner-tag">暂不可租</span>
+                </div>
+                <div className="account-quote-content">
+                  <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
+                  <p className="detail-stage-note account-readonly">
+                    已获准公开的资料仍可查看，当前不能创建新订单。这里是公开版本的资源费用参考，不是本人最终报价。
+                  </p>
+                  <Link className="button secondary button--sm account-readonly-action" href="/accounts">
+                    返回账号市场
+                  </Link>
+                </div>
               </div>
-              <div className="account-quote-content">
-                <p className="account-reference-price">{moneyValue(data.resourceTotalLabel)}</p>
-                <p className="detail-stage-note account-readonly">
-                  已获准公开的资料仍可查看，当前不能创建新订单。这里是公开版本的资源费用参考，不是本人最终报价。
-                </p>
-                <Link className="button secondary button--sm account-readonly-action" href="/accounts">
-                  返回账号市场
-                </Link>
-              </div>
-            </div>
+            )
           ) : (
             <div className="account-quote-panel">
               <div className="account-quote-content">
@@ -955,7 +1060,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
                   versionId={data.versionId}
                   releaseId={data.releaseId}
                   fullPayoutSelected={data.fullPayoutSelected === true}
-                  {...(data.autoPreview ? { autoPreview: true } : {})}
+                  {...(data.autoPreview ? { autoPreview: true, autoStart: true } : {})}
                   reference={{
                     total: moneyValue(data.resourceTotalLabel),
                     haff: moneyValue(data.haffRentLabel),
@@ -1023,7 +1128,7 @@ function ReadyDetail({ data }: { data: ListingDetailData }) {
   );
 }
 
-function DetailView({ accountId }: { accountId: string }) {
+function DetailView({ accountId, fromOrder, fromParty = "renter" }: { accountId: string; fromOrder?: string; fromParty?: "renter" | "owner" }) {
   const [state, setState] = useState<DetailState>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [back, setBack] = useState<BackTarget>({ href: "/accounts", label: "返回账号列表" });
@@ -1106,7 +1211,7 @@ function DetailView({ accountId }: { accountId: string }) {
           </button>
         </section>
       ) : (
-        <>{current.status === "ready" ? <ReadyDetail data={current.data} /> : null}</>
+        <>{current.status === "ready" ? <ReadyDetail data={current.data} fromOrder={fromOrder} fromParty={fromParty} /> : null}</>
       )}
     </ServiceShell>
   );

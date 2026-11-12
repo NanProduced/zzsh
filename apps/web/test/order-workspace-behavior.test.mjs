@@ -41,14 +41,28 @@ function loadWorkspace(session, router, legacyContinuationPanel = () => null) {
       if (name === "@/components/session/identity-reset") return requireFromTree(path.join(tree, "apps/web/src/components/session/identity-reset.ts"));
       if (name === "@/lib/order-client") return requireFromTree(path.join(tree, "apps/web/src/lib/order-client.ts"));
       if (name === "@/lib/order-display") return requireFromTree(path.join(tree, "apps/web/src/lib/order-display.ts"));
+      if (name === "@/components/ui/form-controls") return {
+        Input: (props) => React.createElement("input", props),
+        Textarea: (props) => React.createElement("textarea", props),
+        FormSelect: ({ label, value, options, onChange }) => React.createElement("select", { "aria-label": label, value, onChange: event => onChange(event.target.value) }, (options || []).map(option => React.createElement("option", { key: option.value, value: option.value }, option.label))),
+        DatePicker: ({ label, value, onChange, placeholder }) => React.createElement("input", { type: "text", "aria-label": label, value: value || "", onChange: event => onChange(event.target.value), placeholder }),
+      };
       const local = name.match(/(?:^\.\/|@\/components\/order\/)([a-z-]+)$/)?.[1];
       if (local === "order-account-dossier") return { OrderAccountDossier: () => null };
+      if (local === "payment-dialog") return { PaymentDialog: ({ open }) => open ? React.createElement("div", { "data-testid": "payment-dialog" }, "payment-dialog-open") : null };
+      if (local === "order-action-dialog") return { OrderActionDialog: () => null };
       if (local === "legacy-continuation-panel") return { LegacyContinuationPanel: legacyContinuationPanel };
       if (local === "prestart-termination-panel") return { PrestartTerminationPanel: () => null };
       if (local && (ORDER_COMPONENTS.has(local) || local === "legacy-order-workspace")) {
-        if (local === "order-trade-actions") return { OrderTradeActions: () => null };
+        if (local === "order-trade-actions") return {
+          OrderTradeActions: () => null,
+          PaymentFactsProbe: () => null,
+          activeOpening: (openings) => openings?.length ? (openings.find((opening) => opening.status === "CONFIRMED") ?? openings[openings.length - 1]) : null,
+          stageFacts: () => null,
+        };
         return loadOrderComponent(`${local}.tsx`);
       }
+      if (local === "order-aftersale-dialog") return { OrderAftersaleDialog: () => null };
       if (local === "order-aftersale") return {OrderAftersale:()=>null};
       if (name.endsWith(".css")) return {};
       return requireFromTree(name);
@@ -190,7 +204,7 @@ test('a known server viewer party corrects an opposite-view deep link without re
 test('native account navigation reuses owned-account and stable public detail readers with distinct wording',async()=>{
  for(const party of ['owner','renter']){
   const order={...orderB,viewerParty:party,accountId:'account_A'},probe=await createProbe(async url=>Response.json(String(url).split('?')[0].endsWith('/order_B')?{order}:{items:[],nextCursor:null,limit:20}));
-  try{await probe.render({party,orderId:order.id});const label=party==='owner'?'查看本人账号':'查看当前公开资料',link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent===label);assert.ok(link);assert.equal(link.getAttribute('href'),party==='owner'?'/account?view=accounts&accountId=account_A':'/accounts/account_A');}finally{await probe.dispose();}
+  try{await probe.render({party,orderId:order.id});const label=party==='owner'?'查看本人账号':'查看当前公开资料',link=[...probe.host.querySelectorAll('a')].find(node=>node.textContent===label);assert.ok(link);assert.equal(link.getAttribute('href'),party==='owner'?'/account?view=accounts&accountId=account_A':'/accounts/account_A?fromOrder=order_B');}finally{await probe.dispose();}
  }
 });
 
@@ -446,49 +460,12 @@ test("a row names the account and its resources so two orders are told apart by 
     await probe.render({ party: "renter" }, "identity");
     const row = probe.host.querySelector(".order-row");
     assert.match(row.querySelector(".order-row-title").textContent, /1\.5 M 哈夫币/);
-    // The resource signature does the work the account list's structured title does: it is built from
-    // the fields the order read returned, never from an opaque item id.
+    // The title carries the resource signature; detail-only fields are not repeated under it.
     assert.match(row.querySelector(".order-row-title").textContent, /1\.5 M 哈夫币/);
-    assert.equal(row.querySelector(".order-row-resources").textContent, "保险卡 ×10");
     // The order number is labelled, so it is not read as the account's own number.
     assert.equal(row.querySelector(".order-row-no").textContent, "订单 ZZ-9");
-  } finally {
-    await probe.dispose();
-  }
-});
-
-test("an unnamed list projection stays readable and never repeats zero-unit fragments", async () => {
-  const unnamed = {
-    ...pricedOrder,
-    id: "order_unnamed",
-    quote: {
-      lines: [
-        { itemId: "barrett", unit: "ROUND", quantity: "0" },
-        { itemId: "awm", unit: "ROUND", quantity: "600" },
-        { itemId: "haff", unit: "HAFF_BASE", quantity: "90000000" },
-        { itemId: "insurance", unit: "DAY", quantity: "0" },
-      ],
-    },
-  };
-  const probe = await createProbe(async () => Response.json({ items: [unnamed], nextCursor: null, limit: 20 }));
-  try {
-    await probe.render({ party: "renter" }, "unnamed");
-    const summary = probe.host.querySelector(".order-row-resources").textContent;
-    assert.equal(summary, "物资 1 项");
-    assert.doesNotMatch(summary, /发 ×0|件 ×0|天 ×0/);
-    const named = { ...unnamed, id: "order_named", quote: { lines: [
-      { itemId: "awm", name: "AWM子弹", unit: "ROUND", quantity: "600" },
-      { itemId: "insurance", name: "九格保险体验卡", unit: "DAY", quantity: "0" },
-    ] } };
-    const next = await createProbe(async () => Response.json({ items: [named], nextCursor: null, limit: 20 }));
-    try {
-      await next.render({ party: "renter" }, "named");
-      const text = next.host.querySelector(".order-row-resources").textContent;
-      assert.equal(text, "AWM子弹 ×600");
-      assert.doesNotMatch(text, /保险|×0/);
-    } finally {
-      await next.dispose();
-    }
+    assert.equal(row.querySelector(".order-row-resources"), null);
+    assert.doesNotMatch(row.querySelector(".order-row-meta").textContent, /账号|约定租期/);
   } finally {
     await probe.dispose();
   }
@@ -501,8 +478,9 @@ test("a closed order never reads as a bill still payable", async () => {
     await probe.render({ party: "renter", status: "ALL" }, "cancelled");
     assert.match(probe.host.querySelector(".order-row-amount-label").textContent, /下单金额/);
     assert.doesNotMatch(probe.host.querySelector(".order-row-amount-label").textContent, /应付|已付/);
-    // The closed row states the closure once, without repeating the list-wide settlement rule per row.
-    assert.match(probe.host.querySelector(".order-row-hint").textContent, /订单已取消/);
+    // The closed row states the closure once in the badge; the hint column stays empty.
+    assert.equal(probe.host.querySelector(".order-row-hint"), null);
+    assert.match(probe.host.querySelector(".order-status").textContent, /已取消/);
     assert.doesNotMatch(probe.host.textContent, /结算与确认记录见订单详情/);
   } finally {
     await probe.dispose();
@@ -527,11 +505,11 @@ test("an expired pending order stops offering payment while a live one still doe
   const probe = await createProbe(async () => Response.json({ items: [expired, live], nextCursor: null, limit: 20 }));
   try {
     await probe.render({}, "pending");
-    const actions = [...probe.host.querySelectorAll(".order-row-action")].map((node) => node.textContent);
-    assert.deepEqual(actions, ["查看订单", "查看并付款"]);
+    const actions = [...probe.host.querySelectorAll(".order-row-actions > *")].map((node) => node.textContent);
+    assert.deepEqual(actions, ["查看订单", "继续支付"]);
     assert.match(probe.host.textContent, /已到期，取消处理中/);
     assert.match(probe.host.textContent, /占用截止 · 2099/);
-    // Both rows link to their own detail; neither can pay from the list.
+    // The title opens its own detail; only the live row's action carries the payment intent.
     const links = [...probe.host.querySelectorAll("a[data-order-id]")].map((node) => node.getAttribute("href"));
     assert.deepEqual(links, ["/account?view=rentals&orderId=order_expired", "/account?view=rentals&orderId=order_live"]);
   } finally {
@@ -558,11 +536,12 @@ test("the detail keeps the base order visible when the settlement read is not as
     assert.match(detail.textContent, /租赁账号/);
     assert.match(detail.textContent, /ZZ-9/);
     // The order's own outcome is stated once, in the identity band.
-    assert.match(detail.querySelector(".order-detail-status").textContent, /已完成/);
+    assert.match(detail.querySelector(".order-status").textContent, /已完成/);
     assert.match(detail.textContent, /528.00 元/);
-    // This harness stubs the trade panel, so the recovery cluster it drives is asserted in
-    // order-trade-components-behavior instead.
-    assert.equal(detail.querySelector(".order-attention"), null);
+    // The failed settlement read surfaces one recovery band from the detail itself.
+    const band = detail.querySelector(".order-alert-band");
+    assert.ok(band, "the failed settlement read surfaces one recovery band");
+    assert.match(band.textContent, /结算明细暂时读不到/);
     // Unknown opening and settlement are never invented: no progress is claimed for steps that were
     // not read, and the order is not re-labelled as still renting.
     assert.equal(detail.querySelector(".order-stage-track"), null);
@@ -673,11 +652,15 @@ test("a closed order detail drops the payment prompt and names the figure as a s
     const detail = probe.host.querySelector("[data-testid=order-detail]");
     assert.ok(detail, "the detail view renders");
     // A closed order is closed, not failed and not still awaiting payment.
-    assert.match(detail.querySelector(".order-detail-status").textContent, /已取消/);
-    assert.match(detail.querySelector(".order-attention-copy h2").textContent, /账号占用已解除/);
+    assert.match(detail.querySelector(".order-status").textContent, /已取消/);
+    assert.equal(detail.querySelector(".order-alert-band"), null, "an unpaid cancellation needs no recovery band");
+    assert.match(detail.querySelector(".order-progress-card").textContent, /订单已取消/);
+    assert.match(detail.querySelector(".order-progress-card").textContent, /不会产生退款/);
+    assert.doesNotMatch(detail.textContent, /查看退款进度/);
+    assert.equal(detail.querySelector("#order-refund-section"), null);
     assert.doesNotMatch(detail.textContent, /提交支付前请核对金额/);
     assert.doesNotMatch(detail.textContent, /支付不等于交付/);
-    assert.match(detail.querySelector(".order-amount-block .order-section-title").textContent, /我的订单费用/);
+    assert.match(detail.querySelector(".order-amount-details .order-section-title").textContent, /订单金额明细/);
     assert.match(detail.querySelector(".order-amount-label").textContent, /下单金额/);
     assert.doesNotMatch(detail.querySelector(".order-amount-block").textContent, /应付/);
     // The consequence of closure is stated once, and the state itself lives only in the status pill.
@@ -706,7 +689,39 @@ test("ORDER-A: one list keeps the order mode and old deep link without exposing 
   }
 });
 
-test("ORDER-A: detail names the frozen mode, both parties' unit prices and the real fee-total basis", async () => {
+test("ORDER-A: an unchanged published version restores original line prices and one total discount", async () => {
+  const order = {
+    ...pricedOrder, id: "order_discount", status: "PAID", paidAt: "2026-10-12T00:21:00Z", accountId: "acct_discount",
+    membership: { tier: "SILVER", payableRatio: "0.98000000" },
+    amounts: { rental: { amount: "98.00", currency: "CNY" }, deposit: { amount: "0.00", currency: "CNY" }, totalDue: { amount: "98.00", currency: "CNY" } },
+    listingFacts: { source: "ORDER_VERSION", versionId: "ver_discount", rentalMode: "ordinary", termSeconds: "86400", attributeDisplay: { safeBox: null, grading: null, loginMethod: null }, resourceLines: [{ itemId: "item", code: "item", name: "测试物资", quantity: "2", unit: "PIECE" }] },
+    quote: { lines: [{ itemId: "item", name: "测试物资", unit: "PIECE", unitQuantity: "1", quantity: "2", buyerUnitAmount: { amount: "49.00000000", currency: "CNY", scale: 8 }, buyerAmount: { amount: "98.00", currency: "CNY", unit: "yuan", scale: 2 } }], resourceTotal: { amount: "98.00", currency: "CNY", unit: "yuan", scale: 2 } },
+  };
+  const listing = { versionId: "ver_discount", quote: { lines: [{ itemId: "item", quantity: "2", unit: "PIECE", unitQuantity: "1", buyerUnitAmount: { amount: "50.00000000", currency: "CNY", scale: 8 }, buyerAmount: { amount: "100.00", currency: "CNY", unit: "yuan", scale: 2 } }], resourceTotal: { amount: "100.00", currency: "CNY" } } };
+  const probe = await createProbe(async (input) => {
+    const url = String(input);
+    if (url.includes("/api/supply/listings/acct_discount")) return Response.json(listing);
+    if (url.endsWith("/order_discount")) return Response.json({ order });
+    if (url.includes("/settlement") || url.includes("/refunds")) return Response.json({ error: { code: "NOT_FOUND", message: "Resource not found" } }, 404);
+    return Response.json({ items: [order], nextCursor: null, limit: 20 });
+  });
+  try {
+    await probe.render({ party: "renter", status: "PAID", orderId: order.id }, "discount");
+    for (let i = 0; i < 5; i++) await tick();
+    const detail = probe.host.querySelector("[data-testid=order-detail]");
+    assert.match(detail.querySelector(".order-line-unit").textContent, /参考 ¥50\.00 \/ 1 件/);
+    assert.match(detail.querySelector(".order-table-wrap tbody tr td:last-child").textContent, /¥100\.00/);
+    const calc = detail.querySelector(".order-price-calc");
+    assert.ok(calc, "the aggregate calculation is shown once");
+    assert.match(detail.querySelector(".order-member-badge").textContent, /银卡会员 · 9\.8折/);
+    assert.match(calc.textContent, /资源原价小计.*¥100\.00/s);
+    assert.match(calc.textContent, /会员优惠.*-¥2\.00/s);
+    assert.match(calc.textContent, /折后资源合计.*¥98\.00/s);
+    assert.equal(detail.querySelector(".order-lines-total"), null, "the final total is not repeated");
+  } finally { await probe.dispose(); }
+});
+
+test("ORDER-A: detail names the frozen mode, owner unit price and the real fee-total basis", async () => {
   const detailOrder = {
     ...pricedOrder,
     id: "order_a_detail",
@@ -739,15 +754,17 @@ test("ORDER-A: detail names the frozen mode, both parties' unit prices and the r
     assert.ok(renter, "detail renders");
     assert.match(renter.querySelector(".order-detail-mode").textContent, /极速出租/);
     assert.ok([...renter.querySelectorAll(".order-table-wrap td")].every((td) => td.hasAttribute("data-label")), "mobile stacking keeps a label for every cell");
-    assert.match(renter.querySelector(".order-line-unit").textContent, /¥0\.12345678 \/ 1,000,000 哈夫币（1 M）/);
-    assert.match(renter.textContent, /¥0\.00000012 \/ 60 发/);
+    // Renter amounts are the final allocated price; per-unit figures would repeat the aggregate discount.
+    assert.equal(renter.querySelector(".order-line-unit"), null);
+    assert.doesNotMatch(renter.textContent, /¥0\.12345678|¥0\.00000012/);
+    assert.match(renter.querySelector(".order-lines-note").textContent, /如享会员优惠，已一次性计入合计/);
     assert.match(renter.querySelector(".order-lines-total").textContent, /资源合计（不含押金） 328\.00 元/);
-    assert.match(renter.querySelector(".order-contact-facts").textContent, /客服分配/);
-    assert.match(renter.querySelector(".order-contact-facts").textContent, /已就绪/);
+    assert.match(renter.querySelector(".order-group-card").textContent, /订单群已就绪/);
     await probe.render({ party: "owner", status: "PAID", orderId: "order_a_detail" }, "order-a-detail-owner");
     await tick(); await tick();
     const owner = probe.host.querySelector("[data-testid=order-detail]");
-    assert.match(owner.textContent, /¥0\.10000000 \/ 1,000,000 哈夫币（1 M）/);
+    assert.match(owner.textContent, /¥0\.10 \/ 1,000,000 哈夫币/);
+    assert.match(owner.textContent, /< ¥0\.01 \/ 60 发/);
     assert.doesNotMatch(owner.textContent, /¥0\.12345678/);
     assert.match(owner.querySelector(".order-lines-total").textContent, /号主报价合计 100\.00 元/);
   } finally {
@@ -779,9 +796,9 @@ test("API facts feed the order title, account number, stage and entitlements", a
     await probe.render({ party: "renter" }, "facts-list");
     const row = probe.host.querySelector('[data-order-id="order_facts"]').closest(".order-row");
     assert.match(row.querySelector(".order-row-title").textContent, /1\.2 M 哈夫币 · 6格 · 钻石/);
-    assert.match(row.querySelector(".order-row-meta").textContent, /账号 A20261028001/);
+    assert.match(row.querySelector(".order-row-meta").textContent, /订单 ZZ-9/);
+    assert.match(row.querySelector(".order-row-meta").textContent, /10\/12/);
     assert.match(row.querySelector(".order-row-hint").textContent, /待你确认结算 · 需要你处理/);
-    assert.doesNotMatch(row.querySelector(".order-row-resources")?.textContent ?? "", /哈夫币/);
     await probe.render({ party: "renter", status: "PAID", orderId: "order_facts" }, "facts-detail");
     await tick(); await tick();
     const detail = probe.host.querySelector("[data-testid=order-detail]");
@@ -820,9 +837,9 @@ test("the fulfillment projection maps to stage, due, ending and read-only copy",
   assert.match(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }), /^结算完成 · 可沟通至 /);
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false, sendUntil: "2026-10-19T00:00:00.000Z" }), { now }),
-    "结算完成 · 已超过 72 小时 · 仅可查看",
+    "结算完成 · 已超过 72 小时 · 订单群仅可查看历史消息",
   );
-  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }), "结算完成 · 仅可查看");
+  assert.equal(display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }), "结算完成 · 订单群仅可查看历史消息");
   // A missing projection is a state of its own; no stage, due or window is invented.
   assert.equal(display.orderFulfillmentSummary(null), "阶段未确认");
   assert.deepEqual(display.orderFulfillmentStepStates("RENTING"), ["done", "done", "current", "pending", "pending"]);
@@ -832,6 +849,8 @@ test("the fulfillment projection maps to stage, due, ending and read-only copy",
   assert.deepEqual(display.orderFulfillmentStepStates(null), ["unknown", "unknown", "unknown", "unknown", "unknown"]);
   assert.deepEqual(display.orderFulfillmentSteps("CANCELLED").map((step) => step.label), ["已付款", "开租确认", "已取消"]);
   assert.deepEqual(display.orderFulfillmentSteps("CANCELLED", true).map((step) => step.label), ["已付款", "开租确认", "租用中", "已取消"]);
+  assert.deepEqual(display.orderFulfillmentSteps("CANCELLED", false, false).map((step) => step.label), ["未付款", "已取消"]);
+  assert.deepEqual(display.orderFulfillmentStepStates("CANCELLED", false, false), ["skipped", "cancelled"]);
   assert.deepEqual(display.ORDER_FULFILLMENT_STEPS.map((step) => step.label), ["已付款", "开租确认", "租用中", "结束确认", "结算完成"]);
 });
 
@@ -847,7 +866,7 @@ test("a prestart termination speaks about refund pending instead of a generic ca
   );
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true }), { now, showRefund: false }),
-    "未开租终止 · 仅可查看",
+    "未开租终止 · 订单群仅可查看历史消息",
   );
   assert.equal(
     display.orderFulfillmentSummary(stageProjection({ stage: "CANCELLED", cancelReason: "PRESTART_TERMINATED", refundPending: true, refundCompletedAt: "2026-10-20T08:00:00.000Z", sendUntil: "2026-10-21T00:00:00.000Z" }), { now }),
@@ -900,18 +919,17 @@ test("the detail renders the six-stage bar from the IM projection and keeps the 
     assert.deepEqual(steps.map((node) => node.textContent), ["已付款", "开租确认", "租用中", "结束确认", "结算完成"]);
     assert.deepEqual(steps.map((node) => node.dataset.state), ["done", "done", "current", "pending", "pending"]);
     assert.equal(steps[2].getAttribute("aria-current"), "step");
-    // The group entry is part of the bar and uses the existing support host, not a second chat.
+    // The group entry lives in the order-group card and uses the existing support host, not a second chat.
     const entry = [...detail.querySelectorAll("button")].find((node) => node.textContent?.includes("打开订单群"));
     assert.ok(entry, "the group entry renders");
-    assert.ok(entry.hasAttribute("data-support-trigger"));
     await React.act(async () => {
       entry.dispatchEvent(new window.MouseEvent("click", { bubbles: true, button: 0 }));
       await tick();
     });
     assert.deepEqual(opened, [{ party: "renter", orderId: order.id }]);
-    // The read-only bar leaves the existing amount and refresh actions in place.
-    assert.match(detail.querySelector(".order-amount-block").textContent, /我的订单费用/);
-    assert.match(detail.textContent, /刷新订单/);
+    // The amount section keeps the reader's own figure and the order actions remain reachable.
+    assert.match(detail.querySelector(".order-amount-block").textContent, /实付金额|下单金额/);
+    assert.ok(detail.querySelector(".order-action-card"), "the next-step card remains in place");
   } finally { await probe.dispose(); }
 });
 
@@ -934,7 +952,7 @@ test("a settled projection names the 72-hour window and its read-only state", as
     await probe.render({ status: "COMPLETED", orderId: order.id }, "stage-settled");
     await tick(); await tick();
     const detail = probe.host.querySelector("[data-testid=order-detail]");
-    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "结算完成 · 已超过 72 小时 · 仅可查看");
+    assert.equal(detail.querySelector(".order-fulfillment-summary").textContent, "结算完成 · 已超过 72 小时 · 订单群仅可查看历史消息");
     assert.deepEqual([...detail.querySelectorAll(".order-fulfillment-steps li")].map((node) => node.dataset.state), ["done", "done", "done", "done", "done"]);
   } finally { await probe.dispose(); }
 });
@@ -968,10 +986,9 @@ test("the list marks only the early stages it can prove and never borrows the se
   try {
     await probe.render({ party: "renter" }, "list-tags");
     const row = (id) => probe.host.querySelector(`[data-order-id="${id}"]`).closest(".order-row");
-    assert.equal(row("order_tag_active").querySelector(".order-row-stage"), null, "a ready group adds no stage chip to every row");
-    assert.equal(row("order_tag_preparing").querySelector(".order-row-stage").textContent, "订单群准备中");
-    assert.equal(row("order_tag_waiting").querySelector(".order-row-stage").textContent, "待客服接入");
-    assert.equal(row("order_tag_settled").querySelector(".order-row-stage"), null);
+    assert.equal(row("order_tag_active").querySelector(".order-row-hint").textContent, "订单群已就绪");
+    assert.equal(row("order_tag_preparing").querySelector(".order-row-hint").textContent, "订单群准备中");
+    assert.equal(row("order_tag_waiting").querySelector(".order-row-hint").textContent, "等待客服分配");
   } finally { await probe.dispose(); }
 });
 

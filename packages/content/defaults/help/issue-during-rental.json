@@ -1,0 +1,123 @@
+{
+  "key": "issue-during-rental",
+  "kind": "help",
+  "file": "help/issue-during-rental.json",
+  "meta": {
+    "id": "S01",
+    "slug": "issue-during-rental",
+    "title": "租用中无法登录、账号被封或联系不上号主怎么办？",
+    "summary": "第一时间在本单订单群联系客服并保存证据；未开租可申请结束，已开租由客服按事实核实处理。",
+    "category": "after-sale",
+    "audience": [
+      "renter"
+    ],
+    "keywords": [
+      "无法登录",
+      "封号",
+      "封禁",
+      "号主失联",
+      "顶号",
+      "异常",
+      "售后",
+      "上不了号"
+    ],
+    "updatedAt": "2026-10-06",
+    "related": [
+      "rental-not-started",
+      "protection-coverage",
+      "complaint-guide"
+    ],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-先在订单群内联系客服",
+    "by-stage": "content-按租用阶段处理"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "先在订单群内联系客服",
+        "children": [
+          {
+            "text": "先在订单群内联系客服"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "遇到无法登录、封禁、顶号或号主不回应等情况，第一时间在本单订单群说明并保存证据：问题截图、发生时间、具体现象。订单群是平台认可的沟通与处理渠道。"
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "注意",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "不要绕开订单群私下协商转账或「私了」，私下约定不受平台保障，出现纠纷也无法核实。"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "按租用阶段处理",
+        "children": [
+          {
+            "text": "按租用阶段处理"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "尚未正式开租：任一方可申请结束，无争议且无其他调整时全额应退。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "已正式开租：客服核实事实后按规则分类处理；责任与金额由受审流程确定，不按固定扣款表自动执行。"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "listStyleType": "disc",
+        "indent": 1,
+        "children": [
+          {
+            "text": "对处理结果有异议：在群内提出，必要时按投诉流程由上级复核。"
+          }
+        ]
+      }
+    ]
+  }
+}

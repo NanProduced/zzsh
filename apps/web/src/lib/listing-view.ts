@@ -32,7 +32,7 @@ export type SkinTag = {
   isCollectible?: boolean | null;
   defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
 };
-export type ListingMedia = { assetId: string; url: string; category?: "SHOWCASE" | "PENALTY"; legacy?: boolean };
+export type ListingMedia = { assetId: string; url: string; coverUrl?: string; category?: "SHOWCASE" | "PENALTY"; legacy?: boolean; legacyState?: "PENDING_IMPORT" | "UNAVAILABLE" };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
   canCreateOrder?: boolean;
@@ -289,7 +289,7 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     baseRenterHaffRatioWanPerYuan: listing.quote.baseRenterHaffRatioWanPerYuan ?? null,
     baseRatioReferenceOnly: listing.quote.schemaVersion === 3,
     title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
-    imageUrl: firstMedia?.url,
+    imageUrl: firstMedia?.coverUrl ?? firstMedia?.url,
     media,
     resourceLines,
     resourceTotalLabel: formatMoneyLabel(listing.quote.resourceTotal) ?? "以平台确认为准",
@@ -309,11 +309,13 @@ export function toListingCard(listing: PublicListing): ListingCardData {
 }
 function projectListingMedia(listing: PublicListing): ListingMedia[] {
   if (listing.media.length === 0 && Array.isArray(listing.legacyImages)) {
-    return [...listing.legacyImages].sort((a, b) => a.position - b.position).map(({ position, url }) => ({ assetId: `legacy-slot-${position}`, url, legacy: true }));
+    return [...listing.legacyImages].sort((a, b) => a.position - b.position).map(({ position, url, cdnUrl, state }) => ({
+      assetId: `legacy-slot-${position}`, url: cdnUrl ?? url, ...(cdnUrl ? {} : { legacy: true, ...(state ? { legacyState: state } : {}) }),
+    }));
   }
   return [...listing.media]
     .sort((a, b) => a.position - b.position)
-    .map(({ assetId, url, category }) => ({ assetId, url, ...(category ? { category } : {}) }));
+    .map(({ assetId, url, coverUrl, detailUrl, category }) => ({ assetId, url: detailUrl ?? url, ...(coverUrl ? { coverUrl } : {}), ...(category ? { category } : {}) }));
 }
 function projectListingSkins(listing: PublicListing): Pick<ListingCardData, "skinNames" | "skinLabels" | "skinTags" | "skinsWithheld"> {
   const withheld = listing.presentation.skinsWithheld;

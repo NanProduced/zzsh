@@ -11,7 +11,7 @@ import { readLegacyMarketAccountIds } from "./legacy-listing-read";
 import type { LegacyPublicAdmission } from "../legacy-load/legacy-public-admission";
 
 /** B1: owner-side account list (个人中心「我的账号」). List indicator only — not the full rentability gate. */
-export const OWNER_RENTAL_STATES = ["RENTED", "PENDING_PAYMENT", "LISTED", "PAUSED", "REVIEWING", "DRAFT", "REJECTED", "RESTRICTED", "COMPLETED", "UNKNOWN"] as const;
+export const OWNER_RENTAL_STATES = ["RENTED", "PENDING_PAYMENT", "LISTED", "DELISTED", "HISTORICAL", "PAUSED", "REVIEWING", "DRAFT", "REJECTED", "RESTRICTED", "COMPLETED", "UNKNOWN"] as const;
 export type OwnerRentalState = typeof OWNER_RENTAL_STATES[number];
 export type OwnerAccountQuery = { limit: number; after: string; cursor: string | null; rentalState: OwnerRentalState | null };
 const CURSOR_AUDIENCE = "zzsh:owner-accounts-v1";
@@ -50,11 +50,14 @@ export function decodeOwnerAccountCursor(token: string, userId: string, rentalSt
   return c.id;
 }
 
-/** Same precedence as documented in brief.md (B1). Exported for offline tests and reuse. */
+const retiredLegacySql = `g.code='delta' AND EXISTS (SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts')`;
+/** The active order remains visible even when its imported account is read-only. */
 const rentalStateSql = (continuationReady: boolean) => `CASE
   WHEN ao.status='PAID' OR lo.occupied
     ${continuationReady ? `OR EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register r WHERE r.account_id=a.id AND r.disposition='ISOLATED_PARTY')` : ""} THEN 'RENTED'
   WHEN ao.status='PENDING_PAYMENT' THEN 'PENDING_PAYMENT'
+  WHEN a.lifecycle='DELISTED' THEN 'DELISTED'
+  WHEN ${retiredLegacySql} THEN 'HISTORICAL'
   WHEN a.lifecycle='ARCHIVED' THEN 'COMPLETED'
   WHEN a.staff_restricted THEN 'RESTRICTED'
   WHEN a.id=ANY($5::text[]) THEN CASE WHEN a.owner_paused THEN 'PAUSED' ELSE 'LISTED' END
@@ -62,7 +65,6 @@ const rentalStateSql = (continuationReady: boolean) => `CASE
   WHEN v.review_state='SUBMITTED' THEN 'REVIEWING'
   WHEN v.review_state='REJECTED' THEN 'REJECTED'
   WHEN v.review_state IN ('DRAFT','WITHDRAWN','IMPORTED_UNVERIFIED') THEN 'DRAFT'
-  WHEN g.code='delta' AND v.schema_version=3 THEN 'DRAFT'
   WHEN p.version_id IS NOT NULL AND ${effectivePublicationStateSql("v", "p")} THEN CASE WHEN a.owner_paused THEN 'PAUSED' ELSE 'LISTED' END
   ELSE 'UNKNOWN' END`;
 export const RENTAL_STATE_SQL = rentalStateSql(true);
@@ -70,7 +72,7 @@ const utc = (c: string) => `CASE WHEN ${c} IS NULL THEN NULL ELSE to_char(${c} A
 
 const ownerAccountListSql = (continuationReady: boolean) => `SELECT /* owner-account-list */ * FROM (
  SELECT a.id,a.display_no,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.origin AS version_origin,v.title,v.review_state,v.sequence::text,
-   u.name AS owner_name,g.name AS game_name,g.code AS game_code,v.payload,v.presentation->'items' AS presentation_items,
+   u.name AS owner_name,g.name AS game_name,v.payload,v.presentation->'items' AS presentation_items,(${retiredLegacySql}) AS retired_legacy,
    (v.rule_release_id IS NOT DISTINCT FROM g.current_release_id) AS rule_current,
    CASE WHEN ao.id IS NOT NULL AND lo.occupied THEN NULL ELSE COALESCE(ao.id,lo.id) END AS ao_id,
    COALESCE(ao.display_no,lo.original_order_no) AS ao_display_no,
@@ -143,15 +145,16 @@ export function projectOwnerAccount(row: OwnerAccountRow) {
   if (row.rental_state === "RENTED") blockers.push("RENTED");
   if (row.rental_state === "PENDING_PAYMENT" || row.ao_status === "PENDING_PAYMENT") blockers.push("PENDING_PAYMENT");
   if (row.rental_state === "COMPLETED") blockers.push("RENTAL_COMPLETED");
+  if (row.rental_state === "DELISTED") blockers.push("ACCOUNT_DELISTED");
+  if (row.retired_legacy === true || row.rental_state === "HISTORICAL") blockers.push("LEGACY_LISTING_RELIST_REQUIRED");
   if (row.staff_restricted) blockers.push("STAFF_RESTRICTED");
   if (row.owner_paused) blockers.push("OWNER_PAUSED");
   if (row.rental_state === "REVIEWING") blockers.push("UNDER_REVIEW");
   if (["DRAFT", "REJECTED"].includes(row.rental_state)) blockers.push("NOT_PUBLISHED");
-  if (row.game_code === "delta" && row.payload?.schemaVersion === 3) blockers.push("LEGACY_LISTING_RELIST_REQUIRED");
   if (row.rental_state === "UNKNOWN") blockers.push("STATE_UNKNOWN");
   if (row.legacy_market) blockers.push("NOT_TRADE_READY");
   if (row.version_id && row.rule_current === false) blockers.push("RULE_CHANGED");
-  const { payload: _p, presentation_items: _i, rule_current: _r, legacy_market: _m, version_origin: _o, game_code: _g, title: storedTitle, ...rest } = row;
+  const { payload: _p, presentation_items: _i, rule_current: _r, legacy_market: _m, retired_legacy: _legacy, version_origin: _o, title: storedTitle, ...rest } = row;
   for (const k of Object.keys(rest)) if (k.startsWith("ao_")) delete (rest as any)[k];
   const displayNo = publicAccountNumber(row.display_no);
   return {
@@ -161,7 +164,7 @@ export function projectOwnerAccount(row: OwnerAccountRow) {
     title: declaredTitleOrNull(storedTitle),
     display_no: displayNo,
     rentalState: row.rental_state,
-    historicalReadOnly: row.version_origin === "LEGACY_OBSERVATION" || row.game_code === "delta" && row.payload?.schemaVersion === 3,
+    historicalReadOnly: row.version_origin === "LEGACY_OBSERVATION" || row.retired_legacy === true || row.rental_state === "HISTORICAL",
     accountDisplay: { displayNo, gameId: row.game_id, titleFacts, unknownReason },
     activeOrder: row.ao_id ? {
       id: row.ao_id, displayNo: row.ao_display_no, status: row.ao_status, origin: row.ao_origin === "LEGACY" ? "LEGACY" : "NATIVE", renterName: row.ao_renter_name ?? null,

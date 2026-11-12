@@ -197,26 +197,55 @@ function LevelFilter({
   name,
   idPrefix,
   onChange,
+  mobile = false,
 }: {
   entry: PublicListingFilterField;
   current: number | undefined;
   name: string;
   idPrefix: string;
   onChange: (value: number | null) => void;
+  mobile?: boolean;
 }) {
   const values = entry.levels ?? [];
   if (!values.length) return null;
-  return <FilterRow label={entry.label} id={`${idPrefix}-filter-${entry.key}`}>
-    <MarketSelect
-      className="market-ui-select--property"
-      label={entry.label}
-      name={name}
-      value={current === undefined ? "__unlimited__" : String(current)}
-      placeholder="不限"
-      options={[{ value: "__unlimited__", label: "不限" }, ...values.map((value) => ({ value: String(value), label: `≥${value}` }))]}
-      onChange={(value) => onChange(value === null || value === "__unlimited__" ? null : Number(value))}
-    />
-  </FilterRow>;
+  const isAll = current === undefined;
+
+  const content = (
+    <div className={mobile ? "market-mobile-choice-grid--levels" : "market-filter-row-options"} role="radiogroup" aria-label={entry.label}>
+      <button
+        type="button"
+        className={mobile ? "market-mobile-preset-pill" : "market-level-choice"}
+        data-selected={isAll ? "true" : undefined}
+        aria-pressed={isAll}
+        onClick={() => onChange(null)}
+      >
+        不限
+      </button>
+      {values.map((value) => {
+        const isSelected = current === value;
+        return (
+          <button
+            key={value}
+            type="button"
+            className={mobile ? "market-mobile-preset-pill" : "market-level-choice"}
+            data-selected={isSelected ? "true" : undefined}
+            aria-pressed={isSelected}
+            onClick={() => onChange(isSelected ? null : value)}
+          >
+            ≥{value}
+          </button>
+        );
+      })}
+    </div>
+  );
+
+  if (mobile) return content;
+
+  return (
+    <FilterRow label={entry.label} id={`${idPrefix}-filter-${entry.key}`}>
+      {content}
+    </FilterRow>
+  );
 }
 
 function GradeFilter({ entry, selected, onToggle, onClear }: {
@@ -599,7 +628,7 @@ function ServiceWindowFilter({ filters, metadata, onChange, resetToken = 0 }: Pi
     setError(null);
     onChange({ ...filters, filters: { ...filters.filters, serviceWindow: result.value }, cursor: null });
   };
-  return <FilterRow label={entry.label} id={id}>
+  return <FilterRow label="上号时间" id={id}>
     <div className="market-time-selects">
       <MarketSelect
         className="market-ui-select--time"
@@ -880,13 +909,23 @@ export function MarketFilterControls(props: Props) {
     if (result.filters !== filters) onChange(result.filters);
     return result.error;
   };
-  const levelFilter = (key: "vitality" | "bear") => {
+  const levelFilter = (key: "vitality" | "bear", mobile = false) => {
     const entry = field(metadata, key);
     if (!entry) return null;
-    return <LevelFilter key={key} entry={entry} current={selected[key]?.min} name={`${id}-${key}`} idPrefix={id} onChange={(value) => updateLevel(key, value)} />;
+    return <LevelFilter key={key} entry={entry} current={selected[key]?.min} name={`${id}-${key}`} idPrefix={id} onChange={(value) => updateLevel(key, value)} mobile={mobile} />;
   };
 
-  const loginField = field(metadata, "loginMethodCodes");
+  // Owner 要求：前端隐藏“Steam国际服”选项，避免改动后端代码与枚举（勿当成 bug 移除）
+  const loginField = useMemo(() => {
+    const raw = field(metadata, "loginMethodCodes");
+    if (!raw) return undefined;
+    return {
+      ...raw,
+      options: raw.options?.filter(
+        (option) => option.value !== "legacy_login_steam_global" && !option.label.includes("Steam国际服")
+      ),
+    };
+  }, [metadata]);
   const haffItem = metadata.items.find((item) => item.unit === "HAFF_BASE" && field(metadata, "resources")?.items?.some((entry) => entry.itemId === item.id));
   const commitResource = (itemId: string, quantity: ResourceRange | null) => {
     const next = (selected.resources ?? []).filter((entry) => entry.itemId !== itemId);
@@ -910,18 +949,18 @@ export function MarketFilterControls(props: Props) {
 
   const basicCount = (selected.loginMethodCodes?.length ?? 0)
     + (selected.safeBoxCodes?.length ?? 0)
-    + (selected.regions?.length ?? 0)
-    + (selected.resources?.some((r) => r.itemId === haffItem?.id) ? 1 : 0);
-
-  const characterCount = (selected.gradingCodes?.length ?? 0)
     + (selected.vitality ? 1 : 0)
     + (selected.bear ? 1 : 0)
+    + (selected.resources?.some((r) => r.itemId === haffItem?.id) ? 1 : 0);
+
+  const characterCount = (selected.regions?.length ?? 0)
+    + (selected.gradingCodes?.length ?? 0)
     + (selected.serviceWindow ? 1 : 0);
 
   const resourceCount = selected.resources?.filter((r) => r.itemId !== haffItem?.id).length ?? 0;
   const skinCount = selected.skinGroups?.reduce((sum, g) => sum + g.ids.length, 0) ?? 0;
-  const basicDesktopCount = basicCount - regions.length;
-  const characterDesktopCount = characterCount + regions.length;
+  const basicDesktopCount = basicCount;
+  const characterDesktopCount = characterCount;
   const [openGroups, setOpenGroups] = useState<Record<"basic" | "character" | "resources" | "skins", boolean>>(() => ({
     basic: true,
     character: characterDesktopCount > 0,
@@ -938,7 +977,7 @@ export function MarketFilterControls(props: Props) {
         <div className="market-filter-rail" role="tablist" aria-label="筛选分类导航">
           {[
             { id: "basic", label: "基础条件", count: basicCount },
-            { id: "character", label: "角色属性", count: characterCount },
+            { id: "character", label: "地区与上号时间", count: characterCount },
             { id: "resources", label: "物资数量", count: resourceCount },
             { id: "skins", label: "皮肤外观", count: skinCount },
           ].map((cat) => {
@@ -1050,6 +1089,24 @@ export function MarketFilterControls(props: Props) {
                 </div>
               ) : null}
 
+              {field(metadata, "vitality")?.levels?.length ? (
+                <div className="market-mobile-group">
+                  <span className="market-mobile-group-title">{field(metadata, "vitality")!.label}</span>
+                  {levelFilter("vitality", true)}
+                </div>
+              ) : null}
+
+              {field(metadata, "bear")?.levels?.length ? (
+                <div className="market-mobile-group">
+                  <span className="market-mobile-group-title">{field(metadata, "bear")!.label}</span>
+                  {levelFilter("bear", true)}
+                </div>
+              ) : null}
+            </div>
+          )}
+
+          {activeMobileCategory === "character" && (
+            <div className="market-mobile-category-content">
               {regionsField?.regions?.length ? (
                 <div className="market-mobile-group">
                   <RegionFilter
@@ -1063,11 +1120,7 @@ export function MarketFilterControls(props: Props) {
                   />
                 </div>
               ) : null}
-            </div>
-          )}
 
-          {activeMobileCategory === "character" && (
-            <div className="market-mobile-category-content">
               {field(metadata, "gradingCodes")?.options?.length ? (
                 <div className="market-mobile-group">
                   <span className="market-mobile-group-title">{field(metadata, "gradingCodes")!.label}</span>
@@ -1091,17 +1144,7 @@ export function MarketFilterControls(props: Props) {
               ) : null}
 
               <div className="market-mobile-group">
-                <span className="market-mobile-group-title">体力等级</span>
-                {levelFilter("vitality")}
-              </div>
-
-              <div className="market-mobile-group">
-                <span className="market-mobile-group-title">负重等级</span>
-                {levelFilter("bear")}
-              </div>
-
-              <div className="market-mobile-group">
-                <span className="market-mobile-group-title">配合上号时段</span>
+                <span className="market-mobile-group-title">上号时间</span>
                 <ServiceWindowFilter filters={filters} metadata={metadata} onChange={onChange} resetToken={props.resetToken} />
               </div>
             </div>
@@ -1331,12 +1374,12 @@ export function MarketFilterControls(props: Props) {
       {optionGroup(loginField, selected.loginMethodCodes ?? [], (value) => updateEnum("loginMethodCodes", value), id)}
       {haffItem && field(metadata, "resources")?.items?.find((entry) => entry.itemId === haffItem.id) ? <HaffFilter flushDrafts={props.flushDrafts} item={haffItem} bounds={field(metadata, "resources")!.items!.find((entry) => entry.itemId === haffItem.id)!} current={selected.resources?.find((entry) => entry.itemId === haffItem.id)} rangeSupported={metadata.resourceQuantityRange === true} gameCode={gameCode} resetToken={props.resetToken} onChange={(quantity) => commitResource(haffItem.id, quantity)} /> : null}
       {optionGroup(field(metadata, "safeBoxCodes"), selected.safeBoxCodes ?? [], (value) => updateEnum("safeBoxCodes", value), id)}
-    </FilterGroup>
-    <FilterGroup label="角色与地区" count={characterDesktopCount} open={openGroups.character} onToggle={setGroupOpen("character")}>
-      {regionsField?.regions?.length ? <RegionFilter label={regionsField.label} availableRegions={regionsField.regions} selectedRegions={regions} resetToken={props.resetToken} onToggle={updateRegion} onToggleProvince={updateProvince} onClear={() => onChange({ ...filters, filters: { ...selected, regions: undefined }, cursor: null })} /> : null}
-      <GradeFilter entry={field(metadata, "gradingCodes")} selected={selected.gradingCodes ?? []} onToggle={(value) => updateEnum("gradingCodes", value)} onClear={() => onChange({ ...filters, filters: { ...selected, gradingCodes: undefined }, cursor: null })} />
       {levelFilter("vitality")}
       {levelFilter("bear")}
+    </FilterGroup>
+    <FilterGroup label="地区与上号时间" count={characterDesktopCount} open={openGroups.character} onToggle={setGroupOpen("character")}>
+      {regionsField?.regions?.length ? <RegionFilter label={regionsField.label} availableRegions={regionsField.regions} selectedRegions={regions} resetToken={props.resetToken} onToggle={updateRegion} onToggleProvince={updateProvince} onClear={() => onChange({ ...filters, filters: { ...selected, regions: undefined }, cursor: null })} /> : null}
+      <GradeFilter entry={field(metadata, "gradingCodes")} selected={selected.gradingCodes ?? []} onToggle={(value) => updateEnum("gradingCodes", value)} onClear={() => onChange({ ...filters, filters: { ...selected, gradingCodes: undefined }, cursor: null })} />
       <ServiceWindowFilter filters={filters} metadata={metadata} onChange={onChange} resetToken={props.resetToken} />
     </FilterGroup>
     <FilterGroup label="物资" count={resourceCount} open={openGroups.resources} onToggle={setGroupOpen("resources")}>

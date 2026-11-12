@@ -20,6 +20,9 @@ const CATALOG = [
   { code: 'admin.audit.read', name: '查询账号与权限审计', description: '读取白名单内的管理员账号、角色、授权与冻结审计' },
   { code: 'content.read', name: '读取游戏内容', description: '按游戏对象范围读取资讯草稿与发布状态' },
   { code: 'content.edit', name: '编辑游戏内容', description: '按游戏对象范围创建和编辑游戏资讯草稿' },
+  { code: 'docs.internal.read', name: '查看内部文档', description: '读取内部文档树、详情、版本、回收站与搜索' },
+  { code: 'docs.internal.comment', name: '评论内部文档', description: '建立讨论、回复并解决自己的讨论' },
+  { code: 'docs.internal.manage', name: '管理内部文档', description: '新建、编辑、移动、删除、恢复、回滚与上传图片' },
   { code: 'supply.restrict', name: '限制与解除供给', description: '限制或解除指定范围供给' },
   { code: 'widget.mystery.launch', name: '未知域能力', description: '  未登记业务域  ' },
 ];
@@ -64,6 +67,17 @@ test('counts are per business domain, exclude baseline, and surface codes missin
     { id: 'unknown', label: '未归类权限', count: 1 },
   ]);
   assert.deepEqual(countPermissionsByGroup([], CATALOG), []);
+});
+
+test('docs.internal capabilities form their own domain with a named section, ordered read -> comment -> manage', () => {
+  const docs = groupAdminPermissions(CATALOG).find((group) => group.id === 'docs');
+  assert.ok(docs, 'docs 域独立于运营内容');
+  assert.equal(docs.label, '内部文档');
+  assert.deepEqual(docs.sections, [{ id: 'docs.internal', label: '内部文档', codes: ['docs.internal.read', 'docs.internal.comment', 'docs.internal.manage'] }]);
+  assert.deepEqual(countPermissionsByGroup(['docs.internal.read', 'docs.internal.manage', 'content.read'], CATALOG), [
+    { id: 'docs', label: '内部文档', count: 2 },
+    { id: 'content', label: '运营内容', count: 1 },
+  ]);
 });
 
 test('change summary reports added and removed codes in both directions', () => {

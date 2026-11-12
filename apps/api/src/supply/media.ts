@@ -7,6 +7,9 @@ import type { Pool, PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
+import type { AccountMediaVariant, OssAccountMedia } from "./account-media-oss";
+import type { AccountImageCdn } from "./account-image-cdn";
+import { readAccountWatermarkPolicy, resolveAccountImageWatermark } from "./account-image-watermark";
 import { isAccountDisplayPubliclyEligible } from "./listing-query";
 import { assertGameScope, bumpCatalogRevision, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 
@@ -27,16 +30,22 @@ export class MediaStorageError extends Error {
 
 export type ImageInfo = { mime: ImageMime; width: number; height: number };
 
+async function imageDecoder(bytes: Buffer, pixelLimit = MAX_MEDIA_PIXELS) {
+  if (!bytes.length || bytes.length > MAX_MEDIA_BYTES) throw new MediaValidationError("Image size is outside the allowed range");
+  const decoder = sharp(bytes, { failOn: "warning", limitInputPixels: pixelLimit }).timeout({ seconds: 10 });
+  const metadata = await decoder.metadata();
+  if ((metadata.format !== "jpeg" && metadata.format !== "png" && metadata.format !== "webp") || (metadata.pages ?? 1) !== 1) throw new MediaValidationError("Unsupported image or animation");
+  const info: ImageInfo = { mime: `image/${metadata.format}`, width: metadata.width, height: metadata.height };
+  assertImageWithinBounds(info, bytes.length);
+  return { decoder, metadata, info, format: metadata.format };
+}
+
 export async function decodeImage(bytes: Buffer): Promise<{ info: ImageInfo; publicBytes: Buffer }> {
   if (!bytes.length || bytes.length > MAX_MEDIA_BYTES) throw new MediaValidationError("Image size is outside the allowed range");
   try {
-    const decoder = sharp(bytes, { failOn: "warning", limitInputPixels: MAX_MEDIA_PIXELS }).timeout({ seconds: 10 });
-    const metadata = await decoder.metadata();
-    if (!["jpeg", "png", "webp"].includes(metadata.format ?? "") || (metadata.pages ?? 1) !== 1) throw new MediaValidationError("Unsupported image or animation");
-    const info: ImageInfo = { mime: ("image/" + metadata.format) as ImageMime, width: metadata.width!, height: metadata.height! };
-    assertImageWithinBounds(info, bytes.length);
+    const { decoder, info, format } = await imageDecoder(bytes);
     // Orient only the derivative; original evidence bytes and their hashes stay intact.
-    const output = await decoder.autoOrient().toFormat(metadata.format as "jpeg" | "png" | "webp").toBuffer({ resolveWithObject: true });
+    const output = await decoder.autoOrient().toFormat(format).toBuffer({ resolveWithObject: true });
     const publicBytes = output.data;
     info.width = output.info.width; info.height = output.info.height;
     assertImageWithinBounds(info, publicBytes.length);
@@ -44,6 +53,19 @@ export async function decodeImage(bytes: Buffer): Promise<{ info: ImageInfo; pub
   } catch {
     throw new MediaValidationError("Image is incomplete, invalid or outside resource limits");
   }
+}
+
+export async function inspectAccountWebp(bytes: Buffer, maxEdge: number): Promise<ImageInfo> {
+  const info = await inspectPublicAccountImage(bytes, maxEdge * maxEdge);
+  if (info.mime !== "image/webp" || Math.max(info.width, info.height) > maxEdge) throw new MediaValidationError("Invalid OSS account image variant");
+  return info;
+}
+
+export async function inspectPublicAccountImage(bytes: Buffer, pixelLimit = MAX_MEDIA_PIXELS): Promise<ImageInfo> {
+  const { decoder, metadata, info } = await imageDecoder(bytes, pixelLimit);
+  if (metadata.exif || metadata.xmp || metadata.iptc || metadata.comments?.length) throw new MediaValidationError("Display image contains private metadata");
+  await decoder.raw().toBuffer();
+  return info;
 }
 
 export async function inspectImage(bytes: Buffer): Promise<ImageInfo> {
@@ -72,6 +94,8 @@ export const STORAGE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 export type MediaStorage = {
   available: boolean;
   kind: "local" | "oss" | "unavailable";
+  readonly accountMedia?: OssAccountMedia;
+  readonly accountImageCdn?: AccountImageCdn;
   readonly configuration?: Readonly<{
     target: Readonly<{ bucket: string; region: string; endpoint: string; objectPrefix: string }>;
     credentialMode: "ACCESS_KEY" | "STS";
@@ -166,7 +190,7 @@ function tokensMatch(expectedHash: string, provided: string): boolean {
 export async function createMediaUploadIntent(
   client: PoolClient,
   actor: MediaActor,
-  input: { gameId?: string; accountId?: string; purpose: string; mime: string; size: number },
+  input: { gameId?: string; accountId?: string; purpose: string; mime: string; size: number; directOss?: boolean },
 ): Promise<{ intentId: string; uploadToken: string; expiresAt: string }> {
   if (!ALLOWED_IMAGE_MIMES.includes(input.mime as ImageMime)) throw invalid("MIME type is not allowed", "mime");
   if (!Number.isInteger(input.size) || input.size <= 0 || input.size > MAX_MEDIA_BYTES) throw invalid("Declared size is outside the allowed range");
@@ -209,6 +233,7 @@ export async function createMediaUploadIntent(
     accountId = input.accountId;
     ownerUserId = actor.userId!;
   }
+  if (input.directOss && ownershipKind !== "USER_SUPPLY") throw invalid("Direct upload requires account media");
 
   const intentId = newSupplyId("upload");
   const uploadToken = randomBytes(32).toString("base64url");
@@ -216,8 +241,8 @@ export async function createMediaUploadIntent(
   await client.query(
     `INSERT INTO "zzsh_supply"."media_upload_intent"
       ("id", "token_hash", "game_id", "account_id", "purpose", "ownership_kind", "owner_user_id",
-       "uploaded_by_realm", "uploaded_by_user_id", "uploaded_by_admin_id", "declared_mime", "declared_size", "expires_at")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+       "uploaded_by_realm", "uploaded_by_user_id", "uploaded_by_admin_id", "declared_mime", "declared_size", "expires_at", "direct_oss")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
     [
       intentId,
       tokenHash(uploadToken),
@@ -232,6 +257,7 @@ export async function createMediaUploadIntent(
       input.mime,
       input.size,
       expiresAt,
+      input.directOss === true,
     ],
   );
   return { intentId, uploadToken, expiresAt: expiresAt.toISOString() };
@@ -258,6 +284,8 @@ export type PreparedMediaUpload = {
   byteSize: number;
   contentHash: string;
   publicHash: string;
+  directOss: boolean;
+  variants: AccountMediaVariant[];
   writtenStorageKeys: string[];
 };
 
@@ -280,6 +308,7 @@ type UploadIntentRow = {
   declaredSize: string;
   expiresAt: Date;
   consumedAt: Date | null;
+  directOss: boolean;
 };
 
 async function loadUploadIntent(client: Pool | PoolClient, intentId: string, forUpdate = false): Promise<UploadIntentRow | null> {
@@ -287,7 +316,7 @@ async function loadUploadIntent(client: Pool | PoolClient, intentId: string, for
     `SELECT "account_id" AS "accountId", "token_hash" AS "tokenHash", "game_id" AS "gameId", "purpose", "ownership_kind" AS "ownershipKind",
             "owner_user_id" AS "ownerUserId", "uploaded_by_realm" AS "uploadedByRealm",
             "uploaded_by_user_id" AS "uploadedByUserId", "uploaded_by_admin_id" AS "uploadedByAdminId",
-            "declared_mime" AS "declaredMime", "declared_size"::text AS "declaredSize", "expires_at" AS "expiresAt", "consumed_at" AS "consumedAt"
+            "declared_mime" AS "declaredMime", "declared_size"::text AS "declaredSize", "expires_at" AS "expiresAt", "consumed_at" AS "consumedAt", "direct_oss" AS "directOss"
        FROM "zzsh_supply"."media_upload_intent" WHERE "id" = $1${forUpdate ? " FOR UPDATE" : ""}`,
     [intentId],
   );
@@ -297,6 +326,14 @@ async function loadUploadIntent(client: Pool | PoolClient, intentId: string, for
 function intentActorMatches(intent: { uploadedByRealm: string; uploadedByUserId: string | null; uploadedByAdminId: string | null }, actor: MediaActor): boolean {
   return intent.uploadedByRealm === actor.realm &&
     (actor.realm === "admin" ? intent.uploadedByAdminId === actor.adminUserId : intent.uploadedByUserId === actor.userId);
+}
+
+function assertUploadIntent(intent: UploadIntentRow | null, actor: MediaActor, uploadToken: string, directOss: boolean): asserts intent is UploadIntentRow {
+  if (!intent || !intentActorMatches(intent, actor)) throw notFound();
+  if (!tokensMatch(intent.tokenHash, uploadToken)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
+  if (intent.consumedAt) throw conflict("Upload intent was already used");
+  if (intent.expiresAt.getTime() <= Date.now()) throw conflict("Upload intent has expired");
+  if ((intent.directOss === true) !== directOss) throw conflict("Upload transport does not match the intent");
 }
 
 // Phase one runs outside any database transaction: object storage writes must
@@ -309,15 +346,26 @@ export async function prepareMediaUpload(
   actor: MediaActor,
   intentId: string,
   uploadToken: string,
-  bytes: Buffer,
+  upload: Buffer | { contentHash: string },
 ): Promise<PreparedMediaUpload> {
   const intent = await loadUploadIntent(pool, intentId);
-  if (!intent) throw notFound();
-  if (intent.consumedAt) throw conflict("Upload intent was already used");
-  if (intent.expiresAt.getTime() < Date.now()) throw conflict("Upload intent has expired");
-  if (!intentActorMatches(intent, actor)) throw notFound();
-  if (!tokensMatch(intent.tokenHash, uploadToken)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
+  const directOss = !Buffer.isBuffer(upload);
+  assertUploadIntent(intent, actor, uploadToken, directOss);
+  let bytes: Buffer;
+  if (Buffer.isBuffer(upload)) bytes = upload;
+  else {
+    if (!STORAGE_KEY_PATTERN.test(upload.contentHash)) throw invalid("Invalid SHA-256", "contentHash");
+    if (!storage.accountMedia) throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "Direct media upload is unavailable");
+    try {
+      bytes = await storage.accountMedia.readUpload(intentId, Number(intent.declaredSize));
+    } catch (error) {
+      if (error instanceof MediaStorageError && error.code === "MEDIA_OBJECT_NOT_FOUND") throw conflict("Direct upload has not arrived");
+      throw error;
+    }
+  }
   if (bytes.length !== Number(intent.declaredSize)) throw invalid("Uploaded size does not match the declared size");
+  const contentHash = createHash("sha256").update(bytes).digest("hex");
+  if (!Buffer.isBuffer(upload) && contentHash !== upload.contentHash) throw invalid("Uploaded SHA-256 does not match", "contentHash");
   let image: ImageInfo;
   let publicBytes: Buffer;
   try {
@@ -329,22 +377,27 @@ export async function prepareMediaUpload(
     throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, error instanceof Error ? error.message : "Image is invalid");
   }
   if (image.mime !== intent.declaredMime) throw invalid("Uploaded bytes do not match the declared image type");
-  const contentHash = createHash("sha256").update(bytes).digest("hex");
   const publicHash = createHash("sha256").update(publicBytes).digest("hex");
   // Keys are recorded before each write attempt: a transport failure after the
   // remote object landed (e.g. a timeout) leaves the outcome unknown, so the
   // attempted key must stay traceable as an orphan candidate.
   const writtenStorageKeys: string[] = [];
+  let variants: AccountMediaVariant[] = [];
   try {
     writtenStorageKeys.push(contentHash);
     await storage.write(bytes, contentHash, image.mime);
     writtenStorageKeys.push(publicHash);
     await storage.write(publicBytes, publicHash, image.mime);
+    if (directOss && intent.purpose === "ACCOUNT_DISPLAY" && storage.accountMedia) {
+      const policy = await readAccountWatermarkPolicy(pool);
+      const watermark = await resolveAccountImageWatermark(pool, policy);
+      variants = await storage.accountMedia.generateVariants(publicHash, image, watermark, objectKey => writtenStorageKeys.push(objectKey));
+    }
   } catch (error) {
     logOrphanedMediaObjects({ intentId, storageKeys: [...new Set(writtenStorageKeys)], phase: "write" });
     throw error;
   }
-  return { intentId, uploadToken, image, byteSize: bytes.length, contentHash, publicHash, writtenStorageKeys };
+  return { intentId, uploadToken, image, byteSize: bytes.length, contentHash, publicHash, directOss, variants, writtenStorageKeys };
 }
 
 // Phase two runs inside the idempotent write transaction: the intent row is
@@ -363,11 +416,7 @@ export async function finalizeMediaUpload(
     await lockPublishingAccount(client, locatedIntent.accountId);
   }
   const intent = await loadUploadIntent(client, prepared.intentId, true);
-  if (!intent) throw notFound();
-  if (intent.consumedAt) throw conflict("Upload intent was already used");
-  if (intent.expiresAt.getTime() < Date.now()) throw conflict("Upload intent has expired");
-  if (!intentActorMatches(intent, actor)) throw notFound();
-  if (!tokensMatch(intent.tokenHash, prepared.uploadToken)) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Upload token is invalid");
+  assertUploadIntent(intent, actor, prepared.uploadToken, prepared.directOss);
 
   const assetId = newSupplyId("asset");
   await client.query(
@@ -398,6 +447,7 @@ export async function finalizeMediaUpload(
     `UPDATE "zzsh_supply"."media_upload_intent" SET "consumed_at" = clock_timestamp(), "consumed_asset_id" = $1 WHERE "id" = $2`,
     [assetId, prepared.intentId],
   );
+  await recordAccountMediaVariants(client, assetId, prepared.variants);
   return {
     assetId,
     gameId: intent.gameId,
@@ -411,6 +461,17 @@ export async function finalizeMediaUpload(
     height: prepared.image.height,
     contentHash: prepared.contentHash,
   };
+}
+
+export async function recordAccountMediaVariants(client: PoolClient, assetId: string, variants: readonly AccountMediaVariant[]): Promise<void> {
+  if (!variants.length) return;
+  await client.query(
+    `INSERT INTO zzsh_supply.account_image_variant(asset_id, max_edge, object_key, sha256, byte_size, width, height, watermark_revision)
+     SELECT $1, v."maxEdge", v."objectKey", v.sha256, v."byteSize", v.width, v.height, v."watermarkRevision"
+       FROM jsonb_to_recordset($2::jsonb) AS v("maxEdge" smallint, "objectKey" text, sha256 text, "byteSize" integer,
+         width smallint, height smallint, "watermarkRevision" bigint)`,
+    [assetId, JSON.stringify(variants)],
+  );
 }
 
 type MediaAssetRow = {

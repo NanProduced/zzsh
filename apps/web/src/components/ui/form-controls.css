@@ -36,7 +36,7 @@
 .form-radio-control {display:flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;border:1px solid var(--color-text-secondary);border-radius:50%;background:var(--color-bg-surface);padding:0;}
 .form-radio-control[data-checked] {border-color:var(--color-accent-brand);}
 .form-radio-group--segmented {display:grid;}
-.form-radio-group--segmented .form-radio-choice {position:relative;justify-content:center;}
+.form-radio-group--segmented .form-radio-choice {position:relative;justify-content:center;padding-right:22px;}
 .form-radio-group--segmented .form-radio-control {position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;}
 .form-radio-group--segmented .form-segment-check {position:absolute;right:7px;top:50%;transform:translateY(-50%);opacity:0;color:var(--color-text-primary);pointer-events:none;}
 .form-radio-group--segmented .is-selected .form-segment-check {opacity:1;}
@@ -50,4 +50,10 @@
 .form-calendar .rdp-root {--rdp-accent-color:#8d5b0b;--rdp-accent-background-color:#fff2d6;font-size:14px;}
 .dark .form-calendar .rdp-root {--rdp-accent-color:#f3b64a;--rdp-accent-background-color:#342919;}
 .form-calendar button:focus-visible {outline:2px solid var(--color-focus-ring);outline-offset:2px;}
+.form-radio-tooltip-wrapper { display: contents; }
+.form-radio-label-wrap { display:grid; gap:4px; min-width:0; }
+.form-radio-label-text { display:inline-flex; align-items:center; justify-content:center; gap:5px; white-space:nowrap; }
+.form-radio-hint-trigger { display:inline-flex; align-items:center; justify-content:center; color:var(--color-delta-accent, #ca8a04); cursor:help; padding:1px; border-radius:50%; line-height:1; transition:color 150ms ease, transform 150ms ease; }
+.form-radio-hint-trigger:hover { color:var(--color-delta-accent-hover, #a16207); transform:scale(1.15); }
+.form-radio-alert-icon { flex-shrink:0; }
 @media(max-width:600px){.form-select-trigger,.form-input{font-size:16px;}.form-radio-choice{padding:10px 12px;}.form-calendar{max-width:calc(100vw - 24px);padding:10px;}}

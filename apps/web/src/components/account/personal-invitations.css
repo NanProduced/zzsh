@@ -1,17 +1,155 @@
-.personal-invitations { display:grid; min-width:0; gap:20px; }
-.invitation-pane[hidden] { display: none !important; }
-.invitation-workbench { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.2fr); align-items:start; gap:20px; }
-.personal-invitations h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
-.invitation-code>strong { display:block; font-size:26px; line-height:1.5; letter-spacing:.015em; overflow-wrap:anywhere; }
-.personal-invitations p { color:var(--color-text-secondary); font-size:13px; line-height:1.75; }
-.invitation-actions { display:flex; flex-wrap:wrap; gap:10px; margin-top:20px; }
-.personal-invitations .button { min-height:36px; height:36px; padding:0 16px; border-radius:8px; font-size:13px; font-weight:500; display:inline-flex; align-items:center; justify-content:center; gap:6px; }
-.personal-invitations .button.primary { background:#f59e0b; color:#111827; font-weight:600; border:1px solid rgba(217,119,6,0.2); }
-.personal-invitations .button.primary:hover:not(:disabled) { background:#d97706; color:#ffffff; }
-.personal-invitations .button.secondary { background:var(--color-bg-surface); color:var(--color-text-primary); border:1px solid var(--color-border-default); }
-.personal-invitations .button.secondary:hover:not(:disabled) { background:var(--color-bg-elevated); border-color:var(--color-border-hover); }
+/* ==========================================================================
+   Personal Invitations CSS - Shopify Polaris + Delta Force Tactical Dark/Gold
+   ========================================================================== */
 
-/* 社交凭证与头像缩略组件 (Social Proof with Initials Avatar Stack - c-avatar-21 风格) */
+.personal-invitations {
+  display: grid;
+  min-width: 0;
+  gap: 20px;
+}
+
+.invitation-pane[hidden] {
+  display: none !important;
+}
+
+/* Subtabs Segmented Control Pill Bar */
+.invitation-section-links.fin-subtabs {
+  margin: 0 0 20px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-elevated);
+  border-radius: 12px;
+  padding: 4px;
+}
+
+.invitation-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  align-items: start;
+  gap: 20px;
+}
+
+.personal-invitations h3 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+
+.personal-invitations p {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.invitation-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.invitation-card-header h3 {
+  margin: 0;
+}
+
+.invitation-policy-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 12%, transparent);
+  color: var(--account-accent, #ca8a04);
+  border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 28%, transparent);
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Tab 1: 邀请码卡片 (Invite Code Card)
+   ========================================================================== */
+.invitation-code {
+  position: relative;
+  border-radius: 14px;
+  padding: 22px 24px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+.invitation-code > strong {
+  display: block;
+  font-family: var(--font-mono, monospace);
+  font-size: 26px;
+  font-weight: 750;
+  line-height: 1.4;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  padding: 12px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border-subtle);
+  border-left: 3.5px solid var(--account-accent, #ca8a04);
+  margin: 8px 0 14px;
+  overflow-wrap: anywhere;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.invitation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.personal-invitations .button {
+  min-height: 38px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  box-sizing: border-box;
+}
+
+.personal-invitations .button.primary {
+  background: #f59e0b;
+  color: #111827;
+  font-weight: 650;
+  border: 1px solid rgba(217, 119, 6, 0.25);
+  box-shadow: 0 1px 3px rgba(217, 119, 6, 0.15);
+}
+
+.personal-invitations .button.primary:hover:not(:disabled) {
+  background: #d97706;
+  color: #ffffff;
+}
+
+.personal-invitations .button.secondary {
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-default);
+}
+
+.personal-invitations .button.secondary:hover:not(:disabled) {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-hover);
+  color: var(--color-text-primary);
+}
+
+/* ==========================================================================
+   Tab 1: 社交凭证与头像堆叠 (Social Proof Bar)
+   ========================================================================== */
 .invitation-social-proof-bar {
   display: flex;
   align-items: center;
@@ -21,83 +159,395 @@
   border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 22%, var(--color-border-subtle));
   border-radius: 12px;
   margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
+
 .invitation-avatar-group {
   display: flex;
   align-items: center;
   padding-left: 4px;
 }
+
 .invitation-avatar-circle {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border-radius: 50%;
   margin-left: -8px;
   border: 2px solid var(--color-bg-surface);
   color: #ffffff;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 700;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16);
   flex-shrink: 0;
   transition: transform 0.15s ease;
+  user-select: none;
 }
-.invitation-avatar-circle:first-child { margin-left: 0; }
-.invitation-avatar-circle:hover { transform: translateY(-2px) scale(1.05); z-index: 10 !important; }
-.invitation-avatar-circle.is-empty { background: var(--color-bg-elevated); color: var(--color-text-muted); border-style: dashed; }
-.invitation-avatar-circle.is-item { width: 36px; height: 36px; margin-left: 0; font-size: 13px; }
+
+.invitation-avatar-circle:first-child {
+  margin-left: 0;
+}
+
+.invitation-avatar-circle:hover {
+  transform: translateY(-2px) scale(1.08);
+  z-index: 10 !important;
+}
+
+.invitation-avatar-circle.is-empty {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  border-style: dashed;
+}
+
+.invitation-avatar-circle.is-item {
+  width: 38px;
+  height: 38px;
+  margin-left: 0;
+  font-size: 13.5px;
+  border: 2px solid var(--color-bg-surface);
+}
 
 .invitation-social-proof-text {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   font-size: 13.5px;
   color: var(--color-text-secondary);
 }
+
 .invitation-social-proof-text strong {
-  color: var(--color-text-primary);
+  color: var(--account-accent, #ca8a04);
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   margin: 0 2px;
 }
+
 .invitation-sparkle-icon {
+  color: var(--account-accent, #ca8a04);
+  flex-shrink: 0;
+}
+
+/* ==========================================================================
+   Tab 1: 上级绑定卡片 (Parent Binding Card)
+   ========================================================================== */
+.invitation-parent {
+  position: relative;
+  border-radius: 14px;
+  padding: 22px 24px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+.invitation-bound-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  color: #10b981;
+  border: 1px solid color-mix(in srgb, #10b981 28%, transparent);
+}
+
+.invitation-parent > strong,
+.invitation-parent-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  font-size: 14.5px;
+  font-weight: 650;
+  padding: 6px 14px;
+  border-radius: 8px;
+  margin: 6px 0 12px;
+  transition: all 0.15s ease;
+}
+
+.invitation-parent-status.state-KNOWN_PARENT,
+.invitation-parent > strong:not([class*="state-"]):has(span) {
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  color: #10b981;
+  border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
+}
+
+.invitation-parent-status.state-KNOWN_NONE {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.invitation-parent-status.state-UNKNOWN {
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 10%, transparent);
+  color: var(--account-accent, #ca8a04);
+  border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 25%, transparent);
+}
+
+.invitation-bind-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.invitation-bind-form label:not(.invitation-confirm) {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.invitation-bind-form input:not([type=checkbox]) {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 13.5px;
+  caret-color: var(--account-accent);
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+.invitation-bind-form input:not([type=checkbox]):focus-visible {
+  border-color: var(--account-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--account-accent) 22%, transparent);
+  outline: none;
+}
+
+.invitation-confirm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  user-select: none;
+}
+
+.invitation-confirm input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--account-accent, #ca8a04);
+  cursor: pointer;
+}
+
+/* ==========================================================================
+   Tab 3: 邀请关系花名册 (Member Roster)
+   ========================================================================== */
+.invitation-list {
+  padding: 24px;
+  border-radius: 14px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+}
+
+.invitation-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.invitation-list-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.invitation-list-heading > span {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  background: var(--color-bg-elevated);
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-subtle);
+}
+
+/* 关系类型筛选 Pill Bar */
+.invitation-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 12px;
+}
+
+.invitation-filters button {
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.invitation-filters button:hover:not(:disabled) {
+  border-color: var(--color-border-default);
+  color: var(--color-text-primary);
+}
+
+.invitation-filters button[aria-pressed=true] {
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 14%, transparent);
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 40%, transparent);
+  color: var(--account-accent, #ca8a04);
+  font-weight: 650;
+}
+
+.invitation-user-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.invitation-user-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 12px;
+  background: var(--color-bg-surface);
+  transition: all 0.15s ease;
+}
+
+.invitation-user-item:hover {
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 35%, var(--color-border-default));
+  background: var(--color-bg-elevated);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transform: translateY(-1px);
+}
+
+.invitation-user-info {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.invitation-user-info strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+
+.invitation-user-info small {
+  display: block;
+  margin-top: 3px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.invitation-type-tag {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.invitation-type-tag.type-distribution_leader {
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 14%, transparent);
+  border-color: color-mix(in srgb, var(--account-accent, #ca8a04) 30%, transparent);
   color: var(--account-accent, #ca8a04);
 }
 
-.invitation-parent>strong { font-size:17px; }
-.invitation-parent form { display:grid; gap:12px; margin-top:20px; }
-.invitation-parent label { color:var(--color-text-secondary); font-size:13px; }
-.invitation-parent input:not([type=checkbox]) { width:100%; min-width:0; min-height:40px; padding:8px 12px; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-elevated); color:var(--color-text-primary); font:inherit; caret-color:var(--account-accent); }
-.invitation-confirm { display:flex; align-items:center; gap:10px; min-height:36px; cursor:pointer; }
-.invitation-confirm input { width:17px; height:17px; accent-color:var(--account-accent); }
-.invitation-source { margin:20px 0 0; padding-top:16px; border-top:1px solid var(--color-border-subtle); overflow-wrap:anywhere; }
-.invitation-list-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
-.invitation-list-heading h3 { display:flex; align-items:center; gap:9px; margin:0; }
-.invitation-list-heading>span { color:var(--color-text-secondary); font-size:13px; font-variant-numeric:tabular-nums; }
-.invitation-filters { display:flex; flex-wrap:wrap; gap:20px; margin:18px 0 0; border-bottom:1px solid var(--color-border-subtle); }
-.invitation-filters button { min-height:38px; padding:6px 0; background:transparent; border:0; border-bottom:2px solid transparent; color:var(--color-text-secondary); font:inherit; font-size:13px; cursor:pointer; transition:all 0.15s ease; }
-.invitation-filters button[aria-pressed=true] { color:var(--account-accent); border-bottom-color:var(--account-accent); font-weight:600; }
+.invitation-type-tag.type-inviter {
+  background: color-mix(in srgb, #3b82f6 12%, transparent);
+  border-color: color-mix(in srgb, #3b82f6 26%, transparent);
+  color: #3b82f6;
+}
 
-.invitation-user-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; margin-top:14px; }
-.invitation-user-item { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:12px 14px; border:1px solid var(--color-border-subtle); border-radius:10px; background:var(--color-bg-surface); transition:all 0.15s ease; }
-.invitation-user-item:hover { border-color:var(--color-border-default); background:var(--color-bg-elevated); }
-.invitation-user-info { display:flex; align-items:center; gap:12px; min-width:0; }
-.invitation-user-info strong { display:block; overflow-wrap:anywhere; font-size:13.5px; font-weight:600; }
-.invitation-user-info small { display:block; margin-top:3px; color:var(--color-text-secondary); font-size:12px; }
-.invitation-type-tag { font-size:11.5px; font-weight:500; padding:3px 10px; border-radius:999px; background:var(--color-bg-elevated); border:1px solid var(--color-border-subtle); color:var(--color-text-secondary); white-space:nowrap; }
+.invitation-load-more {
+  margin-top: 14px;
+  width: 100%;
+}
 
-.invitation-load-more { margin-top:14px; width:100%; }
-.invitation-empty { margin:0; padding:28px 0; }
-.invitation-pending { display:flex; align-items:flex-start; gap:14px; }
-.invitation-pending>svg { color:var(--account-accent); flex-shrink:0; }
-.personal-invitations .invitation-error { margin:0; color:var(--account-danger); }
-.invitation-notice { margin:0; }
-.personal-invitations :is(input,button,a):focus-visible { outline:2px solid var(--account-accent); outline-offset:3px; }
-.invitation-rules { border-top:1px solid var(--color-border-subtle); padding-top:10px; }
-.invitation-rules>summary { min-height:40px; display:flex; align-items:center; font-weight:600; cursor:pointer; }
-.personal-invitations :is(summary,a):focus-visible { outline:2px solid var(--account-accent); outline-offset:3px; }
+.invitation-empty {
+  margin: 0;
+  padding: 36px 0;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 13.5px;
+}
 
-/* 佣金规则卡片现代样式 (Distribution Terms System) */
+.invitation-pending {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--account-accent, #ca8a04) 8%, var(--color-bg-surface));
+  border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 25%, var(--color-border-subtle));
+  margin-bottom: 16px;
+}
+
+.invitation-pending > svg {
+  color: var(--account-accent, #ca8a04);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.personal-invitations .invitation-error {
+  margin: 0 0 12px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  color: var(--account-danger, #ef4444);
+  font-size: 13.5px;
+}
+
+.invitation-notice {
+  margin: 0 0 12px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #10b981 10%, var(--color-bg-surface));
+  border: 1px solid color-mix(in srgb, #10b981 25%, transparent);
+  color: #10b981;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.personal-invitations :is(input, button, a):focus-visible {
+  outline: 2px solid var(--account-accent, #ca8a04);
+  outline-offset: 3px;
+}
+
+/* ==========================================================================
+   Tab 4: 佣金规则卡片 (Distribution Terms System)
+   ========================================================================== */
 .invitation-terms {
   padding: 24px;
   border-radius: 14px;
@@ -107,21 +557,25 @@
   flex-direction: column;
   gap: 20px;
 }
+
 .invitation-terms-header {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+
 .invitation-terms-header h3 {
   margin: 0;
   font-size: 17px;
   font-weight: 700;
   color: var(--color-text-primary);
 }
+
 .invitation-terms-sub {
   font-size: 13px;
   color: var(--color-text-secondary);
 }
+
 .invitation-terms-alert {
   margin: 0;
   padding: 12px 16px;
@@ -130,22 +584,27 @@
   font-size: 13.5px;
   color: var(--color-text-secondary);
 }
+
 .invitation-terms-alert.error {
   background: rgba(239, 68, 68, 0.08);
   color: var(--account-danger, #ef4444);
   border: 1px solid rgba(239, 68, 68, 0.2);
 }
+
 .invitation-terms-unknown {
-  padding: 16px;
+  padding: 16px 20px;
   border-radius: 10px;
   background: var(--color-bg-elevated);
   border: 1px dashed var(--color-border-default);
 }
+
 .invitation-terms-unknown strong {
   display: block;
   font-size: 15px;
+  font-weight: 650;
   margin-bottom: 6px;
 }
+
 .invitation-terms-unknown p {
   margin: 0;
   font-size: 13px;
@@ -158,22 +617,25 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 18px;
+  padding: 16px 20px;
   border-radius: 12px;
   background: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(217, 119, 6, 0.03) 100%);
   border: 1px solid rgba(245, 158, 11, 0.22);
 }
+
 .invitation-tier-badge {
   display: flex;
   align-items: center;
   gap: 10px;
   color: #d97706;
 }
+
 .invitation-tier-badge strong {
   font-size: 16px;
   font-weight: 700;
   color: var(--color-text-primary);
 }
+
 .invitation-tier-tag {
   font-size: 11.5px;
   font-weight: 600;
@@ -182,6 +644,7 @@
   background: #f59e0b;
   color: #111827;
 }
+
 .invitation-tier-inapplicable {
   margin: 0;
   font-size: 12.5px;
@@ -191,60 +654,70 @@
 .invitation-terms-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 18px;
 }
+
+/* Dual Rate Cards */
 .invitation-rate-cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
+
 .invitation-rate-card {
-  padding: 18px 20px;
-  border-radius: 12px;
+  padding: 20px 22px;
+  border-radius: 14px;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-subtle);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   transition: all 0.15s ease;
 }
+
 .invitation-rate-card:hover {
   border-color: rgba(245, 158, 11, 0.4);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
 }
+
 .rate-card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
+
 .rate-card-title {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--color-text-secondary);
 }
+
 .rate-card-pill {
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 6px;
   background: color-mix(in srgb, var(--account-accent, #ca8a04) 14%, transparent);
   color: var(--account-accent, #ca8a04);
 }
+
 .rate-card-percent {
-  font-size: 32px;
+  font-size: 34px;
   font-weight: 800;
   line-height: 1.1;
   color: #d97706;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
+
 .rate-card-desc {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 12.5px;
+  line-height: 1.55;
   color: var(--color-text-muted);
 }
 
+/* Key Terms Definition List */
 .invitation-terms-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -252,46 +725,60 @@
   margin: 0;
   padding: 0;
 }
+
 .invitation-terms-list .terms-item {
-  padding: 14px 16px;
-  border-radius: 10px;
+  padding: 14px 18px;
+  border-radius: 12px;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-subtle);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
+
 .invitation-terms-list dt {
   margin: 0;
   font-size: 12.5px;
   color: var(--color-text-secondary);
 }
+
 .invitation-terms-list dd {
   margin: 0;
   font-size: 14.5px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--color-text-primary);
 }
+
 .invitation-terms-list dd.highlight-text {
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 15.5px;
+  font-weight: 750;
   color: var(--color-text-primary);
   font-variant-numeric: tabular-nums;
 }
 
+/* Source & Policy Notice: INVARIANT for I01 test */
 .invitation-source {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12.5px;
   color: var(--color-text-secondary);
-  margin: 0;
+  margin: 16px 0 0;
   padding-top: 14px;
   border-top: 1px solid var(--color-border-subtle);
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
+
 .invitation-source .source-icon {
   color: #10b981;
   flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .invitation-workbench {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {

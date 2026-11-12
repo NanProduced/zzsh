@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   canOpenKind,
   changesSettingsContent,
+  changesWorkspaceContent,
   closeTabs,
   filterTabsByPermission,
   persistTabs,
@@ -49,6 +50,21 @@ test("settings section or preview switches require leave protection within the s
   assert.equal(changesSettingsContent(profile, tabFromLocation("/settings", "?section=profile&preview=1")), true);
   assert.equal(changesSettingsContent(profile, tabFromLocation("/settings", "?section=profile&action=x")), false);
   assert.equal(changesSettingsContent(tabFromLocation("/users"), tabFromLocation("/users", "?q=x")), false);
+});
+
+test("internal document deep links reuse one workspace tab and keep leave protection", () => {
+  const library = tabFromLocation("/docs");
+  const first = tabFromLocation("/docs/doc_a");
+  const second = tabFromLocation("/docs/doc_b");
+  const trash = tabFromLocation("/docs", "?view=trash");
+  assert.deepEqual(upsertTab(upsertTab([library], first), second), [second]);
+  assert.equal(second.id, "docs");
+  assert.equal(second.objectId, "doc_b");
+  assert.equal(tabHref(second), "/docs/doc_b");
+  assert.equal(tabPresentation(second, [second]).label, "内部文档");
+  assert.equal(changesWorkspaceContent(first, second), true);
+  assert.equal(changesWorkspaceContent(first, trash), true);
+  assert.equal(changesWorkspaceContent(first, tabFromLocation("/docs/doc_a", "?theme=dark")), false);
 });
 
 test("detail presentation keeps module names plain and identifies unnamed objects without a visible type prefix", () => {

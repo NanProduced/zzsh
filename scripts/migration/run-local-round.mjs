@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { assertCaptureTargetProfile, assertNextMigrationWriteReady, loadRegisteredTarget, NEXT_MIGRATION_PROFILE, sameMigrationProfile, targetConnection } from "./local-target-registry.mjs";
 import { assertSameDirectoryResumeSafe, inspectRoundResumeOutput, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, reserveRoundResumeOutput, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertReadbackRecoveryOverlay, assertReviewedGrowthRuleFiles, assertGrowthRuleRetry, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { inspectRoundDependencyLayout, probeRoundDependencies, assertRoundDependencyProof, assertBoundRunnerScripts, assertNextSourceTools, verifyRoundDistributionSource } from "./local-round-dependencies.mjs";
 import { assertFullExecutionAdmitted, assertRoundPopulationBinding } from "./full-source-scope.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyDisplayCaptureInputs } from "./local-source-adapter.mjs";
@@ -618,9 +618,8 @@ try {
     assert.equal(result.status, "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED");
     assert.equal(result.differenceCount, 0);
     assert(result.rollbackConfirmed && result.lockReleased && result.connectionsClosed);
-    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
-      assert(result.resource?.migrationProfile === NEXT_MIGRATION_PROFILE && result.targetFence === "HELD_UNTIL_ROLLBACK", "ROUND_TARGET_READBACK_FENCE_UNCONFIRMED");
     if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE) {
+      assert(result.resource?.migrationProfile === NEXT_MIGRATION_PROFILE && result.targetFence === "HELD_UNTIL_ROLLBACK", "ROUND_TARGET_READBACK_FENCE_UNCONFIRMED");
       const listed = result.legacyListedSource, recorded = read(checkpoint)?.sourceScopeVerification?.legacyListed;
       const binding = { sourceReceiptSha256: m.sourceReceiptSha256, sourceAccountsSha256: source.files?.accounts?.sha256 ?? null,
         sourceGamesSha256: source.files?.games?.sha256 ?? null, datasetAccountsSha256: m.files?.accounts?.sha256 ?? null,
@@ -632,6 +631,7 @@ try {
         && (!checkpointV2 || JSON.stringify(listed) === JSON.stringify(recorded))
         && legacyListedTargetMatches(listed, result.legacyListedTarget, binding), "ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED");
       assert(listed.status === "SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN", "ROUND_LEGACY_LISTED_SOURCE_REVIEW_REQUIRED");
+      assert(compactEmptyCoverageReadbackMatches(read(checkpoint)?.generatedPhases?.financeEmptyCoverage,result),"ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED");
     }
     if (input.legal) assert(result.rentalReference?.status === "TARGET_CONFIG_VERIFIED" && result.rentalReference.businessReceiptSha256 === input.bootstrapEvidence.business.sha256
       && result.rentalReference.targetDigest === bootstrapEvidence.rentalReference.targetDigest && result.rentalReference.runtimeAccess === "VERIFIED"

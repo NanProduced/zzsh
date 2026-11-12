@@ -4,6 +4,7 @@ import { assertCurrentRelease, quoteListing, reviewListing, submitListing } from
 import { projectDeltaQuote } from "../src/supply/delta-rental";
 import { computeContentHash } from "../src/supply/content-hash";
 import { compatRule } from "./pricing-compat-fixture";
+import { readListingPricingModel } from "../src/supply/pricing-policy-schedule";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 
 // Synthetic SQL responses; the real quote, policy validator and snapshot writer execute.
@@ -18,6 +19,8 @@ function fixture(amount: string | null = "10000", mode: "NOT_REQUIRED" | "FIXED_
   let policyReads = 0;
   const client: any = { query: async (sql: string, args: any[] = []) => {
     const result = (rows: unknown[]) => ({ rows, rowCount: rows.length });
+    if (sql.includes("AS retired")) return result([{retired:false}]);
+    if (sql.startsWith("SELECT 1 FROM zzsh_supply.listing_publication")) return result(controls.previous?[{}]:[]);
     if (sql.startsWith("SELECT 1 FROM zzsh_order.rental_order")) return result([]);
     if (sql.includes('"game_service_operation"')) return result([{ id: "service", gameCode: "delta", gameEnabled: true, enabled: true }]);
     if (sql.startsWith("SELECT * FROM zzsh_supply.listing_version")) return result([version]);
@@ -62,21 +65,27 @@ test("listing quote freezes tenant deposit separately from publisher guarantee a
 test("new fixed-fee draft uses the current policy while an existing spread listing keeps its mode",async()=>{
   const existing=fixture();await quoteListing(existing.client,existing.account,"1");
   const old=existing.snapshots[0];existing.controls.previous={schemaVersion:2,contentHash:old.hash,payload:old.payload};existing.controls.schedules=true;
-  await quoteListing(existing.client,existing.account,"2");
-  assert.equal(existing.snapshots[1].payload.schemaVersion,2);assert.equal(existing.snapshots[1].payload.pricingPolicy,undefined);
+  const binding={accountId:"account",gameId:"game",ownerUserId:"owner"};
+  assert.equal((await readListingPricingModel(existing.client,binding))?.model,"LEGACY_SPREAD");
+  await assert.rejects(quoteListing(existing.client,existing.account,"2"),/已上架账号不能修改/);
+  assert.equal(existing.snapshots.length,1);
   const fresh=fixture();fresh.controls.schedules=true;await quoteListing(fresh.client,fresh.account,"1");
   const snapshot=fresh.snapshots[0];assert.equal(snapshot.payload.schemaVersion,4);
   assert.equal(snapshot.payload.quoteValues.priceVersionId,"fixed-price");assert.equal(snapshot.payload.ruleRefs.priceVersionId,"price");
   assert.equal(snapshot.payload.pricingPolicy.pricingModel,"FIXED_FEE");assert.equal(snapshot.payload.quoteValues.pricingInputs.commissionRate,"0.1");
   fresh.controls.previous={schemaVersion:4,contentHash:snapshot.hash,payload:snapshot.payload};fresh.controls.defaultModel="SPREAD";
-  await quoteListing(fresh.client,fresh.account,"2");assert.equal(fresh.snapshots[1].payload.pricingPolicy.pricingModel,"FIXED_FEE");
+  assert.equal((await readListingPricingModel(fresh.client,binding))?.model,"FIXED_FEE");
+  await assert.rejects(quoteListing(fresh.client,fresh.account,"2"),/已上架账号不能修改/);
+  fresh.controls.previous=null;fresh.controls.defaultModel="FIXED_FEE";
   Object.assign(fresh.version,{payload:snapshot.payload,content_hash:snapshot.hash,rule_release_id:"release"});
   await assertCurrentRelease(fresh.client,fresh.account,fresh.version);
+
+  await assert.rejects(submitListing(fresh.client,fresh.account,"owner",{expectedRevision:"2",versionId:"draft",contentHash:snapshot.hash,releaseId:"release"},async()=>({publisherBail:"NOT_REQUIRED",reference:"proof",occupancy:"FREE"})),/暂未就绪/);
+  fresh.version.review_state="SUBMITTED";
+  await assert.rejects(reviewListing(fresh.client,fresh.account,"admin",{expectedRevision:"2",versionId:"draft",contentHash:snapshot.hash,releaseId:"release",decision:"APPROVE",reason:"test"},async()=>({publisherBail:"NOT_REQUIRED",reference:"proof",occupancy:"FREE"})),/暂未就绪/);
+  fresh.version.review_state="DRAFT";
   fresh.controls.fixedGeneration="2";
   await assert.rejects(assertCurrentRelease(fresh.client,fresh.account,fresh.version),/价格政策已更新/);
-  await assert.rejects(submitListing(fresh.client,fresh.account,"owner",{expectedRevision:"3",versionId:"draft",contentHash:snapshot.hash,releaseId:"release"},async()=>({publisherBail:"NOT_REQUIRED",reference:"proof",occupancy:"FREE"})),/暂未就绪/);
-  fresh.version.review_state="SUBMITTED";
-  await assert.rejects(reviewListing(fresh.client,fresh.account,"admin",{expectedRevision:"3",versionId:"draft",contentHash:snapshot.hash,releaseId:"release",decision:"APPROVE",reason:"test"},async()=>({publisherBail:"NOT_REQUIRED",reference:"proof",occupancy:"FREE"})),/暂未就绪/);
 });
 
 test("a new scheduled spread listing binds the current price independently of its terms release",async()=>{

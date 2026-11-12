@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
+import { assertContentBootstrapBoss } from "../src/content/content-bootstrap";
 
 import {
   contentSeedCarouselId,
@@ -11,7 +12,20 @@ import {
 } from "../src/content/content-seed";
 
 type ItemRow = { id: string; type: string; gameId: string | null; revision: string; sortOrder: number };
-type VersionRow = { id: string; itemId: string; sequence: number; state: string; title: string; summary: string; body: string; coverMediaId: string | null; revision: string; publishedAt: Date | null; publishedByAdminId: string | null };
+
+test("content bootstrap accepts only active Boss or an unactivated reserved initial Boss", async () => {
+  type Fixture = { isBoss: boolean; status: string; firstActivatedAt: Date | null; username: string | null; suspended: boolean };
+  const initial: Fixture = { isBoss: true, status: "PENDING_ENROLLMENT", firstActivatedAt: null, username: "zz00001", suspended: false };
+  const client = (row: Fixture | null) => ({ query: async () => ({ rows: row ? [row] : [] }) }) as unknown as PoolClient;
+  await assertContentBootstrapBoss(client(initial), "boss");
+  await assertContentBootstrapBoss(client({ ...initial, status: "ACTIVE", username: "other" }), "boss");
+  for (const row of [null, { ...initial, isBoss: false }, { ...initial, suspended: true },
+    { ...initial, status: "FROZEN" }, { ...initial, username: "other" },
+    { ...initial, firstActivatedAt: new Date() }]) {
+    await assert.rejects(assertContentBootstrapBoss(client(row), "boss"));
+  }
+});
+type VersionRow = { id: string; itemId: string; sequence: number; state: string; title: string; summary: string; body: string; coverMediaId: string | null; revision: string; publishedAt: Date | null; publishedByAdminId: string | null; payload: unknown; updateSettings?: unknown };
 type CarouselRow = { id: string; slotCode: string; mediaId: string; imageAlt: string; title: string; description: string; linkUrl: string | null; enabled: boolean; sortOrder: number; startsAt: Date | null; endsAt: Date | null; createdByAdminId: string };
 
 class Stub {
@@ -48,10 +62,12 @@ class Stub {
     }
     if (text.startsWith(`INSERT INTO "zzsh_content"."content_version"`)) {
       // The insert keeps sequence as a SQL literal; parameters start at id.
+      // P2：公告/资讯正文存 payload（plate），body 为纯文本投影；update_settings 一并落库。
       this.versions.set(String(values[0]), {
         id: String(values[0]), itemId: String(values[1]), sequence: 1, state: "DRAFT",
         title: String(values[2]), summary: String(values[3]), body: String(values[4]), coverMediaId: values[5] as string | null,
         revision: "1", publishedAt: null, publishedByAdminId: null,
+        payload: values[7] ? JSON.parse(String(values[7])) : null, updateSettings: values[8] ? JSON.parse(String(values[8])) : undefined,
       });
       return { rows: [], rowCount: 1 };
     }

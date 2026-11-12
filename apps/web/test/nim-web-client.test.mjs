@@ -5,6 +5,7 @@ import {
   createNimWebClientFactory,
   mergeImMessages,
   NimImageSendError,
+  NimLoginTerminalError,
   NimMediaSendError,
   NimTextSendError,
   parseNimMessageMedia,
@@ -37,7 +38,7 @@ test("history anchor keeps adjacent 64-bit IDs in order when their millisecond t
   assert.equal(oldestNimMessage([]),undefined);
   const earlier={...newer,createTime:999};assert.equal(oldestNimMessage([older,earlier]),earlier);
 });
-import { ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
+import { ImClientLifecycle, ImLifecycleSupersededError } from "../src/lib/im-client-lifecycle.ts";
 
 function deferred() {
   let resolve;
@@ -92,7 +93,7 @@ class FakeLoginService {
   }
 }
 
-function fakeSdk({ loginService = new FakeLoginService(), loginError, messageService, messageCreator, conversationUtil, storageService, conversationService } = {}) {
+function fakeSdk({ loginService = new FakeLoginService(), loginError, destroyError, destroyAction, messageService, messageCreator, conversationUtil, storageService, conversationService } = {}) {
   const calls = { initialize: [], destroyed: 0 };
   const sdk = {
     getInstance(initializeOptions, otherOptions) {
@@ -118,6 +119,8 @@ function fakeSdk({ loginService = new FakeLoginService(), loginError, messageSer
         V2NIMConversationService: conversationService,
         async destroy() {
           calls.destroyed += 1;
+          if (destroyAction) await destroyAction();
+          if (destroyError) throw destroyError;
         },
       };
     },
@@ -201,20 +204,42 @@ test("initializes the V2 SDK, logs in, maps connection states, and cleans up lis
   assert.equal(handle.client.getConnectionState(), "CONNECTED");
 
   const states = [];
-  const unsubscribe = handle.client.onConnectionStateChange((state) => states.push(state));
+  const details = [];
+  const unsubscribe = handle.client.onConnectionStateChange((state, detail) => { states.push(state); details.push(detail); });
+  loginService.connectStatus = 2;
+  loginService.emit("onConnectStatus", 2);
+  loginService.emit("onLoginStatus", 0);
   loginService.connectStatus = 3;
   loginService.emit("onConnectStatus", 3);
-  loginService.emit("onKickedOffline");
-  loginService.emit("onLoginFailed");
+  loginService.emit("onKickedOffline", { reason: 1, reasonDesc: "another desktop", clientType: 4 });
   loginService.emit("onDisconnected");
-  assert.deepEqual(states, ["RECONNECTING", "KICKED", "AUTH_FAILED", "DISCONNECTED"]);
+  loginService.emit("onLoginFailed", { code: 1001 });
+  loginService.emit("onDisconnected");
+  assert.deepEqual(states, ["CONNECTING", "DISCONNECTED", "RECONNECTING", "KICKED"], "KICKED is terminal and is not overwritten by a later login-failure event");
+  assert.equal(details[1]?.kind, "LOGOUT", "a non-kicked LOGOUT is distinguishable from a transport break");
+  assert.equal(details[3]?.kickedReason, 1);
+  assert.equal(details[3]?.kickedReasonDesc, "another desktop");
   unsubscribe();
 
   await handle.dispose();
   assert.equal(loginService.logoutCalls, 1);
   assert.equal(calls.destroyed, 1);
   loginService.emit("onConnectStatus", 1);
-  assert.deepEqual(states, ["RECONNECTING", "KICKED", "AUTH_FAILED", "DISCONNECTED"]);
+  assert.deepEqual(states, ["CONNECTING", "DISCONNECTED", "RECONNECTING", "KICKED"]);
+});
+
+test("KICKED outranks an earlier auth failure and later events are ignored", async () => {
+  const { sdk, loginService } = fakeSdk();
+  const factory = createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk);
+  const handle = await factory(testContext("customer-1").context);
+  const states = [];
+  handle.client.onConnectionStateChange((state) => states.push(state));
+  loginService.emit("onLoginFailed", { code: 1001 });
+  loginService.emit("onKickedOffline", { reason: 1, reasonDesc: "another desktop" });
+  loginService.emit("onLoginFailed", { code: 1002 });
+  loginService.emit("onDisconnected");
+  assert.deepEqual(states, ["AUTH_FAILED", "KICKED"], "a real kick must cancel the auth-failure retry path");
+  await handle.dispose();
 });
 
 test("cloud conversation pinning is opt-in and uses the per-account conversation ids", async () => {
@@ -278,6 +303,88 @@ test("destroys an SDK instance after login failure", async () => {
 
   await assert.rejects(factory(testContext("customer-3").context), /invalid token/);
   assert.equal(calls.destroyed, 1);
+});
+
+test("lifecycle waits for the same real SDK cleanup during loading, login and active connection, including failure", async () => {
+  for (const stage of ["active", "login", "loader"]) for (const failedCleanup of [false, true]) {
+    const loginGate = deferred(), loaderGate = deferred(), destroyGate = deferred(), destroyStarted = deferred();
+    const loginService = new FakeLoginService(), cleanupError = new Error("synthetic destroy failure");
+    if (stage === "login") loginService.login = () => loginGate.promise;
+    const { sdk, calls } = fakeSdk({ loginService, destroyAction: async () => {
+      if (stage === "login") loginGate.reject(new Error("synthetic cancelled login"));
+      destroyStarted.resolve();
+      await destroyGate.promise;
+    } });
+    const lifecycle = new ImClientLifecycle(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, () => stage === "loader" ? loaderGate.promise : Promise.resolve(sdk)));
+    const opening = lifecycle.open("customer");
+    const openingResult = opening.then(value => ({ value }), error => ({ error }));
+    if (stage === "active") await opening; else await new Promise(resolve => setImmediate(resolve));
+    let closed = false;
+    const closing = lifecycle.close().then(() => { closed = true; return null; }, error => { closed = true; return error; });
+    if (stage === "loader") loaderGate.resolve(sdk);
+    await destroyStarted.promise;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(closed, false, `close must wait for SDK destroy; stage=${stage}, failure=${failedCleanup}`);
+    assert.equal(calls.destroyed, 1, "the SDK is destroyed once");
+    if (failedCleanup) destroyGate.reject(cleanupError); else destroyGate.resolve();
+    const [opened, closeError] = await Promise.all([openingResult, closing]);
+    if (stage !== "active") assert.ok(opened.error, "cancelled opening is rejected");
+    if (failedCleanup) assert.equal(closeError, cleanupError, "failed cleanup prevents a successful handoff and retains the original error");
+    else assert.equal(closeError, null);
+    assert.equal(calls.destroyed, 1, "concurrent cleanup does not destroy twice");
+  }
+});
+
+test("initial login preserves only current kicked/auth terminal events and leaves network failures unchanged", async () => {
+  for (const [event, state] of [["onKickedOffline", "KICKED"], ["onLoginFailed", "AUTH_FAILED"]]) {
+    const loginService = new FakeLoginService();
+    const original = new Error("sensitive provider detail");
+    loginService.login = async () => { loginService.emit(event, { code: 123, reason: 1 }); throw original; };
+    const { sdk, calls } = fakeSdk({ loginService });
+    const factory = createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => sdk);
+    await assert.rejects(factory(testContext("customer").context), error => {
+      assert.ok(error instanceof NimLoginTerminalError);
+      assert.equal(error.state, state);
+      assert.equal(error.cause, original);
+      assert.doesNotMatch(error.message, /sensitive provider detail/);
+      return true;
+    });
+    assert.equal(calls.destroyed, 1);
+
+    const resolvedService = new FakeLoginService();
+    resolvedService.login = async () => { resolvedService.emit(event, { code: 123, reason: 1 }); };
+    const resolved = fakeSdk({ loginService: resolvedService });
+    await assert.rejects(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => resolved.sdk)(testContext("customer").context), error => error instanceof NimLoginTerminalError && error.state === state);
+    assert.equal(resolved.calls.destroyed, 1);
+  }
+  const network = new Error("synthetic network outage");
+  const normal = fakeSdk({ loginError: network });
+  const factory = createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => normal.sdk);
+  await assert.rejects(factory(testContext("customer").context), error => error === network);
+  assert.equal(normal.calls.destroyed, 1);
+  const networkLogin = new FakeLoginService();
+  networkLogin.login = async () => { networkLogin.emit("onConnectFailed", { code: 503 }); throw network; };
+  const networkEvent = fakeSdk({ loginService: networkLogin });
+  await assert.rejects(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => networkEvent.sdk)(testContext("customer").context), error => error === network);
+  assert.equal(networkEvent.calls.destroyed, 1);
+
+  const cleanup = new Error("synthetic cleanup failure"), original = new Error("synthetic login failure");
+  const kickedLogin = new FakeLoginService();
+  kickedLogin.login = async () => { kickedLogin.emit("onKickedOffline", { reason: 1 }); throw original; };
+  const failedCleanup = fakeSdk({ loginService: kickedLogin, destroyError: cleanup });
+  await assert.rejects(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => failedCleanup.sdk)(testContext("customer").context), error => {
+    assert.ok(error instanceof NimLoginTerminalError);assert.equal(error.state, "KICKED");
+    assert.ok(error.cause instanceof AggregateError);assert.deepEqual(error.cause.errors, [original, cleanup]);
+    assert.doesNotMatch(error.message, /synthetic/);return true;
+  });
+  const ordinaryCleanup = fakeSdk({ loginError: network, destroyError: cleanup });
+  await assert.rejects(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => ordinaryCleanup.sdk)(testContext("customer").context), error => error === cleanup);
+
+  const old = testContext("old-customer"), loginService = new FakeLoginService(), failure = new Error("old failure");
+  loginService.login = async () => { loginService.emit("onKickedOffline", { reason: 1 }); old.supersede(); throw failure; };
+  const superseded = fakeSdk({ loginService });
+  await assert.rejects(createNimWebClientFactory({ appKey: "test-app-key", token: "test-token" }, async () => superseded.sdk)(old.context), error => error === failure && !(error instanceof NimLoginTerminalError));
+  assert.equal(superseded.calls.destroyed, 1);
 });
 
 test("routes authorized P2P messages through the SDK and removes the receive listener", async () => {

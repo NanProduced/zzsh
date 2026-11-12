@@ -298,7 +298,7 @@ test("turtle quantity2 quotes buyer20 owner12 in all four tiers; invalid/missing
 test("resource preview keeps dynamic turtle stock unknown/zero distinct and rejects out-of-range direct API inventory", async () => {
   const expected = { catalogRevision: "1", releaseId: "fixture_release" };
   const item = { itemId: TURTLE_FIXTURE.id, code: TURTLE_FIXTURE.code, name: "45格乌龟包", unit: "PIECE", enabled: true, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" };
-  const previewClient = (priced = true) => ({ query: async (sql: string) => ({ rows: sql.includes("FROM zzsh_supply.game")
+  const previewClient = (priced = true) => ({ query: async (sql: string) => ({ rows: sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes("FROM zzsh_supply.game")
     ? [{ releaseId: expected.releaseId, catalogRevision: expected.catalogRevision, priceVersionId: "fixture_price", generation: "1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1" }]
     : [{ ...item, ...(priced ? {} : { ownerUnitAmount: null }) }] }) }) as never;
   const known = await readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity: "2" }], expected);

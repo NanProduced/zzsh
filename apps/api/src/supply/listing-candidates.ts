@@ -4,7 +4,9 @@ import { PUBLIC_ACCOUNT_NUMBER_PATTERN } from "./account-number";
 
 type CandidateFilters=Omit<ListingFilters,"skinGroups">&{skinGroups?:{ids:string[];match:string}[]};
 export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id JOIN zzsh_supply.game g ON g.id=a.game_id`;
-export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE' AND (g.code<>'delta' OR v.schema_version<>3) AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
+export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE'
+ AND NOT (g.code='delta' AND EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map legacy WHERE legacy.account_id=a.id AND legacy.source_system='legacy_mysql_restore' AND legacy.source_entity='la_rental_accounts'))
+ AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
 // LEGACY_OBSERVATION versions keep the same declaration attributes in the
 // immutable `attributes` column instead of a payload, so callers may pass the
 // column as the attribute source while sharing one predicate implementation.

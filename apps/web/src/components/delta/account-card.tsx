@@ -425,6 +425,7 @@ function AccountGallery({
     src: item.url,
     alt: `${visibleTitle}公开图片，第${index + 1}张`,
     legacy: item.legacy,
+    legacyState: item.legacyState,
   }));
   const handleImageError = (itemId: string) => {
     setFailedItemIds((current) => new Set(current).add(itemId));
@@ -497,7 +498,7 @@ export function AccountCard({
   const [galleryOpen, setGalleryOpen] = useState(false);
   const galleryTriggerRef = useRef<HTMLButtonElement>(null);
   const missing = !data.imageUrl || failedSrc === data.imageUrl;
-  const legacyCover = data.media.some(item => item.legacy && item.url === data.imageUrl);
+  const legacyCover = data.media.find(item => item.legacy && item.url === data.imageUrl);
 
   const rememberDetail = (event: ReactMouseEvent) => {
     if (event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey)
@@ -655,7 +656,7 @@ export function AccountCard({
                   <span>{data.imageUrl ? "图片加载失败" : "图片未提供"}</span>
                 </div>
               ) : legacyCover ? (
-                <LegacyAccountImage src={data.imageUrl ?? null} alt={`${accountVisibleTitle}公开图片`} width={220} height={100} loading={imageLoading} fetchPriority={imageLoading === "eager" ? "high" : "auto"} decoding="async" />
+                <LegacyAccountImage src={data.imageUrl ?? null} knownState={legacyCover.legacyState} alt={`${accountVisibleTitle}公开图片`} width={220} height={100} loading={imageLoading} fetchPriority={imageLoading === "eager" ? "high" : "auto"} decoding="async" />
               ) : (
                 <img
                   src={data.imageUrl}
@@ -1066,7 +1067,7 @@ export function AccountCard({
           <span>{data.imageUrl ? "图片加载失败" : "图片未提供"}</span>
         </div>
       ) : legacyCover ? (
-        <LegacyAccountImage src={data.imageUrl ?? null} alt={`${accountVisibleTitle}公开图片`} width={320} height={190} loading={imageLoading} fetchPriority={imageLoading === "eager" ? "high" : "auto"} decoding="async" />
+        <LegacyAccountImage src={data.imageUrl ?? null} knownState={legacyCover.legacyState} alt={`${accountVisibleTitle}公开图片`} width={320} height={190} loading={imageLoading} fetchPriority={imageLoading === "eager" ? "high" : "auto"} decoding="async" />
       ) : (
         <img
           key={retryToken}

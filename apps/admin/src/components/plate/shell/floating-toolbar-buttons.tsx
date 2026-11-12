@@ -1,9 +1,10 @@
 // Source: https://platejs.org/r/floating-toolbar-buttons.json — Plate UI (MIT), platejs v53.5.2 registry.
-// Adapted: removed AI/comment/equation/suggestion buttons and imports.
-// Kept mark/turn-into/link/list/indent/more, filtered by the preset whitelist:
-// marks follow marksFor(preset), decimal lists skip legal, todo is internal
-// only, indent/outdent show for list selections, more carries the whitelisted
-// color marks (legal/internal) and hides elsewhere.
+// Adapted: removed AI/equation/suggestion buttons and imports; the comment
+// button is kept for the internal preset only (comment marks are internal-only)
+// and routes to the margin rail composer. Kept mark/turn-into/link/list/indent/
+// more, filtered by the preset whitelist: marks follow marksFor(preset),
+// decimal lists skip legal, todo is internal only, indent/outdent show for list
+// selections, more carries the whitelisted color marks (legal/internal).
 import {
   BoldIcon,
   Code2Icon,
@@ -17,12 +18,12 @@ import { useEditorReadOnly, useEditorSelector } from 'platejs/react';
 
 import type { PlatePreset } from '@zzsh/content/plate';
 
+import { CommentToolbarButton, type PlateCommentAnchor } from './comment-toolbar-button';
 import { IndentToolbarButton, OutdentToolbarButton } from './indent-toolbar-button';
 import { LinkToolbarButton } from './link-toolbar-button';
 import {
   BulletedListToolbarButton,
   NumberedListToolbarButton,
-  TodoListToolbarButton,
 } from './list-toolbar-button';
 import { MarkToolbarButton } from './mark-toolbar-button';
 import { MoreToolbarButton } from './more-toolbar-button';
@@ -32,9 +33,13 @@ import { TurnIntoToolbarButton } from './turn-into-toolbar-button';
 export function FloatingToolbarButtons({
   preset,
   marks,
+  onRequestComment,
+  commentAnchorMax = 500,
 }: {
   preset: PlatePreset;
   marks: Set<string>;
+  onRequestComment?: (anchor: PlateCommentAnchor) => void;
+  commentAnchorMax?: number;
 }) {
   const readOnly = useEditorReadOnly();
   const inList = useEditorSelector(
@@ -44,7 +49,11 @@ export function FloatingToolbarButtons({
     []
   );
 
-  if (readOnly) return null;
+  if (readOnly) {
+    return preset === 'internal' && onRequestComment
+      ? <CommentToolbarButton onRequest={onRequestComment} maxLength={commentAnchorMax} />
+      : null;
+  }
 
   return (
     <>
@@ -84,13 +93,20 @@ export function FloatingToolbarButtons({
         <LinkToolbarButton />
       </ToolbarGroup>
 
-      <ToolbarGroup>
-        <BulletedListToolbarButton />
-        {preset !== 'legal' && <NumberedListToolbarButton />}
-        {preset === 'internal' && <TodoListToolbarButton />}
-      </ToolbarGroup>
+      {preset === 'internal' && onRequestComment && (
+        <ToolbarGroup>
+          <CommentToolbarButton onRequest={onRequestComment} maxLength={commentAnchorMax} />
+        </ToolbarGroup>
+      )}
 
-      {inList && (
+      {preset !== 'internal' && (
+        <ToolbarGroup>
+          <BulletedListToolbarButton />
+          {preset !== 'legal' && <NumberedListToolbarButton />}
+        </ToolbarGroup>
+      )}
+
+      {inList && preset !== 'internal' && (
         <ToolbarGroup>
           <IndentToolbarButton />
           <OutdentToolbarButton />

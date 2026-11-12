@@ -1,11 +1,34 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertCurrentRelease, evaluatePublication, freezePresentationSkin, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview, setOwnerPaused } from "../src/supply/publishing";
+import { acceptListingRules, assertCurrentRelease, createListingDraft, delistListing, evaluatePublication, freezePresentationSkin, listingDetail, listingPageShared, orderAccountTitleFact, publicListingAttributes, publicListingBasis, publicationBlockers, publicationWaiverRevision, quoteListing, readDraftSkinSummary, readPresentation, readResourceIncomePreview, reviewListing, saveListingDraft, submitListing } from "../src/supply/publishing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
 import { updatePriceDraft } from "../src/supply/rules";
 import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
 import { readLegacyPublishedReference } from "../src/supply/legacy-published-reference";
 import { assertActiveInTransaction, assertUserContextInTransaction } from "../src/auth/user-identity";
+import { syntheticPublicationCreditGate } from "./funding-authority-fixtures";
+
+test("synthetic publication gate binds the current draft without changing published or unknown gates", async () => {
+  const row = { owner: "owner", game: "game", version: "version", state: "DRAFT", release: "release", price: "price" };
+  const client = { query: async (_sql: string, values: string[]) => ({ rows: values[0] === "account" ? [row] : [] }) };
+  const gate = { publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "fixture" } as const;
+  const bound = await syntheticPublicationCreditGate(client as never, "account", gate);
+  assert.deepEqual(bound.creditGuarantee, { status: "NOT_REQUIRED", accountId: "account", ownerUserId: "owner", gameId: "game",
+    listingVersionId: "version", priceVersionId: "price", releaseId: "release", creditRevision: "1", coverageRevision: null, requiredCents: "0", reference: "fixture" });
+  assert.equal(await syntheticPublicationCreditGate(client as never, "other", gate), gate);
+  row.state = "PUBLISHED";
+  assert.equal(await syntheticPublicationCreditGate(client as never, "account", gate), gate);
+  const unknown = { publisherBail: "UNKNOWN", occupancy: "FREE", reference: null } as const;
+  assert.equal(await syntheticPublicationCreditGate(client as never, "account", unknown), unknown);
+});
+
+test("a migrated account with no current version remains read-only", async () => {
+  const account = { id: "a", game_id: "g", current_version_id: null, display_no: null };
+  const client = { query: async () => ({ rows: [{ retired: true }] }) };
+  const detail = await listingDetail(client as never, account as never, "owner", (() => { throw new Error("unused gate"); }) as never);
+  assert.equal(detail.version, null); assert.equal(detail.available, false);
+  assert.deepEqual(detail.blockers, ["LEGACY_LISTING_RELIST_REQUIRED"]);
+});
 
 test("identity READ purpose omits row locks while every existing default WRITE keeps the original lock", async () => {
   for (const purpose of [undefined, "WRITE", "READ"] as const) {
@@ -43,7 +66,7 @@ test("unquoted draft skins use current visible identities with explicit withheld
 test("resource income preview uses authoritative fixed prices, exact group quantity and unknown semantics without writes",async()=>{
   const queries:string[]=[];
   const rows=[{itemId:"barrett",code:"df_billable_barrett_bullet",name:"巴雷特",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"0.5",ownerUnitAmount:"0.2"},{itemId:"card",code:"df_billable_top_insure_card",name:"保险卡",unit:"DAY",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},{itemId:"six",code:"level6_round",name:"六级",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"8",ownerUnitAmount:"4"},{itemId:"day",code:"legacy_day",name:"旧天",unit:"DAY",enabled:false,pricingKind:null}];
-  const client={query:async(sql:string)=>{queries.push(sql);return {rows:sql.includes('commission_rate')?[{releaseId:"release",generation:"2",priceVersionId:"price",catalogRevision:"92",mode:"SPREAD",commissionRate:null,roundingPolicy:"HALF_UP_CENT_V1"}]:rows};}};
+  const client={query:async(sql:string)=>{queries.push(sql);return {rows:sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes('commission_rate')?[{releaseId:"release",generation:"2",priceVersionId:"price",catalogRevision:"92",mode:"SPREAD",commissionRate:null,roundingPolicy:"HALF_UP_CENT_V1"}]:rows};}};
   const binding={releaseId:"release",catalogRevision:"92"};
   const empty=await readResourceIncomePreview(client as never,"game",[],binding);assert.equal(empty.available,true);assert.equal(empty.ownerTotal,null);
   const priced=await readResourceIncomePreview(client as never,"game",[{itemId:"barrett",quantity:"2"},{itemId:"card",quantity:"3"},{itemId:"six",quantity:"120"}],binding);
@@ -79,7 +102,7 @@ test("only original DAY insurance is a current resource; generic PIECE items and
 test("retired insurance cannot acquire a new price or income projection even with an enabled stale catalog row",async()=>{
  for(const code of ['top_insure_card_piece','df_billable_top_insure_card_piece']){
   const row={itemId:'wrong',code,name:'保险卡',unit:'PIECE',enabled:true,pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'5',ownerUnitAmount:'3'};
-  const client={query:async(sql:string)=>({rows:sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
+  const client={query:async(sql:string)=>({rows:sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
   const empty=await readResourceIncomePreview(client as never,'g',[],{releaseId:'r',catalogRevision:'1'});assert.deepEqual(empty.lines,[]);assert.equal(empty.ownerTotal,null);
   await assert.rejects(()=>readResourceIncomePreview(client as never,'g',[{itemId:'wrong',quantity:'3'}],{releaseId:'r',catalogRevision:'1'}),/基础单位为天/);
   const queries:string[]=[],priceClient={query:async(sql:string)=>{queries.push(sql);return sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'wrong',code,unit:'PIECE',quantityScale:0,gameId:'g'}]}:{rows:[],rowCount:0};}};
@@ -252,9 +275,10 @@ test("new presentation freezes media kind alone, including unknown, without expo
 });
 
 const nativeGate = async () => ({ publisherBail: "NOT_REQUIRED" as const, occupancy: "FREE" as const, reference: "fixture" });
-function nativeGateClient(acceptance = false) {
+function nativeGateClient(acceptance = false, migrated = false) {
   return { query: async (sql: string) => {
     if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
+    if (sql.includes("AS retired")) return { rows: [{ retired: migrated }], rowCount: 1 };
     if (sql.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: "g", gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
     if (sql.includes("rule_acceptance")) return { rows: acceptance ? [{ ok: 1 }] : [], rowCount: acceptance ? 1 : 0 };
@@ -262,6 +286,21 @@ function nativeGateClient(acceptance = false) {
   } };
 }
 const nativeAccount = { id: "a", owner_user_id: "o", game_id: "g", current_version_id: "v", lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", owner_paused: false, staff_restricted: false, display_no: null };
+
+test("admin approval cannot publish an account that has already been published", async () => {
+  const sqls: string[] = [], digest = "a".repeat(64);
+  const version = { id: "v", account_id: "a", origin: "NATIVE", review_state: "SUBMITTED", rule_release_id: "rel", content_hash: digest, payload: {} };
+  const client = { query: async (sql: string) => {
+    sqls.push(sql);
+    if (sql.includes("FROM zzsh_supply.listing_version")) return { rows: [version], rowCount: 1 };
+    if (sql.includes("SELECT current_release_id")) return { rows: [{ current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [{}], rowCount: 1 };
+    throw new Error("unexpected query");
+  } };
+  await assert.rejects(() => reviewListing(client as never, nativeAccount as never, "admin", { expectedRevision: "1", versionId: "v", releaseId: "rel", contentHash: digest, decision: "APPROVE", reason: "核对资料" }, nativeGate), /已上架账号不能修改/);
+  assert.equal(sqls.some(sql => /^\s*(INSERT|UPDATE|DELETE)/.test(sql)), false);
+});
 
 test("an authoritative completed rental blocks publication even when the old account lifecycle remains active and free", async () => {
   const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
@@ -278,57 +317,60 @@ test("an authoritative completed rental blocks publication even when the old acc
   }
 });
 
-test("the three migration account states keep their server-side listing rules", async () => {
-  // The hold rules still apply independently of the retired legacy-quote version.
+test("retired migrated accounts and delisted accounts cannot publish again", async () => {
   const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
-  const delisted = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "UNRESOLVED" } as never, draft as never, nativeGate, "WRITE");
-  assert.equal(delisted.includes("ACCOUNT_NOT_PUBLISHABLE"), true, "a delisted legacy account must not publish on the same account");
-  const listed = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, nativeGate, "WRITE");
-  assert.equal(listed.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "a taken-over listed account must stay publishable after a pause");
-  const paused = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE", owner_paused: true } as never, draft as never, nativeGate, "WRITE");
-  assert.equal(paused.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "pausing is a runtime state, not a hold");
+  const migrated = await publicationBlockers(nativeGateClient(false, true) as never, nativeAccount as never, draft as never, nativeGate, "WRITE");
+  assert.equal(migrated.includes("LEGACY_LISTING_RELIST_REQUIRED"), true);
+  const migratedClient = nativeGateClient(false, true);
+  const sharedRead = await publicationBlockers(migratedClient as never, nativeAccount as never, draft as never, nativeGate, "READ", false, listingPageShared(migratedClient as never));
+  assert.equal(sharedRead.includes("LEGACY_LISTING_RELIST_REQUIRED"), true, "shared admin reads cannot re-expose a migrated account");
+  const delisted = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, lifecycle: "DELISTED" } as never, draft as never, nativeGate, "WRITE");
+  assert.equal(delisted.includes("ACCOUNT_DELISTED"), true);
+  const native = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, draft as never, nativeGate, "WRITE");
+  assert.equal(native.includes("LEGACY_LISTING_RELIST_REQUIRED"), false);
   const settled = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: true }), "WRITE");
   assert.equal(settled.includes("RENTAL_COMPLETED"), true, "a settled rental must not return to a listing");
 });
 
-test("a migrated legacy-price listing must be resubmitted before new orders, without blocking native spread or fixed versions", async () => {
-  const version = { id: "v", account_id: "a", origin: "NATIVE", review_state: "APPROVED", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
-  for (const purpose of ["READ", "WRITE"] as const) {
-    const retired = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, { ...version, schema_version: 3 } as never, nativeGate, purpose);
-    assert(retired.includes("LEGACY_LISTING_RELIST_REQUIRED"));
-    for (const schema_version of [1, 2, 4]) {
-      const current = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, { ...version, schema_version } as never, nativeGate, purpose);
-      assert(!current.includes("LEGACY_LISTING_RELIST_REQUIRED"));
-    }
-    const base = nativeGateClient(), other = { query: async (sql: string) => {
-      const result = await base.query(sql);
-      return sql.includes("FROM zzsh_supply.game WHERE id=$1") ? { ...result, rows: result.rows.map(row => ({ ...row, code: "other" })) } : result;
-    } };
-    const otherGame = await publicationBlockers(other as never, nativeAccount as never, { ...version, schema_version: 3 } as never, nativeGate, purpose);
-    assert(!otherGame.includes("LEGACY_LISTING_RELIST_REQUIRED"));
-  }
+test("a delisted account cannot be delisted again", async () => {
+  const client = { query: async () => { throw new Error("a closed account must not write"); } };
+  const account = { ...nativeAccount, owner_user_id: "owner", lifecycle: "DELISTED", revision: "1" };
+  await assert.rejects(() => delistListing(client as never, account as never, { expectedRevision: "1" }, { userId: "owner", sessionId: "s", requestId: "r" }), /已结束出租/);
 });
 
-test("historical observations cannot bypass publication gates when resuming", async () => {
-  const calls: string[] = [];
-  const client = (origin: string, reviewState: string) => ({ query: async (sql: string) => {
-    calls.push(sql);
-    if (sql.includes("FROM zzsh_supply.listing_version")) return { rows: [{ id: "v", account_id: "a", origin, review_state: reviewState, rule_release_id: null, content_hash: null }], rowCount: 1 };
-    if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [], rowCount: 0 };
-    if (sql.includes("SET owner_paused=")) return { rows: [], rowCount: 1 };
-    if (sql.includes("SET revision=revision+1")) return { rows: [{ revision: "2" }], rowCount: 1 };
-    throw new Error("Unexpected SQL: " + sql.slice(0, 80));
-  } });
-  const historical = { ...nativeAccount, current_version_id: "v", owner_paused: true, revision: "1" };
-  await assert.rejects(() => setOwnerPaused(client("LEGACY_OBSERVATION", "IMPORTED_UNVERIFIED") as never, historical as never, { expectedRevision: "1" }, false, nativeGate), /请先完成资料审核或处理客服限制/);
-  assert.equal(historical.owner_paused, true);
-  assert.equal(calls.some(sql => sql.includes("SET owner_paused=")), false, "historical resume must not alter paused state without admission");
-  const unpausedHistorical = { ...historical, owner_paused: false };
-  await assert.rejects(() => setOwnerPaused(client("LEGACY_OBSERVATION", "IMPORTED_UNVERIFIED") as never, unpausedHistorical as never, { expectedRevision: "1" }, true, nativeGate), /历史账号记录不可修改接单状态/);
-  assert.equal(unpausedHistorical.owner_paused, false, "the owner cannot trap a read-only account in a paused state");
-  const native = { ...nativeAccount, current_version_id: "v", owner_paused: true, revision: "1" };
-  await assert.rejects(() => setOwnerPaused(client("NATIVE", "DRAFT") as never, native as never, { expectedRevision: "1" }, false, nativeGate), /请先完成资料审核或处理客服限制/);
-  assert.equal(native.owner_paused, true, "native resume gates are unchanged");
+test("publication freezes only an authoritative account-bound credit waiver", () => {
+  const account = { id: "a", owner_user_id: "owner", game_id: "game" } as any;
+  const version = { id: "v", rule_release_id: "release", payload: { ruleRefs: { priceVersionId: "price" } } } as any;
+  const credit = { status: "NOT_REQUIRED", accountId: "a", ownerUserId: "owner", gameId: "game", listingVersionId: "v",
+    releaseId: "release", priceVersionId: "price", reference: "ref", creditRevision: "4", coverageRevision: null, requiredCents: "0" } as const;
+  const gate = { publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "ref", creditGuarantee: credit } as const;
+  assert.equal(publicationWaiverRevision(account, version, gate), "4");
+  assert.throws(() => publicationWaiverRevision(account, version, { ...gate, creditGuarantee: { ...credit, ownerUserId: "other" } }));
+  assert.throws(() => publicationWaiverRevision(account, version, { ...gate, creditGuarantee: { ...credit, creditRevision: null } }));
+  assert.throws(() => publicationWaiverRevision(account, version, { ...gate, creditGuarantee: { ...credit, requiredCents: "1" } }));
+  assert.equal(publicationWaiverRevision(account, version, { ...gate, publisherBail: "SATISFIED", creditGuarantee: { ...credit, status: "SATISFIED", requiredCents: "500" } }), null);
+  assert.throws(() => publicationWaiverRevision(account, version, { publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "old-policy" }));
+  assert.throws(() => publicationWaiverRevision(account, version, { publisherBail: "SATISFIED", occupancy: "FREE", reference: "old-proof" }));
+});
+
+test("a previous publication blocks every draft mutation even if a later draft already exists", async () => {
+  const client = { query: async (sql: string) => {
+    if (sql.includes('SELECT "suspended"')) return { rows: [{ suspended: false }], rowCount: 1 };
+    if (sql.includes('user_identity_state')) return { rows: [], rowCount: 0 };
+    if (sql.includes('game_service_operation')) return { rows: [{ id: "s", gameId: "g", gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
+    if (sql.includes('AS retired')) return { rows: [{ retired: false }], rowCount: 1 };
+    if (sql.includes('FROM zzsh_supply.listing_publication')) return { rows: [{}], rowCount: 1 };
+    if (sql.includes('FROM zzsh_order.rental_order')) return { rows: [], rowCount: 0 };
+    throw new Error(`unexpected query: ${sql}`);
+  } } as never;
+  const account = { ...nativeAccount, current_version_id: "unpublished-later-draft" } as never;
+  for (const run of [
+    () => createListingDraft(client, account, "1", nativeGate),
+    () => saveListingDraft(client, account, { expectedRevision: "1" }, nativeGate),
+    () => quoteListing(client, account, "1"),
+    () => acceptListingRules(client, account, { expectedRevision: "1" }),
+    () => submitListing(client, account, "o", { expectedRevision: "1" }, nativeGate),
+  ]) await assert.rejects(run, /已上架账号不能修改/);
 });
 
 test("native empty title is not a write blocker; a legacy placeholder still is", async () => {

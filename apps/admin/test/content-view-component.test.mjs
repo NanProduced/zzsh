@@ -4,9 +4,17 @@ import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { act, createElement, useState } from "react";
 import { createOfflineAdminSource } from "./offline-admin-source.mjs";
-import { DEFAULT_GUIDES, DEFAULT_RESOURCES, RESOURCE_DEFINITIONS, RESOURCE_SCHEMA } from "@zzsh/content";
+import { DEFAULT_RESOURCES, RESOURCE_DEFINITIONS, RESOURCE_SCHEMA } from "@zzsh/content";
 
 const PLATFORM_PERMS = ["content.platform.read", "content.platform.edit", "content.platform.publish"];
+
+/** P2：guide/notice 正文唯一格式 plate；测试夹具与合同一致，不再构造 markdown/sections。 */
+const plateDoc = (text = "原正文", preset = "help") => ({ format: "plate", schemaVersion: 1, preset, value: [{ type: "p", id: "intro", children: [{ text }] }] });
+const guidePayload = (over = {}) => ({
+  kind: "guide", id: "qa-guide", slug: "qa-guide", title: "帮助手册标题", summary: "帮助摘要", category: "rental",
+  audience: ["all"], keywords: [], related: [], updatedAt: "2026-10-28",
+  format: "plate", schemaVersion: 1, document: plateDoc(), mediaIds: [], ...over,
+});
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
@@ -103,13 +111,14 @@ const snapshot = (permissions) => ({
   permissions,
 });
 
-async function mountHarness(t, { fetchImpl, perms }) {
+async function mountHarness(t, { fetchImpl, perms, surface }) {
   const browser = new Window({ url: "http://127.0.0.1:3101/content" });
   browser.Element.prototype.scrollIntoView = function () {};
   Object.assign(globalThis, {
     window: browser,
     document: browser.document,
     localStorage: browser.localStorage,
+    sessionStorage: browser.sessionStorage,
     HTMLElement: browser.HTMLElement,
     Node: browser.Node,
     Event: browser.Event,
@@ -119,8 +128,30 @@ async function mountHarness(t, { fetchImpl, perms }) {
     requestAnimationFrame: browser.requestAnimationFrame.bind(browser),
     cancelAnimationFrame: browser.cancelAnimationFrame.bind(browser),
   });
-  for (const key of ["Element", "SVGElement", "HTMLInputElement", "HTMLButtonElement", "HTMLTextAreaElement", "DocumentFragment", "MouseEvent", "KeyboardEvent", "FocusEvent", "MutationObserver", "ResizeObserver"]) {
-    if (browser[key]) globalThis[key] = browser[key];
+  // PlateEditor（slate）需要完整 DOM 全局：与 docs-view/plate-editor 测试同一口径。
+  for (const key of [
+    "Window", "Document", "ShadowRoot", "DocumentFragment", "DocumentType", "CharacterData", "ProcessingInstruction",
+    "Attr", "DOMImplementation", "XMLSerializer", "DOMParser", "Element", "SVGElement", "Text", "Comment",
+    "Range", "Selection", "StaticRange", "AbstractRange", "EventTarget", "UIEvent", "MouseEvent", "KeyboardEvent",
+    "FocusEvent", "InputEvent", "ClipboardEvent", "DragEvent", "CompositionEvent", "WheelEvent", "PointerEvent",
+    "TouchEvent", "MutationObserver", "MutationRecord", "ResizeObserver", "ResizeObserverEntry", "IntersectionObserver",
+    "Image", "DOMRect", "DOMRectReadOnly", "DOMRectList", "DOMPoint", "DOMMatrix", "DataTransfer", "DataTransferItem",
+    "DataTransferItemList", "NodeList", "HTMLCollection", "NamedNodeMap", "DOMTokenList", "DOMStringMap",
+    "CSSStyleSheet", "CSSRule", "CSSStyleDeclaration", "MediaList", "CSS", "StyleSheet", "FileList", "FileReader",
+    "matchMedia", "MediaQueryList", "screen", "history", "location",
+  ]) {
+    if (browser[key] !== undefined) globalThis[key] = browser[key];
+  }
+  for (const key of Object.getOwnPropertyNames(browser)) {
+    if (key.startsWith("HTML") && browser[key] !== undefined) globalThis[key] = browser[key];
+  }
+  globalThis.innerWidth = browser.innerWidth;
+  globalThis.innerHeight = browser.innerHeight;
+  if (globalThis.Node && globalThis.Node.prototype.DOCUMENT_POSITION_PRECEDING === undefined) {
+    Object.assign(globalThis.Node.prototype, {
+      DOCUMENT_POSITION_DISCONNECTED: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4,
+      DOCUMENT_POSITION_CONTAINS: 8, DOCUMENT_POSITION_CONTAINED_BY: 16, DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: 32,
+    });
   }
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   Object.defineProperty(browser.navigator, "locks", { value: { request: async (name, _options, callback) => callback({ name }) }, configurable: true });
@@ -144,6 +175,8 @@ async function mountHarness(t, { fetchImpl, perms }) {
     return fetchImpl(url, init, browser);
   };
   const source = await createOfflineAdminSource({ root: fileURLToPath(new URL("../../../", import.meta.url)) });
+  // 预热懒加载 Plate 编辑器：缓存命中后 lazy import 立即解析。
+  await source.ssrLoadModule("/apps/admin/src/components/plate/plate-editor.tsx");
   const { ContentView } = await source.ssrLoadModule("/apps/admin/src/views/content-view.tsx");
   const el = browser.document.createElement("div");
   el.className = "workspace-root";
@@ -160,6 +193,7 @@ async function mountHarness(t, { fetchImpl, perms }) {
           snapshot: snapshot(nextPerms),
           onDirtyChange: (dirty) => dirtyLog.push(dirty),
           refreshNonce: nonce,
+          surface,
           tab: { id: "content", title: "内容管理", path: "/content", query, closable: true, kind: "content" },
           onQueryChange: (next) => queryLog.push(next),
         }),
@@ -335,6 +369,27 @@ test("新建公告和资讯标题由可见原生标签关联，读取不发出�
   assert.equal(h.writes.length, 0);
 });
 
+test("平台动态工作台保留公告列表，一次点击新建进入草稿且专用发布权限可用", async (t) => {
+  const created = itemRow({ id: "item_ann_2", published: null, draft: { ...draftVersion, title: "" }, latest: draftVersion });
+  const h = await mountHarness(t, {
+    surface: "updates",
+    perms: ["content.platform.read", "content.platform.edit", "content.updates.publish"],
+    fetchImpl: router([
+      { match: "/api/bff/admin/content/items", response: () => json(itemsPage([itemRow()])) },
+      { method: "POST", match: "/api/bff/admin/content/items", response: () => json({ item: created }) },
+      { match: "/api/bff/admin/content/items/item_ann_2", response: () => json({ item: created, versions: [created.draft] }) },
+    ]),
+  });
+  assert.ok(h.btn("公告") && h.btn("资讯"));
+  assert.equal(h.btn("帮助目录"), undefined);
+  await h.click(h.btn("新建公告"));
+  assert.equal(h.writes.length, 1);
+  assert.equal(h.writes[0].body.type, "ANNOUNCEMENT");
+  assert.ok(h.el.querySelector('[aria-label="公告列表"]').textContent.includes("十月例行维护公告"));
+  assert.ok(h.el.querySelector('[aria-label="公告编辑器"] input[aria-label="文档标题"]'));
+  assert.ok(h.btn("发布"), "窄授权仍能访问发布动作");
+});
+
 test("详情：点击条目请求 /content/items/:id；渲染版本历史与操作；详情失败显示错误", async (t) => {
   let detailCalls = 0;
   let releaseDetail;
@@ -404,7 +459,7 @@ test("页面展示按固定位置管理轮播，读取不调用旧轮播写入�
       },
     ]),
   });
-  await h.click(h.btn("图片与二维码"));
+  await h.click(h.btn("用户站展示"));
   const get = h.gets.find((g) => g.path === "/api/bff/admin/content/resources");
   assert.ok(get, "请求资源位置列表");
   const params = new URLSearchParams(get.query);
@@ -441,41 +496,38 @@ test("媒体 tab：请求 limit=20 渲染审核状态；封面选择器请求 /c
       { match: "/api/bff/admin/content/media-options", response: () => json(optionsPage([mediaOption(), mediaOption({ id: "media_opt_2" })])) },
     ]),
   });
-  await h.click(h.btn("运营素材"));
+  await h.click(h.btn("图片素材"));
   const get = h.gets.find((g) => g.path === "/api/bff/admin/content/media");
   assert.ok(get, "请求平台素材列表");
   assert.equal(new URLSearchParams(get.query).get("limit"), "20");
-  const rows = [...h.el.querySelectorAll("tbody tr")];
+  const rows = [...h.el.querySelectorAll(".content-media-card")];
   assert.equal(rows.length, 2, "渲染两条素材");
-  assert.ok(rows[0].textContent.includes("800×450 · 2048B"), "尺寸与字节数");
-  assert.ok(rows[0].textContent.includes("待审核 · 私有"), "待审核私有状态");
-  assert.ok(rows[1].textContent.includes("1200×600 · 4096B"), "第二条尺寸");
-  assert.ok(rows[1].textContent.includes("已通过 · 公开"), "已通过公开状态");
-  assert.ok(h.btn("处理"), "处理入口");
-  assert.ok(h.textOf().includes("2 条"), "本页条数");
-  await h.click(h.btn("处理"));
+  assert.match(rows[0].textContent, /待审核.*800 × 450/);
+  assert.match(rows[1].textContent, /可使用.*1200 × 600/);
+  await h.click(rows[0]);
   const reviewDialog = h.browser.document.querySelector('[role="dialog"]');
-  assert.ok(reviewDialog, "处理打开弹窗");
-  assert.ok(reviewDialog.textContent.includes("处理素材"), "处理弹窗内容");
+  assert.ok(reviewDialog, "打开图片审核弹窗");
+  assert.match(reviewDialog.textContent, /审核图片.*2 KB/);
+  assert.ok(!reviewDialog.textContent.includes("media_m1"), "弹窗不显示素材编号");
   const closeReview = [...h.browser.document.querySelectorAll("button")].find((node) => node.textContent.trim() === "关闭");
   await h.click(closeReview);
 
   await h.render(1, PLATFORM_PERMS, { tab: "media" });
   await h.settle();
-  assert.ok(h.textOf().includes("还没有素材"), "空素材提示");
-  assert.ok(h.textOf().includes("0 条"), "空态条数");
+  assert.ok(h.textOf().includes("还没有图片"), "空素材提示");
 
   await h.click(h.btn("平台公告"));
   await h.click(h.btn("编辑"));
   const optionsBefore = h.gets.filter((g) => g.path === "/api/bff/admin/content/media-options").length;
+  await h.click(h.btn("发布设置"));
   await h.click(h.btn("选择封面"));
   const optionGets = h.gets.filter((g) => g.path === "/api/bff/admin/content/media-options");
   assert.equal(optionGets.length, optionsBefore + 1, "打开选择器请求候选素材");
   const optionParams = new URLSearchParams(optionGets.at(-1).query);
   assert.equal(optionParams.get("limit"), "20", "候选素材带 limit");
   assert.equal(optionParams.get("purpose"), null, "当前实现不带 purpose 参数");
-  assert.ok(h.btn("media_opt_1") && h.btn("media_opt_2"), "渲染候选素材");
-  assert.ok(h.el.querySelector('img[alt="素材 media_opt_1"]'), "候选素材预览图");
+  assert.equal(h.el.querySelectorAll('.content-image-option').length, 2, "渲染候选素材");
+  assert.ok(h.el.querySelector('.content-image-option img[src$="/media_opt_1/content"]'), "候选素材预览图");
   assert.equal(h.writes.length, 0, "素材查看与选择器流程无写请求");
 });
 
@@ -492,6 +544,44 @@ test("无 content 读权限：显示受限说明、不渲染 tab、无列表读�
   assert.equal(h.gets.filter((g) => g.path === "/api/bff/admin/content/items").length, 0, "无读权限不发出内容列表读");
 });
 
+test("uploading from the picker only selects the new image after an explicit public approval", async (t) => {
+  const assetId = "new_picture";
+  const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([
+    { match: "/api/bff/admin/content/media-options", response: () => json(optionsPage([])) },
+    { method: "POST", match: "/api/bff/admin/content/media/upload-intents", response: () => json({ intentId: "intent_1", uploadToken: "fixture_token" }) },
+    { method: "PUT", match: "/api/bff/admin/content/media/uploads/intent_1", response: (_url, init) => {
+      assert.equal(init.body.name, "fixture.png");
+      assert.equal(new Headers(init.headers).get("x-upload-token"), "fixture_token");
+      return json({ assetId, mime: "image/png", byteSize: 20, width: 512, height: 512, reviewState: "PENDING", accessClass: "PRIVATE_REVIEW" });
+    } },
+    { method: "POST", match: `/api/bff/admin/content/media/${assetId}/review`, response: () => json({ id: assetId, reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" }) },
+  ]) });
+  const { ContentMediaField } = await h.source.ssrLoadModule("/apps/admin/src/views/content-resource-fields.tsx");
+  const { contentCropRect } = await h.source.ssrLoadModule("/apps/admin/src/views/content-image-adjust.tsx");
+  const chosen = [], props = { pickerOnly: true, label: "插图", value: null, hint: "", canUpload: true, onChange: id => chosen.push(id) };
+  await act(async () => h.root.render(createElement(ContentMediaField, props)));
+  await h.click(h.btn("上传新图"));
+  const file = new File(["fixture"], "fixture.png", { type: "image/png" });
+  const input = h.el.querySelector('input[type="file"]');
+  Object.defineProperty(input, "files", { configurable: true, get: () => [file] });
+  await act(async () => input.dispatchEvent(new h.browser.Event("change", { bubbles: true })));
+  await h.click(h.btn("上传图片"));
+  assert.deepEqual(chosen, []);
+  assert.equal(h.btn("审核通过并使用"), undefined, "upload permission alone does not allow use");
+  assert.match(h.textOf(), /等待审核/);
+  await act(async () => h.root.render(createElement(ContentMediaField, { ...props, canReview: true })));
+  await h.click(h.btn("审核通过并使用"));
+  assert.deepEqual(h.writes.map(row => row.path.split("/").at(-1)), ["upload-intents", "intent_1", "review"]);
+  assert.deepEqual(h.writes.at(-1).body, { decision: "APPROVE", visibility: "PUBLIC_DISPLAY" });
+  assert.deepEqual(chosen, [assetId]);
+
+  for (const ratio of [1, 0.75, 2.3, 3]) for (const pan of [-1, 0, 1]) {
+    const box = contentCropRect(1600, 900, ratio, 1.5, pan, -pan);
+    assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.width <= 1600.001 && box.y + box.height <= 900.001);
+    assert.ok(Math.abs(box.width / box.height - ratio) < 0.001);
+  }
+});
+
 test("仅有 content.read：news 默认游戏范围，切到游戏范围后按 scope=game 与 gameId 请求", async (t) => {
   const newsVersion = version({ id: "ver_news", itemId: "item_news_1", sequence: 1, state: "PUBLISHED", title: "版本更新资讯", revision: "rev_news" });
   const newsItem = itemRow({ id: "item_news_1", type: "NEWS", gameId: "game_1", gameName: "三角洲行动", published: newsVersion, latest: newsVersion });
@@ -503,7 +593,7 @@ test("仅有 content.read：news 默认游戏范围，切到游戏范围后按 s
     ]),
   });
   assert.ok(h.btn("资讯"), "仅资讯 tab 可用");
-  assert.ok(!h.btn("平台公告") && !h.btn("页面展示") && !h.btn("运营素材"), "平台级 tab 不渲染");
+  assert.ok(!h.btn("平台公告") && !h.btn("页面展示") && !h.btn("图片素材"), "平台级 tab 不渲染");
   assert.ok(h.gets.some((g) => g.path === "/api/bff/admin/content/games"), "加载游戏范围");
   const first = h.gets.find((g) => g.path === "/api/bff/admin/content/items");
   assert.ok(first, "游戏范围就绪后请求列表");
@@ -552,7 +642,7 @@ test("页内分区与资讯范围写入地址栏：刷新恢复分区，秘密�
   assert.equal(h.queryLog.length, 1, "切换分区只产生一次回写");
   assert.ok(!Object.keys(h.queryLog.at(-1)).some((key) => /password|pin|otp|phone|token|secret/i.test(key)), "敏感键不落 URL");
   await h.render(0, BOTH_CONTENT_PERMS, { tab: "media" });
-  assert.ok(h.btn("运营素材"), "按地址栏 tab 恢复分区");
+  assert.ok(h.btn("图片素材"), "按地址栏 tab 恢复分区");
   await h.render(0, BOTH_CONTENT_PERMS, { tab: "news", scope: "game", gameId: "game_1" });
   const get = h.gets.filter((g) => g.path === "/api/bff/admin/content/items").at(-1);
   const params = new URLSearchParams(get.query);
@@ -562,8 +652,7 @@ test("页内分区与资讯范围写入地址栏：刷新恢复分区，秘密�
 });
 
 test("resource draft keeps its original key after an unknown result and recovers through a read-only receipt", async t => {
-  const { format: _format, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _anchorAliases, ...guideMetadata } = DEFAULT_GUIDES[0];
-  const payload = { ...guideMetadata, sections: [{ id: "overview", title: "核对", blocks: [{ type: "paragraph", text: "<script>作为文字</script>" }] }] };
+  const payload = guidePayload({ title: "核对标题", document: plateDoc("<script>作为文字</script>") });
   const resourceId = `guide:${payload.slug}`;
   const current = { schema: RESOURCE_SCHEMA, key: resourceId, source: "BUILTIN", state: "available", payload, media: [] };
   const definition = { key: resourceId, kind: "guide", label: payload.title, group: "help", locations: [`/help/${payload.slug}`] };
@@ -578,22 +667,21 @@ test("resource draft keeps its original key after an unknown result and recovers
   ]) });
   await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档"));
   assert.equal(h.btn("创建编辑草稿"), undefined, "working copy does not require an empty draft action");
-  const titleLabel = [...h.el.querySelectorAll("label")].find(node => node.textContent === "文档标题");
-  assert.ok(titleLabel);
-  const titleInput = h.browser.document.getElementById(titleLabel.htmlFor);
+  const titleInput = h.el.querySelector('input[aria-label="文档标题"]');
+  assert.ok(titleInput, "页面级 inline 标题输入");
+  assert.equal(titleInput.placeholder, "无标题");
   await act(async () => { const setter = Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, "value").set; setter.call(titleInput, "核对后修改的标题"); titleInput.dispatchEvent(new h.browser.Event("input", { bubbles: true })); });
   await h.settle();
   await h.click(h.btn("保存草稿")); await h.settle(50);
   assert.ok(h.textOf().includes("请求结果尚未确认"));
   const original = h.writes[0]; assert.match(original.key, /^idem_/);
   const raw = h.browser.localStorage.getItem("zzsh.admin.content.pending.v1:admin_content");
-  assert.equal(JSON.parse(raw).key, original.key); assert.ok(!raw.includes("<script>") && !raw.includes("sections"), "article bodies are not persisted in recovery metadata");
+  assert.equal(JSON.parse(raw).key, original.key); assert.ok(!raw.includes("<script>") && !raw.includes("document"), "article bodies are not persisted in recovery metadata");
   await h.click(h.btn("核对原操作结果"));
   assert.equal(h.writes.length, 1, "recovery never resubmits the write");
   assert.equal(h.browser.localStorage.getItem("zzsh.admin.content.pending.v1:admin_content"), null);
   assert.ok(h.textOf().includes("已核实原操作记录"));
-  const recoveredTitle = [...h.el.querySelectorAll("label")].find(node => node.textContent === "文档标题");
-  assert.equal(h.browser.document.getElementById(recoveredTitle.htmlFor).value, "核对后修改的标题", "draft-create recovery preserves the unsaved working copy");
+  assert.equal(h.el.querySelector('input[aria-label="文档标题"]').value, "核对后修改的标题", "draft-create recovery preserves the unsaved working copy");
   assert.ok(h.btn("发布到用户页面").disabled, "unsaved working copy cannot publish the old draft");
   assert.equal(h.el.querySelectorAll("script").length, 0); assert.ok(h.textOf().includes("<script>作为文字</script>"));
 });
@@ -614,13 +702,13 @@ test("QR replacement cancels before submit, freezes cancel while saving, and pub
     { method: "PUT", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/media-draft`, response: () => saved },
     { method: "POST", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/publish`, response: () => { publishedPayload = after; draft = null; revision = "3"; return json(resource()); } },
   ]) });
-  await h.click(h.btn("图片与二维码")); await h.click(h.btn("更换二维码"));
+  await h.click(h.btn("用户站展示")); await h.click(h.btn("更换二维码"));
   assert.ok(h.browser.document.querySelector('[role="dialog"]'), "图片替换使用弹窗而非抽屉");
-  await h.click(h.btn("选择图片"));
+  await h.click(h.btn("更换图片"));
   const choose = () => [...h.el.querySelectorAll("button")].find(node => node.textContent.includes("512 × 512"));
   await h.click(choose()); await h.click(h.btn("取消更换")); await h.click(h.btn("放弃修改并继续"));
   assert.equal(h.writes.length, 0, "cancel before submit does not create or bind anything");
-  await h.click(h.btn("更换二维码")); await h.click(h.btn("选择图片")); await h.click(choose());
+  await h.click(h.btn("更换二维码")); await h.click(h.btn("更换图片")); await h.click(choose());
   await h.click(h.btn("保存图片草稿")); await h.settle(40);
   assert.equal(h.writes.length, 2); assert.ok(h.btn("取消更换").disabled, "sent save cannot be presented as cancelled");
   assert.deepEqual(h.writes[1].body, { media: { qrMediaId: "media_after" }, versionId: "draft_1", expectedRevision: "1" });
@@ -645,20 +733,28 @@ test("footer editor saves a revisioned draft before publish and respects read-on
     { method: "PUT", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/draft`, response: async (_url, init) => { const body = JSON.parse(init.body); assert.equal(body.expectedRevision, "2"); draft = { ...draft, payload: body.payload }; revision = "3"; return json(detail()); } },
     { method: "POST", match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}/publish`, response: async (_url, init) => { const body = JSON.parse(init.body); assert.deepEqual(body, { versionId: "footer_draft", expectedRevision: "3" }); published = { id: "footer_draft", sequence: 2, state: "PUBLISHED", payload: draft.payload }; draft = null; revision = "4"; return json(detail()); } },
   ]) });
-  await h.click(h.btn("图片与二维码")); await h.click(h.btn("编辑页脚"));
+  await h.click(h.btn("用户站展示")); await h.click(h.btn("编辑页脚"));
   assert.ok(h.gets.some(request => request.path.endsWith("/content/resources") && new URLSearchParams(request.query).get("includeFooter") === "1"));
-  const label = [...h.el.querySelectorAll("label")].find(node => node.textContent === "版权主体（留空隐藏）");
+  const dialog = h.browser.document.querySelector('[role="dialog"]');
+  assert.equal(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent, "编辑网站页脚");
+  const label = [...dialog.querySelectorAll("label")].find(node => node.textContent === "版权主体（留空隐藏）");
   const input = h.browser.document.getElementById(label.htmlFor);
   await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, "value").set.call(input, "新版权主体"); input.dispatchEvent(new h.browser.Event("input", { bubbles: true })); });
   await h.settle(); assert.ok(h.btn("发布页脚").disabled, "unsaved changes cannot publish");
+  await h.click(h.btn("关闭", dialog));
+  const confirm = h.browser.document.querySelector('[role="alertdialog"]');
+  assert.ok(confirm, "closing a dirty modal asks before discarding");
+  await h.click(h.btn("继续编辑", confirm));
+  assert.equal(input.value, "新版权主体");
+  assert.equal(h.writes.length, 0);
   await h.click(h.btn("保存草稿")); assert.equal(published.payload.copyright, baseline.copyright, "save does not update the public snapshot");
   await h.click(h.btn("发布页脚")); assert.equal(published.payload.copyright, "新版权主体");
-  await h.render(0, ["content.platform.read"]); await h.settle(); await h.click(h.btn("图片与二维码")); await h.click(h.btn("查看"));
+  await h.render(0, ["content.platform.read"]); await h.settle(); await h.click(h.btn("用户站展示")); await h.click(h.btn("查看"));
   assert.equal(h.btn("保存草稿"), undefined); assert.equal(h.btn("发布页脚"), undefined);
 });
 
 test("late resource detail cannot reopen an editor after switching sections", async t => {
-  const payload = DEFAULT_GUIDES[0], key = `guide:${payload.slug}`;
+  const payload = guidePayload(), key = `guide:${payload.slug}`;
   const current = { schema: RESOURCE_SCHEMA, key, source: "BUILTIN", state: "available", payload, media: [] };
   let finishDetail;
   const response = new Promise(resolve => { finishDetail = resolve; });
@@ -667,17 +763,16 @@ test("late resource detail cannot reopen an editor after switching sections", as
     { match: "/api/bff/admin/content/resources", response: () => json({ items: [{ current, definition: null, metadata: null }], nextCursor: null, limit: 10 }) },
     { match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}`, response: () => response },
   ]) });
-  await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档")); await h.click(h.btn("图片与二维码"));
+  await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档")); await h.click(h.btn("用户站展示"));
   await act(async () => { finishDetail(json({ key, definition: null, item: null, current, baseline: payload, draft: null, published: null, versions: [] })); }); await h.settle();
   assert.equal(h.el.querySelector('[aria-label="内容编辑器"]'), null);
-  assert.ok(h.textOf().includes("用户页面展示")); assert.equal(h.writes.length, 0);
+  assert.ok(h.textOf().includes("用户站展示")); assert.equal(h.writes.length, 0);
 });
 
 test("resource restore confirmation is cleared when edit permission is lost", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) }]) });
   const { ContentResourceEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-resource-editor.tsx");
-  const { format: _format, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _anchorAliases, ...metadata } = DEFAULT_GUIDES[0];
-  const payload = { ...metadata, sections: [{ id: "intro", title: "原格式", blocks: [{ type: "paragraph", text: "保留原文" }] }] }, key = `guide:${payload.slug}`;
+  const payload = guidePayload({ title: "原格式标题" }), key = `guide:${payload.slug}`;
   const version = { id: "history_1", state: "SUPERSEDED", sequence: 1, title: payload.title, updatedAt: "2026-10-28T00:00:00Z", payload };
   const detail = { key, definition: null, item: { id: "item_1", revision: "3" }, current: { key, payload, media: [] }, draft: null, published: null, baseline: payload, versions: [version] };
   const writes = [], props = { detail, canEdit: true, canPublish: true, locked: false, onWrite: async (...args) => { writes.push(args); }, onDirtyChange() {}, onClose() {} };
@@ -689,45 +784,40 @@ test("resource restore confirmation is cleared when edit permission is lost", as
 });
 
 function legacyHelpPayload(overrides = {}) {
-  const { format: _format, markdown: _markdown, mediaIds: _mediaIds, anchorAliases: _anchorAliases, ...metadata } = DEFAULT_GUIDES[0];
-  return { ...metadata, sections: [{ id: "intro", title: "说明", blocks: [{ type: "paragraph", text: "原正文" }] }], ...overrides };
+  return guidePayload(overrides);
 }
 
-for (const format of ["blocks", "markdown"]) {
-  test(`withdrawn ${format} guide reads its original snapshot and restores a separate draft`, async t => {
-    const legacy = legacyHelpPayload({ id: "qa-withdrawn", slug: "qa-withdrawn", title: "撤回后仍可恢复的手册" });
-    const { sections: _sections, ...metadata } = legacy;
-    const payload = format === "blocks" ? legacy : { ...metadata, format: "markdown", schemaVersion: 1, markdown: "## 说明\n\n原正文", mediaIds: [] };
-    const key = `guide:${payload.slug}`, path = `/api/bff/admin/content/resources/${encodeURIComponent(key)}`;
-    let withdrawn = false, draft = null, revision = "3", snapshotReads = 0;
-    const original = () => ({ id: "original_1", revision: "2", sequence: 1, state: withdrawn ? "WITHDRAWN" : "PUBLISHED", title: payload.title, payload, publishedAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:00Z" });
-    const current = () => ({ schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: withdrawn ? "withdrawn" : "available", payload: withdrawn ? null : payload, media: [] });
-    const detail = () => ({ key, definition: null, item: { id: "guide_item", revision, gameId: null }, current: current(), baseline: null, draft, published: withdrawn ? null : original(), versions: [...(draft ? [{ ...draft, payload: null }] : []), { ...original(), payload: null }] });
-    const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([
-      { match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) },
-      { match: "/api/bff/admin/content/resources", response: () => json({ items: [{ current: current(), definition: null, metadata: { title: payload.title, hasDraft: Boolean(draft), revision } }], nextCursor: null, limit: 5 }) },
-      { match: path, response: () => json(detail()) },
-      { match: `${path}/versions/original_1`, response: () => { snapshotReads++; return json({ version: original(), media: [] }); } },
-      { method: "POST", match: `${path}/withdraw`, response: () => { withdrawn = true; revision = "4"; return json(detail()); } },
-      { method: "POST", match: `${path}/restore`, response: () => { revision = "5"; draft = { ...original(), id: "restored_2", sequence: 2, state: "DRAFT", publishedAt: null }; return json(detail()); } },
-    ]) });
-    await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档"));
-    await h.click(h.btn("撤回线上版本")); await h.click(h.btn("确认撤回")); await h.settle(60);
-    assert.equal(snapshotReads, 1, "metadata-only history is hydrated through the existing authorized version endpoint");
-    assert.ok(h.el.querySelector('[aria-label="内容编辑器"]'));
-    assert.ok(h.textOf().includes("线上内容已撤回") && h.textOf().includes("原正文"));
-    assert.ok(!h.textOf().includes("未能读取图片位置") && !h.textOf().includes("当前显示用户侧内容"));
-    assert.ok(h.btn("发布到用户页面").disabled, "reading a historical version cannot publish it directly");
-    assert.equal(Boolean(h.btn("转换为 Markdown 后编辑")), format === "blocks", "original format is retained");
-    await h.click(h.btn("恢复为草稿")); await h.click(h.btn("恢复为新草稿"));
-    assert.deepEqual(h.writes.at(-1).body, { sourceVersionId: "original_1", expectedRevision: "4" });
-    assert.ok(!h.btn("发布到用户页面").disabled);
-    assert.equal(withdrawn, true, "restoring a draft keeps the public resource withdrawn");
-    assert.equal(h.browser.localStorage.getItem("zzsh.admin.content.pending.v1:admin_content"), null);
-    await h.click(h.btn("返回文档列表")); await h.click(h.btn("编辑文档"));
-    assert.equal(snapshotReads, 1, "an active draft needs no historical fallback request");
-  });
-}
+test("withdrawn plate guide reads its original snapshot and restores a separate draft", async t => {
+  const payload = legacyHelpPayload({ id: "qa-withdrawn", slug: "qa-withdrawn", title: "撤回后仍可恢复的手册" });
+  const key = `guide:${payload.slug}`, path = `/api/bff/admin/content/resources/${encodeURIComponent(key)}`;
+  let withdrawn = false, draft = null, revision = "3", snapshotReads = 0;
+  const original = () => ({ id: "original_1", revision: "2", sequence: 1, state: withdrawn ? "WITHDRAWN" : "PUBLISHED", title: payload.title, payload, publishedAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:00Z" });
+  const current = () => ({ schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: withdrawn ? "withdrawn" : "available", payload: withdrawn ? null : payload, media: [] });
+  const detail = () => ({ key, definition: null, item: { id: "guide_item", revision, gameId: null }, current: current(), baseline: null, draft, published: withdrawn ? null : original(), versions: [...(draft ? [{ ...draft, payload: null }] : []), { ...original(), payload: null }] });
+  const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([
+    { match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) },
+    { match: "/api/bff/admin/content/resources", response: () => json({ items: [{ current: current(), definition: null, metadata: { title: payload.title, hasDraft: Boolean(draft), revision } }], nextCursor: null, limit: 5 }) },
+    { match: path, response: () => json(detail()) },
+    { match: `${path}/versions/original_1`, response: () => { snapshotReads++; return json({ version: original(), media: [] }); } },
+    { method: "POST", match: `${path}/withdraw`, response: () => { withdrawn = true; revision = "4"; return json(detail()); } },
+    { method: "POST", match: `${path}/restore`, response: () => { revision = "5"; draft = { ...original(), id: "restored_2", sequence: 2, state: "DRAFT", publishedAt: null }; return json(detail()); } },
+  ]) });
+  await h.click(h.btn("规则与手册")); await h.click(h.btn("编辑文档"));
+  await h.click(h.btn("撤回线上版本")); await h.click(h.btn("确认撤回")); await h.settle(60);
+  assert.equal(snapshotReads, 1, "metadata-only history is hydrated through the existing authorized version endpoint");
+  assert.ok(h.el.querySelector('[aria-label="内容编辑器"]'));
+  assert.ok(h.textOf().includes("线上内容已撤回") && h.textOf().includes("原正文"));
+  assert.ok(!h.textOf().includes("未能读取图片位置") && !h.textOf().includes("当前显示用户侧内容"));
+  assert.ok(h.btn("发布到用户页面").disabled, "reading a historical version cannot publish it directly");
+  assert.equal(h.btn("转换为 Markdown 后编辑"), undefined, "旧格式转换入口已删除");
+  await h.click(h.btn("恢复为草稿")); await h.click(h.btn("恢复为新草稿"));
+  assert.deepEqual(h.writes.at(-1).body, { sourceVersionId: "original_1", expectedRevision: "4" });
+  assert.ok(!h.btn("发布到用户页面").disabled);
+  assert.equal(withdrawn, true, "restoring a draft keeps the public resource withdrawn");
+  assert.equal(h.browser.localStorage.getItem("zzsh.admin.content.pending.v1:admin_content"), null);
+  await h.click(h.btn("返回文档列表")); await h.click(h.btn("编辑文档"));
+  assert.equal(snapshotReads, 1, "an active draft needs no historical fallback request");
+});
 
 test("withdrawn snapshot read failure keeps the completed withdrawal known and can be reopened", async t => {
   const payload = legacyHelpPayload(), key = `guide:${payload.slug}`, path = `/api/bff/admin/content/resources/${encodeURIComponent(key)}`;
@@ -763,17 +853,17 @@ test("read-only withdrawn QR keeps its historical image separate from the public
     { match: path, response: () => json(detail) },
     { match: `${path}/versions/qr_history`, response: () => json({ version, media: [{ id: "old_qr", url: null }] }) },
   ]) });
-  await h.click(h.btn("图片与二维码")); await h.click(h.btn("查看"));
-  assert.ok(h.textOf().includes("查看页面图片") && h.textOf().includes("线上图片已撤回"));
+  await h.click(h.btn("用户站展示")); await h.click(h.btn("查看"));
+  assert.ok(h.textOf().includes("查看二维码") && h.textOf().includes("已下线"));
   assert.ok(h.textOf().includes("历史版本图片"));
-  assert.equal(h.el.querySelector('img[alt="当前用户页面的图片"]'), null);
+  assert.equal(h.el.querySelector('img[alt="当前线上二维码"]'), null);
+  assert.ok(h.el.querySelector('img[alt="历史版本图片"][src$="/old_qr/content"]'));
   assert.equal(h.btn("恢复为草稿"), undefined); assert.equal(h.btn("保存图片草稿"), undefined);
   assert.equal(h.writes.length, 0);
 });
 async function changeContentTitle(h, value) {
-  const label = [...h.el.querySelectorAll("label")].find(node => node.textContent === "文档标题");
-  assert.ok(label);
-  const input = h.browser.document.getElementById(label.htmlFor);
+  const input = h.el.querySelector('input[aria-label="文档标题"]');
+  assert.ok(input);
   await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, "value").set.call(input, value); input.dispatchEvent(new h.browser.Event("input", { bubbles: true })); });
   await h.settle();
 }
@@ -781,22 +871,24 @@ async function changeContentTitle(h, value) {
 test("publication settings remain in a draft, use Beijing time and keep ticker independent of pinning", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([
     { match: '/api/bff/admin/content/items', response: () => json(itemsPage([])) },
-    { method: 'PUT', match: '/api/bff/admin/content/items/item_settings/draft', response: () => json({ saved: true }) },
+    { method: 'PUT', match: '/api/bff/admin/content/items/item_settings/draft', response: () => json({ version: { ...draft, revision: "rev_saved" } }) },
   ]) });
   const { ItemEditor } = await h.source.ssrLoadModule('/apps/admin/src/views/content-item-editor.tsx');
-  const draft = version({ id: 'settings_draft', state: 'DRAFT', title: '时效性服务更新', body: '## 更新说明\n\n这里是本地验证正文。', publishedAt: null, updateSettings: { format: 'markdown', tickerEnabled: true } });
+  const draft = version({ id: 'settings_draft', itemId: 'item_settings', state: 'DRAFT', title: '时效性服务更新', body: '这里是本地验证正文。', publishedAt: null, updateSettings: { format: 'plate', tickerEnabled: true } });
   const item = itemRow({ id: 'item_settings', type: 'NEWS', draft, published: null, latest: draft });
-  await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: true, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
+  await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, canPublishPlatform: true, mediaReadable: true, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
   await h.settle(80);
   assert.ok(h.textOf().includes('轮播必须填写结束时间'));
   assert.ok(h.btn('发布草稿 v1').disabled);
-  assert.ok(h.textOf().includes('长期指南请用帮助手册'));
+  assert.equal(h.el.querySelector('[data-beijing-datetime-input][aria-label^="轮播结束时间"]'), null, "发布设置默认关闭");
+  await h.click(h.btn("发布设置"));
   const input = h.el.querySelector('[data-beijing-datetime-input][aria-label^="轮播结束时间"]');
   await act(async () => { Object.getOwnPropertyDescriptor(h.browser.HTMLInputElement.prototype, 'value').set.call(input, '2030-01-02T12:30'); input.dispatchEvent(new h.browser.Event('input', { bubbles: true })); });
-  await h.settle(); await h.click(h.btn('保存草稿'));
+  await h.settle(); await h.click(h.btn("应用到草稿")); await h.click(h.btn('保存草稿'));
   const saved = h.writes.at(-1); assert.equal(saved.method, 'PUT');
   assert.equal(saved.body.updateSettings.tickerUntil, '2030-01-02T04:30:00.000Z');
   assert.equal(saved.body.updateSettings.tickerEnabled, true); assert.equal(saved.body.updateSettings.pinned, false);
+  assert.equal(saved.body.updateSettings.format, 'plate', 'update_settings 只写 plate 合同');
   assert.equal(saved.body.versionId, 'settings_draft'); assert.equal(saved.body.expectedRevision, draft.revision);
   assert.equal(h.writes.some(x => x.path.endsWith('/publish')), false);
 });
@@ -804,27 +896,34 @@ test("publication settings remain in a draft, use Beijing time and keep ticker i
 test("a game publisher can save homepage exposure settings but needs platform publication permission to release them", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: '/api/bff/admin/content/items', response: () => json(itemsPage([])) }]) });
   const { ItemEditor } = await h.source.ssrLoadModule('/apps/admin/src/views/content-item-editor.tsx');
-  const draft = version({ state: 'DRAFT', publishedAt: null, updateSettings: { format: 'plain', tickerEnabled: true, tickerUntil: '2030-01-01T00:00:00Z' } });
+  const draft = version({ state: 'DRAFT', publishedAt: null, updateSettings: { format: 'plate', tickerEnabled: true, tickerUntil: '2030-01-01T00:00:00Z' } });
   const item = itemRow({ gameId: 'game_a', type: 'NEWS', draft, published: null, latest: draft });
   const props = { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) };
   await act(async () => h.root.render(createElement(ItemEditor, props))); await h.settle();
-  assert.ok(h.textOf().includes('首页曝光需要平台发布权限'));
+  assert.ok(h.textOf().includes('首页展示需要平台发布权限'));
   assert.ok(h.btn('发布草稿 v1').disabled); assert.ok(!h.btn('保存草稿').disabled);
   await act(async () => h.root.render(createElement(ItemEditor, { ...props, canPublishPlatform: true }))); await h.settle();
-  assert.equal(h.textOf().includes('首页曝光需要平台发布权限'), false); assert.ok(!h.btn('发布草稿 v1').disabled);
+  assert.equal(h.textOf().includes('首页展示需要平台发布权限'), false); assert.ok(!h.btn('发布草稿 v1').disabled);
   assert.equal(h.writes.length, 0);
 });
 
-test("unsupported update Markdown can be saved verbatim while the publish action stays unavailable", async t => {
-  const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: '/api/bff/admin/content/items', response: () => json(itemsPage([])) }, { method: 'PUT', match: '/api/bff/admin/content/items/item_ann_1/draft', response: () => json({ saved: true }) }]) });
+test("update draft submits the plate document and keeps publish gated on checks", async t => {
+  const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: '/api/bff/admin/content/items', response: () => json(itemsPage([])) }, { method: 'PUT', match: '/api/bff/admin/content/items/item_ann_1/draft', response: () => json({ version: { ...draft, revision: "rev_saved" } }) }]) });
   const { ItemEditor } = await h.source.ssrLoadModule('/apps/admin/src/views/content-item-editor.tsx');
-  const body = '<div>原文需要保留</div>', draft = version({ state: 'DRAFT', publishedAt: null, body, updateSettings: { format: 'markdown' } }), item = itemRow({ draft, published: null });
+  const document = { format: 'plate', schemaVersion: 1, preset: 'update', value: [{ type: 'p', id: 'n1', children: [{ text: '原文需要保留' }] }] };
+  const draft = version({ state: 'DRAFT', publishedAt: null, body: '原文需要保留', payload: { format: 'plate', schemaVersion: 1, document, mediaIds: [] }, updateSettings: { format: 'plate' } });
+  const item = itemRow({ draft, published: null });
   await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: true, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
   await h.settle(80);
-  assert.match(h.textOf(), /HTML/);
-  assert.ok(h.btn('发布草稿 v1').disabled); assert.ok(!h.btn('保存草稿').disabled);
-  assert.equal(h.el.querySelector('textarea[aria-label="Markdown 正文"]').value, body);
-  await h.click(h.btn('保存草稿')); assert.equal(h.writes.length, 1); assert.equal(h.writes[0].body.body, body); assert.ok(h.btn('发布草稿 v1').disabled);
+  assert.ok(h.textOf().includes('原文需要保留'), 'plate 正文直接渲染在编辑区');
+  assert.equal(h.el.querySelector('textarea[aria-label="Markdown 正文"]'), null, 'Markdown 分屏编辑已删除');
+  assert.ok(!h.btn('发布草稿 v1').disabled, '合法 plate 草稿可发布');
+  await h.click(h.btn('保存草稿')); assert.equal(h.writes.length, 1);
+  const body = h.writes[0].body;
+  assert.equal(body.payload, undefined);
+  assert.deepEqual(body.document, document);
+  assert.equal(body.body, undefined, '不再提交 markdown body 字符串');
+  assert.equal(body.updateSettings.format, 'plate');
 });
 
 test("a published update is read-only until a separate draft is created, so starting edits cannot discard an unsaved working copy", async t => {
@@ -833,8 +932,9 @@ test("a published update is read-only until a separate draft is created, so star
   const published = version(), item = itemRow({ published, draft: null });
   await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [published] }, games: [], canEdit: true, canPublish: true, mediaReadable: true, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
   await h.settle();
-  const title = [...h.el.querySelectorAll('label')].find(x => x.textContent.includes('标题（纯文本')).querySelector('input');
-  assert.ok(title.disabled); assert.ok(h.el.querySelector('textarea[aria-label="纯文本正文"]').disabled);
+  const title = h.el.querySelector('input[aria-label="文档标题"]');
+  assert.ok(title.disabled, '线上版本标题只读');
+  assert.ok(h.el.querySelector('.plate-editor[data-readonly="true"]'), '线上正文只读');
   assert.ok(!h.btn('编辑已发布内容（新建草稿）').disabled); assert.ok(!h.btn('保存排序').disabled);
   assert.equal(h.writes.length, 0);
 });
@@ -894,8 +994,11 @@ test("a completed save releases its own busy token after the selected game chang
 
 for (const eligibility of ["available", "revoked", "read-failure"]) {
   test(`game publisher checks its own draft media without platform catalog permission: ${eligibility}`, async t => {
-    const { sections: _sections, ...metadata } = legacyHelpPayload();
-    const payload = { ...metadata, format: "markdown", schemaVersion: 1, markdown: "## 图片说明\n\n![说明](media://qa_media)", mediaIds: ["qa_media"] }, key = `guide:${metadata.slug}`;
+    const payload = guidePayload({
+      document: { format: "plate", schemaVersion: 1, preset: "help", value: [{ type: "h2", id: "img-heading", children: [{ text: "图片说明" }] }, { type: "img", mediaId: "qa_media", alt: "说明", children: [{ text: "" }] }] },
+      mediaIds: ["qa_media"],
+    });
+    const key = `guide:${payload.slug}`;
     const draft = { id: "draft_game", revision: "7", sequence: 2, state: "DRAFT", payload };
     let versionReads = 0, catalogReads = 0;
     const h = await mountHarness(t, { perms: ["content.read", "content.edit", "content.publish"], fetchImpl: router([
@@ -929,44 +1032,43 @@ test("QR replacement only previews distinct candidates while banner and hero fie
     key, definition: RESOURCE_DEFINITIONS.find(row => row.key === key), item: { id: "media_item", revision: "2", gameId: null },
     draft: draftPayload ? { id: "draft_2", sequence: 2, state: "DRAFT", payload: draftPayload } : null,
     published: { id: "published_1", sequence: 1, state: "PUBLISHED", payload: publishedPayload }, versions: [], baseline: null,
-    current: { schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: "available", payload: publishedPayload, media: [publishedPayload.qrMediaId, publishedPayload.mediaId].filter(Boolean).map(id => ({ id, url: `/api/v1/content/media/${id}/content` })) },
+    current: { schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: "available", payload: publishedPayload, media: [publishedPayload.qrMediaId, publishedPayload.mediaId, publishedPayload.mobileMediaId, ...(publishedPayload.slides?.flatMap(slide => [slide.mediaId, slide.mobileMediaId]) ?? [])].filter(Boolean).map(id => ({ id, url: `/api/v1/content/media/${id}/content` })) },
   });
   const props = { canEdit: true, canPublish: true, locked: false, onWrite: async () => { throw new Error("preview does not write"); }, onClose() {}, onDirtyChange() {} };
   const render = async (key, detail) => { await act(async () => h.root.render(createElement(ContentMediaEditor, { ...props, key, detail }))); await h.settle(); };
   await render("before", makeDetail("placement:FOLLOW", before));
-  assert.equal(h.el.querySelectorAll(".content-media-comparison img").length, 1);
-  assert.equal(h.el.querySelectorAll(".content-media-field .content-media-selection").length, 0);
-  assert.ok(h.textOf().includes("尚未选择图片"));
+  assert.equal(h.el.querySelectorAll(".content-picture-preview img").length, 1);
+  assert.equal(h.el.querySelector(".content-picture-comparison"), null);
   await render("draft", makeDetail("placement:FOLLOW", before, after));
-  const comparison = [...h.el.querySelectorAll(".content-media-comparison img")];
+  const comparison = [...h.el.querySelectorAll(".content-picture-comparison img")];
   assert.equal(comparison.length, 2); assert.ok(comparison[0].getAttribute("src").includes("qr_before")); assert.ok(comparison[1].getAttribute("src").includes("qr_after"));
-  assert.equal(h.el.querySelectorAll(".content-media-field .content-media-selection").length, 0);
-  assert.ok(h.btn("保存图片草稿").disabled, "saved draft has no unsaved changes but still shows the different draft image");
+  assert.equal(h.btn("保存图片草稿"), undefined, "saved draft has no unsaved changes but still shows the different draft image");
+  assert.ok(h.btn("发布图片"));
   await render("published", makeDetail("placement:FOLLOW", after));
-  assert.equal(h.el.querySelectorAll(".content-media-comparison img").length, 1);
-  assert.ok(h.el.querySelector(".content-media-comparison img").getAttribute("src").includes("qr_after"));
+  assert.equal(h.el.querySelectorAll(".content-picture-preview img").length, 1);
+  assert.ok(h.el.querySelector(".content-picture-preview img").getAttribute("src").includes("qr_after"));
   const banner = { ...DEFAULT_RESOURCES["placement:MARKET_DELTA_BANNER"], mediaId: "banner_desktop", mobileMediaId: "banner_mobile" };
   await render("banner", makeDetail("placement:MARKET_DELTA_BANNER", banner));
-  assert.equal(h.el.querySelectorAll(".content-media-field .content-media-selection img").length, 2, "banner desktop and mobile previews are unchanged");
+  assert.equal(h.el.querySelectorAll(".content-picture-preview img").length, 2, "banner desktop and mobile previews are unchanged");
   const hero = { ...DEFAULT_RESOURCES["placement:HOME_HERO"], slides: DEFAULT_RESOURCES["placement:HOME_HERO"].slides.map((slide, index) => ({ ...slide, mediaId: `hero_${index}`, mobileMediaId: `hero_mobile_${index}` })) };
   await render("hero", makeDetail("placement:HOME_HERO", hero));
-  assert.equal(h.el.querySelectorAll(".content-media-field .content-media-selection img").length, hero.slides.length * 2, "each hero field keeps its thumbnail");
+  assert.equal(h.el.querySelectorAll(".content-picture-preview img").length, hero.slides.length * 2, "each hero field keeps its thumbnail");
   assert.equal(h.writes.length, 0);
 });
 
 test("published resource keeps its online snapshot read-only until an explicit draft is created", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) }]) });
   const { ContentResourceEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-resource-editor.tsx");
-  const payload = DEFAULT_GUIDES[0], key = `guide:${payload.slug}`;
+  const payload = guidePayload(), key = `guide:${payload.slug}`;
   const version = { id: "pub_1", revision: "1", sequence: 1, state: "PUBLISHED", title: payload.title, payload, publishedAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:00Z" };
   const detail = { key, definition: null, item: { id: "guide_item", revision: "4" }, current: { schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: "available", payload, version: { id: "pub_1", sequence: 1, publishedAt: version.publishedAt }, media: [] }, draft: null, published: version, versions: [version], baseline: null };
   const writes = [], relatedOptions = [{ slug: "related-guide", title: "相关说明" }], props = { detail, canEdit: true, canPublish: true, locked: false, relatedOptions, onWrite: async (...args) => { writes.push(args); }, onClose() {}, onDirtyChange() {} };
   await act(async () => h.root.render(createElement(ContentResourceEditor, props))); await h.settle(70);
   assert.ok(h.textOf().includes("线上版本只读"));
   assert.equal(h.btn("保存草稿"), undefined, "no draft means no save action");
-  const title = [...h.el.querySelectorAll("label")].find(node => node.textContent === "文档标题");
+  const title = h.el.querySelector('input[aria-label="文档标题"]');
   assert.ok(title);
-  assert.equal(h.browser.document.getElementById(title.htmlFor).closest("fieldset").disabled, true, "online snapshot title is not editable");
+  assert.equal(title.disabled, true, "online snapshot title is not editable");
   const settingsControl = (id) => h.browser.document.getElementById(id);
   const settingsLocked = (node) => {
     for (let current = node; current; current = current.parentElement) if (current.tagName === "FIELDSET") return current.disabled;
@@ -1001,7 +1103,7 @@ test("published resource keeps its online snapshot read-only until an explicit d
 test("published announcement exposes pinned exposure facts instead of a generic display claim", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) }]) });
   const { ItemEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-item-editor.tsx");
-  const settings = { format: "markdown", tickerEnabled: false, tickerFrom: null, tickerUntil: null, pinned: true, pinnedUntil: "2099-01-01T00:00:00.000Z", validUntil: null, noticeKind: "general", effectiveAt: null, impact: "", surfaces: [], mediaIds: [] };
+  const settings = { format: "plate", tickerEnabled: false, tickerFrom: null, tickerUntil: null, pinned: true, pinnedUntil: "2099-01-01T00:00:00.000Z", validUntil: null, visibleFrom: null, noticeKind: "general", effectiveAt: null, impact: "", surfaces: [], mediaIds: [] };
   const published = version({ id: "pin_pub", state: "PUBLISHED", updateSettings: settings });
   const item = itemRow({ published, draft: null, latest: published });
   await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [published] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
@@ -1014,7 +1116,7 @@ test("published announcement exposes pinned exposure facts instead of a generic 
 test("exposure facts distinguish active, expired, total-expiry and missing pin end", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) }]) });
   const { updateExposureFacts } = await h.source.ssrLoadModule("/apps/admin/src/views/content-update-settings.tsx");
-  const base = { format: "markdown", tickerEnabled: false, tickerFrom: null, tickerUntil: null, pinned: true, pinnedUntil: "2030-01-01T00:00:00.000Z", validUntil: null, noticeKind: "general", effectiveAt: null, impact: "", surfaces: [], mediaIds: [] };
+  const base = { format: "plate", tickerEnabled: false, tickerFrom: null, tickerUntil: null, pinned: true, pinnedUntil: "2030-01-01T00:00:00.000Z", validUntil: null, visibleFrom: null, noticeKind: "general", effectiveAt: null, impact: "", surfaces: [], mediaIds: [] };
   const labels = (settings, at) => updateExposureFacts(settings, Date.parse(at)).map(fact => fact.label);
   const active = labels(base, "2029-12-31T00:00:00Z");
   assert.ok(active.some(label => label.startsWith("置顶中")), "an unexpired pin is active");
@@ -1034,13 +1136,13 @@ test("a pinned-limit 409 keeps the draft and explains why publishing failed", as
     { method: "POST", match: /^\/api\/bff\/admin\/content\/items\/[^/]+\/publish$/, response: () => json({ error: { code: "CONFLICT" } }, 409) },
   ]) });
   const { ItemEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-item-editor.tsx");
-  const draft = version({ id: "pin_draft", state: "DRAFT", publishedAt: null, updateSettings: { format: "markdown", pinned: true, pinnedUntil: "2099-01-01T00:00:00.000Z" } });
+  const draft = version({ id: "pin_draft", state: "DRAFT", publishedAt: null, updateSettings: { format: "plate", pinned: true, pinnedUntil: "2099-01-01T00:00:00.000Z" } });
   const item = itemRow({ draft, published: null, latest: draft });
   await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose() {}, onChanged: async () => { throw new Error("publish must not report success"); }, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
   await h.settle(80);
   await h.click(h.btn("发布草稿 v1"));
   await h.settle(60);
-  assert.ok(h.textOf().includes("可能已有 3 条有效置顶"));
+  assert.ok(h.textOf().includes("同时最多 3 条有效置顶"));
   assert.ok(h.textOf().includes("草稿 v1"), "draft stays visible after rejection");
   assert.ok(h.btn("保存草稿"), "draft actions remain available");
 });
@@ -1052,21 +1154,23 @@ test("a bound image without a readable URL is reported as unavailable, not as a 
   const detail = { key, definition: RESOURCE_DEFINITIONS.find(row => row.key === key), item: { id: "qr_item", revision: "2" }, draft: null, published: { id: "qr_pub", sequence: 1, state: "PUBLISHED", payload }, versions: [], baseline: null, current: { schema: RESOURCE_SCHEMA, key, source: "MANAGED", state: "available", payload, media: [{ id: "qr_revoked", url: null }] } };
   await act(async () => h.root.render(createElement(ContentMediaEditor, { detail, canEdit: true, canPublish: true, locked: false, onWrite: async () => { throw new Error("preview does not write"); }, onClose() {}, onDirtyChange() {} })));
   await h.settle();
-  assert.ok(h.textOf().includes("已撤权或无法读取"));
-  assert.equal(h.el.querySelector('img[alt="当前线上图片"]'), null);
+  assert.ok(h.textOf().includes("当前图片无法显示"));
+  assert.equal(h.el.querySelector('img[alt="当前线上二维码"]'), null);
 });
 
-test("an empty Markdown draft offers a starting structure without overwriting other drafts", async t => {
+test("an empty draft opens the Notion editor with an untitled page placeholder", async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: "/api/bff/admin/content/items", response: () => json(itemsPage([])) }]) });
   const { ItemEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-item-editor.tsx");
-  const draft = version({ id: "empty_draft", state: "DRAFT", body: "", publishedAt: null, updateSettings: { format: "markdown" } });
+  const draft = version({ id: "empty_draft", state: "DRAFT", title: "", body: "", publishedAt: null, updateSettings: { format: "plate" } });
   const item = itemRow({ draft, published: null, latest: draft });
   await act(async () => h.root.render(createElement(ItemEditor, { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose() {}, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) })));
   await h.settle(80);
-  assert.ok(h.btn("插入示例结构"), "空正文显示起始结构入口");
-  await h.click(h.btn("插入示例结构"));
-  const area = h.el.querySelector('textarea[aria-label="Markdown 正文"]');
-  assert.ok(area.value.includes("## 公告内容"));
+  const title = h.el.querySelector('input[aria-label="文档标题"]');
+  assert.equal(title.placeholder, "无标题", "页面级 inline 大标题 placeholder");
+  assert.equal(title.value, "");
+  assert.equal(h.btn("插入示例结构"), undefined, "Markdown 示例结构入口已删除");
+  assert.ok(h.el.querySelector(".content-notion-page"), "正文居中列容器");
+  assert.equal(h.writes.length, 0, "空草稿挂载不触发写请求");
 });
 
 async function mountAnnouncementDraftEditor(t, { holdSort = false } = {}) {
@@ -1077,7 +1181,7 @@ async function mountAnnouncementDraftEditor(t, { holdSort = false } = {}) {
     { method: "PUT", match: "/api/bff/admin/content/items/item_ann_local", response: () => holdSort ? sortResult : json({ saved: true }) },
   ]) });
   const { ItemEditor } = await h.source.ssrLoadModule("/apps/admin/src/views/content-item-editor.tsx");
-  const draft = version({ id: "draft_local", state: "DRAFT", title: "原公告标题", publishedAt: null, updateSettings: { format: "markdown" } });
+  const draft = version({ id: "draft_local", state: "DRAFT", title: "原公告标题", publishedAt: null, updateSettings: { format: "plate" } });
   const item = itemRow({ id: "item_ann_local", draft, published: null, latest: draft });
   let closes = 0, reloads = 0;
   const props = { detail: { item, versions: [draft] }, games: [], canEdit: true, canPublish: true, mediaReadable: false, onClose: () => { closes += 1; }, onReload: () => { reloads += 1; }, onChanged: async () => {}, onDirtyChange() {}, requestMediaOptions: async () => optionsPage([]) };
@@ -1087,9 +1191,9 @@ async function mountAnnouncementDraftEditor(t, { holdSort = false } = {}) {
 }
 
 function titleInputOf(h) {
-  const label = [...h.el.querySelectorAll("label")].find(node => node.textContent.startsWith("标题（纯文本"));
-  assert.ok(label, "title field exists");
-  return label.querySelector("input");
+  const input = h.el.querySelector('input[aria-label="文档标题"]');
+  assert.ok(input, "title field exists");
+  return input;
 }
 
 async function typeTitle(h, value) {
@@ -1165,7 +1269,7 @@ test("a failed later page stays incomplete across opening and closing a detail u
     } },
     { match: `/api/bff/admin/content/resources/${encodeURIComponent(key)}`, response: () => json(detail) },
   ]) });
-  await h.click(h.btn("图片与二维码"));
+  await h.click(h.btn("用户站展示"));
   await h.settle(60);
   assert.equal(listCalls, 2, "the first page succeeded and the second failed");
   assert.ok(h.textOf().includes("读取未完成"));
@@ -1195,7 +1299,7 @@ test('pending save cannot be unloaded by a content partition tab',async t=>{
   {match:'/api/bff/admin/content/media',response:()=>json(mediaPage([]))}
  ])});
  await h.click(h.btn('编辑'));await h.settle(80);await h.click(h.btn('保存草稿'));
- const backDisabled=h.btn('返回列表')?.disabled;await h.click(h.btn('运营素材'));
+ const backDisabled=h.btn('返回列表')?.disabled;await h.click(h.btn('图片素材'));
  const editorUnloaded=!h.el.querySelector('[aria-label="公告编辑器"]'),confirmations=h.browser.document.querySelectorAll('[role="alertdialog"]').length;
  release(json({saved:true}));await h.settle(60);
 
@@ -1213,8 +1317,7 @@ test('a higher-revision refresh cannot silently drop input typed during the read
  ])});
  await h.click(h.btn('编辑'));await h.settle(80);await typeTitle(h,'第一次未保存修改');
  await h.click(h.btn('刷新详情'));await h.click(h.btn('放弃并刷新'));await h.settle(30);
- const labelDuringRead=[...h.el.querySelectorAll('label')].find(x=>x.textContent.startsWith('标题（纯文本'));
- const inputDuringRead=labelDuringRead?.querySelector('input');
+ const inputDuringRead=h.el.querySelector('input[aria-label="文档标题"]');
  const disabledDuringRead=!inputDuringRead||inputDuringRead.disabled;
  if(!disabledDuringRead)await typeTitle(h,'刷新读取中新增的第二次输入');
  const typedDuringRead=inputDuringRead?.value??null;
@@ -1236,7 +1339,8 @@ test('read-only update settings disable custom controls and ignore attempted cha
   for (const box of boxes) { assert.equal(box.getAttribute('aria-disabled'), 'true'); assert.equal(box.tabIndex, -1); }
   await h.click(boxes[0]); assert.equal(changes.length, 0);
   await act(async () => h.root.render(createElement(ControlledSettings, { disabled: false }))); await h.settle();
-  await h.click(h.el.querySelector('[role=checkbox]').closest('label')); assert.ok(changes.length > 0); assert.equal(changes.at(-1).tickerEnabled, true); assert.equal(h.el.querySelector('[role=checkbox]').getAttribute('aria-checked'), 'true');
+  const ticker = h.el.querySelector('#ticker-enabled');
+  await h.click(ticker.closest('label')); assert.ok(changes.length > 0); assert.equal(changes.at(-1).tickerEnabled, true); assert.equal(ticker.closest('label').querySelector('[role=checkbox]').getAttribute('aria-checked'), 'true');
   assert.equal(h.writes.length, 0);
 });
 
@@ -1244,14 +1348,16 @@ test('read-only update settings disable custom controls and ignore attempted cha
 test('publication-only access can review and publish a saved draft without being called read-only', async t => {
   const h = await mountHarness(t, { perms: PLATFORM_PERMS, fetchImpl: router([{ match: '/api/bff/admin/content/items', response: () => json(itemsPage([])) }]) });
   const { ContentResourceEditor } = await h.source.ssrLoadModule('/apps/admin/src/views/content-resource-editor.tsx');
-  const key = 'guide:rental-getting-started', payload = { ...DEFAULT_RESOURCES[key], markdown: '## 审阅原稿\n\n保留原稿。', mediaIds: [] };
+  const payload = guidePayload({ id: 'rental-getting-started', slug: 'rental-getting-started', title: '租号入门', document: plateDoc('保留原稿。') });
+  const key = `guide:${payload.slug}`;
   const draft = { id: 'publication_only_draft', sequence: 1, revision: '1', state: 'DRAFT', title: payload.title, payload, publishedAt: null, updatedAt: '2026-10-29T00:00:00Z' };
-  const current = { schema: RESOURCE_SCHEMA, key, source: 'BUILTIN', state: 'available', payload: DEFAULT_RESOURCES[key], media: [] };
-  const detail = { key, definition: null, item: { id: 'publication_only_item', revision: '1' }, draft, published: null, versions: [draft], current, baseline: DEFAULT_RESOURCES[key] }, writes = [];
+  const current = { schema: RESOURCE_SCHEMA, key, source: 'BUILTIN', state: 'available', payload, media: [] };
+  const detail = { key, definition: null, item: { id: 'publication_only_item', revision: '1' }, draft, published: null, versions: [draft], current, baseline: payload }, writes = [];
   const props = { detail, canEdit: false, canPublish: true, locked: false, onWrite: async (...args) => writes.push(args), onClose() {}, onDirtyChange() {} };
   await act(async () => h.root.render(createElement(ContentResourceEditor, props))); await h.settle(100);
   assert.ok(h.textOf().includes('可按发布权限处理已有草稿'));
   assert.ok(!h.textOf().includes('不能保存或发布'));
+  assert.ok(h.el.querySelector('[aria-label="正文只读视图"]'), '客服/发布-only 看到只读渲染而非编辑器');
   assert.ok(!h.btn('发布到用户页面').disabled); await h.click(h.btn('发布到用户页面'));
   assert.equal(writes[0][0], 'content.resource.publish');
   await act(async () => h.root.render(createElement(ContentResourceEditor, { ...props, canPublish: false }))); await h.settle();

@@ -12,18 +12,6 @@ import type { LegacyHistoricalRead } from "../../api";
 import { formatReferenceYuan } from "@zzsh/ui/display-money";
 export type { LegacyHistoricalRead } from "../../api";
 
-export type QueueItem = {
-  id: string;
-  game_id: string;
-  title: string | null;
-  owner_name: string;
-  game_name: string;
-  review_state: string;
-  sequence: string;
-  owner_paused: boolean;
-  staff_restricted: boolean;
-};
-
 export type Declaration = {
   attributes: Record<string, unknown>;
   title: string;
@@ -201,8 +189,8 @@ export function restrictionConditions(detail: SupplyWorkDetail): string[] {
   const version = detail.version, facts = detail.supervision.facts;
   const remaining = [...new Set(facts.reasons.filter(code => code !== "STAFF_RESTRICTED" && code !== "OWNER_PAUSED"))];
   return [
-    "号主暂停：" + (detail.account.owner_paused ? "已暂停，须由号主独立恢复" : "当前未暂停"),
-    "本版资料：" + (version ? reviewStateLabel(version.reviewState) + "；发布记录：" + (version.publication ? publicationSourceLabel(version.publication.source) : "无记录") : "当前版本未提供"),
+    "号主状态：" + (detail.account.owner_paused ? "存在旧暂停记录，请核对账号状态" : "无旧暂停记录"),
+    "所选资料：" + (version ? reviewStateLabel(version.reviewState) + "；发布记录：" + (version.publication ? publicationSourceLabel(version.publication.source) : "无记录") : "当前资料未提供"),
     "其余阻断（当前读取）：" + (remaining.map(blockerLabel).join("；") || "服务端未返回其余阻断"),
     ...(facts.publicVisible === null || facts.newOrders === null ? ["公开或新单资格仍有待核依据，处置后须重新读取。"] : []),
   ];
@@ -220,7 +208,7 @@ export function supplyObjectLabel(item: { id?: string; displayNo?: string | null
   return `账号 ${shortId(item.accountId ?? item.id ?? "")}`;
 }
 export function supplyFactText(facts: SupplyFacts) {
-  return { display: facts.publicVisible === null ? "公开状态待核" : facts.publicVisible ? "当前公开展示" : "当前未公开", newOrders: facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新订单" : "不能接新订单", reason: facts.primaryReasonCode ? blockerLabel(facts.primaryReasonCode) : facts.staffRestricted ? "运营限制尚未解除" : facts.ownerPaused ? "号主暂停公开" : facts.reasons.map(blockerLabel).join("；") || "当前读取依据完整" };
+  return { display: facts.publicVisible === null ? "公开状态待核" : facts.publicVisible ? "当前公开展示" : "当前未公开", newOrders: facts.newOrders === null ? "新单资格待核" : facts.newOrders ? "可接新订单" : "不能接新订单", reason: facts.primaryReasonCode ? blockerLabel(facts.primaryReasonCode) : facts.staffRestricted ? "运营限制尚未解除" : facts.ownerPaused ? "存在旧暂停记录" : facts.reasons.map(blockerLabel).join("；") || "当前读取依据完整" };
 }
 export function knownSupplyLink(value: string, origins: { admin: string; user: string }): { kind: "account" | "order"; id: string } | null {
   try {
@@ -322,7 +310,6 @@ export type Detail = {
     reviewer_name: string;
     decided_at: string;
   }>;
-  duplicateHints: Array<{ id: string; result: string; reason: string }>;
   blockers: string[];
   available: boolean;
 };
@@ -369,7 +356,7 @@ export function accountBusinessStatus(facts: SupplyFacts, reviewState?: string |
   if (facts.businessState === undefined) {
     if (facts.occupancy === "OCCUPIED") return { label: "订单进行中", tone: "info", ...(occupancy ? { detail: occupancy } : {}) };
     if (facts.staffRestricted === true) return { label: "运营限制", tone: "warning" };
-    if (facts.ownerPaused === true) return { label: "号主暂停", tone: "neutral" };
+    if (facts.ownerPaused === true) return { label: "旧状态待核", tone: "neutral" };
     if (facts.newOrders === true) return { label: "上架中", tone: "success" };
   }
   if (reviewState === "DRAFT" && facts.publicVisible === false && facts.newOrders !== true && facts.occupancy === "FREE" && !facts.staffRestricted && !facts.ownerPaused) return { label: "未上架", tone: "neutral" };
@@ -394,16 +381,17 @@ const BLOCKER_LABELS: Record<string, string> = {
   ADULT_REQUIRED: "号主未成年",
   GAME_UNAVAILABLE: "游戏不可用",
   GAME_SERVICE_UNAVAILABLE: "租赁服务未启用",
-  RULE_CHANGED: "规则已切换(需新版本)",
+  RULE_CHANGED: "规则已调整，请核对",
   ACCOUNT_NOT_PUBLISHABLE: "当前账号资料暂不能发布",
-  LEGACY_LISTING_RELIST_REQUIRED: "请号主重新填写账号资料后上架",
+  ACCOUNT_DELISTED: "号主已下架，需重新填写上架资料",
+  LEGACY_LISTING_RELIST_REQUIRED: "旧账号保留历史，需重新填写上架资料",
   PUBLISHER_BAIL_UNCONFIRMED: "号主保证金未确认",
   FUNDING_UNKNOWN: "资金资格依据尚未核定",
   OCCUPIED: "租用占用中",
   OCCUPANCY_UNKNOWN: "占用状态未知",
   PUBLICATION_REQUIRED: "无有效发布事实",
   CURRENT_VERSION_MISSING: "尚无当前资料版本",
-  OWNER_PAUSED: "号主已暂停",
+  OWNER_PAUSED: "存在旧暂停记录",
   STAFF_RESTRICTED: "运营限制中",
   CONFIRMATION_OR_MEDIA_REQUIRED: "规则接受或展示图尚未同时满足",
   QUOTE_REQUIRED: "草稿尚未核价",
@@ -434,7 +422,7 @@ export function effectiveRentable(detail: Pick<Detail, "available" | "account">)
 
 export function availabilityText(detail: Detail): string {
   if (detail.account.staff_restricted) return "运营限制中(已隐藏公开展示并阻止新订单)";
-  if (detail.account.owner_paused) return "号主已暂停(隐藏于公开列表)";
+  if (detail.account.owner_paused) return "存在旧暂停记录，请核对当前状态";
   if (detail.available) return "当前可公开出租";
   return "当前不可租(存在阻塞项)";
 }
@@ -510,7 +498,7 @@ export function lightboxKeyAction(key: string): "close" | null {
 export type ZoomTarget = { src: string; alt: string; caption: string };
 
 export function mediaContentUrl(assetId: string): string {
-  return `/api/bff/admin/supply/media/${assetId}/content`;
+  return `/api/bff/admin/supply/media/${encodeURIComponent(assetId)}/content?delivery=direct`;
 }
 
 export function reasonIsDirty(reason: string): boolean {

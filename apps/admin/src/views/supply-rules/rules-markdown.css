@@ -1,8 +1,3 @@
-.rules-markdown .w-md-editor { box-shadow: none; border-radius: 0; background: transparent; color: var(--foreground); --color-canvas-default: var(--background); --color-canvas-subtle: var(--muted); --color-fg-default: var(--foreground); --color-fg-muted: var(--muted-foreground); --color-border-default: var(--border); }
-.rules-markdown .w-md-editor-text-input { caret-color: var(--foreground); font-size: 14px; line-height: 1.85; }
-.rules-markdown .w-md-editor-toolbar { background: var(--muted); border-bottom: 1px solid var(--border); padding: .5rem; min-height: 2.75rem; flex-wrap: wrap; }
-.rules-markdown .w-md-editor-toolbar button { min-width: 1.875rem; min-height: 1.875rem; }
-
 /* 窄屏：皮肤加价表改为卡片，避免横向滚动 */
 @media (max-width: 639px) {
   .skin-rules-table { overflow: visible; }

@@ -1,0 +1,42 @@
+{
+  "key": "rental-check-before-order",
+  "kind": "help",
+  "file": "help/rental-check-before-order.json",
+  "meta": {
+    "id": "R02",
+    "slug": "rental-check-before-order",
+    "title": "下单前需要核对哪些信息？",
+    "summary": "核对账号资源、费用构成、押金与租期说明，确认页面报价是按你本人情况计算的结果。",
+    "category": "rental",
+    "audience": ["renter"],
+    "keywords": ["核对", "账号信息", "库存", "哈夫币", "哈弗币", "皮肤", "押金", "租期", "报价", "下单前"],
+    "updatedAt": "2026-10-06",
+    "related": ["rental-getting-started", "fees-overview", "membership-benefits"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-先核对这三类信息",
+    "pricing": "content-报价是怎样算出来的"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "先核对这三类信息", "children": [{ "text": "先核对这三类信息" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 1, "children": [{ "text": "资源：哈夫币数量、指定物资库存、皮肤、安全箱等账号资源，以详情页当前展示为准。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 2, "children": [{ "text": "费用：资源费用、押金和租期说明分别列明；哈夫币与物资按账号现有全量库存计价，不是按你预计的使用量。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 3, "children": [{ "text": "本人条件：你的会员档位会影响押金减免与资源价格，最终金额以下单确认页的本人报价为准。" }] },
+      { "type": "h2", "id": "报价是怎样算出来的", "children": [{ "text": "报价是怎样算出来的" }] },
+      { "type": "p", "children": [{ "text": "价格由服务端按平台维护的计价规则计算，下单确认时冻结本单价格与规则版本。公开列表与详情展示的是标准报价，你的最终应付以登录后的下单确认页为准。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "页面没有展示的字段表示未申报或暂未知，不等于零；对任何一项有疑问，先咨询平台客服再下单。" }] }
+        ]
+      }
+    ]
+  }
+}

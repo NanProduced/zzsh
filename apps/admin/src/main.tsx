@@ -7,7 +7,6 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import "@zzsh/ui/content-document.css";
 
 import { AuthLayout } from "./components/auth-layout";
 import { BrandLogo } from "./components/brand-logo";
@@ -362,6 +361,31 @@ function App() {
     snapshot?.authenticated ? snapshot.session.id : undefined,
     () => void lockSession()
   );
+
+  // PIN lock keeps reception timing alive even though the workbench is replaced
+  // by the lock screen and its IM connection is closed. This root-level signal is
+  // independent of the workbench render tree; a closed browser simply stops it.
+  const lockedCanPresence = snapshot?.authenticated === true
+    && (snapshot.security.isBoss || snapshot.permissions.includes("im.support.presence"));
+  useEffect(() => {
+    if (!snapshot?.authenticated || !snapshot.session.locked || !snapshot.session.pinConfigured || !lockedCanPresence) return;
+    let cancelled = false;
+    const beat = () => {
+      if (cancelled) return;
+      void adminRequest("/im/presence/locked-heartbeat", {}, "POST").catch(() => undefined);
+    };
+    beat();
+    const timer = window.setInterval(beat, 30_000);
+    const onVisible = () => { if (document.visibilityState === "visible") beat(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [snapshot, lockedCanPresence]);
 
   const clearPreview = useCallback(() => {
     clearUrlTheme();

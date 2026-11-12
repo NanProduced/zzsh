@@ -53,7 +53,7 @@
 .update-article-heading { padding:10px 0 26px; margin-bottom:30px; border-bottom:1px solid var(--color-border-subtle); }
 .update-article h1 { margin:20px 0 17px; color:var(--color-text-primary); font-size:clamp(26px,3vw,36px); font-weight:750; line-height:1.5; letter-spacing:-.025em; overflow-wrap:anywhere; text-wrap:pretty; }
 .update-article-meta { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:22px; color:var(--color-text-secondary); font-size:13px; }
-.update-article-summary { margin:0; color:var(--color-text-secondary); font-size:16px; line-height:1.9; }
+.update-article-summary { margin:0; color:var(--color-text-secondary); font-size:16px; line-height:1.9; overflow-wrap:anywhere; }
 .update-back { display:inline-flex; gap:7px; align-items:center; min-height:40px; color:var(--color-text-secondary); font-size:13px; text-decoration:none; }
 .update-back:hover { color:var(--color-accent-brand-ink); }
 .update-impact { margin:0 0 32px; padding:20px 24px; background:var(--updates-warm); border:1px solid color-mix(in srgb,var(--updates-gold) 24%,var(--color-border-subtle)); border-radius:10px; font-size:14px; }
@@ -66,7 +66,9 @@
 .update-expired-copy strong { display:block; margin-bottom:2px; color:var(--color-text-primary); font-size:13.5px; font-weight:600; }
 .update-expired-copy p { margin:0; color:var(--color-text-secondary); }
 .update-article-body { line-height:1.85; font-size:15.5px; }
-.update-article-body .content-markdown { --typeset-size:1rem; --typeset-leading:1.85; }
+.update-article-body .plate-document { line-height:1.85; }
+.update-article-body .plate-document > ul { list-style:disc; }
+.update-article-body .plate-document > ol { list-style:decimal; }
 .update-article-footer { border-top:1px solid var(--color-border-subtle); margin-top:36px; padding-top:20px; }
 .updates-loading { padding-block:16px 64px; }.updates-loading-row { height:116px; margin:0; border-bottom:1px solid var(--color-border-subtle); background:linear-gradient(90deg,var(--color-bg-elevated) 20%,transparent 20%) 20px 35px/calc(100% - 40px) 16px no-repeat; }
 .platform-updates-center :where(a,button):focus-visible { outline:2px solid var(--color-focus-ring); outline-offset:4px; }

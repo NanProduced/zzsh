@@ -158,6 +158,7 @@ export function AccountPreviewCard({
               已归档
             </Badge>
           )}
+          {facts.lifecycle === 'DELISTED' && <Badge variant="outline" className="text-[10px] h-4 px-1 py-0">已下架</Badge>}
           {facts.reviewState && (
             <Badge variant="outline" className="text-[10px] h-4 px-1 py-0">
               {({APPROVED:'审核通过',PENDING:'待审核',REJECTED:'已驳回',DRAFT:'草稿'} as Record<string,string>)[facts.reviewState] ?? '审核状态待核'}

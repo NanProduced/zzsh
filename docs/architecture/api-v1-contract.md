@@ -120,32 +120,32 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 
 核心前缀 `/api/v1/supply`，用户Cookie BFF为 `/api/bff/user/supply`（只适配传输，不重算业务）。管理审核核心前缀 `/api/v1/admin/supply/listing-reviews`，Admin BFF为 `/api/bff/admin/supply/listing-reviews`。
 
-本人账号详情的旧观察版本可返回 `canPrepareLegacyCancelledDraft`：true 只表示已具备创建待核草稿的入口，创建和发布仍各自重新校验；false 或字段缺失均不表示可以上架。
+迁入的三角洲账号保留历史资料与订单关联，不在原账号上重建发布草稿；需要出租时由号主填写新账号资料。
 
 | 核心接口 | 输入/结果 |
 |---|---|
 | GET /games/{gameId}/publishing-options | 生效release/generation、租期选项、允许的安全箱/计价选项代码、封存协议正文及digest；不含收价和抽成参数 |
 | POST /accounts | `{gameId}`；创建本人账号档案，不同时创建草稿。随后GET读取版本，再以当前expectedRevision调用POST /accounts/{id}/drafts |
-| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|QUARANTINED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+技术READY+审核状态PENDING或APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未暂停/未受限/规则有效/当前版本具有有效发布事实且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或暂停后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
-| POST /accounts/{id}/drafts | expectedRevision；首次草稿或从已处理版本复制新草稿。审核中先撤回，切换为草稿立即阻止旧版接单，不改写owner_paused。迁移时正在出租的旧账号仅在本平台客服特殊取消后可由号主创建草稿，服务端核对旧账号来源、取消事实、账号占用和版本；创建后须由号主核实资料并重新走发布规则，不自动上架。原已下架旧账号不因此开放。 |
+| GET /me/accounts、GET /accounts/{id} | 本人供给、草稿/当前版本、OwnerQuote、对应版本的协议正文、审核原因与blockers；详情可用versionId读取同档案历史，历史不可作为当前可租版本。号主读取的`declaration.mediaBindings`在既有`assetId/position/purpose/byteHash`上增加只读`reviewState`（`PENDING\|APPROVED\|REJECTED\|QUARANTINED\|UNAVAILABLE`）、`publicDisplayEligible`与`publiclyReadable`。前者只表示素材当前具备 ACCOUNT_DISPLAY+技术READY+审核状态PENDING或APPROVED+PUBLIC_DISPLAY+公开衍生键；`publiclyReadable`表示`GET /listings/{accountId}/media/{assetId}`此刻会放行：须账号当前可公开（未下架/未受限/规则有效/资料具有有效发布事实且媒体就绪）且该图绑定在当前公开版本 payload 中。私有凭证、草稿独有图、撤权或下架后均为 false。不由账号版本 APPROVED 推断。写入草稿仍只接受`assetId/position`，多带只读字段返回400。裁剪回`DraftInput`时只保留`assetId/position`。缺失或不可解析的绑定返回`UNAVAILABLE`且不让整份详情500。 |
+| POST /accounts/{id}/drafts | expectedRevision；仅限未曾正式发布的账号首次创建草稿，或对撤回、退回的未发布资料继续完善。已发布、已下架、归档及迁入的三角洲账号不得创建修改草稿。 |
 | PUT /accounts/{id}/draft | expectedRevision及title/description/attributes/termOptionCode/pricingOptionCode/inventory/skins/entitlements/mediaBindings；库存为整数基础单位文本或null，媒体只提交assetId/position，不接收价格/号主ID/digest/byteHash |
 | POST /accounts/{id}/quote | expectedRevision；从持久化草稿、当前封存规则、目录和媒体记录生成并保存唯一规范化payload/hash；未知数量、条件、有效期不补零 |
 | POST /accounts/{id}/accept-rules、/submit | expectedRevision、versionId、releaseId、contentHash；接受和提交必须匹配已保存报价及当前release |
 | POST /accounts/{id}/withdraw | expectedRevision、versionId、可选reason；只撤回确切待审版本 |
-| POST /accounts/{id}/pause、/resume | expectedRevision及可选reason；恢复另核有效发布事实、规则、身份、保证金资格、占用和媒体，不能解除客服限制 |
+| POST /accounts/{id}/delist | expectedRevision；本人确认永久下架。待付款单先关闭，已付款或在租订单须先处理；未出租账号按原保证金收款记录建立退还责任，渠道执行与到账另行确认。旧 pause/resume 写入口不再提供。 |
 | GET /listings、GET /listings/{id} | 无登录墙的PublicQuote白名单；以下为未指定queryVersion的v1合同，v2见[组合筛选合同](listing-query.md)。list支持可选`q`（NFC+trim，空白视为未传，最长120，NUL拒绝；服务端参数化`ILIKE`且`%/_/\\`按字面量）、gameId、itemId/minQuantity、重复skinId+skinMatch=ANY/ALL、limit1–100和cursor。游标绑定规范化后的`q`及其他过滤，更换条件后旧游标400，不混页。`q`只在当前可租候选池匹配标题/公开号，不搜索内部用户ID、登录资料或私人说明；精确编号`GET /listings/lookup?number=&gameId=`可查仍获准公开的暂不可租资料，详见[账号可见性与编号](account-visibility.md)。原生编号须装配独立账号序列与约束后在创建事务中持久赋值，不借订单号；旧号按可信冻结来源保留。详情在既有quote/attributes上增加`attributes.safe_box_code`、`safeBox{code,displayName}`（已知稳定code从受控映射返回中文名称，未知code的displayName为null；attributeDisplay保留UNCONFIRMED及issueCode，缺值不猜测）和`termOption{code,displayName,dailyConsumption{quantity,unit=HAFF_BASE}}`，数据取自该公开版本绑定的封存release/term_option，不用当前运营草稿改写；缺字段为null，不默认0。`quote.termSeconds`仍为权威租期；每日消耗只用于租期推算，不是每日保底。不可公开统一404。 |
-| GET /listings/{id}/media/{assetId} | 仅当前可公开版本绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、撤回、限制或公开前置失效后404，暂停和规则变更等非租赁阻断随已获准公开详情保持只读可读 |
-| 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情含前版对比与审核/重复线索，不用内部ID作为主要人工入口 |
+| GET /listings/{id}/media/{assetId} | 仅当前可公开资料绑定且技术/公开资格有效的ACCOUNT_DISPLAY衍生图，no-store；下架、撤回、限制或公开前置失效后404，其他非租赁阻断以公开资格实际结果为准。 |
+| 管理 GET /listing-reviews、/{accountId} | 按state/after/limit读取显式scope队列，nextCursor接后续after；详情包含历史资料与审核记录，不用内部ID作为主要人工入口 |
 | 管理 GET /listing-reviews?queryVersion=3 | 跨资料状态账号供给读取；view=all/changes/restricted/paused/orders，queryKind=account/legacy/owner/nickname/order、q、gameId、limit（1–50）、cursor。号主昵称多候选，业务编号/旧来源编号/稳定ID分别保留；无新编号时不落库伪造。游标HMAC绑定管理员/会话/权限/游戏scope/完整查询；旧ID游标、绑定或签名不符409回首页。列表无全局总计。order线索/视图另需order.read。 |
 | 管理 GET /listing-reviews/{accountId}?queryVersion=3 | 独立对象读取，versionId限同账号历史；返回contractVersion/contextKey、当前资料与历史/前版、supervision的权威公开/新单/阻断与主要原因、对象相关限制事件、按独立权限裁剪的号主/订单目标。公开读取复用原生及旧来源只读合同，旧来源公开不等原生接单许可；缺资料/原事件/图片不补造证据。历史版本只读，当前业务事实仍单列。 |
 | 管理 POST /listing-reviews/{accountId}/decide | expectedRevision、versionId、releaseId、contentHash、APPROVE/REJECT、具体reason；审核/撤回竞争只接受一次有效处理 |
-| 管理 POST /listing-reviews/{accountId}/restriction、/duplicates | 限制使用restricted+reason；重复线索使用relatedAccountId/evidenceRef/result/reason；均带expectedRevision，重复仅人工记录，不自动处置 |
+| 管理 POST /listing-reviews/{accountId}/restriction | 限制使用restricted+reason及expectedRevision；重复上架由客服线下核实，不提供系统判重或重复线索登记入口。 |
 
 - 匿名无版本档案统一404。公共详情、图片和整页列表在REPEATABLE READ READ ONLY事务中读取同一快照，不取用户/游戏/档案/版本的排他行锁。撤权提交后建立的新快照拒绝访问；已开始的读取可按其先前一致快照完成，响应保持no-store。
 - 发布写回执保留原版本、修订及结果；首次和缓存重放发送前均按当前内部报价权限投影报价字段，不重新执行业务或刷新成另一版本，不改写原缓存。
-- 全部写入带Idempotency-Key，重放仍检查当前身份、权限和对象范围。管理审核须supply.review.read，决定、限制、重复另需supply.review.decide、supply.restrict、supply.duplicate.review；内部双边报价另需supply.quote.internal.read。未配置scope不放行。
+- 全部写入带Idempotency-Key，重放仍检查当前身份、权限和对象范围。管理审核须supply.review.read，决定和限制另需supply.review.decide、supply.restrict；内部双边报价另需supply.quote.internal.read。未配置scope不放行。
 - 号主submit在门禁通过后写入不可变OWNER_DIRECT发布事实，版本置PUBLISHED，不伪造管理员APPROVE。历史APPROVED必须匹配真实LEGACY_APPROVED发布依据；详情见[直接发布合同](supply-form-contract.md)。
-- listing_version.schema_version保留旧1，含rentalPricing的新声明/报价使用2；attributes采用受控字段，安全箱条件保存为safe_box_code。未知值可留草稿；报价/提交必须满足已配置规则，不允许把空等级变成0。提交后内容/明细不可改，撤回或驳回后创建新版本；规则变化需新报价/接受并形成有效发布事实，不自动继承历史通过。
+- listing_version.schema_version保留旧1，含rentalPricing的新声明/报价使用2；attributes采用受控字段，安全箱条件保存为safe_box_code。未知值可留草稿；报价/提交必须满足已配置规则，不允许把空等级变成0。正式发布后不能修改或以同一账号再次发布；未发布资料撤回或驳回后仍可继续完善。订单需要的原始资料快照与引用保留。
 - 用户行锁协调身份变化与发布事务，占用由订单表派生。默认SupplyGateReader读取当前正式政策及最新有效保证金依据，缺失或不匹配为UNKNOWN；测试替代reader仅限显式test/fake能力。HTTP不能自行声明已付款/未占用，正式核定依据也不等于真实资金到账。
 - ACCOUNT_EVIDENCE始终为私有证据；ACCOUNT_DISPLAY单独申报并执行技术/公开资格校验，绑定需同号主/档案/游戏；仍可由有权管理员审核或隔离。用户素材不能经无条件的/media/{id}/content公开；原始证据保持私有。未传purpose时仍兼容M3-B私有凭证及原幂等指纹。
   - 管理`POST /media/{assetId}/review`及`/visibility`对USER_SUPPLY/ACCOUNT_DISPLAY的新意图都要求`accountContext={accountId,accountRevision,versionId,assetRevision,byteHash}`及2–500字原因。账号→媒体锁内校验原号主、当前版本、仍绑定图片、两种修订及字节摘要；错账号/用途404，缺上下文或版本/绑定改变409重新核对。这是旧客户端写合同收紧：原媒体页转精确来源账号/图片核对；未绑定当前版本的图保留只读与待补合法处置边界，不能自动改其他图。平台目录/内容素材及私有凭证保持原合同。已成功旧key重放仍先核当前权限/scope再返回原回执，不重新执行或因旧CAS变更再写。
@@ -220,7 +220,7 @@ ID 以 opaque 字符串传输，允许 `A-Za-z0-9` 开头，后续使用 `A-Za-z
 | POST /users/lookup | 同一只读查询，另需`user.phone.lookup`。手机号仅放JSON正文，允许与上述非敏感筛选一起提交；不改变数据。GET中的phone或搜索参数中的手机号拒绝400。响应只给脱敏手机号，游标仅含查询摘要及排序键，不含原手机号 |
 | GET /users/{userId} | `user.directory.read`；规范创建/更新时间、来源三态、账号/实名/年龄状态、脱敏实名资料及联系方式，附与列表同口径的关系、成长礼遇和信用摘要；技术追溯另按`admin.audit.read`裁剪（Boss全量，非Boss仅本人来源操作）。不投影钱包余额/收益，不在读取时补造资格 |
 | POST /users/{userId}/sensitive-profile | 另需`user.identity.sensitive.read`；按当前旧实名来源与主体绑定解密姓名和证件，连同已存手机号按需读取，同事务记字段名审计，响应`no-store`。资料缺失与解密依赖不可用分别处理，新渠道仅有脱敏资料时不伪造明文 |
-| GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；`publication=published` 与目录上架数共同包括当前发布及仍在公开列表的旧资料。旧资料以`publiclyListed`表示；发布和公开展示均不表示可租资格。 |
+| GET /users/{userId}/rental-accounts | 另需`supply.rental_account.read`，同时检查owner关联与游戏scope；`publication=published` 与目录上架数共同包括当前发布及符合公开规则的其他旧来源资料。迁入的旧三角洲账号仅保留历史资料，不计为公开上架。发布和公开展示均不表示可租资格。 |
 | GET /users/{userId}/orders | 另需`order.read` + 游戏/对象范围；`role=renter|owner|any`仅表示该单参与方，另有status/limit/cursor。status支持原单状态及`current`（PENDING_PAYMENT或PAID，属于过滤分组，不是新订单状态）；与目录分角色计数同口径、同新旧来源，过滤先于分页。金额来自冻结订单快照；取消后仍保留paidAt，已付/完成但时间缺失不可推断未付。没有独立供给读取权限时不返回内部accountId/展示号 |
 | GET /users/{userId}/audit-events | 另需既有`admin.audit.read`；按用户对象过滤，Boss全量、非Boss仅本人操作；沿用敏感detail裁剪，不新增用户页专用IAM scope |
 

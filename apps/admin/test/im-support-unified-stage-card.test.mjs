@@ -51,7 +51,7 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false },
 });
-const { ImSupportView, presenceDisconnectGraceMs, presenceRuntimeState, presenceWriteSucceeded } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const { ImSupportView, presenceRuntimeState, presenceWriteSucceeded, staleHeartbeatRetryState } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const { WorkspaceApp } = await vite.ssrLoadModule("/src/workspace/app-shell.tsx");
 after(async () => { await vite.close(); });
 
@@ -84,16 +84,28 @@ function deferred() {
 let api = { admin: "A", orders: [], page2: [], nextCursor: null, requests: [], hold: null, holdMore: null, failMoreOnce: false };
 let heartbeatRequests = 0;
 let readRequests = [];
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input), browser.location.href);
-  if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
+  if (url.pathname.endsWith("/im/token")) { api.tokenRequests = (api.tokenRequests ?? 0) + 1; return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" }); }
   if (url.pathname.endsWith("/im/consultations")) {
     const q = url.searchParams.get("q");
     if (q) { api.searchQueries = [...(api.searchQueries ?? []), `consultations:${q}`]; return response({ consultations: api.searchConsultations ?? [], query: q }); }
     return response({ consultations: [] });
   }
-  if (url.pathname.endsWith("/im/presence")) return response({ availability: "AVAILABLE", connectionState: "CONNECTED", version: 1 });
-  if (url.pathname.endsWith("/im/presence/heartbeat")) { heartbeatRequests += 1; return response({}); }
+  if (url.pathname.endsWith("/im/presence")) return response(api.presence ?? { availability: "AVAILABLE", connectionState: "CONNECTED", version: 1 });
+  if (url.pathname.endsWith("/im/presence/connect")) {
+    api.connectRequests = (api.connectRequests ?? 0) + 1;
+    const next = api.connectResponses?.shift();
+    return next ? response(next.body, next.status ?? 200) : response({ ok: true, reason: "CLAIMED", version: 1, stateRevision: 1 });
+  }
+  if (url.pathname.endsWith("/im/presence/release")) {
+    api.releaseRequests = [...(api.releaseRequests ?? []), init.body ? JSON.parse(String(init.body)) : {}];
+    return response({ released: true });
+  }
+  if (url.pathname.endsWith("/im/presence/heartbeat")) {
+    heartbeatRequests += 1;
+    return response({ ok: true, dispatchable: true, reason: null, disconnectedSince: null, dispatchPaused: false, stateRevision: 1, today: { seconds: 0, sessions: 0, users: 0 }, serverTime: "2026-11-12T00:00:00.000000Z" });
+  }
   if (url.pathname.includes("/im/order-teams/") && url.pathname.endsWith("/read")) { readRequests.push({ kind: "order", id: url.pathname.split("/").at(-2) }); return response({}); }
   if (/\/im\/consultations\/[^/]+\/read$/.test(url.pathname)) { readRequests.push({ kind: "consultation" }); return response({}); }
   if (url.pathname.endsWith("/orders/order-a/im")) {
@@ -567,7 +579,7 @@ test("a late successful order detail response cannot restore revoked content", a
 test("switching workspace tabs keeps the support workbench mounted and heartbeating while hidden", async (t) => {
   const host = await mountWorkspace(t, "/support", false, [...permissions, "im.support.presence"]);
   await waitFor(() => host.querySelector(".im-wb-root") !== null);
-  await waitFor(() => supportIntervals.filter((item) => item.active).length >= 2, 4000);
+  await waitFor(() => supportIntervals.filter((item) => item.active).length >= 1, 4000);
   const root = host.querySelector(".im-wb-root");
   await act(async () => host.querySelector('[data-tab-id="workbench"]').click());
   assert.equal(root.isConnected, true, "the support workbench stays mounted after switching tabs");
@@ -601,13 +613,146 @@ test("a hidden support tab does not mark an order group read until it is visible
   assert.equal(readRequests.find((request) => request.kind === "order").id, "order-a");
 });
 
-test("transient reconnects get a grace window before the reception session closes", () => {
-  assert.equal(presenceDisconnectGraceMs("CONNECTED"), null);
-  assert.equal(presenceDisconnectGraceMs("CONNECTING"), 0);
-  assert.equal(presenceDisconnectGraceMs("RECONNECTING"), 0);
-  assert.equal(presenceDisconnectGraceMs("DISCONNECTED"), 10_000);
-  assert.equal(presenceDisconnectGraceMs("AUTH_FAILED"), null);
-  assert.equal(presenceDisconnectGraceMs("KICKED"), null);
+test("same-session connection recovery retries the claim before logging into IM", async (t) => {
+  api = {
+    admin: "A", requests: [], nextCursor: null, page2: [], orders: [],
+    presence: { availability: "AVAILABLE", connectionState: "DISCONNECTED", version: 1, stateRevision: 1, ownedByAnotherSession: false },
+    connectResponses: [{ body: { ok: false, reason: "OTHER_WINDOW", version: 1, stateRevision: 1 } }],
+  };
+  const { host } = await mountView(t, snapshot([...permissions, "im.support.presence"]));
+  await waitFor(() => host.textContent.includes("系统会自动尝试恢复"));
+  assert.equal(api.connectRequests, 1);
+  assert.equal(api.tokenRequests ?? 0, 0, "do not log in while the previous connection owns the lease");
+  await act(async () => { browser.dispatchEvent(new browser.Event("online")); });
+  await waitFor(() => api.tokenRequests === 1);
+  assert.equal(api.connectRequests, 2, "retry the server claim before the new login");
+});
+
+test("pagehide waits for a pending previous lifecycle handoff before releasing the connection slot", async (t) => {
+  api = { admin: "A", requests: [], nextCursor: null, page2: [], orders: [] };
+  const { ImClientLifecycle } = await vite.ssrLoadModule("@zzsh/im-client/lifecycle");
+  const originalClose = ImClientLifecycle.prototype.close;
+  let closeCalls = 0;
+  let releaseClose;
+  const heldClose = new Promise((resolve) => { releaseClose = resolve; });
+  ImClientLifecycle.prototype.close = function close() {
+    closeCalls += 1;
+    return closeCalls === 1 ? heldClose.then(() => originalClose.call(this)) : originalClose.call(this);
+  };
+  t.after(() => { ImClientLifecycle.prototype.close = originalClose; });
+  const snap = snapshot([...permissions, "im.support.presence"]);
+  const { root } = await mountView(t, snap);
+  await waitFor(() => api.tokenRequests === 1);
+  // Rebuilding the effect replaces lifecycleRef immediately, while the old
+  // effect's close is still pending in the handoff chain.
+  const next = { ...snap, session: { ...snap.session, id: "session-a2" } };
+  await act(async () => { root.render(createElement(ImSupportView, { snapshot: next, onRefresh: async () => next })); });
+  await waitFor(() => closeCalls === 1);
+  await act(async () => {
+    browser.dispatchEvent(new browser.Event("pagehide"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  assert.equal(api.releaseRequests?.length ?? 0, 0, "the server slot stays claimed while the old close is unproven");
+  await act(async () => { releaseClose(); await new Promise((resolve) => setTimeout(resolve, 50)); });
+  await waitFor(() => (api.releaseRequests?.length ?? 0) === 1);
+  assert.equal(typeof api.releaseRequests[0].connectionId, "string", "release carries the exact connection instance after the handoff");
+});
+
+test("a temporary connection-claim outage retries without treating it as revoked permission", async (t) => {
+  api = {
+    admin: "A", requests: [], nextCursor: null, page2: [], orders: [],
+    presence: { availability: "AVAILABLE", connectionState: "DISCONNECTED", version: 1, stateRevision: 1, ownedByAnotherSession: false },
+    connectResponses: [{ body: { error: { code: "UNAVAILABLE", message: "synthetic" } }, status: 503 }],
+  };
+  const { host } = await mountView(t, snapshot([...permissions, "im.support.presence"]));
+  await waitFor(() => host.textContent.includes("消息服务暂不可用，正在自动重试"));
+  assert.equal(api.tokenRequests ?? 0, 0);
+  await act(async () => { browser.dispatchEvent(new browser.Event("online")); });
+  await waitFor(() => api.tokenRequests === 1);
+  assert.equal(api.connectRequests, 2);
+});
+
+test("tab lease hands the single IM slot to the next tab only after the holder releases it", async () => {
+  const previous = browser.navigator.locks;
+  let holder = null;
+  const queue = [];
+  const startNext = () => {
+    const next = queue.shift();
+    if (next) { holder = next; next(); } else holder = null;
+  };
+  const fake = {
+    request: async (_name, _options, callback) => {
+      await new Promise((resolve, reject) => {
+        const run = async () => {
+          try { await callback(); resolve(); } catch (error) { reject(error); }
+        };
+        const hold = () => { void run().finally(() => { if (queue.length) startNext(); else holder = null; }); };
+        if (holder) queue.push(hold); else { holder = hold; hold(); }
+      });
+    },
+  };
+  Object.defineProperty(browser.navigator, "locks", { configurable: true, value: fake });
+  try {
+    const { acquireSupportTabLease } = await vite.ssrLoadModule("/src/views/support-tab-lease.ts");
+    const first = acquireSupportTabLease("tab-lease-test", new AbortController().signal);
+    assert.equal(first.supported, true);
+    assert.equal(await first.acquired, true);
+    let secondGranted = false;
+    const second = acquireSupportTabLease("tab-lease-test", new AbortController().signal);
+    second.acquired.then((granted) => { secondGranted = granted; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(secondGranted, false, "the second tab waits while the first holds the IM slot");
+    first.release();
+    assert.equal(await second.acquired, true);
+    assert.equal(secondGranted, true);
+    second.release();
+
+    const controller = new AbortController();
+    const aborting = acquireSupportTabLease("tab-lease-abort", controller.signal);
+    assert.equal(await aborting.acquired, true);
+    controller.abort();
+    const afterAbort = acquireSupportTabLease("tab-lease-abort", new AbortController().signal);
+    let afterAbortGranted = false;
+    afterAbort.acquired.then((granted) => { afterAbortGranted = granted; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(afterAbortGranted, false, "aborting a granted holder must wait for its explicit release");
+    aborting.release();
+    assert.equal(await afterAbort.acquired, true);
+    afterAbort.release();
+  } finally {
+    Object.defineProperty(browser.navigator, "locks", { configurable: true, value: previous });
+  }
+});
+
+test("tab lease failure is false and unsupported browsers use the server claim", async () => {
+  const previous = browser.navigator.locks;
+  try {
+    Object.defineProperty(browser.navigator, "locks", { configurable: true, value: {
+      request: async () => { throw new Error("denied"); },
+    } });
+    const { acquireSupportTabLease } = await vite.ssrLoadModule("/src/views/support-tab-lease.ts");
+    assert.equal(await acquireSupportTabLease("tab-lease-denied", new AbortController().signal).acquired, false);
+    Object.defineProperty(browser.navigator, "locks", { configurable: true, value: undefined });
+    const unsupported = acquireSupportTabLease("tab-lease-unsupported", new AbortController().signal);
+    assert.equal(unsupported.supported, false);
+    assert.equal(await unsupported.acquired, true, "the server claim, not a fake local lock, decides the owner");
+    unsupported.release();
+  } finally {
+    Object.defineProperty(browser.navigator, "locks", { configurable: true, value: previous });
+  }
+});
+
+test("a stale heartbeat never replays an old CONNECTED into a new connection generation", () => {
+  const client = {};
+  const base = { liveConnection: "CONNECTED", terminal: undefined, sentGeneration: 2, liveGeneration: 2, sentClient: client, liveClient: client };
+  assert.equal(staleHeartbeatRetryState(base), "CONNECTED", "the same live connection may refresh its revision");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveGeneration: 3 }), null, "a new connection generation rejects the old retry");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveClient: {} }), null, "a replaced NIM client rejects the old retry");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveConnection: "KICKED", terminal: "KICKED" }), "KICKED", "the current terminal event is recorded");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveConnection: "KICKED", terminal: undefined }), "KICKED", "a kick observed after the request is the live state");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveConnection: "DISCONNECTED", terminal: undefined }), "DISCONNECTED", "an old CONNECTED retry becomes the newer disconnect");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveConnection: "CONNECTED", terminal: "KICKED" }), null, "a terminal state blocks a lingering connected retry");
+  assert.equal(staleHeartbeatRetryState({ ...base, liveConnection: "AUTH_FAILED", terminal: "AUTH_FAILED" }), "AUTH_FAILED");
 });
 
 test("reconnecting presence never looks like dispatchable reception", () => {
@@ -640,6 +785,30 @@ test("reconnecting presence never looks like dispatchable reception", () => {
   assert.match(unboundReconnecting.label, /需重新开始接待/);
   assert.doesNotMatch(unboundReconnecting.label, /接待中|可接待/, "an unbound old row is not on duty while reconnecting");
   assert.equal(unboundReconnecting.toggleDisabled, true);
+
+  const kicked = presenceRuntimeState("AVAILABLE", "KICKED", false);
+  assert.match(kicked.label, /被踢下线/);
+  assert.equal(kicked.toggleLabel, "在此接待");
+  assert.equal(kicked.toggleDisabled, false, "an explicit reconnect may retry after a kick");
+
+  const authFailed = presenceRuntimeState("AVAILABLE", "AUTH_FAILED", false);
+  assert.match(authFailed.label, /认证失败/);
+  assert.equal(authFailed.toggleLabel, "重新连接");
+
+  for (const state of ["KICKED", "AUTH_FAILED"]) {
+    const stopped = presenceRuntimeState("OFF_DUTY", state, false);
+    assert.match(stopped.label, /未接待/);
+    assert.doesNotMatch(stopped.label, /接待中/);
+    assert.equal(stopped.toggleLabel, "重新连接");
+  }
+
+  const pausedDispatch = presenceRuntimeState("AVAILABLE", "CONNECTED", false, false, false, true, false);
+  assert.equal(pausedDispatch.label, "接待中 · 暂停派单");
+  assert.equal(pausedDispatch.tone, "warn");
+
+  const secondaryTab = presenceRuntimeState("AVAILABLE", "CONNECTED", false, false, false, false);
+  assert.equal(secondaryTab.label, "其他窗口接待中");
+  assert.equal(secondaryTab.toggleDisabled, true, "a non-holder tab never changes reception");
 
   assert.equal(presenceWriteSucceeded(undefined, "AVAILABLE"), false);
   assert.equal(presenceWriteSucceeded({ availability: "AVAILABLE", ownedByAnotherSession: true }, "AVAILABLE"), false, "another window's AVAILABLE is not this write's success");

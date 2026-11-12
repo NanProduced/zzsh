@@ -1,0 +1,64 @@
+{
+  "key": "withdraw-status",
+  "kind": "help",
+  "file": "help/withdraw-status.json",
+  "meta": {
+    "id": "F06",
+    "slug": "withdraw-status",
+    "title": "提现什么时候到账，失败后怎么办？",
+    "summary": "提现不设人工审核，但须通过身份、资格、渠道及资金校验；能否申请与可提现金额以钱包当前状态为准。",
+    "category": "fees",
+    "audience": ["all"],
+    "keywords": ["提现", "出款", "到账", "提现失败", "余额", "钱包", "释放"],
+    "updatedAt": "2026-10-19",
+    "related": ["fees-settlement", "fees-refund-status", "invitation-earnings", "platform-upgrade-records"],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-先给结论",
+    "failure": "content-提现失败怎么办",
+    "notes": "content-其他说明"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "先给结论", "children": [{ "text": "先给结论" }] },
+      { "type": "p", "children": [{ "text": "提现不设人工审核；身份与提现资格、收款渠道、资金和原申请状态满足条件后即可申请。号主收入入账后，也不需要等租客退款完成才核定提现条件。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "钱包可用余额不等于可提现金额。可提现金额暂未确认、收款目标暂不可申请，或原申请结果未明时，不要据可用余额发起新的提现。" }] }
+        ]
+      },
+      { "type": "p", "children": [{ "text": "到账时间取决于出款渠道的实际处理；已提交或处理中不代表已经到账，请查看这笔提现的结果。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "提现是余额出款，与租客「退款未到账」是两条不同的资金链路，不要按同一种状态理解。" }] }
+        ]
+      },
+      { "type": "h2", "id": "提现失败怎么办", "children": [{ "text": "提现失败怎么办" }] },
+      { "type": "p", "children": [{ "text": "「失败」本身不代表资金已经回到可用余额。请按顺序确认：" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 1, "children": [{ "text": "先确认这笔提现确实没有出款（以渠道与平台记录为准，不只看页面状态文字）。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 2, "children": [{ "text": "再确认钱包流水显示该笔资金已释放、可用余额已经恢复。" }] },
+      { "type": "p", "listStyleType": "decimal", "indent": 1, "listStart": 3, "children": [{ "text": "两项都确认后，再核对当前提现条件与可提现金额，符合条件才重新申请。" }] },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "children": [
+          { "type": "p", "children": [{ "text": "注意", "bold": true }] },
+          { "type": "p", "children": [{ "text": "结果未知或释放记录待核时，不要重新申请，避免重复出款；请保留记录并联系平台客服继续核实。" }] }
+        ]
+      },
+      { "type": "h2", "id": "其他说明", "children": [{ "text": "其他说明" }] },
+      { "type": "p", "children": [{ "text": "具体渠道的到账时效与可能产生的渠道费用以实际渠道规则为准；平台不作超出渠道能力的承诺。" }] }
+    ]
+  }
+}

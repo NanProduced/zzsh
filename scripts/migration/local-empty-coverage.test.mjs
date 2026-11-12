@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { assertFundsWriterCoverage, createEmptyCoverageSink, EMPTY_COVERAGE_CHUNK_SIZE } from "./local-funds-plan.mjs";
+import { importEmptyCoverageChunk } from "./local-target-finance.mjs";
 
 const entry = (index, domain = "earnings") => ({ sourceId: `subject-${index}:${domain}`, domain, input: { index } });
 
@@ -62,4 +63,15 @@ test("the coverage assertion accepts the streamed manifest and rejects a changed
   assert.equal(coverage.earnings.coverageWriter, 5);
   assert.throws(() => assertFundsWriterCoverage(plan, [], [], { ...manifest, digest: "f".repeat(64) }), /EMPTY_COVERAGE_SOURCE_SET_CHANGED/);
   assert.throws(() => assertFundsWriterCoverage(plan, [], [], { ...manifest, rows: manifest.rows + 1 }), /EMPTY_COVERAGE_SOURCE_SET_CHANGED/);
+});
+
+test("only the next profile selects the compact batch writer",async()=>{
+ const calls=[],scope={id:'fixture'};
+ const module={bindReviewedEmptyFinanceObservationBatch:async()=>{calls.push('bind');return scope;},
+  importReviewedEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('legacy');return{body:{created:1}};},
+  importReviewedCompactEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('compact');return{body:{created:0}};}};
+ assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],false)).replayed,false);
+ assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],true)).replayed,true);
+ assert.deepEqual(calls,['bind','legacy','bind','compact']);
+ await assert.rejects(importEmptyCoverageChunk(module,{}, {}, [], [],undefined),/MIGRATION_PROFILE_FLAG_UNPROVEN/);
 });

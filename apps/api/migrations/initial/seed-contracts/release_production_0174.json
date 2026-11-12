@@ -11,11 +11,11 @@
   },
   "reviewedTarget": {
     "method": "INITIAL_PLUS_TAIL_READBACK",
-    "sourceCount": 196,
-    "sourceChainSha256": "a4c767f7ef181920529629650db788af81c9994a2b7bdcae73d7ef58194b6143",
-    "through": "0195_approval_center_link"
+    "sourceCount": 197,
+    "sourceChainSha256": "9199f5a47b78c35a0bf64541dd5a9c3b48360f57849ddcfa6806becd55df98bc",
+    "through": "0196_initial_distribution_source"
   },
-  "evidence": "独立参考库重放至0188；0174生产基线加尾链至0195的隔离目标种子读回通过。0195仅移除运营预设的包赔审批权限；0189–0195未独立重放完整旧链。",
+  "evidence": "独立参考库重放至0188；0174生产基线加尾链至0196的隔离目标种子及结构读回通过。0196仅扩展首版分销政策来源约束；完整旧链仍未独立重放。",
   "tables": {
     "zzsh_iam.admin_permission": { "count": 89, "sha256": "0d985e26301fa485dd5db253c4ac3a26538e2284364bb56f00956e2a0b31369c" },
     "zzsh_iam.admin_role": { "count": 2, "sha256": "c3715dbd1ff7e15f7c371828c3ac10ac59c1eef4ed2e25603dda9afcc4226df9" },

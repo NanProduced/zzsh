@@ -1,0 +1,115 @@
+{
+  "key": "terms-and-privacy",
+  "kind": "help",
+  "file": "help/terms-and-privacy.json",
+  "meta": {
+    "id": "L01",
+    "slug": "terms-and-privacy",
+    "title": "协议与隐私说明",
+    "summary": "阅读当前展示的平台服务协议与隐私政策；订单适用创建时实际接受的条款，后续更新不追溯改变历史订单。",
+    "category": "agreement",
+    "audience": [
+      "all"
+    ],
+    "keywords": [
+      "协议",
+      "隐私",
+      "条款",
+      "用户协议",
+      "服务协议",
+      "版本"
+    ],
+    "updatedAt": "2026-10-31",
+    "related": [
+      "protection-coverage",
+      "minor-protection"
+    ],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "status": "content-当前状态",
+    "order-terms": "content-你的订单适用哪一版条款",
+    "legacy": "content-旧平台文件"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      {
+        "type": "h2",
+        "id": "当前状态",
+        "children": [
+          {
+            "text": "当前状态"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "请从登录、注册页面的《平台服务协议》和《用户隐私政策》入口阅读正文，并核对页面展示的版本。某份内容暂未提供时，请按页面提示联系平台确认，不用帮助文章代替正式条款。"
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "你的订单适用哪一版条款",
+        "children": [
+          {
+            "text": "你的订单适用哪一版条款"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "订单按创建时实际接受的协议与包赔条款版本处理，后续条款更新不追溯改变已创建订单的适用规则。如需核对某笔订单，请查看订单详情中已提供的记录，或联系平台客服。"
+          }
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "说明",
+                "bold": true
+              }
+            ]
+          },
+          {
+            "type": "p",
+            "children": [
+              {
+                "text": "帮助中心的文章用于解释规则，不替代正式协议与条款；具体适用内容以本次操作展示并确认的版本及订单记录为准。"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "h2",
+        "id": "旧平台文件",
+        "children": [
+          {
+            "text": "旧平台文件"
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "旧平台的隐私保护与免责声明是旧平台的历史文件，不自动成为新平台当前条款；旧平台创建的订单继续按其下单时适用的旧条款处理。"
+          }
+        ]
+      }
+    ]
+  }
+}

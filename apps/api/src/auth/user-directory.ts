@@ -225,7 +225,11 @@ function publishedAccountSql(account: string, legacyIds?: string): string {
       AND pp.rule_release_id=pv.rule_release_id AND pp.content_hash=pv.content_hash
     WHERE pv.id=${account}.current_version_id AND pv.account_id=${account}.id
       AND ${effectivePublicationStateSql("pv", "pp")})`;
-  return `${account}.lifecycle='ACTIVE' AND ${legacyIds ? `(${native} OR ${account}.id=ANY(${legacyIds}::text[]))` : native}`;
+  return `${account}.lifecycle='ACTIVE' AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game retired_game
+    JOIN zzsh_supply.legacy_supply_map retired_map ON retired_map.account_id=${account}.id
+    WHERE retired_game.id=${account}.game_id AND retired_game.code='delta'
+      AND retired_map.source_system='legacy_mysql_restore' AND retired_map.source_entity='la_rental_accounts')
+    AND ${legacyIds ? `(${native} OR ${account}.id=ANY(${legacyIds}::text[]))` : native}`;
 }
 
 function resourceCountsSql(read: string, boss: string, admin: string, legacyIds?: string): string {
@@ -790,6 +794,7 @@ export type UserRentalAccountRow = {
   gameName: string;
   versionState: string | null;
   publicationSource: string | null;
+  retiredLegacy: boolean;
 };
 
 export async function listUserRentalAccounts(
@@ -813,7 +818,9 @@ export async function listUserRentalAccounts(
               a.legacy_hold AS "legacyHold", a.current_version_id AS "currentVersionId",
               v.review_state AS "versionState", p.source AS "publicationSource",
               to_char(a.created_at ${TIMESTAMP_TEXT}) AS "createdAt",
-              g.id AS "gameId", g.code AS "gameCode", g.name AS "gameName"
+              g.id AS "gameId", g.code AS "gameCode", g.name AS "gameName",
+              (g.code='delta' AND EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id
+                AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts')) AS "retiredLegacy"
          FROM zzsh_supply.rental_account a
          JOIN zzsh_supply.game g ON g.id = a.game_id
          LEFT JOIN zzsh_supply.listing_version v ON v.id = a.current_version_id AND v.account_id = a.id
@@ -847,7 +854,7 @@ export async function listUserRentalAccounts(
       publication: { versionState: row.versionState ?? null, source: row.publicationSource ?? null,
         ...(legacyMarketIds.has(row.id) ? { publiclyListed: true } : {}),
         versionPublished: isEffectivePublicationState(row.versionState, row.publicationSource),
-        currentlyPublished: row.lifecycle === "ACTIVE" && isEffectivePublicationState(row.versionState, row.publicationSource) },
+        currentlyPublished: row.lifecycle === "ACTIVE" && row.retiredLegacy !== true && isEffectivePublicationState(row.versionState, row.publicationSource) },
       createdAt: row.createdAt,
       historicalRead: historical.get(row.id) ?? null,
     })),

@@ -1,5 +1,5 @@
 import { createRequire, Module } from "node:module";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import ts from "typescript";
@@ -7,6 +7,21 @@ import React from "react";
 import { DEFAULT_RESOURCES, RESOURCE_SCHEMA } from "@zzsh/content";
 
 const tree = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.."), cache = new Map();
+// 场景说明不再有运行时代码默认；离线夹具从已确认的 defaults 读取 Plate 正文。
+const noticeDefaults = new Map();
+function noticePayload(key) {
+  if (!key.startsWith("placement:")) return null;
+  const placement = key.slice(10);
+  if (noticeDefaults.has(placement)) return noticeDefaults.get(placement);
+  const file = path.join(tree, "packages/content/defaults/notices", `${placement}.json`);
+  let payload = null;
+  if (existsSync(file)) {
+    const entry = JSON.parse(readFileSync(file, "utf8"));
+    payload = { kind: "notice", title: entry.meta.title, format: "plate", schemaVersion: 1, document: entry.document, mediaIds: [] };
+  }
+  noticeDefaults.set(placement, payload);
+  return payload;
+}
 function load(relative) {
   const file = path.join(tree, relative);
   if (cache.has(file)) return cache.get(file).exports;
@@ -17,8 +32,7 @@ function load(relative) {
     if (name.endsWith(".png")) return name;
     if (name === "./account-media-placeholder") return load("packages/ui/src/account-media-placeholder.tsx");
     if (name === "next/link") return ({ children, ...props }) => React.createElement("a", props, children);
-    if (name === "@zzsh/ui/content-document" || name === "./content-document") return load("packages/ui/src/content-document.tsx");
-    if (name === "@zzsh/ui/content-markdown") return load("packages/ui/src/content-markdown.tsx");
+    if (name === "@zzsh/ui/plate-document") return load("packages/ui/src/plate-document.tsx");
     return contentFixtureDependency(name) ?? native(name);
   };
   module._compile(ts.transpileModule(readFileSync(file,"utf8"), { fileName:file, compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true} }).outputText,file);
@@ -31,7 +45,7 @@ export function contentFixtureDependency(name) {
   if (name === "@zzsh/ui/account-media-placeholder") return load("packages/ui/src/account-media-placeholder.tsx");
   if (name === "@zzsh/ui/legacy-account-image") return load("packages/ui/src/legacy-account-image.tsx");
   if (name === "@/components/content/platform-update-notices") return { BusinessUpdateNotices: () => null };
-  if (["./public-content-provider", "@/components/content/public-content-provider"].includes(name)) return { usePublicContent: key => ({status:"ready",resource:{schema:RESOURCE_SCHEMA,key,source:"BUILTIN",state:"available",payload:DEFAULT_RESOURCES[key] ?? null,media:[]},retry(){}}) };
+  if (["./public-content-provider", "@/components/content/public-content-provider"].includes(name)) return { usePublicContent: key => ({status:"ready",resource:{schema:RESOURCE_SCHEMA,key,source:"BUILTIN",state:"available",payload:DEFAULT_RESOURCES[key] ?? noticePayload(key) ?? null,media:[]},retry(){}}) };
   if (name === "@/components/content/managed-notice") return load("apps/web/src/components/content/managed-notice.tsx");
   if (name === "@/components/content/market-content") return load("apps/web/src/components/content/market-content.tsx");
   if (["./catalog-item-art", "@/components/supply/catalog-item-art"].includes(name)) return load("apps/web/src/components/supply/catalog-item-art.tsx");

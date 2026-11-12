@@ -41,6 +41,16 @@ const SIBLING_ROUTES: Record<string, readonly string[]> = {
   "/distribution": ["/distribution/earnings", "/distribution/participants", "/distribution/relations", "/distribution/policy"],
 };
 
+const LEGACY_CONTENT_PATHS: Readonly<Record<string, string>> = {
+  rules: "/content/help",
+  help: "/content/help",
+  announcement: "/content/updates",
+  news: "/content/updates",
+  legal: "/content/legal",
+  pages: "/content/pages",
+  media: "/content/media",
+};
+
 function blockedBySibling(pathname: string, current: string): boolean {
   return (SIBLING_ROUTES[pathname] ?? []).some((sibling) => {
     const base = sibling.split("?")[0] ?? "";
@@ -77,7 +87,9 @@ export function navEntryRank(
   const href = sanitizeLocalHref(`${location.pathname}${location.search ?? ""}`);
   const [currentPath = "/", currentSearch = ""] = href.split("?");
   const legacyFinanceSearch = currentPath === '/finance' && ['scope','q','kind','bucket','state','period','entry','from','to','page'].some(key => new URLSearchParams(currentSearch).has(key));
-  const current = normalizeNavPath(legacyFinanceSearch || currentPath === '/finance/search' ? '/finance/records' : currentPath);
+  const contentTab = currentPath === "/content" ? new URLSearchParams(currentSearch).get("tab") ?? "help" : "";
+  const current = normalizeNavPath(Object.hasOwn(LEGACY_CONTENT_PATHS, contentTab) ? LEGACY_CONTENT_PATHS[contentTab]!
+    : legacyFinanceSearch || currentPath === '/finance/search' ? '/finance/records' : currentPath);
   const carriesQuery = query.size > 0;
   if (/^\/finance\/(documents|users)\//.test(current)) {
     if (pathname === '/finance') return null;

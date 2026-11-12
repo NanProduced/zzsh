@@ -11,6 +11,9 @@ import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
 import type { SupportAvailability, SupportConnectionState } from "./consultation";
+import { supportDispatchablePresenceSql } from "./support-presence-policy";
+import { reapSupportPresenceSessions } from "./support-dispatch";
+import { convergeSupportPresenceForAdmin } from "./support-presence-convergence";
 import { YunxinApiError, type YunxinSupportScopeApi } from "./yunxin-provider";
 
 import { managedProfileImagePath } from "../profile/profile-avatar";
@@ -302,9 +305,12 @@ function supportTodaySql(dateParam: string, endDateParam = dateParam): string {
   WITH bounds AS (${dayBounds(dateParam, endDateParam)}),
   seconds AS (
     SELECT FLOOR(COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (
-             LEAST(COALESCE(s."ended_at", CASE WHEN s."last_heartbeat_at" < clock_timestamp() - interval '2 minutes' THEN s."last_heartbeat_at" ELSE clock_timestamp() END), b.day_end) - GREATEST(s."started_at", b.day_start)
+             LEAST(COALESCE(s."ended_at", p."last_confirmed_at", s."started_at"), b.day_end) - GREATEST(s."started_at", b.day_start)
            )), 0)), 0))::bigint AS value
-      FROM "zzsh_iam"."im_support_presence_session" s CROSS JOIN bounds b
+      FROM "zzsh_iam"."im_support_presence_session" s
+      LEFT JOIN "zzsh_iam"."im_support_presence" p
+        ON p."app_id" = s."app_id" AND p."admin_user_id" = s."admin_user_id"
+      CROSS JOIN bounds b
      WHERE s."app_id" = $1 AND s."admin_user_id" = $2
        AND s."started_at" < b.day_end AND COALESCE(s."ended_at", b.day_end) > b.day_start
   ),
@@ -407,14 +413,16 @@ const SUPPORT_OVERVIEW_ELIGIBLE_SQL = `
       ON m."provider" = 'yunxin' AND m."app_id" = p."app_id" AND m."realm" = 'admin'
      AND m."identity_kind" = 'ADMIN' AND m."platform_subject_id" = p."admin_user_id" AND m."status" = 'READY'
    WHERE p."app_id" = $1 AND s."status" = 'ACTIVE' AND NOT u."suspended"
-     AND p."availability" = 'AVAILABLE' AND p."connection_state" = 'CONNECTED'
-     AND p."last_connected_at" > clock_timestamp() - interval '2 minutes'`;
+     AND ${supportDispatchablePresenceSql("p")}`;
 
 const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   WITH bounds AS (${dayBounds("$2", "$3")}),
   day_sessions AS (
-    SELECT s."admin_user_id", s."started_at", s."ended_at", s."last_heartbeat_at"
-      FROM "zzsh_iam"."im_support_presence_session" s CROSS JOIN bounds b
+    SELECT s."admin_user_id", s."started_at", s."ended_at", s."last_heartbeat_at", p."last_confirmed_at"
+      FROM "zzsh_iam"."im_support_presence_session" s
+      LEFT JOIN "zzsh_iam"."im_support_presence" p
+        ON p."app_id" = s."app_id" AND p."admin_user_id" = s."admin_user_id"
+      CROSS JOIN bounds b
      WHERE s."app_id" = $1 AND s."started_at" < b.day_end AND COALESCE(s."ended_at", b.day_end) > b.day_start
   ),
   presence_rows AS (
@@ -436,7 +444,7 @@ const SUPPORT_OVERVIEW_ON_DUTY_SQL = `
   session_seconds AS (
     SELECT s."admin_user_id",
            FLOOR(COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (
-             LEAST(COALESCE(s."ended_at", CASE WHEN s."last_heartbeat_at" < clock_timestamp() - interval '2 minutes' THEN s."last_heartbeat_at" ELSE clock_timestamp() END), b.day_end) - GREATEST(s."started_at", b.day_start)
+             LEAST(COALESCE(s."ended_at", s."last_confirmed_at", s."started_at"), b.day_end) - GREATEST(s."started_at", b.day_start)
            )), 0)), 0))::bigint AS "seconds"
       FROM day_sessions s CROSS JOIN bounds b
      GROUP BY s."admin_user_id"
@@ -703,6 +711,14 @@ export async function readSupportOverview(
   // No hard capacity: all fresh online agents are reported as able to take work.
   const capacityLimit = null;
   const firstResponseSeconds = resolveFirstResponseSeconds(limits.firstResponseSeconds);
+  // A manager opening the overview is also a maintenance read: converge missed
+  // sweeps even when the dispatch worker is disabled or recovering. Authorization
+  // is verified first so an unauthorized session cannot trigger global writes.
+  await withTransaction(options.pool, async (client) => {
+    await assertAdminContextInTransaction(client, context);
+    requireSupportManagementRead(await loadEffectiveAdminAccess(client, context.userId));
+    await reapSupportPresenceSessions(client, options.appId);
+  });
   return withTransaction(options.pool, async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);
@@ -1180,6 +1196,7 @@ export async function readPatrolConsultationAccess(client:PoolClient,input:{appI
 export async function readOwnSupportStatistics(options: { pool: Pool; appId: string }, context: AdminContext,
   dateValue?: string | null, dateToValue?: string | null) {
   const range = parseSupportRange(dateValue, dateToValue);
+  await withTransaction(options.pool, (client) => convergeSupportPresenceForAdmin(client, options.appId, context.userId));
   return withTransaction(options.pool, async client => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await assertAdminContextInTransaction(client, context);

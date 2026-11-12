@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Field } from "../components/ui/field";
 import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
@@ -21,7 +22,6 @@ import { BasePricingEditor, DepositCapEditor, PriceItemsEditor, type EnsureDraft
 import { activePriceDraft, pendingSealedPrice, docStage, DocStatusRow, PublishBar } from "./supply-rules/publish-flow";
 import { sourcePriceVersion } from "./supply-rules/price-draft";
 import { LegalDocumentsPanel } from "./legal-documents-panel";
-import { RulesMarkdownField } from "./supply-rules/rules-markdown-field";
 
 const inputClass = "h-9";
 
@@ -483,7 +483,9 @@ export function SupplyRulesView({
           {selectedAgreement ? (
             <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveAgreement(event)); }} className="mt-4 space-y-3">
               <Field label="标题"><Input value={agreementTitle} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>
-              <RulesMarkdownField label="协议正文" hint={selectedAgreement.status === "SEALED" ? "已提交，只读；要修改请新建协议草稿" : "支持 Markdown（标题、列表、加粗）；租客下单时阅读的就是这份正文"} value={agreementBody} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(value) => { setAgreementBody(value); setDirty(true); }} />
+              <Field label="协议正文" hint={selectedAgreement.status === "SEALED" ? "已提交，只读；要修改请新建协议草稿" : "纯文本；租客下单时阅读的就是这份正文，保存不改变字节语义"}>
+                <Textarea aria-label="协议正文" value={agreementBody} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementBody(event.target.value); setDirty(true); }} className="min-h-64 text-xs leading-relaxed" />
+              </Field>
               {selectedAgreement.status === "DRAFT" ? <BusyButton type="submit" busy={loading} disabled={command.locked} busyText="保存中…">保存协议草稿</BusyButton> : null}
             </form>
           ) : null}

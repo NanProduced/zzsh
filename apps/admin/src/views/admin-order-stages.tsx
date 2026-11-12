@@ -49,6 +49,7 @@ export const CANCEL_ACTOR_MAP: Record<string, string> = {
   SYSTEM: '超时未付系统取消',
   TIMEOUT: '超时自动取消',
   SUPPORT_UNPAID: '客服取消待付款订单',
+  OWNER_DELISTED: '号主下架账号，关闭待付款订单',
   OPERATOR: '平台管理员取消',
   ADMIN: '平台管理员取消',
   RISK: '风控拦截取消',

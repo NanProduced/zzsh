@@ -5,9 +5,28 @@ import { validateRoundAccountSet, validateRoundTrialReceipt } from './legacy-lis
 import { NEXT_MIGRATION_PROFILE } from './local-target-registry.mjs';
 const sha=value=>createHash('sha256').update(value).digest('hex');
 
-/** The next migration imports old listings as history; owners must confirm the new pricing before relisting. */
-export function assertLegacyAutoPublicationPermitted(target) {
-  if (target?.migrationProfile === NEXT_MIGRATION_PROFILE) throw new Error('NEXT_LEGACY_LISTING_OWNER_CONFIRMATION_REQUIRED');
+/** Only a source-bound, known non-Delta game can keep its existing migration path. */
+export function assertLegacyAutoPublicationPermitted(sourceGameId, gameBindings, targetGameCode) {
+  if(typeof sourceGameId!=='string'||!/^[1-9]\d{0,23}$/.test(sourceGameId)
+    ||!gameBindings||typeof gameBindings!=='object'||Array.isArray(gameBindings)||!Object.hasOwn(gameBindings,sourceGameId)
+    ||typeof gameBindings[sourceGameId]!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameBindings[sourceGameId]))
+    throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+  const gameCode=gameBindings[sourceGameId];
+  if(gameCode==='delta'||targetGameCode==='delta')throw new Error('LEGACY_DELTA_LISTING_REPUBLICATION_DISABLED');
+  if(targetGameCode!==undefined&&targetGameCode!==gameCode)throw new Error('LEGACY_LISTING_GAME_BINDING_CHANGED');
+  return gameCode;
+}
+
+/** A plan's game id must be part of the same source row and source-bound digest. */
+export function legacyListedSourceGameId(row) {
+  const intake=row?.body?.intake,source=intake?.source,evidence=intake?.legacyQuoteEvidence,raw=evidence?.sourceCanonical;
+  if(source?.sourceSystem!=='legacy_mysql_restore'||source?.sourceEntity!=='la_rental_accounts'
+    ||typeof raw!=='string'||sha(raw)!==source.sourceDigest)throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+  let original;try{original=JSON.parse(raw);}catch{throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');}
+  if(!original||typeof original!=='object'||Array.isArray(original)||original.id!==source.legacyId||row.sourceId!==source.legacyId
+    ||typeof original.game_id!=='string'||!/^[1-9]\d{0,23}$/.test(original.game_id)
+    ||evidence?.policyBinding?.legacyGameId!==original.game_id)throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+  return original.game_id;
 }
 
 export const LISTED_API_MODULES = ['auth/auth-security','auth/security-core','database/business-migrations','order/order','order/legacy-continuation-model','supply/content-hash','supply/funding-authority',

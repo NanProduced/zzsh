@@ -1,9 +1,11 @@
-.plate-document {
+.plate-document, .plate-color-menu {
   --plate-red: #b91c1c;
   --plate-orange: #c2410c;
   --plate-green: #15803d;
   --plate-blue: #1d4ed8;
   --plate-gray: #52525b;
+}
+.plate-document {
   line-height: 1.75;
   overflow-wrap: break-word;
 }
@@ -19,6 +21,8 @@
 .plate-document code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
 .plate-document :not(pre) > code { padding: 0.1em 0.35em; border-radius: 4px; background: color-mix(in srgb, currentColor 10%, transparent); }
 .plate-document img { max-width: 100%; height: auto; border-radius: 6px; }
+.plate-document .plate-image-figure { margin-inline: 0; }
+.plate-document .plate-image-caption { margin-top: 0.3rem; color: var(--muted-foreground); font-size: 0.85em; }
 .plate-image-missing { display: inline-block; padding: 0.35em 0.7em; border: 1px dashed currentColor; border-radius: 6px; opacity: 0.7; font-size: 0.9em; }
 .plate-table-scroll { overflow-x: auto; }
 .plate-document table { border-collapse: collapse; width: 100%; }

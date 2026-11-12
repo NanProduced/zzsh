@@ -62,3 +62,32 @@ test("a retained payment-marker conflict is passed to growth as unknown rather t
   assert.equal(result.summary.orderKnowledge.UNKNOWN, 1);
   assert.equal(result.unknownSources[0].reason, "ORDER_PAYMENT_SOURCE_CONFLICT");
 });
+
+test("new rounds keep their own cutoff and do not inherit the November 3 reason or execution key", () => {
+  const modules = {
+    canonicalize: value => JSON.stringify(value),
+    growthWindowStartAt: () => "2026-08-13T00:00:00.000000Z",
+    prepareLegacyGrowthBackfill: () => ({ ok: true, coverageState: "BACKFILL_PENDING", rows: [] }),
+  };
+  const input = {
+    modules, cohort: [{ sourceId: "1", userId: "user_fixture" }], orders: [], targets: [],
+    payments: [], refunds: [], refundLogs: [], cutoff: "2026-11-11T00:00:00.000000Z",
+    lineage: { captureReceiptSha256: "a".repeat(64) }, oldRuleEvidenceRef: "fixture",
+  };
+  const previous = buildLocalGrowthPlan(input).packages[0];
+  const explicitPrevious = buildLocalGrowthPlan({ ...input, isNextMigration: false }).packages[0];
+  const next = buildLocalGrowthPlan({ ...input, isNextMigration: true }).packages[0];
+  const oldBusiness = JSON.parse(previous.bytes), newBusiness = JSON.parse(next.bytes);
+  assert.equal(previous.bytes, explicitPrevious.bytes);
+  assert.equal(previous.executionKey, explicitPrevious.executionKey);
+  assert.equal(oldBusiness.reason, "本地Nov3完整旧源租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇");
+  assert.match(previous.executionKey, /^nov3-growth-[a-f0-9]{48}$/);
+  assert.doesNotMatch(newBusiness.reason, /Nov3|11月3日/i);
+  assert.match(next.executionKey, /^legacy-growth-[a-f0-9]{48}$/);
+  assert.equal(newBusiness.source.receipt.cutoff, input.cutoff);
+  assert.deepEqual(newBusiness.source, oldBusiness.source);
+  assert.equal(buildLocalGrowthPlan({ ...input, isNextMigration: true }).packages[0].bytes, next.bytes);
+  const newer = buildLocalGrowthPlan({ ...input, cutoff: "2026-11-12T00:00:00.000000Z", isNextMigration: true }).packages[0];
+  assert.notEqual(newer.executionKey, next.executionKey);
+  assert.throws(() => buildLocalGrowthPlan({ ...input, isNextMigration: "true" }), /GROWTH_MIGRATION_PROFILE_INVALID/);
+});

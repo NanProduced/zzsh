@@ -1,8 +1,8 @@
 import type { INestApplication } from "@nestjs/common";
 import type { PoolClient } from "pg";
-import { DEFAULT_RESOURCES, RESOURCE_DEFINITIONS, resourceMediaIds, validateResourceKey, type ContentResource } from "@zzsh/content";
+import { DEFAULT_RESOURCES, NOTICE_PLACEMENT_KEYS, RESOURCE_DEFINITIONS, resourceMediaIds, validateResourceKey, type ContentResource } from "@zzsh/content";
 
-import { ADMIN_PERMISSION, loadEffectiveAdminAccess, requirePermission, type EffectiveAdminAccess } from "../auth/admin-authorization";
+import { ADMIN_PERMISSION, hasPermission, loadEffectiveAdminAccess, requirePermission, type EffectiveAdminAccess } from "../auth/admin-authorization";
 import { assertAdminContextInTransaction, readAdminContext, type AuthSecurityOptions } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, setAuditContext, withTransaction } from "../auth/security-core";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId, validateIdempotencyKey } from "../contracts/api-v1";
@@ -45,6 +45,24 @@ import {
 } from "./public-activity";
 import { builtinResource, listPublicResources, loadResourceItem, lockManagedResource, managedCarousel, readPublicResource, readResourceDetail, type ResourceScope } from "./managed-content";
 import { listPublicUpdates, readPublicUpdate, checkedUpdateSettings, requireUpdatePromotionPermission } from "./updates";
+import {
+  assertSlugNotRetired,
+  attachHelpArticle,
+  authorizeHelp,
+  createFolder,
+  createHelpArticle,
+  deleteHelpNode,
+  helpIconKey,
+  listAdminHelpTree,
+  listHelpTrash,
+  loadHelpNode,
+  lockHelpTree,
+  moveHelpNode,
+  publicHelpTree,
+  readHelpSlugStatus,
+  restoreHelpBatch,
+  updateFolder,
+} from "./help-tree";
 import type { UpdateSurface } from "@zzsh/content/updates";
 import {
   CAROUSEL_SLOTS,
@@ -69,6 +87,7 @@ import {
   loadContentItem,
   loadContentVersions,
   loadContentVersion,
+  projectStoredVersion,
   parseRfc3339Timestamp,
   publishContentVersion,
   saveContentDraft,
@@ -79,6 +98,7 @@ import {
   withdrawContentVersion,
   type CarouselInput,
   type ContentItemRow,
+  type ContentVersionRow,
   type DraftInput,
 } from "./content";
 
@@ -95,7 +115,9 @@ function scopePermission(platform: boolean, action: ContentAction): string {
 async function authorizeItem(client: PoolClient, actor: WriteActor, action: ContentAction, item: ContentItemRow): Promise<EffectiveAdminAccess> {
   const access = await requireAdminAccess(client, actor.id);
   const scope = itemScope(item);
-  requirePermission(access, scopePermission(scope.platform, action));
+  const canPublishPlatformUpdate = scope.platform && action === "publish" && item.type !== "RESOURCE"
+    && hasPermission(access, ADMIN_PERMISSION.contentUpdatesPublish);
+  if (!canPublishPlatformUpdate) requirePermission(access, scopePermission(scope.platform, action));
   if (!scope.platform) await assertGameScope(client, actor.id, access.isBoss, scope.gameId);
   return access;
 }
@@ -238,7 +260,8 @@ async function authorizeResource(client: PoolClient, actor: WriteActor, action: 
   const item = await loadResourceItem(client, key);
   if (item) {
     if (creatingGameId !== undefined && item.gameId !== creatingGameId) throw conflict("Resource scope cannot change");
-    await authorizeItem(client, actor, action, item);
+    if (action === "publish" && item.gameId === null && key.startsWith("guide:")) await authorizeHelp(client, actor, "publish");
+    else await authorizeItem(client, actor, action, item);
   } else {
     const gameId = DEFAULT_RESOURCES[key] ? null : creatingGameId ?? null;
     if (creatingGameId && DEFAULT_RESOURCES[key]) throw invalid("Built-in resource scope cannot change");
@@ -249,9 +272,11 @@ async function authorizeResource(client: PoolClient, actor: WriteActor, action: 
   return item;
 }
 
-function resourceVersionSnapshot(key: string, item: ContentItemRow, version: { id: string; sequence: number; state: string; revision: string; payload: ContentResource | null }): Record<string, unknown> {
+function resourceVersionSnapshot(key: string, item: ContentItemRow, version: { id: string; sequence: number; state: string; revision: string; payload: ContentVersionRow["payload"] }): Record<string, unknown> {
+  // Resource routes only ever snapshot RESOURCE payloads (which carry a kind).
+  const resource = version.payload && "kind" in version.payload ? version.payload : null;
   return { key, itemId: item.id, itemRevision: item.revision, versionId: version.id, sequence: version.sequence, state: version.state, revision: version.revision,
-    payloadDigest: fingerprintRequest("content.resource", key, version.payload), mediaIds: version.payload ? resourceMediaIds(version.payload) : [] };
+    payloadDigest: fingerprintRequest("content.resource", key, version.payload), mediaIds: resource ? resourceMediaIds(resource) : [] };
 }
 
 // ---------------------------------------------------------------------------
@@ -276,10 +301,10 @@ export async function handleContentPublicRoute(
       if ([...query.keys()].some(key => !["type", "page", "limit", "surface", "gameId"].includes(key))) throw invalid("Query is invalid");
       const type = query.get("type"), surface = query.get("surface"), gameId = query.get("gameId");
       if (type !== null && !isContentType(type)) throw invalid("Type is invalid");
-      if (surface !== null && !["home", "publish", "rental", "orders"].includes(surface)) throw invalid("Surface is invalid");
-      if (gameId !== null) { decodeId(gameId); if (!surface || surface === "home") throw invalid("gameId requires a business surface"); }
+      if (surface !== null && !["home", "home-popup", "publish", "rental", "orders"].includes(surface)) throw invalid("Surface is invalid");
+      if (gameId !== null) { decodeId(gameId); if (!surface || surface === "home" || surface === "home-popup") throw invalid("gameId requires a business surface"); }
       const number = (key: string, fallback: number, max: number) => { const raw = query.get(key); if (raw !== null && !/^[1-9]\d{0,5}$/.test(raw)) throw invalid(`${key} is invalid`); const n = raw === null ? fallback : Number(raw); if (n > max) throw invalid(`${key} is invalid`); return n; };
-      const result = await withTransaction(options.pool, client => listPublicUpdates(client, { page: number("page", 1, 10000), limit: number("limit", 12, 20), ...(type ? { type } : {}), ...(surface ? { surface: surface as "home" | UpdateSurface } : {}), ...(gameId ? { gameId } : {}) }));
+      const result = await withTransaction(options.pool, client => listPublicUpdates(client, { page: number("page", 1, 10000), limit: number("limit", 12, 20), ...(type ? { type } : {}), ...(surface ? { surface: surface as "home" | "home-popup" | UpdateSurface } : {}), ...(gameId ? { gameId } : {}) }));
       sendJson(response, 200, result, requestId, PUBLIC_CACHE); return;
     }
     const updateMatch = /^\/updates\/([^/]+)$/.exec(path);
@@ -345,6 +370,21 @@ export async function handleContentPublicRoute(
       sendJson(response, 200, result, requestId, "public, max-age=30");
       return;
     }
+    if (path === "/help-tree") {
+      if ([...query.keys()].length > 0) throw invalid("Query is invalid");
+      const nodes = await withTransaction(options.pool, client => publicHelpTree(client));
+      sendJson(response, 200, { nodes }, requestId, PUBLIC_CACHE);
+      return;
+    }
+    const helpSlugMatch = /^\/help-slugs\/([^/]+)$/.exec(path);
+    if (helpSlugMatch) {
+      const slug = decodeURIComponent(helpSlugMatch[1]!);
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) throw invalid("Slug is invalid");
+      const status = await withTransaction(options.pool, client => readHelpSlugStatus(client, slug));
+      if (!status) throw notFound();
+      sendJson(response, 200, { slug, ...status }, requestId, PUBLIC_CACHE);
+      return;
+    }
     const mediaMatch = /^\/media\/([^/]+)\/content$/.exec(path);
     if (mediaMatch) {
       const assetId = decodeId(mediaMatch[1]!);
@@ -379,7 +419,7 @@ export async function handleContentAdminRoute(
       await handleAdminRead(response, options, requestId, path, query, actor, headerValue(request.headers["idempotency-key"]));
       return;
     }
-    if (method !== "POST" && method !== "PUT") throw notFound();
+    if (method !== "POST" && method !== "PUT" && method !== "PATCH" && method !== "DELETE") throw notFound();
     await handleAdminWrite(request, response, options, requestId, method, path, actor);
   });
 }
@@ -396,7 +436,7 @@ async function handleAdminRead(
   if (path === "/operation-result") {
     for (const name of query.keys()) if (!["operation", "resourceId", "fingerprint", "gameId"].includes(name) || query.getAll(name).length !== 1) throw invalid("Unsupported content recovery query");
     const operation = query.get("operation") ?? "";
-    if (!["content.resource.draft.create", "content.resource.draft.save", "content.resource.media-draft.save", "content.resource.draft.restore", "content.resource.publish", "content.resource.withdraw"].includes(operation)) throw invalid("Unsupported content recovery operation");
+    if (!["content.resource.draft.create", "content.resource.draft.save", "content.resource.media-draft.save", "content.resource.draft.restore", "content.resource.draft.discard", "content.resource.publish", "content.resource.withdraw"].includes(operation)) throw invalid("Unsupported content recovery operation");
     const key = managedKey(query.get("resourceId") ?? "");
     const fingerprint = query.get("fingerprint") ?? "";
     if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw invalid("Original content fingerprint is required");
@@ -415,6 +455,24 @@ async function handleAdminRead(
       if (row.status !== 200 || !original || original.key !== key || !original.item?.id || !original.item.revision) throw notFound();
       return { receipt: "RECORDED", operation, resourceId: key, responseStatus: row.status,
         result: { itemId: original.item.id, revision: original.item.revision, draftVersionId: original.draft?.id ?? null, publishedVersionId: original.published?.id ?? null } };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/help-tree") {
+    const result = await withTransaction(options.pool, async client => {
+      const access = await authorizeHelp(client, actor, "read");
+      return { nodes: await listAdminHelpTree(client, !hasPermission(access, ADMIN_PERMISSION.contentPlatformRead)), publicOrigin: new URL(options.userOrigin).origin };
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  if (path === "/help-tree/trash") {
+    const cursor = query.get("cursor");
+    const result = await withTransaction(options.pool, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformRead);
+      return listHelpTrash(client, cursor ?? undefined);
     });
     sendJson(response, 200, result, requestId);
     return;
@@ -449,6 +507,18 @@ async function handleAdminRead(
   if (resourceMatch) {
     const key = managedKey(resourceMatch[1]!);
     const result = await withTransaction(options.pool, async client => {
+      if (key.startsWith("guide:")) {
+        const access = await requireAdminAccess(client, actor.id);
+        if (hasPermission(access, ADMIN_PERMISSION.contentHelpRead) && !hasPermission(access, ADMIN_PERMISSION.contentPlatformRead)) {
+          const item = await loadResourceItem(client, key);
+          if (!item) throw notFound();
+          if (item.gameId === null) {
+            const detail = await readResourceDetail(client, key);
+            if (!detail.published || detail.current.state !== "available") throw notFound();
+            return { ...detail, draft: null, versions: [] };
+          }
+        }
+      }
       await authorizeResource(client, actor, "read", key);
       return readResourceDetail(client, key);
     });
@@ -464,13 +534,14 @@ async function handleAdminRead(
       if (!item) throw notFound();
       const version = await loadContentVersion(client, versionId);
       if (!version || version.itemId !== item.id) throw notFound();
-      const ids = version.payload ? resourceMediaIds(checkedResource(key, version.payload)) : [];
+      const projected = projectStoredVersion(version);
+      const ids = projected.payload ? resourceMediaIds(projected !== version ? projected.payload as ContentResource : checkedResource(key, projected.payload)) : [];
       const eligible = ids.length ? (await client.query<{ id: string }>(
         `SELECT "id" FROM "zzsh_supply"."media_asset" WHERE "id" = ANY($1::text[]) AND "purpose" = 'CONTENT_MEDIA'
           AND "ownership_kind" = 'PLATFORM_CONTENT' AND "review_state" = 'APPROVED' AND "access_class" = 'PUBLIC_DISPLAY' AND "public_storage_key" IS NOT NULL`, [ids],
       )).rows : [];
       const available = new Set(eligible.map(row => row.id));
-      return { version, media: ids.map(id => ({ id, url: available.has(id) ? `/api/v1/content/media/${encodeURIComponent(id)}/content` : null })) };
+      return { version: projected, media: ids.map(id => ({ id, url: available.has(id) ? `/api/v1/content/media/${encodeURIComponent(id)}/content` : null })) };
     });
     sendJson(response, 200, result, requestId);
     return;
@@ -529,7 +600,7 @@ async function handleAdminRead(
     const itemId = decodeId(itemMatch[1]!);
     const result = await withTransaction(options.pool, async (client) => {
       const item = await authorizeItemId(client, actor, "read", itemId);
-      const versions = await loadContentVersions(client, itemId);
+      const versions = (await loadContentVersions(client, itemId)).map(projectStoredVersion);
       const draft = versions.find((version) => version.state === "DRAFT") ?? null;
       const published = versions.find((version) => version.state === "PUBLISHED") ?? null;
       const previewIds = new Set([draft?.id, published?.id, versions[0]?.id]);
@@ -624,7 +695,7 @@ async function handleAdminWrite(
   response: ContentResponse,
   options: ContentRuntimeOptions,
   requestId: string,
-  method: "POST" | "PUT",
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
   path: string,
   actor: WriteActor,
 ): Promise<void> {
@@ -650,6 +721,99 @@ async function handleAdminWrite(
     );
   };
 
+  // --- help center tree ----------------------------------------------------
+  if (path === "/help-tree/articles" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["parentId", "title", "slug"]);
+    const parentId = body.parentId === undefined || body.parentId === null ? null : decodeId(requiredString(body, "parentId", 128));
+    const title = requiredString(body, "title", 200);
+    const slug = body.slug === undefined ? undefined : requiredString(body, "slug", 122);
+    await write("content.help-tree.article.create", undefined, async client => {
+      await authorizeHelp(client, actor, "edit");
+    }, async client => ({ status: 200, body: { node: await createHelpArticle(client, actor, requestId, { parentId, title, slug }) } }));
+    return;
+  }
+  if (path === "/help-tree/folders" && method === "POST") {
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["parentId", "title", "description", "afterId", "iconKey"]);
+    const parentId = body.parentId === undefined || body.parentId === null ? null : decodeId(requiredString(body, "parentId", 128));
+    const title = requiredString(body, "title", 40);
+    const description = body.description === undefined ? undefined : body.description === null ? null : optionalText(body, "description", 120)!;
+    const afterId = body.afterId === undefined || body.afterId === null ? undefined : decodeId(requiredString(body, "afterId", 128));
+    const iconKey = body.iconKey === undefined ? undefined : helpIconKey(body.iconKey);
+    await write("content.help-tree.folder.create", undefined, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
+    }, async client => {
+      const node = await createFolder(client, actor, requestId, { parentId, title, description, afterId, iconKey });
+      return { status: 200, body: { node } };
+    });
+    return;
+  }
+  const helpTrashRestore = /^\/help-tree\/trash\/([^/]+)\/restore$/.exec(path);
+  if (helpTrashRestore && method === "POST") {
+    const batchId = decodeId(helpTrashRestore[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["parentId"]);
+    const parentId = body.parentId === undefined ? undefined : body.parentId === null ? null : decodeId(requiredString(body, "parentId", 128));
+    await write("content.help-tree.restore", batchId, async client => {
+      await authorizeHelp(client, actor, "publish");
+    }, async client => {
+      const result = await restoreHelpBatch(client, actor, requestId, batchId, parentId);
+      return { status: 200, body: result };
+    });
+    return;
+  }
+  const helpNodeMove = /^\/help-tree\/([^/]+)\/move$/.exec(path);
+  if (helpNodeMove && method === "POST") {
+    const id = decodeId(helpNodeMove[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "parentId", "afterId"]);
+    const expectedRevision = parseExpectedRevision(body);
+    const parentId = body.parentId === undefined || body.parentId === null ? null : decodeId(requiredString(body, "parentId", 128));
+    const afterId = body.afterId === undefined ? undefined : body.afterId === null ? null : decodeId(requiredString(body, "afterId", 128));
+    await write("content.help-tree.move", id, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
+    }, async client => {
+      const node = await moveHelpNode(client, actor, requestId, id, expectedRevision, parentId, afterId);
+      return { status: 200, body: { node } };
+    });
+    return;
+  }
+  const helpNodeMatch = /^\/help-tree\/([^/]+)$/.exec(path);
+  if (helpNodeMatch && method === "PATCH") {
+    const id = decodeId(helpNodeMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision", "title", "description", "iconKey"]);
+    const expectedRevision = parseExpectedRevision(body);
+    const title = body.title === undefined ? undefined : requiredString(body, "title", 40);
+    const description = body.description === undefined ? undefined : body.description === null ? null : optionalText(body, "description", 120)!;
+    const iconKey = body.iconKey === undefined ? undefined : helpIconKey(body.iconKey);
+    await write("content.help-tree.update", id, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
+    }, async client => {
+      const node = await updateFolder(client, actor, requestId, id, expectedRevision, { title, description, iconKey });
+      return { status: 200, body: { node } };
+    });
+    return;
+  }
+  if (helpNodeMatch && method === "DELETE") {
+    const id = decodeId(helpNodeMatch[1]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["expectedRevision"]);
+    const expectedRevision = parseExpectedRevision(body);
+    await write("content.help-tree.delete", id, async client => {
+      const access = await requireAdminAccess(client, actor.id);
+      requirePermission(access, ADMIN_PERMISSION.contentPlatformEdit);
+    }, async client => {
+      const result = await deleteHelpNode(client, actor, requestId, id, expectedRevision);
+      return { status: 200, body: result };
+    });
+    return;
+  }
+
   const resourceWrite = /^\/resources\/([^/]+)\/(draft|media-draft|restore|publish|withdraw)$/.exec(path);
   if (resourceWrite) {
     const key = managedKey(resourceWrite[1]!);
@@ -662,6 +826,7 @@ async function handleAdminWrite(
       await write("content.resource.draft.create", key, async client => {
         await authorizeResource(client, actor, "edit", key, gameId);
       }, async client => {
+        if (key.startsWith("guide:") && gameId == null) await lockHelpTree(client);
         await lockManagedResource(client, key);
         await authorizeResource(client, actor, "edit", key, gameId);
         let item = await loadResourceItem(client, key, true);
@@ -671,10 +836,17 @@ async function handleAdminWrite(
           version = (await createContentDraftFromLatest(client, actor.id, item.id, sourceVersionId)).version;
         } else {
           if (sourceVersionId) throw notFound();
+          // slug 永不复用：新建帮助文章前比对墓碑，命中即 400 SLUG_RETIRED。
+          if (key.startsWith("guide:")) await assertSlugNotRetired(client, key.slice(6));
           const payload = checkedResource(key, body.payload ?? await builtinResource(client, key, true));
           if (body.payload !== undefined && isMediaResource(payload)) throw invalid("Fixed page resources are created from their code template, not a custom payload");
           const created = await createContentItem(client, actor.id, { type: "RESOURCE", gameId: gameId ?? null, resourceKey: key, payload });
           item = created.item; version = created.version;
+          if (payload.kind === "guide" && item.gameId === null) {
+            const folder = await loadHelpNode(client, payload.category);
+            const parentId = folder?.kind === "FOLDER" && !folder.deletedAt && folder.depth < 3 ? folder.id : null;
+            await attachHelpArticle(client, actor.id, key, parentId);
+          }
         }
         await auditContent(client, { actor, requestId, action: "content.resource.draft_created", objectType: "content_resource", objectId: item.id,
           scope: itemScopeLabel(item), before: null, after: resourceVersionSnapshot(key, item, version), result: "CREATED" });
@@ -720,6 +892,27 @@ async function handleAdminWrite(
       });
       return;
     }
+    if (operation === "draft" && method === "DELETE") {
+      if (!key.startsWith("guide:")) throw notFound();
+      ensureOnlyFields(body, ["versionId", "expectedRevision"]);
+      const versionId = decodeId(requiredString(body, "versionId", 128));
+      const expectedRevision = parseExpectedRevision(body);
+      await write("content.resource.draft.discard", key, async client => {
+        if (!await authorizeResource(client, actor, "edit", key)) throw notFound();
+      }, async client => {
+        const item = await loadResourceItem(client, key, true);
+        if (!item) throw notFound();
+        const before = await loadContentVersion(client, versionId);
+        const result = await client.query<{ discarded: boolean }>(
+          `SELECT zzsh_content.discard_guide_draft($1, $2, $3) AS discarded`, [item.id, versionId, expectedRevision],
+        );
+        if (result.rows[0]?.discarded !== true || !before) throw conflict("The draft or online version changed; reload before discarding");
+        await auditContent(client, { actor, requestId, action: "content.resource.draft_discarded", objectType: "content_resource", objectId: item.id,
+          scope: itemScopeLabel(item), before: resourceVersionSnapshot(key, item, before), after: null, result: "DISCARDED" });
+        return { status: 200, body: await readResourceDetail(client, key) };
+      });
+      return;
+    }
     if (operation === "draft" && method === "PUT") {
       ensureOnlyFields(body, ["versionId", "expectedRevision", "payload"]);
       const versionId = decodeId(requiredString(body, "versionId", 128));
@@ -740,6 +933,9 @@ async function handleAdminWrite(
       return;
     }
     if ((operation === "publish" || operation === "withdraw") && method === "POST") {
+      if (NOTICE_PLACEMENT_KEYS.some(placement => key === `placement:${placement}`)) {
+        throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "场景说明需通过固定文书审批发布");
+      }
       ensureOnlyFields(body, ["versionId", "expectedRevision"]);
       const versionId = decodeId(requiredString(body, "versionId", 128));
       const expectedRevision = parseExpectedRevision(body);
@@ -765,7 +961,7 @@ async function handleAdminWrite(
 
   if (path === "/items" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["type", "gameId", "title", "summary", "body", "coverMediaId", "updateSettings"]);
+    ensureOnlyFields(body, ["type", "gameId", "title", "summary", "body", "document", "coverMediaId", "updateSettings"]);
     const type = requiredString(body, "type", 16);
     if (!isContentType(type)) throw invalid("Type is invalid");
     const gameIdRaw = body.gameId === undefined || body.gameId === null ? null : decodeId(requiredString(body, "gameId", 128));
@@ -785,6 +981,7 @@ async function handleAdminWrite(
         ...(title !== undefined ? { title } : {}),
         ...(summary !== undefined ? { summary } : {}),
         ...(contentBody !== undefined ? { body: contentBody } : {}),
+        ...(body.document !== undefined ? { document: body.document as never } : {}),
         ...(coverMediaId !== undefined ? { coverMediaId } : {}),
         ...(body.updateSettings !== undefined ? { updateSettings: checkedUpdateSettings(body.updateSettings) } : {}),
       });
@@ -807,7 +1004,7 @@ async function handleAdminWrite(
   if (draftMatch && method === "PUT") {
     const itemId = decodeId(draftMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["versionId", "expectedRevision", "title", "summary", "body", "coverMediaId", "updateSettings"]);
+    ensureOnlyFields(body, ["versionId", "expectedRevision", "title", "summary", "body", "document", "coverMediaId", "updateSettings"]);
     // Version identity is required: the server never picks a draft on its own,
     // so a stale editor cannot overwrite a replacement draft that shares the
     // same per-version revision counter.
@@ -818,6 +1015,7 @@ async function handleAdminWrite(
     if (body.title !== undefined) draft.title = optionalText(body, "title", 200)!;
     if (body.summary !== undefined) draft.summary = optionalText(body, "summary", 500)!;
     if (body.body !== undefined) draft.body = optionalText(body, "body", 20_000, 20_000)!;
+    if (body.document !== undefined) draft.document = body.document as never;
     if (body.coverMediaId !== undefined) draft.coverMediaId = body.coverMediaId === null ? null : decodeId(requiredString(body, "coverMediaId", 128));
     await write("content.draft.save", itemId, async (client) => {
       await authorizeItemId(client, actor, "edit", itemId);
@@ -879,7 +1077,7 @@ async function handleAdminWrite(
       const access = await authorizeItem(client, actor, "publish", item);
       const version = await loadContentVersion(client, versionId, true);
       if (!version || version.itemId !== itemId) throw notFound();
-      requireUpdatePromotionPermission(access, version.updateSettings ?? {});
+      requireUpdatePromotionPermission(access, projectStoredVersion(version).updateSettings ?? {});
     }, async (client) => {
       const item = await loadContentItem(client, itemId, true);
       if (!item) throw notFound();

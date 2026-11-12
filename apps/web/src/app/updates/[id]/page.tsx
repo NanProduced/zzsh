@@ -1,13 +1,16 @@
 import { notFound } from 'next/navigation';
 import { Clock3 } from 'lucide-react';
 import { ServiceShell } from '@/components/layout/service-shell';
-import { MarkdownDocument } from '@zzsh/ui/content-markdown';
-import '@zzsh/ui/content-markdown.css';
-import { plainTextMarkdown } from '@zzsh/content/updates';
+import { PlateDocument } from '@zzsh/ui/plate-document';
+import '@zzsh/ui/plate-document.css';
 import { loadPlatformUpdate } from '@/lib/updates-server';
 import { updateDate, updateReturnHref, updateTypeLabel } from '@/lib/platform-updates';
 import { UpdateBackLink } from '@/components/content/updates-list';
 import '../updates.css';
+
+function plateMediaUrls(urls: Readonly<Record<string, string | null>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(urls).filter((entry): entry is [string, string] => entry[1] !== null));
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -96,14 +99,9 @@ export default async function PlatformUpdatePage({
           ) : null}
 
           <div className="update-article-body">
-            <MarkdownDocument
-              markdown={
-                settings.format === 'markdown'
-                  ? item.body ?? ''
-                  : plainTextMarkdown(item.body ?? '')
-              }
-              mediaUrls={item.mediaUrls}
-            />
+            {item.document
+              ? <PlateDocument document={item.document} mediaUrls={plateMediaUrls(item.mediaUrls)} />
+              : <p>{item.body ?? ''}</p>}
           </div>
 
           <div className="update-article-footer">

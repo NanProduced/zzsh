@@ -133,10 +133,11 @@ const setList = (
   entry: NodeEntry<TElement>
 ) => {
   editor.tf.setNodes(
-    editor.api.create.block({
+    {
+      type: KEYS.p,
       indent: 1,
       listStyleType: type,
-    }),
+    },
     {
       at: entry[1],
     }

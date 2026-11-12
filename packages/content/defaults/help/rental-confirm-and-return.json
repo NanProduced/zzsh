@@ -1,0 +1,45 @@
+{
+  "key": "rental-confirm-and-return",
+  "kind": "help",
+  "file": "help/rental-confirm-and-return.json",
+  "meta": {
+    "id": "R05",
+    "slug": "rental-confirm-and-return",
+    "title": "开始租用和归还数量怎样确认？",
+    "summary": "开租前双方确认同一版期初清单，结束时按确认的期末数量计算实耗；消耗与金额都由系统按冻结价格生成明细。",
+    "category": "rental",
+    "audience": ["renter", "owner"],
+    "keywords": ["开租", "期初", "期末", "归还", "确认", "消耗", "起租", "验号", "交付"],
+    "updatedAt": "2026-10-06",
+    "related": ["rental-getting-started", "fees-settlement", "fees-early-end"],
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "open": "content-正式开租以双方确认为准",
+    "return": "content-结束时怎样计算消耗",
+    "exceptions": "content-异常情况不会自动结算"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "正式开租以双方确认为准", "children": [{ "text": "正式开租以双方确认为准" }] },
+      { "type": "p", "children": [{ "text": "客服会先提交本单期初数量清单，清单必须与订单冻结的资源报价一致；买卖双方确认同一版期初清单后才正式开租。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "付款、进群发消息都不等于开租；期初清单与订单不一致时不会开租，先在群内核实差异。" }] }
+        ]
+      },
+      { "type": "h2", "id": "结束时怎样计算消耗", "children": [{ "text": "结束时怎样计算消耗" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "任一方可以填写归还（期末）数量发起结束，另一方在订单页确认或拒绝；客服也可以代为登记、修改后重新发起。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "哈夫币消耗按双方确认的期初与期末净差计算；物品按确认的期初数量减期末剩余数量计算实耗。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "未消耗的物品按下单时冻结的价格从预付款中退回，正常结束时押金全额应退。" }] },
+      { "type": "h2", "id": "异常情况不会自动结算", "children": [{ "text": "异常情况不会自动结算" }] },
+      { "type": "p", "children": [{ "text": "数量未知、期末大于期初等异常不会按正常值裁剪过账，会交由客服与运营核实处理。发现数量不对时不要确认，直接在群内提出。" }] }
+    ]
+  }
+}

@@ -12,7 +12,7 @@ import { legacyDisplayMatchesSource, legacyDisplayDigest, parseLegacyDisplaySnap
 import { readLegacyListedSource } from "./legacy-listed-source";
 import { readLegacyListedPolicy } from "./legacy-listed-policy";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
-import { createListingDraft, lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, checkAccountRevision, type LegacyTakeoverGradingContext, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "./publishing";
+import { createListingDraft, isRetiredMigratedAccount, lockPublishingAccount, currentVersion, readDeclaration, saveListingDraft, quoteListing, reviewListing, assertCurrentRelease, checkAccountRevision, type LegacyTakeoverGradingContext, type ListingVersion, type PublishingAccount, type SupplyGateReader } from "./publishing";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, newSupplyId, sha256Hex, withIdempotency } from "./supply-util";
 import { legacyPlanYuanToCents } from "../order/legacy-continuation-model";
 
@@ -123,6 +123,7 @@ async function authorize(client: PoolClient, actor: TradeActor, a: PublishingAcc
   const access = await loadEffectiveAdminAccess(client, actor.id);
   requirePermission(access, "supply.catalog.manage"); requirePermission(access, "supply.review.decide");
   await assertGameScope(client, actor.id, access?.isBoss === true, a.game_id);
+  if (await isRetiredMigratedAccount(client, a)) throw conflict("历史账号仅保留记录，请重新填写资料上架");
 }
 async function assertTierCoverage(client: PoolClient, a: PublishingAccount, version?: ListingVersion) {
   if (version?.payload?.schemaVersion === 3 && version.payload.quoteSource === "LEGACY_QUOTED") return;
@@ -245,6 +246,7 @@ export async function authorizeLegacyOrdinaryDraft(client: PoolClient, actor: Tr
   const access = await loadEffectiveAdminAccess(client, actor.id);
   requirePermission(access, "supply.catalog.manage");
   await assertGameScope(client, actor.id, access?.isBoss === true, account.game_id);
+  if (await isRetiredMigratedAccount(client, account)) throw conflict("历史账号仅保留记录，请重新填写资料上架");
   if (account.owner_user_id !== intake.source.expectedOwnerUserId || account.game_id !== intake.source.expectedGameId) throw conflict("SOURCE_BINDING_MISMATCH");
   return account;
 }

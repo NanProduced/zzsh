@@ -12,7 +12,7 @@ import { distributionAccrualTaskAbsentSql, distributionAccrualTaskContractSql } 
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
-const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order"] as const;
+const BUSINESS_SCHEMAS = ["zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order", "zzsh_docs"] as const;
 
 function quoteIdentifier(value: string): string {
   if (!IDENTIFIER.test(value)) throw new Error("runtime database user must be a safe identifier");
@@ -213,7 +213,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_support_presence" FROM ${runtimeUser};
-    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at", "auth_session_id") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
+    GRANT UPDATE ("availability", "connection_state", "last_connected_at", "last_confirmed_at", "disconnected_since", "dispatch_paused", "state_revision", "connection_id", "connection_expires_at", "active_load", "version", "updated_at", "last_order_assigned_at", "last_consultation_assigned_at", "auth_session_id") ON TABLE "zzsh_iam"."im_support_presence" TO ${runtimeUser};
     GRANT SELECT, INSERT ON TABLE "zzsh_iam"."im_consultation" TO ${runtimeUser};
     REVOKE DELETE, TRUNCATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
     REVOKE UPDATE ON TABLE "zzsh_iam"."im_consultation" FROM ${runtimeUser};
@@ -287,8 +287,8 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_content.legal_document_version') AS relation`)).rows[0]?.relation) {
     await resetRuntimeTablePrivileges(pool, "zzsh_content.legal_document_version", "PUBLIC", { select: false });
     await resetRuntimeTablePrivileges(pool, "zzsh_content.legal_document_version", runtimeUser);
-    await pool.query(`GRANT INSERT(id,doc_type,title,body,digest,effective_at,created_by_admin_id) ON zzsh_content.legal_document_version TO ${runtimeUser};
-      GRANT UPDATE(title,body,digest,status,revision,effective_at,updated_at,sealed_by_admin_id,sealed_at) ON zzsh_content.legal_document_version TO ${runtimeUser}`);
+    await pool.query(`GRANT INSERT(id,doc_type,title,body,digest,effective_at,created_by_admin_id,body_format,body_document,approval_request_id,status,sealed_by_admin_id,sealed_at) ON zzsh_content.legal_document_version TO ${runtimeUser};
+      GRANT UPDATE(title,body,digest,status,revision,effective_at,updated_at,sealed_by_admin_id,sealed_at,body_format,body_document,approval_request_id) ON zzsh_content.legal_document_version TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_content.document_acceptance') AS relation`)).rows[0]?.relation) {
     await resetRuntimeTablePrivileges(pool, "zzsh_content.document_acceptance", "PUBLIC", { select: false });
@@ -308,6 +308,26 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureLegacyCaptureFactPrivileges(pool, runtimeRole);
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_account_media_paths') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_account_media_paths FROM PUBLIC, ${runtimeUser}; GRANT SELECT ON zzsh_supply.legacy_account_media_paths TO ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.account_image_watermark') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.account_image_watermark, zzsh_supply.account_image_variant FROM PUBLIC, ${runtimeUser};
+      GRANT SELECT ON zzsh_supply.account_image_watermark, zzsh_supply.account_image_variant TO ${runtimeUser};
+      GRANT INSERT ON zzsh_supply.account_image_variant TO ${runtimeUser};
+      GRANT UPDATE (revision, enabled, logo_asset_id, position, size_percent, opacity_percent, margin_percent, updated_by_admin_id, updated_at)
+        ON zzsh_supply.account_image_watermark TO ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.account_image_cdn_delivery') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.account_image_cdn_queue, zzsh_supply.account_image_cdn_delivery FROM PUBLIC, ${runtimeUser};
+      GRANT SELECT, INSERT ON zzsh_supply.account_image_cdn_queue, zzsh_supply.account_image_cdn_delivery TO ${runtimeUser};
+      GRANT UPDATE (request_revision, due_at) ON zzsh_supply.account_image_cdn_queue TO ${runtimeUser};
+      GRANT UPDATE (state, published_at, purge_task_id) ON zzsh_supply.account_image_cdn_delivery TO ${runtimeUser};
+      REVOKE ALL ON FUNCTION zzsh_supply.schedule_account_image_cdn(), zzsh_supply.restrict_account_image_cdn() FROM PUBLIC, ${runtimeUser}`);
+  }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_image_cdn_delivery') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.legacy_image_cdn_delivery FROM PUBLIC, ${runtimeUser};
+      GRANT SELECT, INSERT ON zzsh_supply.legacy_image_cdn_delivery TO ${runtimeUser};
+      GRANT UPDATE (state, published_at, purge_task_id) ON zzsh_supply.legacy_image_cdn_delivery TO ${runtimeUser};
+      REVOKE ALL ON FUNCTION zzsh_supply.schedule_legacy_image_cdn() FROM PUBLIC, ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_skin_holding') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_skin_holding FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_skin_holding TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_skin_holding FROM ${runtimeUser}`);
@@ -491,7 +511,11 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
   await configureFixedFeeSupportCancellationPrivileges(pool, runtimeRole);
-  await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+  await configureFixedFeePersonalPrivileges(pool, runtimeRole);  await configureDocsLibraryPrivileges(pool, runtimeRole);
+  const discardGuideDraft = "zzsh_content.discard_guide_draft(text,text,bigint)";
+  if ((await pool.query("SELECT to_regprocedure($1) AS fn", [discardGuideDraft])).rows[0]?.fn) {
+    await pool.query(`GRANT EXECUTE ON FUNCTION ${discardGuideDraft} TO ${runtimeUser}`);
+  }
 }
 
 /** Never expose the new cancellation executor unless its complete ledger contract is installed. */
@@ -544,6 +568,34 @@ export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query
   if(keys.some(key=>inventory[key]!==true))throw new Error("Fixed fee order contract is partially deployed");
   await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
     GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text) TO ${role}`);
+}
+
+/**
+ * P1a internal documentation library plus P1b discussions. Reads and writes
+ * follow the content block (SELECT/INSERT/UPDATE, no TRUNCATE), but the 30-day
+ * trash purge needs DELETE on every doc_* table, so DELETE is granted per table
+ * after the content-style reset. An absent schema is allowed on older databases;
+ * a partial one is refused (0205 adds doc_discussion / doc_comment).
+ */
+export async function configureDocsLibraryPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const tables = ["doc_node", "doc_version", "doc_image", "doc_version_image", "doc_discussion", "doc_comment"] as const;
+  const present = (await pool.query(
+    `SELECT count(*)::int AS count FROM unnest($1::text[]) AS t(name) WHERE to_regclass('zzsh_docs.' || name) IS NOT NULL`,
+    [[...tables]],
+  )).rows[0]?.count;
+  if (!Number.isInteger(present)) throw new Error("Docs library privilege inventory is unavailable");
+  if (present === 0) return;
+  if (present !== tables.length) throw new Error("Docs library schema is incomplete; runtime privileges not finalized");
+  await pool.query(`GRANT USAGE ON SCHEMA "zzsh_docs" TO ${role}`);
+  for (const table of tables) {
+    const relation = `zzsh_docs.${table}`;
+    await resetRuntimeTablePrivileges(pool, relation, "PUBLIC", { select: false });
+    await resetRuntimeTablePrivileges(pool, relation, role);
+    await pool.query(`GRANT INSERT, UPDATE, DELETE ON TABLE ${relation} TO ${role};
+      REVOKE TRUNCATE ON TABLE ${relation} FROM ${role}`);
+  }
+  await pool.query(`ALTER DEFAULT PRIVILEGES IN SCHEMA "zzsh_docs" GRANT SELECT, INSERT, UPDATE ON TABLES TO ${role}`);
 }
 
 /** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
@@ -843,6 +895,17 @@ export async function configureCreditGuaranteePrivileges(pool: Pick<Pool, "query
     REVOKE ALL ON FUNCTION zzsh_credit.guard_credit_state_update(),zzsh_credit.guard_credit_event_insert(),zzsh_order.guard_guarantee_root(),zzsh_order.guard_guarantee_event(),zzsh_order.guard_guarantee_entry(),zzsh_order.check_guarantee_batch() FROM ${role};
     GRANT EXECUTE ON FUNCTION zzsh_credit.runtime_contract_version() TO ${role};
   `);
+  const automatic = (await pool.query<{ present: boolean; ready: boolean }>(`SELECT
+    to_regprocedure('zzsh_order.guard_auto_delisted_guarantee_refund()') IS NOT NULL AS present,
+    EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE t.tgrelid=to_regclass('zzsh_order.owner_guarantee_refund')
+        AND t.tgname='owner_guarantee_auto_refund_guard' AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
+        AND p.oid=to_regprocedure('zzsh_order.guard_auto_delisted_guarantee_refund()') AND p.proowner=c.relowner)
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_order.owner_guarantee_refund')
+        AND c.conname='owner_guarantee_refund_release_decision_shape' AND c.convalidated
+        AND position('AUTO_APPROVED' IN pg_get_constraintdef(c.oid))>0) AS ready`)).rows[0];
+  if (!automatic || automatic.present && !automatic.ready) throw new Error("Automatic guarantee refund guard is incomplete");
+  if (automatic.present) await pool.query(`GRANT INSERT(release_decision_reason,release_decision_fingerprint,release_decided_at) ON zzsh_order.owner_guarantee_refund TO ${role}`);
 }
 
 async function resetRuntimeTablePrivileges(pool: Pick<Pool, "query">, table: string, role: string, options: { columns?: readonly string[]; select?: boolean } = {}): Promise<void> {

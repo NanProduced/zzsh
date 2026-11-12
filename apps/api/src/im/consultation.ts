@@ -36,6 +36,8 @@ import {
 import type { ImMessageTransport } from "./im-contract";
 import { managedProfileImagePath } from "../profile/profile-avatar";
 import { lockDispatchGate, lockSupportMutation, readEligibleSupport, reserveSupportCandidateOutcome, type LockedSupportRoster, type SupportQueueReason } from "./support-dispatch";
+import { isPresenceDispatchable, isPresenceStrictOnline, supportDispatchablePresenceSql } from "./support-presence-policy";
+import { convergeSupportPresenceForAdmin } from "./support-presence-convergence";
 import { assignWaitingOrders } from "./order-dispatch";
 import {
   auditViewerAccount,
@@ -87,11 +89,32 @@ export function supportManagerIdentityKey(appId: string): ImIdentityKey {
   return { provider: "yunxin", appId, realm: "system", kind: "SYSTEM", platformSubjectId: SUPPORT_MANAGER_SUBJECT_ID };
 }
 
+export type SupportPresenceReason =
+  | "NOT_OWNER"
+  | "TAKEN_OVER"
+  | "LOCKED"
+  | "ENDED"
+  | "SESSION_INVALID"
+  | "FORBIDDEN"
+  | "GRACE"
+  | "PAUSED_DISPATCH"
+  | "CONNECTION_TERMINAL"
+  | "RECONNECTING"
+  | "STALE_STATE"
+  | "STALE_CONNECTION"
+  | "OTHER_WINDOW";
+
 export type SupportPresence = {
   adminUserId: string;
   availability: SupportAvailability;
   connectionState: SupportConnectionState;
   lastConnectedAt: string | null;
+  lastConfirmedAt: string | null;
+  disconnectedSince: string | null;
+  dispatchPaused: boolean;
+  dispatchable: boolean;
+  reason: SupportPresenceReason | null;
+  stateRevision: number;
   activeLoad: number;
   version: number;
   /** Another browser session currently owns this admin's single presence row. */
@@ -99,6 +122,17 @@ export type SupportPresence = {
   /** Pre-0184 row with no auth session owner; requires an explicit start to bind. */
   unbound: boolean;
   today: SupportDayCounts;
+};
+
+export type SupportPresenceHeartbeat = {
+  ok: boolean;
+  dispatchable: boolean;
+  reason: SupportPresenceReason | null;
+  disconnectedSince: string | null;
+  dispatchPaused: boolean;
+  stateRevision: number;
+  today?: SupportDayCounts;
+  serverTime: string;
 };
 
 export type SupportRoundRatingView = {
@@ -250,6 +284,12 @@ type PresenceRow = {
   availability: SupportAvailability;
   connectionState: SupportConnectionState;
   lastConnectedAt: Date | string | null;
+  lastConfirmedAt: Date | string | null;
+  disconnectedSince: Date | string | null;
+  dispatchPaused: boolean;
+  stateRevision: string | number;
+  connectionId: string | null;
+  connectionExpiresAt: Date | string | null;
   activeLoad: number;
   version: string | number;
   authSessionId: string | null;
@@ -265,6 +305,15 @@ function invalid(message = "Request validation failed"): SecurityApiError {
 
 function conflict(message: string): SecurityApiError {
   return new SecurityApiError(409, "CONFLICT", message);
+}
+
+/** A browser tab is an owner only after it has claimed this exact connection. */
+export function ownsPresenceConnection(
+  row: Pick<PresenceRow, "authSessionId" | "connectionId"> | undefined,
+  sessionId: string,
+  connectionId: string,
+): boolean {
+  return Boolean(row && row.authSessionId === sessionId && row.connectionId === connectionId);
 }
 
 function unavailable(message = "IM service is temporarily unavailable"): SecurityApiError {
@@ -309,18 +358,40 @@ export function parseConsultationBody(value: unknown): { type: SupportType; entr
   return { type: entryIntent, entryIntent, subjectRef: parseSubjectRef(value.subjectRef) };
 }
 
-export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean } {
+const CONNECTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,63}$/;
+
+export function parseConnectionIdBody(value: unknown): { connectionId: string } {
   if (!isRecord(value)) throw invalid("Request body is invalid");
-  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version" && key !== "takeover")) throw invalid("Request body contains an unknown field");
+  if (Object.keys(value).some((key) => key !== "connectionId")) throw invalid("Request body contains an unknown field");
+  if (typeof value.connectionId !== "string" || !CONNECTION_ID_PATTERN.test(value.connectionId)) throw invalid("Connection id is invalid");
+  return { connectionId: value.connectionId };
+}
+
+export function parsePresenceHeartbeatBody(value: unknown): { connectionState: SupportConnectionState; stateRevision: number; connectionId: string } {
+  if (!isRecord(value)) throw invalid("Request body is invalid");
+  if (Object.keys(value).some((key) => key !== "connectionState" && key !== "stateRevision" && key !== "connectionId")) throw invalid("Request body contains an unknown field");
+  if (typeof value.connectionState !== "string" || !CONNECTION_STATES.has(value.connectionState as SupportConnectionState)) {
+    throw invalid("Connection state is invalid");
+  }
+  if (!Number.isSafeInteger(value.stateRevision) || (value.stateRevision as number) < 1) throw invalid("Presence state revision is invalid");
+  if (typeof value.connectionId !== "string" || !CONNECTION_ID_PATTERN.test(value.connectionId)) throw invalid("Connection id is invalid");
+  return { connectionState: value.connectionState as SupportConnectionState, stateRevision: value.stateRevision as number, connectionId: value.connectionId };
+}
+
+export function parsePresenceBody(value: unknown): { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean; connectionId?: string } {
+  if (!isRecord(value)) throw invalid("Request body is invalid");
+  if (Object.keys(value).some((key) => key !== "availability" && key !== "connectionState" && key !== "version" && key !== "takeover" && key !== "connectionId")) throw invalid("Request body contains an unknown field");
   if (typeof value.availability !== "string" || !AVAILABILITY.has(value.availability as SupportAvailability)) throw invalid("Availability is invalid");
   if (typeof value.connectionState !== "string" || !CONNECTION_STATES.has(value.connectionState as SupportConnectionState)) throw invalid("Connection state is invalid");
   if (value.version !== undefined && (!Number.isSafeInteger(value.version) || (value.version as number) < 0)) throw invalid("Presence version is invalid");
   if (value.takeover !== undefined && typeof value.takeover !== "boolean") throw invalid("Presence takeover flag is invalid");
+  if (value.connectionId !== undefined && (typeof value.connectionId !== "string" || !CONNECTION_ID_PATTERN.test(value.connectionId))) throw invalid("Connection id is invalid");
   return {
     availability: value.availability as SupportAvailability,
     connectionState: value.connectionState as SupportConnectionState,
     ...(value.version === undefined ? {} : { version: value.version as number }),
     ...(value.takeover === undefined ? {} : { takeover: value.takeover as boolean }),
+    ...(value.connectionId === undefined ? {} : { connectionId: value.connectionId as string }),
   };
 }
 
@@ -709,8 +780,12 @@ type Candidate = {
 };
 
 async function reserveEligibleAdmin(client: PoolClient, appId: string, locked: LockedSupportRoster, type: SupportType,
-  targetAdminId?: string, concurrencyLimit?: number, enforceCapacity = true): Promise<{ candidate: Candidate | null; reason: SupportQueueReason | null }> {
-  const outcome = await reserveSupportCandidateOutcome(client, appId, type, await readEligibleSupport(client, appId, locked), targetAdminId, concurrencyLimit, enforceCapacity);
+  targetAdminId?: string, concurrencyLimit?: number, enforceCapacity = true,
+  mode: "DISPATCHABLE" | "STRICT" = "DISPATCHABLE", sessionId?: string, connectionId?: string): Promise<{ candidate: Candidate | null; reason: SupportQueueReason | null }> {
+  const outcome = await reserveSupportCandidateOutcome(
+    client, appId, type, await readEligibleSupport(client, appId, locked, mode, sessionId, connectionId),
+    targetAdminId, concurrencyLimit, enforceCapacity, mode, sessionId, connectionId,
+  );
   return { candidate: outcome.candidate, reason: outcome.reason };
 }
 
@@ -2719,31 +2794,75 @@ export async function listAdminConsultations(
   });
 }
 
-export async function readOwnPresence(options: ConsultationRouteOptions, context: AdminContext): Promise<SupportPresence> {
-  return withTransaction(options.pool, async (client) => {
-    await assertAdminContextInTransaction(client, context);
-    const row = (await client.query<PresenceRow>(
-      `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
-              "auth_session_id" AS "authSessionId"
-         FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`,
-      [options.appId, context.userId],
-    )).rows[0];
-    const today = await readSupportToday(client, options.appId, context.userId);
-    return row ? { ...presenceView(row, context.sessionId), today } : { ...defaultPresence(context.userId), today };
-  });
-}
+const PRESENCE_SELECT = `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
+    "last_connected_at" AS "lastConnectedAt", "last_confirmed_at" AS "lastConfirmedAt",
+    "disconnected_since" AS "disconnectedSince", "dispatch_paused" AS "dispatchPaused",
+    "state_revision" AS "stateRevision", "connection_id" AS "connectionId", "connection_expires_at" AS "connectionExpiresAt", "active_load" AS "activeLoad", "version", "auth_session_id" AS "authSessionId"
+  FROM "zzsh_iam"."im_support_presence" WHERE "app_id" = $1 AND "admin_user_id" = $2`;
 
 function defaultPresence(adminUserId: string): Omit<SupportPresence, "today"> {
-  return { adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", lastConnectedAt: null, activeLoad: 0, version: 0, ownedByAnotherSession: false, unbound: false };
+  return {
+    adminUserId,
+    availability: "OFF_DUTY",
+    connectionState: "DISCONNECTED",
+    lastConnectedAt: null,
+    lastConfirmedAt: null,
+    disconnectedSince: null,
+    dispatchPaused: false,
+    dispatchable: false,
+    reason: null,
+    stateRevision: 0,
+    activeLoad: 0,
+    version: 0,
+    ownedByAnotherSession: false,
+    unbound: false,
+  };
 }
 
-function presenceView(row: PresenceRow, currentSessionId: string): Omit<SupportPresence, "today"> {
+function presenceReason(
+  row: PresenceRow,
+  currentSessionId: string,
+  hasOwnedSession: boolean,
+  dispatchable: boolean,
+  dispatchEligible: boolean,
+): SupportPresenceReason | null {
+  if (row.authSessionId !== null && row.authSessionId !== currentSessionId) return "TAKEN_OVER";
+  if (row.authSessionId === null) return row.availability === "AVAILABLE" ? "NOT_OWNER" : null;
+  if (!dispatchEligible) return "FORBIDDEN";
+  if (row.availability !== "AVAILABLE") return "ENDED";
+  if (!hasOwnedSession) return "ENDED";
+  if (row.dispatchPaused) return "PAUSED_DISPATCH";
+  if (row.connectionState === "KICKED" || row.connectionState === "AUTH_FAILED") return "CONNECTION_TERMINAL";
+  if (!dispatchable) return "PAUSED_DISPATCH";
+  if (row.disconnectedSince !== null || row.connectionState !== "CONNECTED") return "GRACE";
+  return null;
+}
+
+function presenceView(
+  row: PresenceRow,
+  currentSessionId: string,
+  hasOwnedSession: boolean,
+  dispatchEligible: boolean,
+): Omit<SupportPresence, "today"> {
+  const dispatchable = dispatchEligible && hasOwnedSession && isPresenceDispatchable({
+    availability: row.availability,
+    connectionState: row.connectionState,
+    lastConfirmedAt: row.lastConfirmedAt,
+    disconnectedSince: row.disconnectedSince,
+    dispatchPaused: row.dispatchPaused,
+    hasOwnedSession,
+  });
   return {
     adminUserId: row.adminUserId,
     availability: row.availability,
     connectionState: row.connectionState,
     lastConnectedAt: iso(row.lastConnectedAt),
+    lastConfirmedAt: iso(row.lastConfirmedAt),
+    disconnectedSince: iso(row.disconnectedSince),
+    dispatchPaused: row.dispatchPaused,
+    dispatchable,
+    reason: presenceReason(row, currentSessionId, hasOwnedSession, dispatchable, dispatchEligible),
+    stateRevision: numberValue(row.stateRevision),
     activeLoad: row.activeLoad,
     version: numberValue(row.version),
     ownedByAnotherSession: row.authSessionId !== null && row.authSessionId !== currentSessionId,
@@ -2751,91 +2870,291 @@ function presenceView(row: PresenceRow, currentSessionId: string): Omit<SupportP
   };
 }
 
-/**
- * CONNECTED opens/keeps the reception interval. A short transport reconnect keeps it
- * open but is already excluded from dispatch by the connection-state predicate.
- */
-export function presenceSessionAction(
-  availability: SupportAvailability,
-  connectionState: SupportConnectionState,
-): "OPEN" | "KEEP" | "CLOSE" {
-  if (availability === "AVAILABLE" && connectionState === "CONNECTED") return "OPEN";
-  if (availability === "AVAILABLE" && (connectionState === "RECONNECTING" || connectionState === "CONNECTING")) return "KEEP";
-  return "CLOSE";
+async function presenceHasOwnedSession(client: PoolClient, appId: string, adminUserId: string, sessionId: string): Promise<boolean> {
+  return Boolean((await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM "zzsh_auth_admin"."session" a
+        WHERE a."id" = $1 AND a."userId" = $2 AND a."locked" = false AND a."expiresAt" > clock_timestamp()
+     ) AS "present"`,
+    [sessionId, adminUserId],
+  )).rows[0]?.present);
 }
 
-export function presenceSessionEndReason(
-  availability: SupportAvailability,
-  connectionState: SupportConnectionState,
-): "PAUSED" | "OFF_DUTY" | "DISCONNECTED" | null {
-  if (availability === "PAUSED") return "PAUSED";
-  if (availability === "OFF_DUTY") return "OFF_DUTY";
-  if (connectionState !== "CONNECTED" && connectionState !== "RECONNECTING" && connectionState !== "CONNECTING") return "DISCONNECTED";
-  // AVAILABLE + (CONNECTED | reconnecting) is not an end reason.
-  return null;
+function hasPresencePermission(access: EffectiveAdminAccess | null): boolean {
+  return hasPermission(access, ADMIN_PERMISSION.imSupportPresence);
 }
 
-export const PRESENCE_SESSION_OPEN_SQL = `INSERT INTO "zzsh_iam"."im_support_presence_session"
-  ("id", "app_id", "admin_user_id")
-  VALUES ($1, $2, $3)
-  ON CONFLICT ("app_id", "admin_user_id") WHERE "ended_at" IS NULL DO NOTHING`;
+async function presenceIdentityReady(client: PoolClient, appId: string, adminUserId: string): Promise<boolean> {
+  const row = (await client.query<{ accountId: string; identityMarker: string }>(
+    `SELECT "account_id" AS "accountId", "identity_marker" AS "identityMarker"
+       FROM "zzsh_iam"."im_identity_mapping"
+      WHERE "provider" = 'yunxin' AND "app_id" = $1 AND "realm" = 'admin' AND "identity_kind" = 'ADMIN'
+        AND "platform_subject_id" = $2 AND "status" = 'READY'`,
+    [appId, adminUserId],
+  )).rows[0];
+  if (!row) return false;
+  const key = { provider: "yunxin" as const, appId, realm: "admin" as const, kind: "ADMIN" as const, platformSubjectId: adminUserId };
+  return row.accountId === deriveYunxinAccountId(key) && row.identityMarker === buildYunxinIdentityMarker(key);
+}
 
-export const PRESENCE_SESSION_CLOSE_SQL = `UPDATE "zzsh_iam"."im_support_presence_session"
-  SET "ended_at" = clock_timestamp(), "end_reason" = $3
-  WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`;
+function canDispatchPresence(access: EffectiveAdminAccess | null, identityReady: boolean): boolean {
+  return access?.status === "ACTIVE"
+    && identityReady
+    && hasPermission(access, ADMIN_PERMISSION.imSupportRead)
+    && hasPermission(access, ADMIN_PERMISSION.imSupportAccept);
+}
 
-async function syncPresenceSession(client: PoolClient, appId: string, adminUserId: string, row: PresenceRow): Promise<void> {
-  const action = presenceSessionAction(row.availability, row.connectionState);
-  if (action === "OPEN") {
-    await client.query(PRESENCE_SESSION_OPEN_SQL, [`im_presence_${randomUUID().replaceAll("-", "")}`, appId, adminUserId]);
-    return;
+async function serverTime(client: PoolClient): Promise<string> {
+  return (await client.query<{ serverTime: string }>(
+    `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverTime"`,
+  )).rows[0]!.serverTime;
+}
+
+export async function readOwnPresence(options: ConsultationRouteOptions, context: AdminContext): Promise<SupportPresence> {
+  return withTransaction(options.pool, async (client) => {
+    await assertAdminContextInTransaction(client, context);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+    const row = (await client.query<PresenceRow>(PRESENCE_SELECT, [options.appId, context.userId])).rows[0];
+    const today = await readSupportToday(client, options.appId, context.userId);
+    if (!row) return { ...defaultPresence(context.userId), today };
+    const hasOwnedSession = await presenceHasOwnedSession(client, options.appId, context.userId, context.sessionId)
+      && await hasOpenPresenceSession(client, options.appId, context.userId);
+    const dispatchEligible = canDispatchPresence(access, await presenceIdentityReady(client, options.appId, context.userId));
+    return { ...presenceView(row, context.sessionId, hasOwnedSession, dispatchEligible), today };
+  });
+}
+
+async function updatePresenceConnection(
+  client: PoolClient,
+  appId: string,
+  context: AdminContext,
+  connectionState: SupportConnectionState,
+  connectionId: string,
+): Promise<{ row: PresenceRow | null; hasOwnedSession: boolean }> {
+  const confirmed = connectionState === "CONNECTED";
+  const row = (await client.query<PresenceRow>(
+    `UPDATE "zzsh_iam"."im_support_presence"
+        SET "connection_state" = $4,
+            "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE "last_connected_at" END,
+            "last_confirmed_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE "last_confirmed_at" END,
+            "disconnected_since" = CASE WHEN $4 = 'CONNECTED' THEN NULL ELSE COALESCE("disconnected_since", clock_timestamp()) END,
+            "dispatch_paused" = CASE WHEN $4 = 'CONNECTED' THEN false ELSE "dispatch_paused" END,
+            "connection_expires_at" = clock_timestamp() + interval '120 seconds',
+            "state_revision" = "state_revision" + 1,
+            "updated_at" = clock_timestamp()
+      WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "auth_session_id" = $3
+        AND "connection_id" = $5 AND "availability" = 'AVAILABLE'
+      RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
+                "last_connected_at" AS "lastConnectedAt", "last_confirmed_at" AS "lastConfirmedAt",
+                "disconnected_since" AS "disconnectedSince", "dispatch_paused" AS "dispatchPaused",
+                "state_revision" AS "stateRevision", "connection_id" AS "connectionId", "connection_expires_at" AS "connectionExpiresAt", "active_load" AS "activeLoad", "version", "auth_session_id" AS "authSessionId"`,
+    [appId, context.userId, context.sessionId, connectionState, connectionId],
+  )).rows[0] ?? null;
+  if (confirmed && row) {
+    await client.query(
+      `UPDATE "zzsh_iam"."im_support_presence_session"
+          SET "last_heartbeat_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`,
+      [appId, context.userId],
+    );
   }
-  if (action === "KEEP") return;
-  const reason = presenceSessionEndReason(row.availability, row.connectionState);
-  if (!reason) return;
-  await client.query(PRESENCE_SESSION_CLOSE_SQL, [appId, adminUserId, reason]);
+  const hasOwnedSession = await presenceHasOwnedSession(client, appId, context.userId, context.sessionId)
+    && Boolean((await client.query<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM "zzsh_iam"."im_support_presence_session"
+          WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL
+       ) AS "present"`,
+      [appId, context.userId],
+    )).rows[0]?.present);
+  return { row, hasOwnedSession };
 }
 
-/** 心跳只在本人当前 AVAILABLE + CONNECTED 且存在未结束区间时生效；不推进 presence 版本。 */
+function heartbeatSnapshot(row: PresenceRow | undefined): Pick<SupportPresenceHeartbeat, "disconnectedSince" | "dispatchPaused" | "stateRevision"> {
+  return {
+    disconnectedSince: iso(row?.disconnectedSince ?? null),
+    dispatchPaused: row?.dispatchPaused ?? false,
+    stateRevision: numberValue(row?.stateRevision ?? 1),
+  };
+}
+
+/** One heartbeat for every connection state; only CONNECTED advances trusted liveness. */
 export async function heartbeatOwnPresence(
   options: ConsultationRouteOptions,
   context: AdminContext,
-): Promise<{ ok: boolean; serverTime: string }> {
+  connectionState: SupportConnectionState,
+  stateRevision: number,
+  connectionId: string,
+): Promise<SupportPresenceHeartbeat> {
+  if (!Number.isSafeInteger(stateRevision) || stateRevision < 1) throw invalid("Presence state revision is invalid");
+  if (typeof connectionId !== "string" || !CONNECTION_ID_PATTERN.test(connectionId)) throw invalid("Connection id is invalid");
   return withTransaction(options.pool, async (client) => {
-    await assertAdminContextInTransaction(client, context);
-    const row = (await client.query<{ presence: boolean; session: boolean; serverTime: string }>(
-      `WITH p AS (
-         UPDATE "zzsh_iam"."im_support_presence"
-            SET "last_connected_at" = clock_timestamp()
-          WHERE "app_id" = $1 AND "admin_user_id" = $2
-            AND "availability" = 'AVAILABLE' AND "connection_state" = 'CONNECTED'
-            AND "auth_session_id" = $3
-          RETURNING "admin_user_id"
-       ), s AS (
-         UPDATE "zzsh_iam"."im_support_presence_session"
-            SET "last_heartbeat_at" = clock_timestamp()
-          WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL
-            AND EXISTS (SELECT 1 FROM p)
-          RETURNING "id"
-       )
-       SELECT EXISTS (SELECT 1 FROM p) AS "presence",
-              EXISTS (SELECT 1 FROM s) AS "session",
-              to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "serverTime"`,
-      [options.appId, context.userId, context.sessionId],
+    // Session -> presence is the single lock order for heartbeat, lock/unlock and
+    // explicit presence writes. Revalidate the session after acquiring the row.
+    const session = (await client.query<{ locked: boolean; expired: boolean }>(
+      `SELECT "locked", "expiresAt" <= clock_timestamp() AS expired
+         FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
     )).rows[0];
+    const now = await serverTime(client);
+    if (!session || session.expired) {
+      await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+      const row = (await client.query<PresenceRow>(PRESENCE_SELECT, [options.appId, context.userId])).rows[0];
+      return { ok: false, dispatchable: false, reason: "SESSION_INVALID", ...heartbeatSnapshot(row), serverTime: now };
+    }
+    if (session.locked) {
+      const row = (await client.query<PresenceRow>(PRESENCE_SELECT, [options.appId, context.userId])).rows[0];
+      return { ok: false, dispatchable: false, reason: "LOCKED", ...heartbeatSnapshot(row), serverTime: now };
+    }
+    await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    const current = (await client.query<PresenceRow>(`${PRESENCE_SELECT} FOR UPDATE`, [options.appId, context.userId])).rows[0];
+    if (!hasPresencePermission(access)) {
+      return { ok: false, dispatchable: false, reason: "FORBIDDEN", ...heartbeatSnapshot(current), serverTime: now };
+    }
+    if (!current) {
+      return { ok: false, dispatchable: false, reason: "NOT_OWNER", disconnectedSince: null, dispatchPaused: false, stateRevision: 1, serverTime: now };
+    }
+    if (current.authSessionId !== context.sessionId) {
+      return {
+        ok: false,
+        dispatchable: false,
+        reason: current.availability === "AVAILABLE" ? "OTHER_WINDOW" : "NOT_OWNER",
+        ...heartbeatSnapshot(current),
+        serverTime: now,
+      };
+    }
+    if (!ownsPresenceConnection(current, context.sessionId, connectionId)) {
+      return {
+        ok: false,
+        dispatchable: false,
+        reason: "STALE_CONNECTION",
+        ...heartbeatSnapshot(current),
+        serverTime: now,
+      };
+    }
+    if (numberValue(current.stateRevision) !== stateRevision) {
+      return { ok: false, dispatchable: false, reason: "STALE_STATE", ...heartbeatSnapshot(current), serverTime: now };
+    }
+    if (current.availability !== "AVAILABLE") {
+      return { ok: false, dispatchable: false, reason: "ENDED", ...heartbeatSnapshot(current), serverTime: now };
+    }
+    const updated = await updatePresenceConnection(client, options.appId, context, connectionState, connectionId);
+    const row = updated.row!;
+    const dispatchEligible = canDispatchPresence(access, await presenceIdentityReady(client, options.appId, context.userId));
+    const dispatchable = dispatchEligible && isPresenceDispatchable({
+      availability: row.availability,
+      connectionState: row.connectionState,
+      lastConfirmedAt: row.lastConfirmedAt,
+      disconnectedSince: row.disconnectedSince,
+      dispatchPaused: row.dispatchPaused,
+      hasOwnedSession: updated.hasOwnedSession,
+    });
+    const today = await readSupportToday(client, options.appId, context.userId);
     return {
-      ok: row?.presence === true && row?.session === true,
-      serverTime: row?.serverTime ?? new Date().toISOString(),
+      ok: updated.hasOwnedSession,
+      dispatchable,
+      reason: presenceReason(row, context.sessionId, updated.hasOwnedSession, dispatchable, dispatchEligible),
+      disconnectedSince: iso(row.disconnectedSince),
+      dispatchPaused: row.dispatchPaused,
+      stateRevision: numberValue(row.stateRevision),
+      today,
+      serverTime: now,
     };
   });
+}
+
+/** Locked-page liveness only extends trusted time; it never resumes dispatch by itself. */
+export async function heartbeatLockedOwnPresence(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+): Promise<{ ok: boolean; serverTime: string }> {
+  if (!context.sessionLocked) throw conflict("Session is not locked");
+  return withTransaction(options.pool, async (client) => {
+    const session = (await client.query<{ locked: boolean; expired: boolean }>(
+      `SELECT "locked", "expiresAt" <= clock_timestamp() AS expired
+         FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    )).rows[0];
+    const now = await serverTime(client);
+    if (!session || session.expired || !session.locked) return { ok: false, serverTime: now };
+    const converged = await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+    if (converged.ended) return { ok: false, serverTime: now };
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPresencePermission(access)) return { ok: false, serverTime: now };
+    const updated = await client.query(
+      `UPDATE "zzsh_iam"."im_support_presence"
+          SET "last_confirmed_at" = clock_timestamp(),
+              "connection_state" = 'DISCONNECTED',
+              "disconnected_since" = COALESCE("disconnected_since", clock_timestamp()),
+              "dispatch_paused" = true,
+              "connection_expires_at" = clock_timestamp() + interval '120 seconds',
+              "state_revision" = "state_revision" + 1,
+              "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "auth_session_id" = $3
+          AND "availability" = 'AVAILABLE'`,
+      [options.appId, context.userId, context.sessionId],
+    );
+    if ((updated.rowCount ?? 0) > 0) {
+      await client.query(
+        `UPDATE "zzsh_iam"."im_support_presence_session"
+            SET "last_heartbeat_at" = clock_timestamp()
+          WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`,
+        [options.appId, context.userId],
+      );
+    }
+    return { ok: (updated.rowCount ?? 0) > 0, serverTime: now };
+  });
+}
+
+async function closePresenceSessions(
+  client: PoolClient,
+  appId: string,
+  adminUserId: string,
+  reason: "PAUSED" | "OFF_DUTY" | "TAKEN_OVER",
+  endedAt?: Date,
+): Promise<void> {
+  await client.query(
+    `UPDATE "zzsh_iam"."im_support_presence_session"
+        SET "ended_at" = GREATEST(COALESCE($4::timestamptz, clock_timestamp()), "started_at"), "end_reason" = $3
+      WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`,
+    [appId, adminUserId, reason, endedAt ?? null],
+  );
+}
+
+async function openPresenceSession(client: PoolClient, appId: string, adminUserId: string): Promise<void> {
+  await client.query(
+    `INSERT INTO "zzsh_iam"."im_support_presence_session"
+      ("id", "app_id", "admin_user_id", "metric_version")
+     VALUES ($1, $2, $3, 2)
+     ON CONFLICT ("app_id", "admin_user_id") WHERE "ended_at" IS NULL DO NOTHING`,
+    [`im_presence_${randomUUID().replaceAll("-", "")}`, appId, adminUserId],
+  );
+}
+
+async function hasOpenPresenceSession(client: PoolClient, appId: string, adminUserId: string): Promise<boolean> {
+  return Boolean((await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM "zzsh_iam"."im_support_presence_session"
+        WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL
+     ) AS "present"`,
+    [appId, adminUserId],
+  )).rows[0]?.present);
 }
 
 export async function updateOwnPresence(
   options: ConsultationRouteOptions,
   context: AdminContext,
-  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean },
+  input: { availability: SupportAvailability; connectionState: SupportConnectionState; version?: number; takeover?: boolean; connectionId?: string },
   requestId: string,
 ): Promise<SupportPresence> {
+  if (input.connectionId === undefined) throw conflict("客户端版本已更新，请刷新页面后再操作接待状态");
+  if (!CONNECTION_ID_PATTERN.test(input.connectionId)) throw invalid("Connection id is invalid");
+  const connectionId = input.connectionId;
   const result = await withTransaction(options.pool, async (client) => {
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     await assertAdminContextInTransaction(client, context);
@@ -2854,14 +3173,8 @@ export async function updateOwnPresence(
     );
     if (!session.rows[0]) throw new SecurityApiError(401, "UNAUTHENTICATED", "Session is not available");
     if (session.rows[0].locked) throw new SecurityApiError(423, "FORBIDDEN", "Account locked");
-    const current = (await client.query<PresenceRow>(
-      `SELECT "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-              "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
-              "auth_session_id" AS "authSessionId"
-         FROM "zzsh_iam"."im_support_presence"
-        WHERE "app_id" = $1 AND "admin_user_id" = $2`,
-      [options.appId, context.userId],
-    )).rows[0];
+    await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+    const current = (await client.query<PresenceRow>(PRESENCE_SELECT, [options.appId, context.userId])).rows[0];
     const currentVersion = current ? numberValue(current.version) : 0;
     if (current && (input.version === undefined || input.version !== currentVersion)) {
       throw conflict("Presence version is stale");
@@ -2869,30 +3182,54 @@ export async function updateOwnPresence(
     if (!current && input.version !== undefined && input.version !== 0) {
       throw conflict("Presence version is stale");
     }
-    const explicitStart = input.takeover === true && input.availability === "AVAILABLE" && input.connectionState === "CONNECTED";
-    if (input.takeover === true && !explicitStart) {
-      throw conflict("Presence takeover requires an explicit connected start");
+    const starting = input.availability === "AVAILABLE";
+    const takeover = input.takeover === true;
+    const ownsConnection = ownsPresenceConnection(current, context.sessionId, connectionId);
+    if (takeover && !starting) throw conflict("Presence takeover requires an available start");
+    if (starting && input.connectionState !== "CONNECTED" && !takeover) {
+      throw conflict("Reception requires an active connection");
     }
-    if (current?.authSessionId && current.authSessionId !== context.sessionId && !explicitStart) {
+    // A takeover may be requested before the new page has connected. It still
+    // transfers ownership and opens the new interval; dispatch stays paused until
+    // the first CONNECTED heartbeat, so the old page cannot be raced.
+    if (current?.authSessionId && current.authSessionId !== context.sessionId && !takeover) {
       throw conflict("Presence is owned by another session");
     }
-    // A pre-0184 row has no owner. A passive CONNECTED sync must not turn its old
-    // AVAILABLE state back into dispatchable reception; only an explicit start may bind.
-    if (current?.authSessionId === null && input.availability === "AVAILABLE" && !explicitStart) {
+    // A pre-0184 row has no owner. A passive AVAILABLE sync must not turn its old
+    // state back into dispatchable reception; only an explicit start may bind.
+    if (current?.authSessionId === null && current.availability === "AVAILABLE" && starting && !takeover) {
       throw conflict("Presence is unbound; explicit start required");
     }
+    // A session can have multiple tabs; ordinary writes require the claimed tab.
+    if (!takeover && !ownsConnection) throw conflict("Presence connection belongs to another window; refresh or reconnect");
     await options.testPresenceBarrier?.(context);
+    // A new owner has not connected yet, regardless of the state its request supplied.
+    const connectionState: SupportConnectionState = takeover && !ownsConnection ? "CONNECTING" : input.connectionState;
+    const confirmed = connectionState === "CONNECTED";
+    // The caller is the current connection/reception owner. A stop keeps that
+    // ownership so the same page can continue reading and restart; the WHERE
+    // clause still uses the caller's session and never lets a stale window close
+    // a newer owner.
+    const callerSessionId = context.sessionId;
+    const newOwnerSessionId = context.sessionId;
     let persisted: PresenceRow | undefined;
     if (!current) {
       const inserted = await client.query<PresenceRow>(
         `INSERT INTO "zzsh_iam"."im_support_presence"
-          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at", "auth_session_id")
-         VALUES ($1,$2,$3,$4,CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,$5)
+          ("app_id", "admin_user_id", "availability", "connection_state", "last_connected_at",
+           "last_confirmed_at", "disconnected_since", "dispatch_paused", "auth_session_id", "connection_id", "connection_expires_at")
+         VALUES ($1,$2,$3,$4,
+                 CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                 CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                 CASE WHEN $3 = 'AVAILABLE' AND $4 <> 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
+                 $3 = 'AVAILABLE' AND $4 <> 'CONNECTED', $5, $6,
+                 CASE WHEN $6 IS NULL THEN NULL ELSE clock_timestamp() + interval '120 seconds' END)
          ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
          RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                   "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
-                   "auth_session_id" AS "authSessionId"`,
-        [options.appId, context.userId, input.availability, input.connectionState, context.sessionId],
+                   "last_connected_at" AS "lastConnectedAt", "last_confirmed_at" AS "lastConfirmedAt",
+                   "disconnected_since" AS "disconnectedSince", "dispatch_paused" AS "dispatchPaused",
+                   "state_revision" AS "stateRevision", "connection_id" AS "connectionId", "connection_expires_at" AS "connectionExpiresAt", "active_load" AS "activeLoad", "version", "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, connectionState, newOwnerSessionId, connectionId],
       );
       persisted = inserted.rows[0];
     } else {
@@ -2900,23 +3237,55 @@ export async function updateOwnPresence(
         `UPDATE "zzsh_iam"."im_support_presence"
             SET "availability" = $3,
                 "connection_state" = $4,
-                "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE NULL END,
-                "auth_session_id" = $6,
+                "last_connected_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp() ELSE "last_connected_at" END,
+                "last_confirmed_at" = CASE WHEN $4 = 'CONNECTED' THEN clock_timestamp()
+                                           WHEN $8::boolean AND $3 = 'AVAILABLE' THEN NULL
+                                           ELSE "last_confirmed_at" END,
+                "disconnected_since" = CASE WHEN $4 = 'CONNECTED' THEN NULL
+                                            WHEN $3 = 'AVAILABLE' THEN COALESCE("disconnected_since", clock_timestamp())
+                                            ELSE NULL END,
+                "dispatch_paused" = ($3 = 'AVAILABLE' AND $4 <> 'CONNECTED'),
+                "auth_session_id" = $7,
+                "connection_id" = CASE WHEN $8::boolean THEN $9 ELSE "connection_id" END,
+                "connection_expires_at" = CASE WHEN $8::boolean THEN clock_timestamp() + interval '120 seconds' ELSE "connection_expires_at" END,
                 "version" = "version" + 1,
+                "state_revision" = "state_revision" + 1,
                 "updated_at" = clock_timestamp()
           WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "version" = $5
             AND ("auth_session_id" = $6
-                 OR ($7::boolean AND $3 = 'AVAILABLE' AND $4 = 'CONNECTED')
-                 OR ("auth_session_id" IS NULL AND $3 <> 'AVAILABLE'))
+                 OR ($8::boolean AND $3 = 'AVAILABLE')
+                 OR ("auth_session_id" IS NULL AND ("availability" <> 'AVAILABLE' OR $3 <> 'AVAILABLE')))
           RETURNING "admin_user_id" AS "adminUserId", "availability", "connection_state" AS "connectionState",
-                    "last_connected_at" AS "lastConnectedAt", "active_load" AS "activeLoad", "version",
-                    "auth_session_id" AS "authSessionId"`,
-        [options.appId, context.userId, input.availability, input.connectionState, currentVersion, context.sessionId, input.takeover === true],
+                    "last_connected_at" AS "lastConnectedAt", "last_confirmed_at" AS "lastConfirmedAt",
+                    "disconnected_since" AS "disconnectedSince", "dispatch_paused" AS "dispatchPaused",
+                    "state_revision" AS "stateRevision", "connection_id" AS "connectionId", "connection_expires_at" AS "connectionExpiresAt", "active_load" AS "activeLoad", "version", "auth_session_id" AS "authSessionId"`,
+        [options.appId, context.userId, input.availability, connectionState, currentVersion, callerSessionId, newOwnerSessionId, takeover, connectionId],
       );
       persisted = updated.rows[0];
     }
     if (!persisted) throw conflict("Presence version is stale");
-    await syncPresenceSession(client, options.appId, context.userId, persisted);
+    if (takeover && !ownsConnection) {
+      // Ownership moves at one server timestamp: close the old interval, then open
+      // the new one. The old page's next heartbeat sees TAKEN_OVER and lets go.
+      const takenOverAt = new Date();
+      await closePresenceSessions(client, options.appId, context.userId, "TAKEN_OVER", takenOverAt);
+      if (starting) await openPresenceSession(client, options.appId, context.userId);
+    } else if (starting) {
+      await openPresenceSession(client, options.appId, context.userId);
+      if (confirmed) {
+        await client.query(
+          `UPDATE "zzsh_iam"."im_support_presence_session"
+              SET "last_heartbeat_at" = clock_timestamp()
+            WHERE "app_id" = $1 AND "admin_user_id" = $2 AND "ended_at" IS NULL`,
+          [options.appId, context.userId],
+        );
+      }
+    } else {
+      await closePresenceSessions(client, options.appId, context.userId, input.availability === "PAUSED" ? "PAUSED" : "OFF_DUTY");
+    }
+    const hasOwnedSession = starting && await hasOpenPresenceSession(client, options.appId, context.userId)
+      && await presenceHasOwnedSession(client, options.appId, context.userId, context.sessionId);
+    const dispatchEligible = canDispatchPresence(access, await presenceIdentityReady(client, options.appId, context.userId));
     const today = await readSupportToday(client, options.appId, context.userId);
     await recordAudit(client, {
       actorType: "admin",
@@ -2927,15 +3296,179 @@ export async function updateOwnPresence(
       objectId: context.userId,
       outcome: "SUCCESS",
       requestId,
-      details: { availability: input.availability, connectionState: input.connectionState, appId: options.appId },
+      details: { availability: input.availability, connectionState, appId: options.appId, takeover },
     });
-    return { ...presenceView(persisted, context.sessionId), today };
+    return { ...presenceView(persisted, context.sessionId, hasOwnedSession, dispatchEligible), today };
   });
-  if (result.availability === "AVAILABLE" && result.connectionState === "CONNECTED") {
+  if (result.availability === "AVAILABLE" && result.dispatchable) {
     options.wakeDispatch?.();
     if (options.autoAssignConsultations) void autoAssignWaitingConsultations(options, 5).catch(() => undefined);
   }
   return result;
+}
+
+export type SupportConnectionClaim = {
+  ok: boolean;
+  reason: "CLAIMED" | "OTHER_WINDOW" | "LOCKED" | "FORBIDDEN" | "SESSION_INVALID";
+  version?: number;
+  stateRevision?: number;
+};
+
+/**
+ * Before any NIM login, one auth session must win the account's connection slot.
+ * This is a server-side claim, not a UI convention: two browser sessions that
+ * both see an empty/unbound presence race on the same row and only one logs in.
+ * It never starts reception; availability and intervals are unchanged.
+ */
+export async function claimSupportConnection(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  connectionId: string,
+): Promise<SupportConnectionClaim> {
+  if (typeof connectionId !== "string" || !CONNECTION_ID_PATTERN.test(connectionId)) throw invalid("Connection id is invalid");
+  return withTransaction(options.pool, async (client) => {
+    const session = (await client.query<{ locked: boolean; expired: boolean }>(
+      `SELECT "locked", "expiresAt" <= clock_timestamp() AS expired
+         FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    )).rows[0];
+    if (!session || session.expired) return { ok: false, reason: "SESSION_INVALID" };
+    if (session.locked) return { ok: false, reason: "LOCKED" };
+    await convergeSupportPresenceForAdmin(client, options.appId, context.userId);
+    const access = await loadEffectiveAdminAccess(client, context.userId);
+    if (!hasPermission(access, ADMIN_PERMISSION.imSupportRead)) return { ok: false, reason: "FORBIDDEN" };
+    let row = (await client.query<PresenceRow>(`${PRESENCE_SELECT} FOR UPDATE`, [options.appId, context.userId])).rows[0];
+    if (!row) {
+      const inserted = await client.query<{ version: string | number; stateRevision: string | number }>(
+        `INSERT INTO "zzsh_iam"."im_support_presence"
+          ("app_id", "admin_user_id", "availability", "connection_state", "auth_session_id", "connection_id", "connection_expires_at")
+         VALUES ($1, $2, 'OFF_DUTY', 'CONNECTING', $3, $4, clock_timestamp() + interval '120 seconds')
+         ON CONFLICT ("app_id", "admin_user_id") DO NOTHING
+         RETURNING "version", "state_revision" AS "stateRevision"`,
+        [options.appId, context.userId, context.sessionId, connectionId],
+      );
+      if (inserted.rows[0]) {
+        return { ok: true, reason: "CLAIMED", version: numberValue(inserted.rows[0].version), stateRevision: numberValue(inserted.rows[0].stateRevision) };
+      }
+      row = (await client.query<PresenceRow>(`${PRESENCE_SELECT} FOR UPDATE`, [options.appId, context.userId])).rows[0];
+    }
+    if (!row) return { ok: false, reason: "OTHER_WINDOW" };
+    const now = (await client.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    const sameSession = row.authSessionId === context.sessionId;
+    const sameInstance = sameSession && (row.connectionId === null || row.connectionId === connectionId);
+    const noOwner = row.authSessionId === null && row.connectionId === null;
+    const leaseExpired = row.connectionExpiresAt === null || new Date(row.connectionExpiresAt).getTime() <= now.getTime();
+    // Same tab reconnects reuse the same id. A different tab/session may only take
+    // over a non-reception slot after its bounded connection lease expires.
+    const canClaim = sameInstance || noOwner || (leaseExpired && (sameSession || row.availability !== "AVAILABLE"));
+    if (!canClaim) {
+      return { ok: false, reason: "OTHER_WINDOW", version: numberValue(row.version), stateRevision: numberValue(row.stateRevision) };
+    }
+    const updated = await client.query<{ version: string | number; stateRevision: string | number }>(
+      `UPDATE "zzsh_iam"."im_support_presence"
+          SET "auth_session_id" = $3,
+              "connection_id" = $4,
+              "connection_expires_at" = clock_timestamp() + interval '120 seconds',
+              "connection_state" = 'CONNECTING',
+              "dispatch_paused" = CASE WHEN "availability" = 'AVAILABLE' THEN true ELSE "dispatch_paused" END,
+              "version" = "version" + 1,
+              "state_revision" = "state_revision" + 1,
+              "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "admin_user_id" = $2
+          AND (
+            ("auth_session_id" = $3 AND ("connection_id" IS NULL OR "connection_id" = $4))
+            OR ("auth_session_id" IS NULL AND "connection_id" IS NULL)
+            OR ("auth_session_id" = $3 AND ("connection_expires_at" IS NULL OR "connection_expires_at" <= clock_timestamp()))
+            OR ("availability" <> 'AVAILABLE' AND ("connection_id" IS NULL OR "connection_expires_at" IS NULL OR "connection_expires_at" <= clock_timestamp()))
+          )
+        RETURNING "version", "state_revision" AS "stateRevision"`,
+      [options.appId, context.userId, context.sessionId, connectionId],
+    );
+    if (!updated.rows[0]) return { ok: false, reason: "OTHER_WINDOW" };
+    return { ok: true, reason: "CLAIMED", version: numberValue(updated.rows[0].version), stateRevision: numberValue(updated.rows[0].stateRevision) };
+  });
+}
+
+export type SupportConnectionRelease = { released: boolean };
+
+/**
+ * Page-close handoff. It always clears this connection instance so the next tab
+ * can take over. An AVAILABLE row keeps its auth-session binding, reception
+ * interval and timing; another session still needs explicit takeover. An
+ * off-duty row also clears the session binding.
+ */
+export async function releaseSupportConnection(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  connectionId: string,
+): Promise<SupportConnectionRelease> {
+  if (typeof connectionId !== "string" || !CONNECTION_ID_PATTERN.test(connectionId)) throw invalid("Connection id is invalid");
+  return withTransaction(options.pool, async (client) => {
+    const session = (await client.query<{ locked: boolean; expired: boolean }>(
+      `SELECT "locked", "expiresAt" <= clock_timestamp() AS expired
+         FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    )).rows[0];
+    if (!session || session.expired) return { released: false };
+    const result = await client.query(
+      `UPDATE "zzsh_iam"."im_support_presence"
+          SET "auth_session_id" = CASE WHEN "availability" = 'AVAILABLE' THEN "auth_session_id" ELSE NULL END,
+              "connection_id" = NULL,
+              "connection_expires_at" = NULL,
+              "version" = "version" + 1,
+              "state_revision" = "state_revision" + 1,
+              "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "admin_user_id" = $2
+          AND "auth_session_id" = $3 AND "connection_id" = $4`,
+      [options.appId, context.userId, context.sessionId, connectionId],
+    );
+    return { released: (result.rowCount ?? 0) > 0 };
+  });
+}
+
+export type SupportConnectionLease = {
+  ok: boolean;
+  reason: "OWNED" | "STALE_CONNECTION" | "SESSION_INVALID" | "LOCKED";
+  expiresAt?: string;
+};
+
+/**
+ * Off-duty pages still own the exclusive connection slot. This lightweight lease
+ * refresh keeps it through quiet periods; after an abnormal exit the lease expires
+ * and another tab can recover without waiting for auth-session expiry.
+ */
+export async function refreshSupportConnection(
+  options: ConsultationRouteOptions,
+  context: AdminContext,
+  connectionId: string,
+): Promise<SupportConnectionLease> {
+  if (typeof connectionId !== "string" || !CONNECTION_ID_PATTERN.test(connectionId)) throw invalid("Connection id is invalid");
+  return withTransaction(options.pool, async (client) => {
+    const session = (await client.query<{ locked: boolean; expired: boolean }>(
+      `SELECT "locked", "expiresAt" <= clock_timestamp() AS expired
+         FROM "zzsh_auth_admin"."session"
+        WHERE "id" = $1 AND "userId" = $2
+        FOR UPDATE`,
+      [context.sessionId, context.userId],
+    )).rows[0];
+    if (!session || session.expired) return { ok: false, reason: "SESSION_INVALID" };
+    if (session.locked) return { ok: false, reason: "LOCKED" };
+    const row = (await client.query<{ expiresAt: Date }>(
+      `UPDATE "zzsh_iam"."im_support_presence"
+          SET "connection_expires_at" = clock_timestamp() + interval '120 seconds',
+              "updated_at" = clock_timestamp()
+        WHERE "app_id" = $1 AND "admin_user_id" = $2
+          AND "auth_session_id" = $3 AND "connection_id" = $4
+        RETURNING "connection_expires_at" AS "expiresAt"`,
+      [options.appId, context.userId, context.sessionId, connectionId],
+    )).rows[0];
+    if (!row) return { ok: false, reason: "STALE_CONNECTION" };
+    return { ok: true, reason: "OWNED", expiresAt: iso(row.expiresAt) ?? undefined };
+  });
 }
 
 type ClaimPlan =
@@ -2957,7 +3490,7 @@ const UNRESOLVED_SCOPE_OPERATION_STATES = "('PENDING','RUNNING','UNKNOWN','NEEDS
  * confirmed remotely; a second admin cannot slip in because the active
  * operation and the row lock serialise the intent.
  */
-async function beginClaimMembership(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string, aftersaleId?:string): Promise<ClaimPlan> {
+async function beginClaimMembership(options: ConsultationRouteOptions, context: AdminContext, consultationId: string, requestId: string, aftersaleId?:string, connectionId?: string): Promise<ClaimPlan> {
   const plan = await withTransaction(options.pool, async (client) => {
     const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
@@ -3005,11 +3538,14 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
     const eligible = await readEligibleSupport(client, options.appId, locked);
     const priority = await assignWaitingOrders(client, options.appId, eligible);
     if (priority.more) return null;
+    // Claiming is an explicit action: a 2-minute reconnect grace is suitable for
+    // automatic dispatch, not for proving that this agent can actually see the chat.
+    const strictEligible = await readEligibleSupport(client, options.appId, locked, "STRICT", context.sessionId, connectionId);
     await readConsultation(client, options.appId, consultationId, true);
     if (unresolved) {
       // The unresolved operation already reserved this round: eligibility is checked
       // read-only so the same agent never adds a second active_load for one round.
-      const target = eligible.find((candidate) => candidate.adminUserId === context.userId);
+      const target = strictEligible.find((candidate) => candidate.adminUserId === context.userId);
       if (!target) throw unavailable("当前客服不可接待新咨询");
       const resumed = await client.query(
         `UPDATE "zzsh_iam"."im_consultation_scope_operation"
@@ -3033,7 +3569,7 @@ async function beginClaimMembership(options: ConsultationRouteOptions, context: 
       });
       return { kind: "OPERATION" as const, operationId: unresolved.id, reservedNew: false };
     }
-    const reservation = await reserveSupportCandidateOutcome(client, options.appId, row.kind, eligible, context.userId, options.supportConcurrency);
+    const reservation = await reserveSupportCandidateOutcome(client, options.appId, row.kind, strictEligible, context.userId, options.supportConcurrency, false, "STRICT", context.sessionId, connectionId);
     if (!reservation.candidate) {
       throw Object.assign(unavailable(reservation.reason === "ALL_AT_CAPACITY"
         ? "当前客服已满接待上限，请先处理现有会话"
@@ -3184,6 +3720,7 @@ async function beginTransfer(
   requestId: string,
   note: string | null,
   kind: TransferKind,
+  connectionId?: string,
 ): Promise<TransferPlan | null> {
   const manager = supportManagerAccount(options);
   if (!options.provider) throw unavailable("IM message scope provider is not configured");
@@ -3222,7 +3759,13 @@ async function beginTransfer(
     const targetAccess = await loadEffectiveAdminAccess(client, targetAdminId);
     if (!hasPermission(targetAccess, ADMIN_PERMISSION.imSupportAccept)) throw new SecurityApiError(403, "FORBIDDEN", "Target administrator is not authorized");
     // 转交与接管都会增加目标客服的个人负载，使用相同接待上限。
-    const reservation = await reserveEligibleAdmin(client, options.appId, locked, row.kind, targetAdminId, options.supportConcurrency);
+    const selfTakeover = kind === "TAKEOVER" && targetAdminId === context.userId;
+    const reservation = await reserveEligibleAdmin(
+      client, options.appId, locked, row.kind, targetAdminId, options.supportConcurrency, true,
+      selfTakeover ? "STRICT" : "DISPATCHABLE",
+      selfTakeover ? context.sessionId : undefined,
+      selfTakeover ? connectionId : undefined,
+    );
     if (!reservation.candidate) {
       throw Object.assign(unavailable(reservation.reason === "ALL_AT_CAPACITY" ? "目标客服已满接待上限" : "目标客服当前不可接待"),
         reservation.reason === "ALL_AT_CAPACITY" ? { reason: "SUPPORT_AT_CAPACITY" } : {});
@@ -3315,7 +3858,10 @@ export async function listTransferTargets(
   options: ConsultationRouteOptions,
   context: AdminContext,
   consultationId: string,
-): Promise<{ targets: { adminUserId: string; displayName: string }[]; transferReady: boolean }> {
+): Promise<{
+  targets: { adminUserId: string; displayName: string; inGrace: boolean; disconnectedSince: string | null }[];
+  transferReady: boolean;
+}> {
   return withTransaction(options.pool, async (client) => {
     const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
     await assertAdminContextInTransaction(client, context);
@@ -3330,7 +3876,19 @@ export async function listTransferTargets(
     const candidates = await readEligibleSupport(client, options.appId, locked);
     const targets = candidates
       .filter((candidate) => candidate.adminUserId !== context.userId && (row.kind !== "COMPLAINT" || candidate.complaint))
-      .map((candidate) => ({ adminUserId: candidate.adminUserId, displayName: candidate.adminName }));
+      .map((candidate) => ({
+        adminUserId: candidate.adminUserId,
+        displayName: candidate.adminName,
+        inGrace: !isPresenceStrictOnline({
+          availability: "AVAILABLE",
+          connectionState: candidate.connectionState ?? "DISCONNECTED",
+          lastConfirmedAt: candidate.lastConfirmedAt ?? null,
+          disconnectedSince: candidate.disconnectedSince ?? null,
+          dispatchPaused: false,
+          hasOwnedSession: true,
+        }),
+        disconnectedSince: candidate.disconnectedSince ?? null,
+      }));
     return { targets, transferReady: true };
   });
 }
@@ -3586,7 +4144,7 @@ export async function closeUserConsultation(
   return result;
 }
 
-export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string, aftersaleId?:string): Promise<{ consultation: ConsultationView }> {
+export async function claimConsultation(options: ConsultationRouteOptions, context: AdminContext, id: string, requestId: string, aftersaleId?:string, connectionId?: string): Promise<{ consultation: ConsultationView }> {
   // Auto-assignment is the primary path. Manual claim is a management fallback;
   // enforce it server-side so hiding the button is not the only control.
   const access = await withTransaction(options.pool, async (client) => {
@@ -3596,11 +4154,11 @@ export async function claimConsultation(options: ConsultationRouteOptions, conte
   if (!aftersaleId && !(access?.isBoss || hasPermission(access, ADMIN_PERMISSION.imSupportAuditTakeover))) {
     throw new SecurityApiError(403, "FORBIDDEN", "Manual takeover requires a management grant");
   }
-  let plan = await beginClaimMembership(options, context, id, requestId, aftersaleId);
+  let plan = await beginClaimMembership(options, context, id, requestId, aftersaleId, connectionId);
   if (plan.kind === "NEEDS_TEAM") {
     // First use after close/reopen may still need the thread Team; create it before adding the agent.
     await ensureThreadTeam(options, plan.threadId, id);
-    plan = await beginClaimMembership(options, context, id, requestId, aftersaleId);
+    plan = await beginClaimMembership(options, context, id, requestId, aftersaleId, connectionId);
   }
   const claimedNow = plan.kind === "OPERATION";
   const reservedNew = plan.kind === "OPERATION" && plan.reservedNew;
@@ -3640,8 +4198,9 @@ export async function takeoverConsultation(
   id: string,
   requestId: string,
   note: string | null,
+  connectionId?: string,
 ): Promise<{ consultation: ConsultationView }> {
-  const plan = await beginTransfer(options, context, id, context.userId, requestId, note, "TAKEOVER");
+  const plan = await beginTransfer(options, context, id, context.userId, requestId, note, "TAKEOVER", connectionId);
   if (!plan) throw unavailable("已付款订单正在优先分配，请稍后重试");
   if ("alreadyAssigned" in plan) return readAdminConsultationView(options, context, id);
   await runScopeOperationNow(options, plan.operationId);
@@ -3672,6 +4231,7 @@ async function retryOwnClaimOperation(
   context: AdminContext,
   consultationId: string,
   requestId: string,
+  connectionId?: string,
 ): Promise<string | null> {
   if (!options.provider) return null;
   return withTransaction(options.pool, async (client) => {
@@ -3699,7 +4259,7 @@ async function retryOwnClaimOperation(
     }
     const locked = await lockSupportMutation(client, options.appId, [], [context.userId]);
     // 同一目标已由原操作预留过一次：恢复只做只读资格校验，不 reserve、不再推进分配时间。
-    const target = (await readEligibleSupport(client, options.appId, locked)).find((candidate) => candidate.adminUserId === context.userId);
+    const target = (await readEligibleSupport(client, options.appId, locked, "STRICT", context.sessionId, connectionId)).find((candidate) => candidate.adminUserId === context.userId);
     if (!target) throw unavailable("当前客服不可接待新咨询");
     const resumed = await client.query(
       `UPDATE "zzsh_iam"."im_consultation_scope_operation"
@@ -3730,9 +4290,10 @@ export async function retryMessageScopeOperation(
   context: AdminContext,
   consultationId: string,
   requestId: string,
+  connectionId?: string,
 ): Promise<{ consultation: ConsultationView }> {
   // ADD_MEMBER 对账恢复必须先于关单对账：等待中轮次没有负责人，关单路径会直接拒绝。
-  const claimRecoveryId = await retryOwnClaimOperation(options, context, consultationId, requestId);
+  const claimRecoveryId = await retryOwnClaimOperation(options, context, consultationId, requestId, connectionId);
   if (claimRecoveryId) {
     await runScopeOperationNow(options, claimRecoveryId);
     await restoreClaimLoad(options, consultationId, context.userId);

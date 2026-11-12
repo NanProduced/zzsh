@@ -220,6 +220,8 @@ export function assertNoWriteRetryLineage({ input, originalInput, originalReceip
 export function assertRoundBootstrap(input, actorProof, evidence) {
   const target = input.target, binding = input.bootstrapEvidence;
   assert(target.migrationProfile !== NEXT_MIGRATION_PROFILE || target.bootstrapReservation === "ROUND07_BOOTSTRAP_RESERVED", "ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:schema");
+  // shortcut: old receipts require activated Boss accounts; replace this gate when the first-deployment contract is verified.
+  assert.notEqual(target.migrationProfile, NEXT_MIGRATION_PROFILE, "ROUND_NEXT_INITIALIZATION_CONTRACT_NOT_READY");
     const sameTarget = (value, database = true) => value && String(value.oid ?? value.resourceOid) === target.oid && value.nonce === target.nonce
     && (!database || value.database === "zzsh_test_regression")
     && (!target.instance || JSON.stringify(value.instance ?? null) === JSON.stringify(target.instance));
@@ -358,6 +360,15 @@ export function assertRoundOpeningPartition(dataset, opening) {
   "ROUND_OPENING_PARTITION_INCOMPLETE");
   return { status: s.reviewRequired ? "REVIEW_REQUIRED" : "NO_REVIEW_IN_PREPARED_INPUT", subjects: s.subjects,
     candidate: s.candidate, reviewRequired: s.reviewRequired, reviewAvailableCents: s.reviewAvailableCents };
+}
+
+/** NEXT must prove the batch receipts as well as every original coverage row. */
+export function compactEmptyCoverageReadbackMatches(phase,readback){
+ const proof=readback?.emptyFinancialCoverage,batch=proof?.batchProof;
+ return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&phase.receiptMode==='BATCH_V2'&&Array.isArray(phase.chunks)
+  &&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&proof?.sourceRebuilt===true&&proof.expected===phase.rows
+  &&proof.readable===phase.rows&&proof.actual===phase.rows&&proof.chunks===phase.chunks.length
+  &&batch?.mode==='BATCH_V2'&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
 }
 
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
@@ -571,6 +582,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
       ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
       ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&!compactEmptyCoverageReadbackMatches(empty,readback))issues.push('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED');
     const guarantee=checkpoint?.fundsSupplement?.coverage?.guarantees;
     if(guarantee?.policyExcluded===true && (readback.ownerGuaranteeHistory?.policyExcluded!==true
       ||readback.ownerGuaranteeHistory.expected!==0||readback.ownerGuaranteeHistory.actual!==0)) issues.push("ROUND_GUARANTEE_EXCLUSION_READBACK_UNCONFIRMED");

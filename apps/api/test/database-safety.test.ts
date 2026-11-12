@@ -207,12 +207,14 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
     if (sql.includes("guard_opening_auto_confirm_policy")) return { rows: [{ policy: false, generation: false, reminder: false, guard: false, recovery_marker: false, opening_columns: 0 }] };
     if (sql.includes("user_auth_throttle_event_id_seq")) return { rows: [{ event: false, captcha: false, sequence: false }] };
     if (sql.includes("post_order_compensation(text)")) return { rows: [{ present: false, executor: false, verifier: false, triggers: 0, functions_safe: false, incident_index: false }] };
-    if (sql.includes("cancel_order_after_start(text,bigint,numeric,numeric,text)")) return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
-    if (sql.includes("assert_fixed_fee_personal_order_v5")) return { rows: [{ verifier:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false,functions_safe:true }] };
+    if (args[0] === "zzsh_order.support_poststart_cancellation") return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
+    if (sql.includes("AS absent") && sql.includes("distribution_accrual_task")) return { rows: [{ absent: true, ready: false }] };
+    if (sql.includes("cancel_order_after_start_v3")) return { rows: [{ executor: false, helper: false, columns: 0, marker: false, safe: false, triggers: 0 }] };
+    if (sql.includes("assert_fixed_fee_personal_order_v5")) return { rows: [{ verifier:false,common:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false,functions_safe:true }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
-    return { rows: [{ relation: null, present: false, proof: false, initializer: false, allocator: null, ready: false }] };
+    return { rows: [{ relation: null, fn: null, present: false, proof: false, initializer: false, allocator: null, ready: false }] };
   } } as unknown as Parameters<typeof applyRuntimePrivileges>[0];
   return { pool, seen, grants: () => seen.filter(sql => sql.includes("GRANT EXECUTE ON FUNCTION zzsh_supply.valid_funding_policy_legacy_v1")) };
 }
@@ -477,7 +479,8 @@ test("runtime identity probes content schema ownership and CREATE while acceptin
     "the name overload throws undefined_schema when the optional content schema is absent");
   const schemas = ownershipQuery.args[0] as string[];
   assert.ok(schemas.includes("zzsh_content"), "ownership probe must cover the content schema");
-  assert.equal(schemas.length, 8);
+  assert.ok(schemas.includes("zzsh_docs"), "ownership probe must cover the docs schema");
+  assert.equal(schemas.length, 9);
 });
 
 test("runtime identity rejects a role owning the content schema", async () => {

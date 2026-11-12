@@ -44,13 +44,12 @@ export async function runListingCoexistenceChecks(o: {
   const adminRoot = `/api/bff/admin/supply/games/${o.gameId}`;
   const list = (query = "") => ok(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}${query}`);
 
-  await o.testContext.test("coexistence: legacy snapshots and native publications share one candidate set", async () => {
+  await o.testContext.test("migrated Delta snapshots stay historical while native listings remain visible", async () => {
     const config = {
       schemaVersion: 1,
       fields: [
         { key: "safeBoxCodes", operator: "ANY", label: "安全箱", enabled: true, order: 0, options: [
           { value: "box-a", label: "安全箱 A" },
-          { value: "safe_box_1x2", label: "基础安全箱(1*2)" },
         ] },
         { key: "vitality", operator: "MIN", label: "体力", enabled: true, order: 1, levels: [6, 7] },
       ],
@@ -117,42 +116,7 @@ export async function runListingCoexistenceChecks(o: {
     const legacyA = await makeLegacy("共存旧快照甲", "coex-a", nativePublished);
     const legacyB = await makeLegacy("共存旧快照乙", "coex-b", "2026-09-20T00:00:00.000Z", "safe_box_1x2");
 
-    // A legacy snapshot recorded for an already published native account must not
-    // surface as a second row or as a legacy projection. The importer refuses to
-    // overwrite a native declaration, so the source observation is recorded the
-    // way it would have existed before the native flow took the account over.
-    const takeoverDigest = createHash("sha256").update(`takeover:${takeoverId}`).digest("hex");
-    const takeoverObservationId = await withTransaction(o.pool, async (client) => {
-      const id = `observation_${randomUUID().replaceAll("-", "")}`;
-      const sequence = (await client.query(`SELECT (COALESCE(MAX(sequence),0)+1)::text AS next FROM zzsh_supply.listing_version WHERE account_id=$1`, [takeoverId])).rows[0].next as string;
-      await client.query(`INSERT INTO zzsh_supply.listing_version(id,account_id,sequence,origin,title,description,attributes,term_option_code,pricing_option_code,schema_version) VALUES($1,$2,$3,'LEGACY_OBSERVATION','历史资料待核实',NULL,'{}','','',1)`, [id, takeoverId, sequence]);
-      await client.query(`UPDATE zzsh_supply.listing_version SET review_state='IMPORTED_UNVERIFIED' WHERE id=$1`, [id]);
-      await client.query(`INSERT INTO zzsh_supply.legacy_supply_map(source_system,source_entity,legacy_id,account_id,version_id,evidence_ref,source_digest) VALUES($1,$2,'coex-takeover',$3,$4,$5,$6)`, [source.sourceSystem, source.sourceEntity, takeoverId, id, source.evidenceRef, takeoverDigest]);
-      return id;
-    });
-    await withTransaction(o.pool, (client) =>
-      recordLegacyReadSnapshot(client, takeoverId, {
-        ...source,
-        observationVersionId: takeoverObservationId,
-        legacyId: "coex-takeover",
-        sourceDigest: takeoverDigest,
-        sourceStatus: 3,
-        sourceDeleted: false,
-        sourceUpdatedAt: "2026-09-20T00:00:00.000Z",
-        snapshot: {
-          schema: "legacy-listing-read-v1",
-          resourceNo: "R-coex-takeover",
-          haffRentYuan: "999.00",
-          goodsYuan: "999.00",
-          depositYuan: "999.00",
-          termDays: "99",
-          dailyHaffBase: "1000000",
-        },
-      }, actor),
-    );
-
-    // Configuration may keep the configured historical display code next to the
-    // priced rule code once legacy snapshots exist (mixed mode).
+    // Retired Delta observations must not widen the current public filter options.
     await ok(adminRoot + "/listing-filters", { expectedRevision: "0", config, reason: "coexistence fixture" }, o.boss, "PUT");
 
     const metadata = await ok(publicRoot + "/listing-filters");
@@ -162,58 +126,32 @@ export async function runListingCoexistenceChecks(o: {
 
     const mixed = await list("&limit=50");
     const ids = mixed.items.map((item: any) => item.id);
-    assert.ok(ids.includes(legacyA.accountId), "legacy snapshot is listed next to native rows");
-    assert.ok(ids.includes(legacyB.accountId));
-    assert.equal(ids.filter((id: string) => id === takeoverId).length, 1, "takeover account appears exactly once");
+    assert.equal(ids.includes(legacyA.accountId), false);
+    assert.equal(ids.includes(legacyB.accountId), false);
+    assert.equal(ids.filter((id: string) => id === takeoverId).length, 1, "native account appears exactly once");
     const takeoverItem = mixed.items.find((item: any) => item.id === takeoverId);
     assert.equal(takeoverItem.source, undefined, "takeover account keeps its native projection");
-    const legacyItem = mixed.items.find((item: any) => item.id === legacyA.accountId);
-    assert.equal(legacyItem.source, "LEGACY_READ_ONLY");
-    assert.equal(legacyItem.canCreateOrder, false);
-    assert.equal(legacyItem.quote, null);
-    assert.equal(legacyItem.displayNo, null);
-    assert.deepEqual(legacyItem.historicalQuote, {
-      haffRent: { currency: "CNY", unit: "yuan", amount: "120.00", scale: 2 },
-      goods: { currency: "CNY", unit: "yuan", amount: "30.00", scale: 2 },
-      deposit: { currency: "CNY", unit: "yuan", amount: "50.00", scale: 2 },
-      termDays: "30",
-    });
-    const legacyDetail = await ok(`/api/v1/supply/listings/${legacyA.accountId}`);
-    assert.equal(legacyDetail.source, "LEGACY_READ_ONLY");
+    assert.equal((await call(`/api/v1/supply/listings/${legacyA.accountId}`)).status, 404);
+    assert.equal((await ok(`/api/v1/supply/accounts/${legacyA.accountId}`)).version.origin, "LEGACY_OBSERVATION");
     assert.equal((await ok(`/api/v1/supply/listings/${takeoverId}`)).source, undefined);
 
     // Non-empty mixed filters: the configured historical code locates only the
     // legacy row, the priced code locates native rows, combinations can be empty,
     // and unknown codes stay rejected.
     const filterOptions = metadata.fields.find((f: any) => f.key === "safeBoxCodes").options.map((option: any) => option.value);
-    assert.ok(filterOptions.includes("safe_box_1x2"), "metadata keeps the configured historical code next to the priced code");
+    assert.equal(filterOptions.includes("safe_box_1x2"), false);
     const filtered = async (filters: unknown) => list(`&limit=50&filters=${encodeURIComponent(JSON.stringify(filters))}`);
-    const historical = await filtered({ safeBoxCodes: ["safe_box_1x2"] });
-    assert.ok(historical.items.some((item: any) => item.id === legacyB.accountId), "historical code locates the legacy row");
-    assert.equal(historical.items.some((item: any) => item.id === takeoverId), false, "historical code does not match native rows");
+    const historical = await call(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}&filters=${encodeURIComponent(JSON.stringify({ safeBoxCodes: ["safe_box_1x2"] }))}`);
+    assert.equal(historical.status, 400);
     const priced = await filtered({ safeBoxCodes: ["box-a"] });
     assert.ok(priced.items.some((item: any) => item.id === takeoverId), "priced code locates native rows");
-    assert.ok(priced.items.some((item: any) => item.id === legacyA.accountId), "priced code still locates legacy rows carrying it");
+    assert.equal(priced.items.some((item: any) => item.id === legacyA.accountId), false);
     assert.equal(priced.items.some((item: any) => item.id === legacyB.accountId), false);
-    const empty = await filtered({ safeBoxCodes: ["safe_box_1x2"], vitality: { min: 7 } });
-    assert.equal(empty.items.length, 0, "a mixed combination with no matches stays empty");
     const unknown = await call(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}&filters=${encodeURIComponent(JSON.stringify({ safeBoxCodes: ["safe_box_9x9"] }))}`);
     assert.equal(unknown.status, 400, "unknown codes stay rejected");
 
-    // A paused native account disappears from the list and 404s; it must never
-    // fall back to the legacy snapshot recorded for the same account.
-    const beforePause = await ok(`/api/v1/supply/accounts/${takeoverId}`);
-    await ok(`/api/v1/supply/accounts/${takeoverId}/pause`, { expectedRevision: beforePause.account.revision, reason: "coexistence pause fixture" }, o.user);
-    const paused = await list("&limit=50");
-    assert.equal(paused.items.some((item: any) => item.id === takeoverId), false, "paused native account leaves the list");
-    // A paused listing stays readable as OFFLINE and must not fall back to its legacy snapshot.
-    const pausedDetail = await call(`/api/v1/supply/listings/${takeoverId}`);
-    assert.equal(pausedDetail.status, 200);
-    assert.equal((pausedDetail.body as any).source, undefined, "paused native account must not fall back to its legacy snapshot");
-    assert.equal((pausedDetail.body as any).availability.state, "OFFLINE");
-    assert.equal((pausedDetail.body as any).canCreateOrder, false);
-    const beforeResume = await ok(`/api/v1/supply/accounts/${takeoverId}`);
-    await ok(`/api/v1/supply/accounts/${takeoverId}/resume`, { expectedRevision: beforeResume.account.revision, reason: "coexistence resume fixture" }, o.user);
+    const current = await ok(`/api/v1/supply/accounts/${takeoverId}`);
+    for (const action of ["pause", "resume"]) assert.equal((await call(`/api/v1/supply/accounts/${takeoverId}/${action}`, { expectedRevision: current.account.revision }, o.user)).status, 404);
 
     // Equal sort keys across sources must page without duplicates or misses.
     // legacyA shares the takeover account's published_at (immutable snapshots
@@ -227,7 +165,8 @@ export async function runListingCoexistenceChecks(o: {
       if (!cursor) break;
     }
     assert.equal(new Set(seen).size, seen.length, "pagination never repeats a row");
-    assert.ok(seen.includes(legacyA.accountId) && seen.includes(takeoverId), "equal sort values across sources stay reachable");
+    assert.ok(seen.includes(takeoverId));
+    assert.equal(seen.includes(legacyA.accountId), false);
   });
 
   await o.testContext.test("coexistence: release and source changes invalidate cursors and switch modes", async () => {
@@ -240,8 +179,8 @@ export async function runListingCoexistenceChecks(o: {
       assert.equal((await call(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}&limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`)).status, 409, "mixed cursor cannot cross a rule change");
 
       const legacyOnly = await list("&limit=50");
-      assert.ok(legacyOnly.items.some((item: any) => item.source === "LEGACY_READ_ONLY"));
-      assert.equal(legacyOnly.items.some((item: any) => item.id === takeoverId), false, "legacy-only mode does not project native accounts");
+      assert.equal(legacyOnly.items.some((item: any) => item.source === "LEGACY_READ_ONLY"), false, "retired Delta rows remain hidden");
+      assert.equal(legacyOnly.items.some((item: any) => item.id === takeoverId), false, "without a release native accounts cannot accept orders");
       // The list is legacy-only, but an approved native detail stays readable without a current
       // rule release (non-createable); it never falls back to the legacy snapshot.
       const legacyOnlyDetail = await call(`/api/v1/supply/listings/${takeoverId}`);
@@ -252,10 +191,6 @@ export async function runListingCoexistenceChecks(o: {
       assert.equal(legacyMeta.readMode, "LEGACY_READ_ONLY");
       assert.equal(legacyMeta.ruleReleaseId, null);
 
-      const legacyPage = await list("&limit=1");
-      assert.ok(legacyPage.nextCursor);
-      await o.maintenance.query(`UPDATE zzsh_supply.game SET current_release_id=$1 WHERE id=$2`, [release, o.gameId]);
-      assert.equal((await call(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}&limit=1&cursor=${encodeURIComponent(legacyPage.nextCursor)}`)).status, 409, "legacy cursor cannot cross back into mixed mode");
     } finally {
       await o.maintenance.query(`UPDATE zzsh_supply.game SET current_release_id=$1 WHERE id=$2`, [release, o.gameId]);
     }
@@ -271,7 +206,7 @@ export async function runListingCoexistenceChecks(o: {
     const restricted = await list("&limit=50");
     assert.equal(restricted.items.some((item: any) => item.id === takeoverId), false, "restricted native account leaves the list");
     assert.equal((await call(`/api/v1/supply/listings/${takeoverId}`)).status, 404, "restricted native account must not fall back to its legacy snapshot");
-    assert.ok(restricted.items.some((item: any) => item.id === legacyAId), "restriction does not hide legacy rows");
+    assert.equal(restricted.items.some((item: any) => item.id === legacyAId), false, "retired legacy rows stay hidden");
     const afterRestriction = await ok(`/api/v1/supply/accounts/${takeoverId}`);
     await ok(`/api/bff/admin/supply/listing-reviews/${takeoverId}/restriction`, { expectedRevision: afterRestriction.account.revision, restricted: false, reason: "coexistence restriction release" }, o.boss);
 
@@ -291,7 +226,7 @@ export async function runListingCoexistenceChecks(o: {
       assert.equal(invalidatedDetail.status, 200);
       assert.equal((invalidatedDetail.body as any).source, undefined, "rule-invalid native account must not fall back to its legacy snapshot");
       assert.equal((invalidatedDetail.body as any).canCreateOrder, false);
-      assert.ok(invalidated.items.some((item: any) => item.id === legacyAId), "rule invalidation does not hide legacy rows");
+      assert.equal(invalidated.items.some((item: any) => item.id === legacyAId), false, "rule invalidation cannot revive retired legacy rows");
       if (cursorPage.nextCursor) assert.equal((await call(`/api/v1/supply/listings?queryVersion=2&gameId=${o.gameId}&limit=1&cursor=${encodeURIComponent(cursorPage.nextCursor)}`)).status, 409, "cursor bound to the old rule release is rejected");
     } finally {
       await o.maintenance.query(`UPDATE zzsh_supply.game SET current_release_id=$1 WHERE id=$2`, [release, o.gameId]);
@@ -307,16 +242,17 @@ export async function runListingCoexistenceChecks(o: {
       if (!cursor) break;
     }
     assert.equal(new Set(seen).size, seen.length, "filtered pagination never repeats a row");
-    assert.ok(seen.includes(takeoverId) && seen.includes(legacyAId), "filtered pagination keeps both sources reachable");
+    assert.ok(seen.includes(takeoverId));
+    assert.equal(seen.includes(legacyAId), false);
   });
 
-  await o.testContext.test("coexistence: favorites resolve the same legacy projection as list and detail", async () => {
+  await o.testContext.test("migrated favorites remain visible without restoring a retired listing", async () => {
     const legacyId = (await o.pool.query(`SELECT a.id FROM zzsh_supply.legacy_listing_read_snapshot h JOIN zzsh_supply.rental_account a ON a.id=h.account_id WHERE a.game_id=$1 AND NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id) ORDER BY h.created_at LIMIT 1`, [o.gameId])).rows[0].id as string;
-    await ok(`/api/v1/supply/favorites/${legacyId}`, { saved: true }, o.user, "PUT");
+    const owner = (await o.pool.query(`SELECT owner_user_id AS id FROM zzsh_supply.rental_account WHERE id=$1`, [legacyId])).rows[0].id;
+    await o.maintenance.query(`INSERT INTO zzsh_supply.favorite(user_id,account_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, [owner, legacyId]);
     const favorites = await ok("/api/v1/supply/me/favorites");
     const favorite = favorites.items.find((item: any) => item.accountId === legacyId);
-    assert.equal(favorite.state, "AVAILABLE");
-    assert.equal(favorite.listing.source, "LEGACY_READ_ONLY");
-    assert.equal(favorite.listing.canCreateOrder, false);
+    assert.equal(favorite.state, "UNAVAILABLE");
+    assert.equal(favorite.listing, null);
   });
 }

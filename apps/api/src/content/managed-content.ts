@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
-import { DEFAULT_RESOURCES, RESOURCE_DEFINITIONS, RESOURCE_SCHEMA, resourceMediaIds, type ContentResource, type PublicContentResource, type CarouselResource } from "@zzsh/content";
-import { checkedResource, fixedCarouselDraft, listAdminCarousel, loadContentItem, loadContentVersions, type ContentItemRow, type ContentVersionRow } from "./content";
+import { projectLegacyResource } from "@zzsh/content/legacy-plate";
+import { DEFAULT_RESOURCES, NOTICE_PLACEMENT_KEYS, RESOURCE_DEFINITIONS, RESOURCE_SCHEMA, resourceMediaIds, type ContentResource, type PublicContentResource, type CarouselResource } from "@zzsh/content";
+import { checkedResource, fixedCarouselDraft, listAdminCarousel, loadContentItem, loadContentVersions, projectStoredVersion, type ContentItemRow, type ContentVersionRow } from "./content";
 import { conflict, notFound } from "../supply/supply-util";
 
 export type ResourceScope = { scope: "platform" | "game"; gameId?: string };
@@ -48,7 +49,7 @@ function publishedSnapshot(version: { id: string; sequence: number; publishedAt:
 async function projectResource(client: PoolClient, key: string, item: ContentItemRow | null, versions: ContentVersionRow[]): Promise<PublicContentResource> {
   const published = versions.find(version => version.state === "PUBLISHED");
   const hasPublication = versions.some(version => version.publishedAt !== null);
-  const payload = published ? checkedResource(key, published.payload) : hasPublication ? null : await builtinResource(client, key);
+  const payload = published ? (projectLegacyResource(published.payload) ?? checkedResource(key, published.payload)) : hasPublication ? null : await builtinResource(client, key);
   const ids = payload ? resourceMediaIds(payload) : [];
   const eligible = ids.length ? (await client.query<{ id: string }>(
     `SELECT "id" FROM "zzsh_supply"."media_asset" WHERE "id" = ANY($1::text[])
@@ -65,12 +66,16 @@ async function projectResource(client: PoolClient, key: string, item: ContentIte
 
 export async function readResourceDetail(client: PoolClient, key: string): Promise<ResourceDetail> {
   const item = await loadResourceItem(client, key);
-  if (!item && !DEFAULT_RESOURCES[key]) throw notFound();
+  // 帮助/场景说明不再有运行时代码默认：未创建的文章后台仍可打开详情以创建草稿。
+  const articleKey = key.startsWith("guide:") || NOTICE_PLACEMENT_KEYS.includes(key.slice(10));
+  if (!item && !DEFAULT_RESOURCES[key] && !articleKey) throw notFound();
   const versions = item ? await loadContentVersions(client, item.id, true) : [];
+  const draft = versions.find(version => version.state === "DRAFT");
+  const published = versions.find(version => version.state === "PUBLISHED");
   return {
     key, definition: RESOURCE_DEFINITIONS.find(value => value.key === key) ?? null, item,
-    draft: versions.find(version => version.state === "DRAFT") ?? null,
-    published: versions.find(version => version.state === "PUBLISHED") ?? null,
+    draft: draft ? projectStoredVersion(draft) : null,
+    published: published ? projectStoredVersion(published) : null,
     versions: versions.slice(0, 20).map(version => ({ ...version, body: "", payload: null })),
     current: await projectResource(client, key, item, versions), baseline: !item ? await builtinResource(client, key, true) : null,
   };
@@ -119,7 +124,7 @@ export async function listPublicResources(client: PoolClient, input: { scope?: R
     const versions = rows.rows.filter(row => row.key === key);
     const published = versions.find(row => row.state === "PUBLISHED");
     const hasPublication = versions.some(row => row.publishedAt !== null);
-    const payload = published ? checkedResource(key, published.payload) : hasPublication ? null : await builtinResource(client, key);
+    const payload = published ? (projectLegacyResource(published.payload) ?? checkedResource(key, published.payload)) : hasPublication ? null : await builtinResource(client, key);
     payloads.push({ key, payload, managed: Boolean(published || hasPublication || (versions.length && !payload)), withdrawn: hasPublication, version: publishedSnapshot(published) });
   }
   const allIds = [...new Set(payloads.flatMap(row => row.payload ? resourceMediaIds(row.payload) : []))];

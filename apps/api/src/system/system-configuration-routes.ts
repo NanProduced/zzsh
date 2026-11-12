@@ -5,9 +5,11 @@ import { createHash } from "node:crypto";
 import { assertAdminContextInTransaction, readAdminContext } from "../auth/auth-security";
 import { withTransaction } from "../auth/security-core";
 import { ensureApiV1RequestId } from "../contracts/api-v1";
-import { ALLOWED_IMAGE_MIMES, MAX_MEDIA_BYTES } from "../supply/media";
+import { ALLOWED_IMAGE_MIMES, loadMediaAsset, MAX_MEDIA_BYTES } from "../supply/media";
+import { isAccountDisplayPubliclyEligible } from "../supply/listing-query";
+import { parseAccountWatermarkSettings, parseAccountWatermarkUpdate, readAccountWatermarkPolicy, resolveAccountImageWatermark, updateAccountWatermarkPolicy } from "../supply/account-image-watermark";
 import { requireAdminAccess, runIdempotentWrite, safely, type SupplyResponse, type SupplyRuntimeOptions } from "../supply/supply-routes";
-import { bodyOf, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
+import { bodyOf, conflict, ensureOnlyFields, forbidden, headerValue, invalid, notFound, sendJson, type SupplyNodeRequest } from "../supply/supply-util";
 import { readSettlementRefundPolicy, updateSettlementRefundPolicy, validateSettlementRefundPolicy, type SettlementRefundPolicyInput } from "../order/settlement-refund-policy";
 import {
   readOpeningAutoConfirmPolicy, updateOpeningAutoConfirmPolicy, validateOpeningAutoConfirmPolicy,
@@ -22,6 +24,12 @@ type StorageCheck = {
   integrity: "NOT_RUN" | "PASS" | "FAILED";
 };
 
+function isWatermarkPreviewSample(asset: NonNullable<Awaited<ReturnType<typeof loadMediaAsset>>>): boolean {
+  return asset.ownershipKind === "USER_SUPPLY" && Boolean(asset.accountId) && isAccountDisplayPubliclyEligible(asset)
+    || asset.ownershipKind === "PLATFORM_CONTENT" && asset.purpose === "CONTENT_MEDIA"
+      && asset.reviewState === "APPROVED" && asset.technicalState === "READY" && asset.accessClass === "PUBLIC_DISPLAY";
+}
+
 export async function handleSystemConfiguration(
   request: SupplyNodeRequest,
   response: SupplyResponse,
@@ -34,8 +42,11 @@ export async function handleSystemConfiguration(
     const policy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/settlement-refund-policy$/.test(url.pathname);
     const openingPolicy = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/opening-auto-confirm$/.test(url.pathname);
     const sms = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/sms$/.test(url.pathname);
+    const watermark = /^\/api\/(?:v1\/admin|bff\/admin)\/system\/account-image-watermark$/.test(url.pathname);
+    const watermarkPreview = request.method === "POST" && /^\/api\/(?:v1\/admin|bff\/admin)\/system\/account-image-watermark\/preview$/.test(url.pathname);
     if (!(request.method === "GET" && /^\/api\/(?:v1\/admin|bff\/admin)\/system\/storage(?:\/check)?$/.test(url.pathname))
       && !(request.method === "GET" && sms)
+      && !(watermark && (request.method === "GET" || request.method === "PUT")) && !watermarkPreview
       && !(policy && (request.method === "GET" || request.method === "PUT"))
       && !(openingPolicy && (request.method === "GET" || request.method === "PUT"))) throw notFound();
     if (url.searchParams.size) throw invalid("System configuration does not accept query parameters");
@@ -49,6 +60,51 @@ export async function handleSystemConfiguration(
       await assertAdminContextInTransaction(client, context);
       if (!(await requireAdminAccess(client, context.userId)).isBoss) throw forbidden();
     };
+    const accountMedia = options.mediaStorage.accountMedia;
+    if (watermarkPreview) {
+      const body = bodyOf(request);
+      ensureOnlyFields(body, ["assetId", "enabled", "logoAssetId", "position", "sizePercent", "opacityPercent", "marginPercent"]);
+      if (body.assetId !== null && (typeof body.assetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.assetId))) throw invalid("样本图片编号无效", "assetId");
+      const requestedSampleId = typeof body.assetId === "string" ? body.assetId : null;
+      const settings = parseAccountWatermarkSettings(body);
+      const sample = await withTransaction(options.pool, async client => {
+        await authorize(client);
+        if (!accountMedia) throw conflict("OSS 图片处理尚未启用");
+        const sampleId = requestedSampleId ?? (await client.query<{ id: string }>(`SELECT id FROM zzsh_supply.media_asset
+          WHERE purpose='ACCOUNT_DISPLAY' AND ownership_kind='USER_SUPPLY' AND account_id IS NOT NULL
+            AND review_state IN ('PENDING','APPROVED') AND technical_state='READY'
+            AND access_class='PUBLIC_DISPLAY' AND public_storage_key IS NOT NULL ORDER BY id LIMIT 1`)).rows[0]?.id;
+        if (!sampleId) return null;
+        const asset = await loadMediaAsset(client, sampleId);
+        if (!asset || !asset.publicStorageKey || !isWatermarkPreviewSample(asset)) throw notFound();
+        const policy = await resolveAccountImageWatermark(client, { ...settings, revision: "1" });
+        return { asset, storageKey: asset.publicStorageKey, policy, accountMedia };
+      });
+      if (!sample) { sendJson(response, 200, { images: [], state: "NO_SAMPLE" }, requestId); return; }
+      const images = await sample.accountMedia.previewVariants(sample.storageKey, sample.asset, sample.policy);
+      await withTransaction(options.pool, async client => {
+        await authorize(client);
+        const current = await loadMediaAsset(client, sample.asset.id);
+        if (!current || current.publicStorageKey !== sample.storageKey || !isWatermarkPreviewSample(current)) throw notFound();
+        const watermark = await resolveAccountImageWatermark(client, { ...settings, revision: "1" });
+        if (watermark.logoStorageKey !== sample.policy.logoStorageKey) throw conflict("Logo 素材已变化，请重新选择");
+      });
+      sendJson(response, 200, { images }, requestId);
+      return;
+    }
+    if (watermark) {
+      if (request.method === "GET") {
+        const policy = await withTransaction(options.pool, async client => { await authorize(client); return readAccountWatermarkPolicy(client); });
+        sendJson(response, 200, { policy, previewAvailable: Boolean(accountMedia) }, requestId);
+        return;
+      }
+      const input = parseAccountWatermarkUpdate(bodyOf(request));
+      await runIdempotentWrite(options, request, response, requestId,
+        { principalId: context.userId, operation: "supply.account_image_watermark.update", resourceId: "global" },
+        { realm: "admin", id: context.userId, sessionId: context.sessionId }, input, authorize,
+        async client => ({ status: 200, body: { policy: await updateAccountWatermarkPolicy(client, { id: context.userId, sessionId: context.sessionId }, input, requestId) } }));
+      return;
+    }
     if(sms){
       await withTransaction(options.pool,authorize);
       const config=options.userSmsConfiguration;

@@ -53,7 +53,7 @@ export function PrestartTerminationPanel({order,party,onChanged}:{order:Order;pa
    setNote(out.status==='unauthorized'?'登录状态已变化，请重新登录查看上次请求。':out.status==='unknown'||out.status==='recovery-unresolved'?'结果尚未确认，请按原请求核对。':out.status==='blocked'?'暂时无法继续，请联系客服。':'取消未完成，请刷新后重试。');}
  };
  const canChoose=Boolean(read?.eligibility.allowed&&read.cancellationReasons.length&&(!read.request||read.request.state!=='APPROVED'));
- return <section className="order-detail-section order-prestart-section" aria-label="未开租取消订单"><details className="order-secondary-details" open={Boolean(read?.request || pending || note || visible?.error)}><summary><h2 className="order-section-title">取消订单</h2><span>{read?.request ? stateText[read.request.state] : '尚未开租可取消订单'}</span></summary><div className="order-prestart-content">
+ return <section className="order-detail-section order-prestart-section" id="order-cancel-request" aria-label="未开租取消订单"><details className="order-secondary-details" open={Boolean(read?.request || pending || note || visible?.error)}><summary><h2 className="order-section-title">取消订单</h2><span>{read?.request ? stateText[read.request.state] : '尚未开租可取消订单'}</span></summary><div className="order-prestart-content">
   <p className="order-muted">双方确认开租前可取消订单，租客的实付金额将原路退回。</p>
   {!visible||!visible.read&&!visible.error?<p role="status" className="order-muted">正在查看取消条件…</p>:visible.error?<p role="alert">暂时无法查看取消条件，请稍后重试。{visible.error.requestId?` 查询编号：${visible.error.requestId}`:''}</p>:null}
   {read?.request?<><p role="status">{stateText[read.request.state]}</p><p className="order-muted">{read.request.reason}{read.request.reviewReason&&read.request.reviewReason!==read.request.reason?` · ${read.request.reviewReason}`:''}</p>

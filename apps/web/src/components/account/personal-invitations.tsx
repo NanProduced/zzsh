@@ -1,7 +1,9 @@
 "use client";
 import {PersonalEarnings} from './personal-earnings';import {useEffect,useRef,useState,type FormEvent} from 'react';import {Copy,RefreshCw,Users,Link2,Clock3,Sparkles,ShieldCheck} from 'lucide-react';
 import {useUserSession,useUserSessionStore} from '@/components/session/user-session-provider';import {formatOrderTime} from '@/lib/order-client';import {WalletRequestError} from '@/lib/personal-wallet-client';
-import {readMyInvitation,readMyInvitees,pendingLeaderBinding,bindLeader,recoverLeaderBinding,readMyDistributionTerms,type InvitationRead,type MyDistributionTerms} from '@/lib/invitation-client';import './personal-invitations.css';
+import {readMyInvitation,readMyInvitees,pendingLeaderBinding,bindLeader,recoverLeaderBinding,readMyDistributionTerms,type InvitationRead,type MyDistributionTerms} from '@/lib/invitation-client';
+import './financial-primitives.css';
+import './personal-invitations.css';
 type Filter='ALL'|'INVITER'|'DISTRIBUTION_LEADER';type Page=Awaited<ReturnType<typeof readMyInvitees>>;
 type TabKey='overview'|'earnings'|'relations'|'rules';
 const typeLabel={INVITER:'注册邀请',DISTRIBUTION_LEADER:'佣金关系'};
@@ -91,7 +93,10 @@ export function PersonalInvitations({scope}:{scope:string}){
 
     <div className="invitation-workbench">
       <section className="account-module-card invitation-code">
-        <h3 id="invitation-actions-heading">我的邀请码</h3>
+        <div className="invitation-card-header">
+          <h3 id="invitation-actions-heading">我的邀请码</h3>
+          <span className="invitation-policy-pill">好友租号享折扣 · 您享最高分佣返还</span>
+        </div>
         <strong>{value?.ownCode.code??(busy?'正在读取':'邀请信息尚在核对')}</strong>
         <p>{value?.ownCode.code?'分享邀请码，邀请好友加入。':'确认后可分享邀请码或邀请链接。'}</p>
         <div className="invitation-actions">
@@ -100,10 +105,18 @@ export function PersonalInvitations({scope}:{scope:string}){
         </div>
       </section>
       <section className="account-module-card invitation-parent">
-        <h3>佣金上级</h3>
-        <strong>{value?.leader.knowledge==='KNOWN_PARENT'?'已绑定':value?.leader.knowledge==='KNOWN_NONE'?'尚未绑定':'关系待确认'}</strong>
+        <div className="invitation-card-header">
+          <h3>佣金上级</h3>
+          {value?.leader.knowledge==='KNOWN_PARENT'?(
+            <span className="invitation-bound-badge">
+              <ShieldCheck size={13} aria-hidden="true" />
+              已生效
+            </span>
+          ):null}
+        </div>
+        <strong className={`invitation-parent-status state-${value?.leader.knowledge||'unknown'}`}>{value?.leader.knowledge==='KNOWN_PARENT'?'已绑定':value?.leader.knowledge==='KNOWN_NONE'?'尚未绑定':'关系待确认'}</strong>
         {value?.leader.knowledge==='KNOWN_NONE'&&bindingEnabled?<p>绑定后无法更换，请确认对方信息。</p>:null}
-        {value?.leader.knowledge==='KNOWN_NONE'&&bindingEnabled?<form onSubmit={submit}><label htmlFor="leader-invitation-code">上级邀请码</label><input id="leader-invitation-code" autoComplete="off" maxLength={30} placeholder="填写对方的邀请码" value={code} disabled={busy||pending||!bindingEnabled} onChange={e=>{setCode(e.target.value);setAccepted(false);}}/><label className="invitation-confirm"><input type="checkbox" checked={accepted} disabled={busy||pending||!bindingEnabled} onChange={e=>setAccepted(e.target.checked)}/><span>我确认绑定后不能更换上级</span></label><button className="button primary" type="submit" disabled={busy||pending||!accepted||!code.trim()||!bindingEnabled}>绑定上级</button></form>:value?.leader.knowledge==='KNOWN_NONE'?<p>暂时无法绑定上级。</p>:null}
+        {value?.leader.knowledge==='KNOWN_NONE'&&bindingEnabled?<form onSubmit={submit} className="invitation-bind-form"><label htmlFor="leader-invitation-code">上级邀请码</label><input id="leader-invitation-code" autoComplete="off" maxLength={30} placeholder="填写对方的邀请码" value={code} disabled={busy||pending||!bindingEnabled} onChange={e=>{setCode(e.target.value);setAccepted(false);}}/><label className="invitation-confirm"><input type="checkbox" checked={accepted} disabled={busy||pending||!bindingEnabled} onChange={e=>setAccepted(e.target.checked)}/><span>我确认绑定后不能更换上级</span></label><button className="button primary" type="submit" disabled={busy||pending||!accepted||!code.trim()||!bindingEnabled}>绑定上级</button></form>:value?.leader.knowledge==='KNOWN_NONE'?<p>暂时无法绑定上级。</p>:null}
         <p className="invitation-source">注册邀请：{value?.inviter.knowledge==='KNOWN_PARENT'?'已记录':value?.inviter.knowledge==='KNOWN_NONE'?'注册时未填写邀请码':'待确认'}</p>
       </section>
     </div>
@@ -138,7 +151,7 @@ export function PersonalInvitations({scope}:{scope:string}){
                   <small>{item.boundAt===null?'原绑定时间未核定':formatOrderTime(item.boundAt)}</small>
                 </div>
               </div>
-              <span className="invitation-type-tag">{typeLabel[item.type]}</span>
+              <span className={`invitation-type-tag type-${item.type.toLowerCase()}`}>{typeLabel[item.type]}</span>
             </li>
           ))}
         </ul>

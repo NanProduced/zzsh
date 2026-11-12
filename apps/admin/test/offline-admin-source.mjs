@@ -22,13 +22,17 @@ export async function createOfflineAdminSource(options){
     m.require=name=>{
       if(name.endsWith(".css"))return {};
       if(name.endsWith(".png"))return name;
+      // Vite ?raw 导入（默认内容清单等）：离线按原文读取，与浏览器侧语义一致。
+      if(name.endsWith("?raw")){const raw=resolveSource(name.slice(0,-4),file);return {__esModule:true,default:fs.readFileSync(raw,"utf8")};}
       const source=resolveSource(name,file);
-      if(source&&/\.(?:tsx?|jsx?)$/.test(source))return load(source);
+      if(source&&/\.(?:tsx?|jsx?|mjs)$/.test(source))return load(source);
       if(name.startsWith("@zzsh/")){const shared=native.resolve(name);if(/\.(?:tsx?|jsx?)$/.test(shared))return load(shared);}
       return native(name);
     };
     const source=fs.readFileSync(file,"utf8");
-    m._compile(ts.transpileModule(source,{fileName:file,compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
+    // .mjs 会让 transpileModule 保留 ESM 语法（impliedNodeFormat）；按 .js 转译成 CJS 才能走 m.require。
+    const transpileName=file.endsWith(".mjs")?file.slice(0,-4)+".js":file;
+    m._compile(ts.transpileModule(source,{fileName:transpileName,compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
     return m.exports;
   };
   return {ssrLoadModule:async url=>load(path.join(root,url.replace(/^\//,""))),close:async()=>cache.clear()};

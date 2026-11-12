@@ -72,7 +72,6 @@ async function main(){
   &&Array.isArray(policyReceipt.batches)&&Array.isArray(manifest.batches)&&policyReceipt.batches.length===manifest.batches.length
   &&(manifest.listedAccounts===0?policyReceipt.status==='NO_LISTED_SOURCE_ACCOUNTS':
    ['SAME_CAPTURE_POLICY_PREPARED_NO_TARGET','SAME_CAPTURE_BATCHES_PREPARED_NO_TARGET'].includes(policyReceipt.status)),'LISTED_RUN_POLICY_CHANGED');
- if(mode==='--execute'&&manifest.listedAccounts>0)assertLegacyAutoPublicationPermitted(round.target);
  assert(isAbsolute(round.credentials??'')&&!lstatSync(round.credentials).isSymbolicLink(),'LISTED_RUN_CREDENTIALS_REQUIRED');
  const resourcePath=join(dirname(round.credentials),'resource.json');assert(!lstatSync(resourcePath).isSymbolicLink(),'LISTED_RUN_LINK_REFUSED');
  const resource=JSON.parse(readFileSync(resourcePath)),registered=loadRegisteredTarget(round.credentials);
@@ -119,6 +118,7 @@ async function main(){
    const batchBinding={sourceBindingFile:input.sourceBinding.path,sourceBindingSha256:input.sourceBinding.sha256,expectedAccountCount:manifest.batches[index].count,
     batch:{schema:'zzsh.listed-same-capture-batch-binding.v1',manifestFile,manifestSha256:manifestRef.sha256,index:index+1,policyFiles}};
    const selected=await readRoundListedBatch(batchBinding,round,policy,privatePath(round.source.path),canonicalize,legacyPriceInteger);
+   if(mode==='--execute')for(const raw of selected.accounts.values())assertLegacyAutoPublicationPermitted(raw.game_id,dataset.gameBindings);
    const policyCanonical=canonicalize(policy),authorityCanonical=canonicalize(authority);
    for(const item of policy.supplement.accountSourceDigests){const raw=selected.accounts.get(item.id);
     readLegacyListedPolicy(policyCanonical,{proofSha256:sha(policyCanonical),sourceReceiptSha256:round.source.sha256,

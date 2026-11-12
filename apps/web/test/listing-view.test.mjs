@@ -110,6 +110,30 @@ test('card view uses presentation names, public conditions and server totals', (
   ]);
 });
 
+test('market uses the small CDN cover, details use the full variant, and missing CDN data stays compatible', () => {
+  const coverUrl = 'https://listing-images.example.com/public/listing/a/asset_a/cdn_v/640.webp';
+  const detailUrl = 'https://listing-images.example.com/public/listing/a/asset_a/cdn_v/1920.webp';
+  const distributed = { ...listing, media: [listing.media[0], { ...listing.media[1], coverUrl, detailUrl }] };
+  assert.equal(toListingCard(distributed).imageUrl, coverUrl);
+  const detail = toListingDetail(distributed);
+  assert.equal(detail.media[0].url, detailUrl);
+  assert.equal(detail.media[0].coverUrl, coverUrl);
+  assert.equal(detail.media[1].url, listing.media[0].url);
+});
+
+test('legacy CDN image loads directly while a confirmed missing slot keeps its migration status', () => {
+  const cdnUrl = 'https://listing-images.example.com/public/legacy/cdn_v/accountsImage/20261112/showcase.png';
+  const legacy = { ...listing, media: [], legacyImages: [
+    { position: 0, url: '/api/supply/listings/account_1/legacy-images/0', cdnUrl },
+    { position: 1, url: '/api/supply/listings/account_1/legacy-images/1', state: 'PENDING_IMPORT' },
+  ] };
+  const card = toListingCard(legacy);
+  assert.equal(card.imageUrl, cdnUrl);
+  assert.equal(card.media[0].legacy, undefined);
+  assert.equal(card.media[1].legacy, true);
+  assert.equal(card.media[1].legacyState, 'PENDING_IMPORT');
+});
+
 test('detail breadcrumb stays generic without a server-confirmed game', () => {
   for (const value of [null, undefined, '']) {
     assert.deepEqual(detailBreadcrumbs(value), [

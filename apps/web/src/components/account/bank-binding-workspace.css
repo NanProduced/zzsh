@@ -1,18 +1,35 @@
-/* 提现单卡聚焦工作台 (Single Focus Card Architecture) - 对齐图 2 与 /impeccable layout */
+/* 提现工作台 Web 桌面端两栏流式布局 (Desktop 2-Column Responsive Architecture) */
 .bank-binding-workspace {
-  max-width: 580px;
-  margin: 0 auto;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
   min-width: 0;
 }
 
 .bank-withdrawal-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.95fr);
+  gap: 24px;
+  align-items: start;
   width: 100%;
+}
+
+@media (max-width: 1080px) {
+  .bank-withdrawal-grid {
+    grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+    gap: 20px;
+  }
+}
+
+@media (max-width: 860px) {
+  .bank-withdrawal-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
 }
 
 .bank-binding-workspace .account-module-card {
@@ -434,17 +451,25 @@
 .bank-card-realistic {
   position: relative;
   width: 100%;
-  min-height: 96px;
-  border-radius: 12px;
-  padding: 16px 20px;
+  min-height: 160px;
+  border-radius: 14px;
+  padding: 20px 22px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: space-between;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-  color: #ffffff;
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.12), inset 0 1px 1px rgba(255, 255, 255, 0.12);
+  background:
+    radial-gradient(circle at 90% 12%, rgba(202, 138, 4, 0.08) 0%, transparent 45%),
+    radial-gradient(circle at 10% 88%, rgba(59, 130, 246, 0.04) 0%, transparent 40%),
+    linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #f1f5f9 100%);
+  border: 1px solid color-mix(in srgb, var(--account-accent, #ca8a04) 22%, #cbd5e1);
+  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.05), inset 0 1px 0 rgba(255, 255, 255, 1);
+  color: #0f172a;
   overflow: hidden;
-  gap: 16px;
+  gap: 14px;
+  transition: all 0.2s ease;
+}
+.bank-card-realistic:hover {
+  box-shadow: 0 6px 24px -2px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 1);
 }
 .bank-card-waves {
   position: absolute;
@@ -452,59 +477,112 @@
   width: 100%;
   height: 100%;
   pointer-events: none;
-  opacity: 0.6;
+  opacity: 0.7;
 }
 .bank-card-top {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 12px;
+  position: relative;
+  z-index: 1;
+}
+.bank-card-brand {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #334155;
 }
 .bank-card-network {
-  font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.85);
-  letter-spacing: 0.04em;
+  font-size: 13px;
+  font-weight: 650;
+  color: #1e293b;
+  letter-spacing: 0.02em;
+}
+.bank-contactless-svg {
+  color: #94a3b8;
+}
+.bank-chip-svg {
+  flex-shrink: 0;
+  filter: drop-shadow(0 1px 2px rgba(180, 130, 40, 0.25));
 }
 .bank-card-number {
   position: relative;
   z-index: 1;
   font-family: var(--font-mono, monospace);
-  font-size: 18px;
+  font-size: 19px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  color: #ffffff;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
-  margin: 6px 0 2px;
+  letter-spacing: 0.15em;
+  color: #0f172a;
+  margin: 10px 0 6px;
   font-variant-numeric: tabular-nums;
 }
 .bank-card-bottom {
   position: relative;
   z-index: 1;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: 14px;
 }
 .bank-card-holder {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
 }
 .bank-card-label {
   font-size: 11px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #64748b;
+  letter-spacing: 0.06em;
 }
 .bank-card-name {
-  font-size: 13.5px;
-  font-weight: 650;
-  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
 }
 .bank-card-realistic .info-status-badge {
-  background: rgba(255, 255, 255, 0.16);
-  color: #ffffff;
-  border-color: rgba(255, 255, 255, 0.25);
-  backdrop-filter: blur(4px);
+  background: rgba(16, 185, 129, 0.08);
+  color: #047857;
+  border: 1px solid rgba(16, 185, 129, 0.25);
   font-size: 11.5px;
+  font-weight: 600;
+}
+
+.bank-security-tips {
+  margin-top: 18px;
+  padding: 16px 18px;
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.bank-security-tip-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.bank-security-tip-icon {
+  font-size: 15px;
+  line-height: 1.4;
+  flex: none;
+}
+.bank-security-tip-item strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+  line-height: 1.4;
+  margin-bottom: 2px;
+}
+.bank-security-tip-item p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
 }
 
 .bank-empty {

@@ -1,0 +1,45 @@
+{
+  "key": "PUBLISH_TERM",
+  "kind": "notice",
+  "file": "notices/PUBLISH_TERM.json",
+  "meta": {
+    "title": "日耗、租期与比例",
+    "sections": [
+      {
+        "id": "help",
+        "title": "选择说明",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "每日消耗用于推算预计租期，也可能参与比例计算。可用档位、范围及金额以本次核价为准；资料变化后需要重新核价。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "help",
+        "children": [
+          {
+            "text": "选择说明",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "每日消耗用于推算预计租期，也可能参与比例计算。可用档位、范围及金额以本次核价为准；资料变化后需要重新核价。"
+          }
+        ]
+      }
+    ]
+  }
+}

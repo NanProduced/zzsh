@@ -18,10 +18,11 @@ import { WorkspaceTopbar } from "./topbar";
 import {
   WORKBENCH_TAB_ID,
   canOpenKind,
-  changesSettingsContent,
+  changesWorkspaceContent,
   clearTabs,
   closeTabs,
   filterTabsByPermission,
+  isContentWorkspaceKind,
   persistTabs,
   restoreTabs,
   tabFromLocation,
@@ -44,7 +45,7 @@ function currentLocationTab(): WorkspaceTab {
 type DiscardIntent = { titles: string[]; execute: () => void; cancel?: () => void; accessKey: string };
 
 function supportsWriteLock(kind: WorkspaceTab["kind"]): boolean {
-  return kind === "content" || kind === "support-settings" || kind === "support-management";
+  return kind === "content" || isContentWorkspaceKind(kind) || kind === "support-settings" || kind === "support-management";
 }
 
 export function WorkspaceApp({
@@ -148,6 +149,7 @@ export function WorkspaceApp({
     setWriteLockedIds(next);
   }, []);
   const activeWriteLocked = isWriteLocked(active.id);
+  const legalWorkbench = active.kind === "content-legal" || (active.kind === "content" && active.query.tab === "legal");
   // 侧栏唯一活动入口按真实地址（含 query）判定：/settings?section=security 只点亮账号安全。
   // 前进/后退后 tab 可能还没有本轮 query，故用 revision 触发重算。
   const [locationRevision, bumpLocationRevision] = useState(0);
@@ -249,7 +251,7 @@ export function WorkspaceApp({
         window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
         return;
       }
-      const hasDirty = currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesSettingsContent(currentTab, next));
+      const hasDirty = currentTab && dirtyIdsRef.current[currentId] && (next.id !== currentId || changesWorkspaceContent(currentTab, next));
       if (hasDirty) {
         window.history.pushState({ tabId: currentTab.id }, "", tabHref(currentTab));
         if (accessRef.current.locked || !canOpenKind(next.kind, accessRef.current.nav)) return;
@@ -328,7 +330,7 @@ export function WorkspaceApp({
       return true;
     }
     if (isWriteLocked(activeIdRef.current)) return false;
-    if (next.id === activeIdRef.current && (!current || !changesSettingsContent(current, next))) {
+    if (next.id === activeIdRef.current && (!current || !changesWorkspaceContent(current, next))) {
       return proceed();
     }
     return confirmLeave(activeIdRef.current, proceed);
@@ -337,7 +339,7 @@ export function WorkspaceApp({
   const openPath = useCallback((path: string, title?: string, afterOpen?: () => void): boolean => {
     const [pathname, search = ""] = path.split("?");
     const tab = tabFromLocation(pathname || "/workbench", search);
-    return openTab(title ? { ...tab, title } : tab, false, afterOpen);
+    return openTab(title && tab.id !== "docs" ? { ...tab, title } : tab, false, afterOpen);
   }, [openTab]);
 
   const activate = (tabId: string): boolean => {
@@ -531,7 +533,7 @@ export function WorkspaceApp({
             onClose={close}
           />
           <div className={`workspace-page flex min-h-0 flex-1 flex-col overflow-auto px-4 py-4 sm:px-5 sm:py-5${supportTab && active.id === supportTab.id ? " im-wb-active" : ""}`}>
-            {activeWriteLocked ? <p role="status" className="mb-3 text-xs text-muted-foreground">内容操作正在处理或等待结果核对，暂不能离开或刷新。</p> : null}
+            {activeWriteLocked && !legalWorkbench ? <p role="status" className="mb-3 text-xs text-muted-foreground">内容操作正在处理或等待结果核对，暂不能离开或刷新。</p> : null}
             {/* 客服工作台单独常驻：切 tab 或页面隐藏时保留 IM 连接与接待心跳。 */}
             {supportTab ? (
               <div hidden={active.id !== supportTab.id} className="flex min-h-0 flex-1 flex-col">

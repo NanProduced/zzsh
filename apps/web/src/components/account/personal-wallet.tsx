@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, CreditCard, Eye, EyeOff, FileText, Info, RefreshCw } from "lucide-react";
+import { ArrowDownLeft, ArrowLeft, ArrowUpRight, ChevronRight, CreditCard, Eye, EyeOff, FileText, Info, RefreshCw, RotateCcw } from "lucide-react";
 import { useUserSession, useUserSessionStore } from "@/components/session/user-session-provider";
 import { formatOrderTime } from "@/lib/order-client";
 import { walletWithdrawalNote, financeEntryLabel, walletSourceStatus,refundAttemptStatus,walletOriginalType, readMyWallet, readMyWalletEntries, readMyWalletEntry, walletMoney, WalletRequestError, type EntryBucket, type WalletRead, type WalletEntry, type WalletEntryPage, type WalletEntryDetail } from "@/lib/personal-wallet-client";
@@ -82,6 +82,43 @@ function useUserBankBinding(scope: string, enabled: boolean, userId: string | nu
   return state.scope === scope && latest.status === "authenticated" && latest.userId === userId && `${latest.userId}:${latest.identityVersion}` === scope ? state : { scope, status: "loading" as const, binding: null };
 }
 
+function getEntryIconMeta(e: WalletEntry) {
+  if (
+    e.bucket === "REFUND_PAYABLE" ||
+    e.sourceKind === "HISTORICAL_REFUND" ||
+    e.sourceKind === "CONTROLLED_WITHDRAWAL_RELEASE" ||
+    e.sourceKind === "JOINPAY_WITHDRAWAL_RELEASED" ||
+    e.purpose === "WITHDRAWAL_REJECTED_RETURN" ||
+    e.purpose === "TRANSFER_FAILED_RETURN" ||
+    e.purpose === "WECHAT_WITHDRAWAL_FAILED_RETURN"
+  ) {
+    return { type: "refund", Icon: RotateCcw };
+  }
+  if (
+    (e.deltaCents && e.deltaCents.startsWith("-")) ||
+    e.sourceKind === "CONTROLLED_WITHDRAWAL_RESERVE" ||
+    e.sourceKind === "JOINPAY_WITHDRAWAL_RESERVED" ||
+    e.sourceKind === "CONTROLLED_WITHDRAWAL_PAYOUT" ||
+    e.sourceKind === "HISTORICAL_WITHDRAWAL" ||
+    e.purpose === "WITHDRAWAL_DEBIT" ||
+    e.purpose === "PLATFORM_DEBIT"
+  ) {
+    return { type: "out", Icon: ArrowUpRight };
+  }
+  if (
+    (e.deltaCents && !e.deltaCents.startsWith("-") && e.deltaCents !== "0") ||
+    e.sourceKind === "NATIVE_SETTLEMENT" ||
+    e.sourceKind === "NATIVE_REFERRAL_EARNING_SETTLED" ||
+    e.sourceKind === "ORDER_COMPENSATION_PAID" ||
+    e.purpose === "OWNER_RENTAL_INCOME" ||
+    e.purpose === "DISTRIBUTION_INCOME" ||
+    e.purpose === "PLATFORM_CREDIT"
+  ) {
+    return { type: "in", Icon: ArrowDownLeft };
+  }
+  return { type: "neutral", Icon: CreditCard };
+}
+
 function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: EntryBucket; onOpen: (id: string) => void }) {
   return (
     <div className="wallet-records">
@@ -90,6 +127,8 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
         const nature = entryNature(e);
         const status = entryStatus(e);
         const reference = e.sourceDetails?.originalNumber ?? e.businessReference.number;
+        const iconMeta = getEntryIconMeta(e);
+        const IconComponent = iconMeta.Icon;
         return (
           <Link
             key={e.id}
@@ -108,17 +147,24 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               )}
             </span>
             <div className="wallet-record-copy">
-              <div className="wallet-record-title-row">
-                <strong>{financeEntryLabel(e)}</strong>
-                {e.dataOrigin ? <span className="wallet-type-tag reference-tag">{e.dataOrigin === "UNKNOWN" ? "来源待核" : "模拟"}</span> : null}
+              <div className="wallet-record-info-group">
+                <div className={`wallet-record-icon is-${iconMeta.type}`} aria-hidden="true">
+                  <IconComponent size={16} />
+                </div>
+                <div className="wallet-record-info-text">
+                  <div className="wallet-record-title-row">
+                    <strong>{financeEntryLabel(e)}</strong>
+                    {e.dataOrigin ? <span className="wallet-type-tag reference-tag">{e.dataOrigin === "UNKNOWN" ? "来源待核" : "模拟"}</span> : null}
+                  </div>
+                  {reference ? <small className="wallet-record-ref">单号 {reference}</small> : null}
+                  {e.sourceDetails?.attempts?.map(a => (
+                    <small key={"la_refund_log:" + a.source.id}>
+                      原尝试 {a.originalNumber ?? "未记录"} · {walletMoney(a.recordedAmountCents)} ·{" "}
+                      {refundAttemptStatus(a.originalStatus)}
+                    </small>
+                  ))}
+                </div>
               </div>
-              {reference ? <small>单号 {reference}</small> : null}
-              {e.sourceDetails?.attempts?.map(a => (
-                <small key={"la_refund_log:" + a.source.id}>
-                  原尝试 {a.originalNumber ?? "未记录"} · {walletMoney(a.recordedAmountCents)} ·{" "}
-                  {refundAttemptStatus(a.originalStatus)}
-                </small>
-              ))}
             </div>
             <div className="wallet-delta-container">
               <strong
@@ -135,12 +181,52 @@ function EntryRows({ items, bucket, onOpen }: { items: WalletEntry[]; bucket: En
               </strong>
               {nature.note ? <small className={`wallet-delta-sub ${nature.reference ? "reference" : "balance"}`}>{nature.note}</small> : null}
             </div>
-            {status ? <RecordStatus tone="neutral">{status}</RecordStatus> : e.kind === "HISTORICAL" ? <span className="wallet-record-history">{e.historicalAmountSemantics === "UNVERIFIED" ? "来源待核" : "旧平台记录"}</span> : <span />}
+            {status ? (
+              <span className={`wallet-status-pill status-${iconMeta.type}`}>
+                <RecordStatus tone={iconMeta.type === "in" ? "success" : "neutral"}>{status}</RecordStatus>
+              </span>
+            ) : e.kind === "HISTORICAL" ? (
+              <span className="wallet-record-history">
+                {e.historicalAmountSemantics === "UNVERIFIED" ? "来源待核" : "旧平台记录"}
+              </span>
+            ) : (
+              <span />
+            )}
             <ChevronRight size={15} aria-hidden="true" />
           </Link>
         );
       })}
     </div>
+  );
+}
+
+function BankChipSvg() {
+  return (
+    <svg className="bank-chip-svg" width="34" height="26" viewBox="0 0 34 26" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="34" height="26" rx="4.5" fill="url(#chip-surface-wallet)" stroke="#c4a568" strokeWidth="0.8" />
+      <path d="M0 9h11a3 3 0 0 1 3 3v2a3 3 0 0 1-3 3H0" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.65" />
+      <path d="M34 9h-11a3 3 0 0 0-3 3v2a3 3 0 0 0 3 3h11" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.65" />
+      <path d="M17 0v26" stroke="#8a6723" strokeWidth="0.75" strokeDasharray="3 2" opacity="0.45" />
+      <rect x="12.5" y="9.5" width="9" height="7" rx="1.5" stroke="#8a6723" strokeWidth="0.75" fill="none" opacity="0.6" />
+      <defs>
+        <linearGradient id="chip-surface-wallet" x1="0" y1="0" x2="34" y2="26" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#fef3c7" />
+          <stop offset="0.35" stopColor="#fde68a" />
+          <stop offset="0.7" stopColor="#f59e0b" stopOpacity="0.85" />
+          <stop offset="1" stopColor="#d97706" stopOpacity="0.75" />
+        </linearGradient>
+      </defs>
+    </svg>
+  );
+}
+
+function ContactlessSvg() {
+  return (
+    <svg className="bank-contactless-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8.5 16.5a5 5 0 0 1 0-9" />
+      <path d="M12 19a8.5 8.5 0 0 0 0-14" />
+      <path d="M15.5 21.5a12 12 0 0 0 0-19" />
+    </svg>
   );
 }
 
@@ -294,11 +380,31 @@ export function PersonalWallet({ scope }: { scope: string }) {
 
           {/* Card 2: 收款银行卡 */}
           <section className="account-module-card wallet-overview-card wallet-bank-card-container fin-bank-card" aria-label="收款银行卡">
+            <svg className="fin-bank-card-waves" viewBox="0 0 340 220" fill="none" preserveAspectRatio="none" aria-hidden="true">
+              <path d="M-20 140 C 90 90, 180 190, 360 100" stroke="currentColor" strokeWidth="1.2" strokeOpacity="0.08" fill="none" />
+              <path d="M-10 170 C 100 120, 190 220, 370 130" stroke="currentColor" strokeWidth="1.2" strokeOpacity="0.06" fill="none" />
+              <circle cx="280" cy="50" r="75" fill="url(#card-glow-overview)" opacity="0.1" />
+              <defs>
+                <radialGradient id="card-glow-overview" cx="50%" cy="50%" r="50%">
+                  <stop stopColor="#f59e0b" />
+                  <stop offset="100%" stopColor="transparent" />
+                </radialGradient>
+              </defs>
+            </svg>
             <div className="fin-bank-card-top">
-              <div className="fin-chip-emblem" aria-hidden="true" />
-              <StatusBadge tone={bankCard.status === "ready" && bankCard.binding ? "info" : bankCard.status === "unknown" ? "neutral" : "neutral"}>
-                {bankCard.status === "ready" && bankCard.binding ? "资料已保存" : bankCard.status === "unknown" ? "状态待核" : "未绑定"}
-              </StatusBadge>
+              <div className="fin-card-brand">
+                <span className="fin-card-credential-mark" aria-hidden="true">
+                  <CreditCard size={15} />
+                </span>
+                <span className="fin-card-brand-title">收款银行账户</span>
+                <ContactlessSvg />
+              </div>
+              <div className="fin-card-top-right">
+                <BankChipSvg />
+                <StatusBadge tone={bankCard.status === "ready" && bankCard.binding ? "info" : bankCard.status === "unknown" ? "neutral" : "neutral"}>
+                  {bankCard.status === "ready" && bankCard.binding ? "资料已保存" : bankCard.status === "unknown" ? "状态待核" : "未绑定"}
+                </StatusBadge>
+              </div>
             </div>
             <div className="wallet-bank-card-body">
               {bankCard.status === "loading" ? (
@@ -315,7 +421,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                       <span className="fin-cardholder-label">持卡人</span>
                       <span className="fin-cardholder-name">{bankCard.binding.holderNameMask}</span>
                     </div>
-                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs">
+                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs fin-card-action-btn">
                       管理卡片
                     </Link>
                   </div>
@@ -328,7 +434,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
                       <span className="fin-cardholder-label">持卡人</span>
                       <span className="fin-cardholder-name">尚未绑定收款银行卡</span>
                     </div>
-                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs">
+                    <Link href={href("withdraw")} scroll={false} className="button secondary button--xs fin-card-action-btn">
                       去绑卡
                     </Link>
                   </div>
@@ -375,15 +481,15 @@ export function PersonalWallet({ scope }: { scope: string }) {
               <span className="wallet-filter-label">时间</span>
               <button
                 type="button"
-                className={`wallet-toggle-chip ${timeRange === "ALL" ? "active" : ""}`}
+                className={`wallet-toggle-chip fin-filter-pill ${timeRange === "ALL" ? "active is-active" : ""}`}
                 aria-pressed={timeRange === "ALL"}
                 onClick={() => setTimeRange("ALL")}
               >
-                全部时间
+                全部
               </button>
               <button
                 type="button"
-                className={`wallet-toggle-chip ${timeRange === "30D" ? "active" : ""}`}
+                className={`wallet-toggle-chip fin-filter-pill ${timeRange === "30D" ? "active is-active" : ""}`}
                 aria-pressed={timeRange === "30D"}
                 onClick={() => setTimeRange("30D")}
               >
@@ -391,7 +497,7 @@ export function PersonalWallet({ scope }: { scope: string }) {
               </button>
               <button
                 type="button"
-                className={`wallet-toggle-chip ${timeRange === "7D" ? "active" : ""}`}
+                className={`wallet-toggle-chip fin-filter-pill ${timeRange === "7D" ? "active is-active" : ""}`}
                 aria-pressed={timeRange === "7D"}
                 onClick={() => setTimeRange("7D")}
               >
@@ -426,35 +532,74 @@ export function PersonalWallet({ scope }: { scope: string }) {
   </section>;
 }
 function EntryDetail({ detail }: { detail: WalletEntryDetail }) {
- const e=detail.entry,display=entryDisplayTime(e);
- const nature = entryNature(e), status = entryStatus(e);
- const note=e.historicalAmountSemantics==='UNVERIFIED'?'这条记录的来源和金额暂未确认。':e.sourceDetails?'旧平台记录，不影响余额。':e.kind==='HISTORICAL'?(e.includedInOpening&&detail.coverage.knowledge==='KNOWN'?'这条记录已计入原有余额。':'这条记录是否计入原有余额，暂未确认。'):null;
- return <article className="account-module-card wallet-entry-detail">
-   <div className="wallet-entry-detail-header">
-     {status?<StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{status}</StatusBadge>:null}
-     <span className={`wallet-type-tag ${e.kind === "HISTORICAL" || nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
-     {e.dataOrigin?<StatusBadge tone="neutral">{e.dataOrigin==='UNKNOWN'?'来源待核':'模拟'}</StatusBadge>:null}
-   </div>
-   <h3>{financeEntryLabel(e)}</h3>
-   <strong className="wallet-main-amount">{e.historicalAmountSemantics==='UNVERIFIED'?'金额待核':walletMoney(e.sourceDetails?.recordedAmountCents??e.deltaCents, !e.sourceDetails)}</strong>
-   {e.dataOrigin?<p className="wallet-detail-nature-hint">{e.dataOrigin==='UNKNOWN'?'这笔记录的资金来源尚待核实。':'这是一笔模拟资金记录，不会产生真实收款或打款。'}</p>:null}
-   {e.sourceDetails ? <p className="wallet-detail-nature-hint">这是旧平台的业务记录，金额没有计入当前余额。</p> : null}
-   <dl className="account-fact-list">
-     <div><dt>记录类型</dt><dd>{e.historicalAmountSemantics==='UNVERIFIED'?'待核实':e.kind==='HISTORICAL'?'旧平台余额变动':bucketLabel(e.bucket)}</dd></div>
-     <div><dt>{display.label}</dt><dd>{display.at?formatOrderTime(display.at, { timeZoneName: false }):e.historicalAmountSemantics==='UNVERIFIED'?'待核实':'未记录'}</dd></div>
-     {e.kind==='POSTED'&&display.label!=='记录时间'&&Object.hasOwn(e,'recordedAt')?<div><dt>记录时间</dt><dd>{e.recordedAt?formatOrderTime(e.recordedAt,{timeZoneName:false}):'未记录'}</dd></div>:null}
-     {e.sourceDetails?<>{walletOriginalType(e)?<div><dt>{e.sourceKind==='HISTORICAL_WITHDRAWAL'?'原提现方式':e.sourceKind==='HISTORICAL_PAYMENT'?'原业务类型':'原退款类型'}</dt><dd>{walletOriginalType(e)}</dd></div>:null}
-     <div><dt>原平台状态</dt><dd>{walletSourceStatus(e)??'未记录'}</dd></div>
-     {e.sourceDetails.associationState==='UNRESOLVED'?<div><dt>关联状态</dt><dd>未记录</dd></div>:null}
-     <div><dt>原记录单号</dt><dd>{e.sourceDetails.originalNumber??'未记录'}</dd></div>
-     {e.sourceDetails.sourcePaidAt?<div><dt>{e.sourceKind==='HISTORICAL_DISTRIBUTION'?'原结算时间':'原支付时间'}</dt><dd>{formatOrderTime(e.sourceDetails.sourcePaidAt,{timeZoneName:false})}</dd></div>:null}
-     {e.sourceDetails.attempts?.map(a=><div key={'la_refund_log:'+a.source.id}><dt>原退款尝试</dt><dd>{a.originalNumber??'未记录'} · {walletMoney(a.recordedAmountCents)} · {refundAttemptStatus(a.originalStatus)}{a.occurredAt?' · '+formatOrderTime(a.occurredAt,{timeZoneName:false}):''}</dd></div>)}
-     {e.sourceDetails.reasonCodes?.length?<div><dt>原记录核对</dt><dd>这笔记录有退款需要核对。</dd></div>:null}
-     <div><dt>资金含义</dt><dd>不影响余额</dd></div>
-     {e.sourceDetails.originalLevel?<div><dt>原分销层级与比例</dt><dd>{e.sourceDetails.originalLevel}级 · {e.sourceDetails.originalRatio??'未记录'}</dd></div>:null}</>:null}
-     <div><dt>关联单号</dt><dd>{e.historicalAmountSemantics==='UNVERIFIED'?'待核实':e.businessReference.number ?? "未记录"}</dd></div>
-     <div><dt>当时余额</dt><dd>{e.historicalAmountSemantics==='UNVERIFIED'?'待核实':e.balanceAfterCents === null ? "未记录" : walletMoney(e.balanceAfterCents)}</dd></div>
-   </dl>
-   {note?<p className="account-module-note">{note}</p>:null}
- </article>;
+  const e = detail.entry, display = entryDisplayTime(e);
+  const nature = entryNature(e), status = entryStatus(e);
+  const note = e.historicalAmountSemantics === "UNVERIFIED"
+    ? "这条记录的来源和金额暂未确认。"
+    : e.sourceDetails
+    ? "旧平台记录，不影响余额。"
+    : e.kind === "HISTORICAL"
+    ? (e.includedInOpening && detail.coverage.knowledge === "KNOWN" ? "这条记录已计入原有余额。" : "这条记录是否计入原有余额，暂未确认。")
+    : null;
+  const iconMeta = getEntryIconMeta(e);
+  const IconComponent = iconMeta.Icon;
+
+  return (
+    <article className="account-module-card wallet-entry-detail">
+      <div className="wallet-entry-detail-header">
+        <div className={`wallet-detail-icon is-${iconMeta.type}`} aria-hidden="true">
+          <IconComponent size={20} />
+        </div>
+        <div className="wallet-detail-header-text">
+          <div className="wallet-detail-tags">
+            {status ? <StatusBadge tone={e.kind === "HISTORICAL" ? "neutral" : "success"}>{status}</StatusBadge> : null}
+            <span className={`wallet-type-tag ${e.kind === "HISTORICAL" || nature.reference ? "reference-tag" : "balance-tag"}`}>{nature.label}</span>
+            {e.dataOrigin ? <StatusBadge tone="neutral">{e.dataOrigin === "UNKNOWN" ? "来源待核" : "模拟"}</StatusBadge> : null}
+          </div>
+          <h3>{financeEntryLabel(e)}</h3>
+        </div>
+      </div>
+      <div className="wallet-detail-amount-hero">
+        <strong className="wallet-main-amount">
+          {e.historicalAmountSemantics === "UNVERIFIED" ? "金额待核" : walletMoney(e.sourceDetails?.recordedAmountCents ?? e.deltaCents, !e.sourceDetails)}
+        </strong>
+      </div>
+      {e.dataOrigin ? <p className="wallet-detail-nature-hint">{e.dataOrigin === "UNKNOWN" ? "这笔记录的资金来源尚待核实。" : "这是一笔模拟资金记录，不会产生真实收款或打款。"}</p> : null}
+      {e.sourceDetails ? <p className="wallet-detail-nature-hint">这是旧平台的业务记录，金额没有计入当前余额。</p> : null}
+      <dl className="account-fact-list wallet-fact-list">
+        <div><dt>记录类型</dt><dd>{e.historicalAmountSemantics === "UNVERIFIED" ? "待核实" : e.kind === "HISTORICAL" ? "旧平台余额变动" : bucketLabel(e.bucket)}</dd></div>
+        <div><dt>{display.label}</dt><dd>{display.at ? formatOrderTime(display.at, { timeZoneName: false }) : e.historicalAmountSemantics === "UNVERIFIED" ? "待核实" : "未记录"}</dd></div>
+        {e.kind === "POSTED" && display.label !== "记录时间" && Object.hasOwn(e, "recordedAt") ? (
+          <div><dt>记录时间</dt><dd>{e.recordedAt ? formatOrderTime(e.recordedAt, { timeZoneName: false }) : "未记录"}</dd></div>
+        ) : null}
+        {e.sourceDetails ? (
+          <>
+            {walletOriginalType(e) ? (
+              <div><dt>{e.sourceKind === "HISTORICAL_WITHDRAWAL" ? "原提现方式" : e.sourceKind === "HISTORICAL_PAYMENT" ? "原业务类型" : "原退款类型"}</dt><dd>{walletOriginalType(e)}</dd></div>
+            ) : null}
+            <div><dt>原平台状态</dt><dd>{walletSourceStatus(e) ?? "未记录"}</dd></div>
+            {e.sourceDetails.associationState === "UNRESOLVED" ? <div><dt>关联状态</dt><dd>未记录</dd></div> : null}
+            <div><dt>原记录单号</dt><dd>{e.sourceDetails.originalNumber ?? "未记录"}</dd></div>
+            {e.sourceDetails.sourcePaidAt ? (
+              <div><dt>{e.sourceKind === "HISTORICAL_DISTRIBUTION" ? "原结算时间" : "原支付时间"}</dt><dd>{formatOrderTime(e.sourceDetails.sourcePaidAt, { timeZoneName: false })}</dd></div>
+            ) : null}
+            {e.sourceDetails.attempts?.map(a => (
+              <div key={"la_refund_log:" + a.source.id}>
+                <dt>原退款尝试</dt>
+                <dd>{a.originalNumber ?? "未记录"} · {walletMoney(a.recordedAmountCents)} · {refundAttemptStatus(a.originalStatus)}{a.occurredAt ? " · " + formatOrderTime(a.occurredAt, { timeZoneName: false }) : ""}</dd>
+              </div>
+            ))}
+            {e.sourceDetails.reasonCodes?.length ? <div><dt>原记录核对</dt><dd>这笔记录有退款需要核对。</dd></div> : null}
+            <div><dt>资金含义</dt><dd>不影响余额</dd></div>
+            {e.sourceDetails.originalLevel ? (
+              <div><dt>原分销层级与比例</dt><dd>{e.sourceDetails.originalLevel}级 · {e.sourceDetails.originalRatio ?? "未记录"}</dd></div>
+            ) : null}
+          </>
+        ) : null}
+        <div><dt>关联单号</dt><dd>{e.historicalAmountSemantics === "UNVERIFIED" ? "待核实" : e.businessReference.number ?? "未记录"}</dd></div>
+        <div><dt>当时余额</dt><dd>{e.historicalAmountSemantics === "UNVERIFIED" ? "待核实" : e.balanceAfterCents === null ? "未记录" : walletMoney(e.balanceAfterCents)}</dd></div>
+      </dl>
+      {note ? <p className="account-module-note">{note}</p> : null}
+    </article>
+  );
 }

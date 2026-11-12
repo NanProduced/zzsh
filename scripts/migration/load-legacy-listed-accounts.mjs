@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { readBoundSourceRows } from "./local-source-adapter.mjs";
 import { verifyLegacyListedPolicyDump } from "./verify-legacy-listed-policy-dump.mjs";
-import { assertLegacyAutoPublicationPermitted, assertSameCapturePolicyMigration, isSameCaptureListedPolicy, readListedCompiledProof, validateLegacyListedExecutionPlan, validateListedExecutionCheckpoint, readListedExecutionProof, readVerifiedLegacySkinIds } from "./legacy-listed-execution-plan.mjs";
+import { assertLegacyAutoPublicationPermitted, legacyListedSourceGameId, assertSameCapturePolicyMigration, isSameCaptureListedPolicy, readListedCompiledProof, validateLegacyListedExecutionPlan, validateListedExecutionCheckpoint, readListedExecutionProof, readVerifiedLegacySkinIds } from "./legacy-listed-execution-plan.mjs";
 import { inspectDeferredLegacyCredit, lockDeferredLegacyCreditTables, deferredCreditGateForRow, requiresFullRollbackTrial, rejectUnmarkedObservation } from "./legacy-listed-provisional-credit.mjs";
 import { verifyRoundBoundSourcePlan, validateRoundTrialReceipt, verifySameCaptureListedPolicySource } from "./legacy-listed-round-source.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
@@ -18,8 +18,8 @@ const mode = ["--prepare", "--trial", "--execute", "--recover", "--readback"].fi
 if (mode.length === 0) {
   console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression",
     prepare: ["--prepare", "--input", "--input-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist", "--source-dir", "--source-receipt-sha", "--source-binding", "--policy-bundle", "--policy-bundle-sha", "--policy-authority", "--policy-authority-sha"],
-    execute: ["--execute", "--input", "--input-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist", "--maintenance-password-file"],
-    trial: "Same prepared input and lock as execute. Runs each candidate in its own transaction and confirms rollback.",
+    execute: "Delta republication disabled; other games require a verified source binding.",
+    trial: "Delta republication disabled; other games require a verified source binding.",
     recover: "Same prepared input and original execution --out; reads original receipt only.",
     readback: ["--readback", "--input", "--input-sha", "--checkpoint", "--checkpoint-sha", "--out", "--actor-file", "--credentials", "--oid", "--nonce", "--api-dist"],
     connections: 0, credentialReads: 0 }));
@@ -55,7 +55,6 @@ if (inputSha !== option("--input-sha") || !/^\d+$/.test(oid ?? "") || !/^[a-z0-9
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json")));
 const credentials = JSON.parse(readFileSync(credentialsFile));
 const registered = loadRegisteredTarget(credentialsFile);
-if (["--prepare", "--trial", "--execute"].includes(action)) assertLegacyAutoPublicationPermitted(registered);
 if (action === "--trial" || action === "--execute") assertNextMigrationWriteReady(registered);
 const roleKind = action === "--execute" || action === "--trial" ? "migration" : "runtime";
 const role = credentials[roleKind];
@@ -100,6 +99,10 @@ if (input.schema === 'zzsh.listed-source-continuity-plan.v2' || input.sourcePlan
     policyBundle: option('--policy-bundle'), policyBundleSha: option('--policy-bundle-sha'),
     policyAuthority: option('--policy-authority'), policyAuthoritySha: option('--policy-authority-sha'), creditGuaranteeEnabled,
     allowExpiredReadOnly: action === '--recover' || action === '--readback', compiled, parseInteger:mod('supply/legacy-listed-pricing').legacyPriceInteger }, canonicalize);
+}
+if (action === "--trial" || action === "--execute") {
+  if (!Array.isArray(input.rows) || !input.rows.length) throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+  for (const row of input.rows) assertLegacyAutoPublicationPermitted(legacyListedSourceGameId(row),sealedDependencies?.gameBindings);
 }
 const runtimeRequire=sealedDependencies?.dependencyLayout?createRequire(join(sealedDependencies.dependencyLayout.sourceRoot,'apps/api/package.json')):require;
 const { Client } = runtimeRequire("pg");
@@ -268,6 +271,10 @@ async function prepareRow(row, reviewed) {
 async function runPublication(row) {
   const requestId = `listed_takeover_${row.sourceId}`;
   await setAuditContext(client, "admin", actor.id, actor.sessionId, requestId);
+  const accountGame=(await client.query(`SELECT g.code FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id
+    WHERE a.id=$1 AND a.game_id=$2 FOR UPDATE OF a FOR SHARE OF g`,[row.body.intake.accountId,row.body.intake.source.expectedGameId])).rows[0];
+  if(!accountGame)throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+  assertLegacyAutoPublicationPermitted(legacyListedSourceGameId(row),sealedDependencies?.gameBindings,accountGame.code);
   const release = (await client.query("SELECT current_release_id FROM zzsh_supply.game WHERE id=$1", [row.body.intake.source.expectedGameId])).rows[0];
   if (release?.current_release_id !== row.releaseId || !await readLegacyPublishedReference(client, row.body.intake.accountId, row.referenceDigest))
     throw new Error("REVIEWED_RELEASE_OR_REFERENCE_CHANGED");
@@ -344,6 +351,14 @@ try {
       blocked: rows.filter(row => row.blocked), planSha256: sha(bytes) };
   } else {
     const rows = validateLegacyListedExecutionPlan(input,target,compiled,canonicalize,binding);
+    if(action === "--trial" || action === "--execute") {
+      const games=(await client.query(`SELECT a.id,g.code FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id
+        WHERE a.id=ANY($1::text[])`,[rows.map(row=>row.body.intake.accountId)])).rows;
+      const byAccount=new Map(games.map(row=>[row.id,row.code]));
+      for(const row of rows){const code=byAccount.get(row.body.intake.accountId);
+        if(typeof code!=='string')throw new Error('LEGACY_LISTING_GAME_UNVERIFIED');
+        assertLegacyAutoPublicationPermitted(legacyListedSourceGameId(row),sealedDependencies?.gameBindings,code);}
+    }
     for(const row of rows)if(row.deferredCredit && (row.deferredCredit.kind!=='FROZEN_QUOTE_REQUIRED'||!/^[1-9]\d*$/.test(row.deferredCredit.creditRevision??'')||!input.creditGuaranteeEnabled||row.priorVersion))throw new Error('DEFERRED_CREDIT_PLAN_INVALID');
     if(input.creditGuaranteeEnabled&&rows.some(row=>row.priorVersion===null&&!row.deferredCredit))throw new Error('DEFERRED_CREDIT_PLAN_REQUIRED');
     if (requiresFullRollbackTrial(action,input,rows)) {

@@ -5,8 +5,8 @@ import { createRequire } from "node:module";
 import ts from "typescript";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { allHelpArticles } from "../src/content/help/index.ts";
-import { buildHelpNavData, flattenHelpNavArticles, getHelpArticleNeighbors } from "../src/components/help/nav-data.ts";
+import { defaultHelpTree } from "./help-defaults.mjs";
+import { articleBreadcrumb, buildHelpNavData, findHelpGroup, flattenHelpNavArticles, getHelpArticleNeighbors } from "../src/components/help/nav-data.ts";
 import { stripHelpSearchQuery } from "../src/components/help/help-url.ts";
 import * as keyboardScope from "../src/components/help/keyboard-scope.ts";
 
@@ -35,6 +35,7 @@ function setupDrawer() {
     };
     if (name === "next/navigation") return { usePathname: () => state.pathname };
     if (name === "next/link") return ({ children, ...props }) => React.createElement("a", props, children);
+    if (name === "./nav-data") return { flattenHelpNavArticles };
     if (name === "@radix-ui/react-dialog") return Object.fromEntries(["Root", "Portal", "Overlay", "Content", "Title", "Close"].map(key => [key, `test-dialog-${key}`]));
     return require(name);
   }, exports, {
@@ -48,7 +49,7 @@ function setupDrawer() {
   };
   const render = () => {
     refIndex = 0; effectIndex = 0;
-    tree = exports.HelpNavDrawer({ data: { categories: [], aux: [] } });
+    tree = exports.HelpNavDrawer({ data: { entries: [] } });
     find(node => node.type === "button" && node.props.className === "help-nav-trigger").props.ref.current = trigger;
   };
   const runEffects = () => { effects.splice(0).forEach(fn => fn()); render(); };
@@ -86,7 +87,7 @@ test("drawer cancellation restores position while article navigation leaves the 
 });
 
 test("neighbors follow the flattened help-nav order for all 24 articles", () => {
-  const nav = buildHelpNavData(allHelpArticles);
+  const nav = buildHelpNavData(defaultHelpTree());
   const order = flattenHelpNavArticles(nav).map((a) => a.slug);
   assert.equal(order.length, 24);
   assert.equal(new Set(order).size, 24, "every article appears exactly once in nav order");
@@ -104,6 +105,26 @@ test("neighbors follow the flattened help-nav order for all 24 articles", () => 
   const last = getHelpArticleNeighbors(nav, order[order.length - 1]);
   assert.equal(last.next, null);
   assert.deepEqual(getHelpArticleNeighbors(nav, "no-such-slug"), { prev: null, next: null });
+});
+
+test("moved guides follow directory order, icon, and breadcrumbs while retaining their original links", () => {
+  const source = defaultHelpTree();
+  const first = source.find(node => node.slug === "rental-getting-started");
+  const second = source.find(node => node.slug === "fees-overview");
+  const nav = buildHelpNavData([
+    ...source.filter(node => node.kind === "FOLDER"),
+    { id: "new-folder", parentId: null, kind: "FOLDER", title: "新目录", depth: 1, sortKey: "0000", iconKey: "shield", slug: null, description: null },
+    { id: "new-subfolder", parentId: "new-folder", kind: "FOLDER", title: "子目录", depth: 2, sortKey: "0002", iconKey: null, slug: null, description: null },
+    { ...second, parentId: "new-subfolder", depth: 3, sortKey: "0000" },
+    { ...first, parentId: "new-folder", depth: 2, sortKey: "0001" },
+  ]);
+  assert.equal(findHelpGroup(nav, "new-folder").iconKey, "shield");
+  assert.deepEqual(flattenHelpNavArticles(nav).map(article => article.slug), [first.slug, second.slug]);
+  assert.equal(getHelpArticleNeighbors(nav, first.slug).next.slug, second.slug);
+  assert.deepEqual(articleBreadcrumb({ slug: second.slug }, nav).slice(2), [
+    { label: "新目录", href: "/help?category=new-folder" },
+    { label: "子目录", href: "/help?category=new-subfolder" },
+  ]);
 });
 
 function setupPager({ prev, next, pathname = "/help/rental-getting-started" } = {}) {
@@ -148,7 +169,7 @@ function setupPager({ prev, next, pathname = "/help/rental-getting-started" } = 
   return { render, runEffects, pushes, heading, scrolls, fireKey, HTMLElementShim, state };
 }
 
-test("pager renders prev/next links with correct hrefs and edge placeholders", () => {
+test("pager renders only the links available at each edge", () => {
   const prev = { slug: "rental-check-before-order", title: "下单前需要核对哪些信息？" };
   const next = { slug: "rental-confirm-and-return", title: "确认收货与归还" };
   const html = renderToStaticMarkup(setupPager({ prev, next }).render());
@@ -161,7 +182,7 @@ test("pager renders prev/next links with correct hrefs and edge placeholders", (
 
   const edge = renderToStaticMarkup(setupPager({ prev: null, next }).render());
   assert.ok(!edge.includes('rel="prev"'));
-  assert.ok(edge.includes('help-pager-link--placeholder'));
+  assert.equal((edge.match(/<a /g) ?? []).length, 1);
   assert.ok(edge.includes('href="/help/rental-confirm-and-return"'));
 
   const none = setupPager({ prev: null, next: null });
@@ -243,12 +264,13 @@ test("pager skips focus management on first mount, then moves focus to the headi
   assert.deepEqual(p2.scrolls.at(-1), { top: 0, behavior: "auto" });
 });
 
-function setupShell() {
+function setupShell({ collapsed = false } = {}) {
   const code = transpile("../src/components/help/help-shell.tsx");
   const effects = [];
   const keyHandlers = [];
   const clickHandlers = [];
   const focused = [];
+  const expanded = [];
   const pushes = [];
   const exports = {};
   class ElementShim {}
@@ -268,8 +290,8 @@ function setupShell() {
     addEventListener: (type, fn) => { if (type === "keydown") keyHandlers.push(fn); else clickHandlers.push(fn); },
     removeEventListener() {},
     querySelector: (selector) => (selector === 'form.site-search input[type="search"]'
-      ? { focus: (args) => focused.push(args) }
-      : null),
+      ? { getClientRects: () => collapsed ? [] : [{}], closest: () => null, focus: (args) => focused.push(args) }
+      : selector === ".site-search-toggle" && collapsed ? { click: () => expanded.push(true) } : null),
   }, HTMLElementShim);
   const tree = exports.HelpShell({ children: React.createElement("p", null, "帮助内容"), breadcrumbs: [], title: "帮助中心", description: "", initialQuery: "" });
   const fireKey = (init) => {
@@ -277,7 +299,7 @@ function setupShell() {
     for (const fn of keyHandlers) fn({ preventDefault: () => prevented++, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, ...init });
     return prevented;
   };
-  return { tree, effects, focused, pushes, fireKey, HTMLElementShim };
+  return { tree, effects, focused, expanded, pushes, fireKey, HTMLElementShim };
 }
 
 test("help shell focuses the search box on / and Ctrl+K without stealing editable keys", () => {
@@ -298,6 +320,14 @@ test("help shell focuses the search box on / and Ctrl+K without stealing editabl
   editable.closest = (sel) => (sel.includes("input") ? {} : null);
   assert.equal(s.fireKey({ key: "/", target: editable }), 0);
   assert.equal(s.focused.length, 3);
+});
+
+test("a help shortcut opens the collapsed mobile search instead of focusing a hidden input", () => {
+  const s = setupShell({ collapsed: true });
+  s.effects.forEach((fn) => fn());
+  assert.equal(s.fireKey({ key: "/" }), 1);
+  assert.equal(s.expanded.length, 1);
+  assert.equal(s.focused.length, 0);
 });
 
 test("X-R1-02: pager arrows stay silent for handled, composing, editable and overlay events", () => {

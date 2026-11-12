@@ -60,6 +60,9 @@ const COMPARISON_LABEL_TO_TIER: Record<string, TrackTier> = {
   金卡会员: "GOLD",
   铂金会员: "PLATINUM",
   钻石会员: "DIAMOND",
+  黑金会员: "BLACK_GOLD",
+  "黑金会员 · 终身": "BLACK_GOLD",
+  "黑金会员·终身": "BLACK_GOLD",
 };
 
 const ENTITLEMENT_STATE_LABELS: Record<EntitlementState, string> = {
@@ -824,7 +827,11 @@ export function MembershipCenterView({ state, onRetry, pointEvents }: { state: M
             )}
             <div className="mc-progress-slot">{summary?.progress ? (
               <div className="mc-progress">
-                <span className="mc-progress-label">{summary.progress.label}<strong>{summary.progress.detail}</strong></span>
+                <span className="mc-progress-label">
+                  {summary.progress.label}
+                  <strong>{summary.progress.detail}</strong>
+                  <span className="mc-progress-percent">{summary.progress.percent}%</span>
+                </span>
                 <Progress className="mc-progress-bar" value={summary.progress.percent} aria-label={summary.progress.label} aria-valuetext={summary.progress.detail} />
                 <span className="mc-progress-gap">{summary.headline?.includes("还差") && summary.value ? `还差 ${summary.value} 分` : ""}</span>
               </div>
@@ -858,10 +865,10 @@ export function MembershipCenterView({ state, onRetry, pointEvents }: { state: M
               {benefits?.items ? (
                 <ul className="mc-benefit-list">
                   {benefits.items.map((item) => (
-                    <li key={item.title} className="mc-benefit-card">
+                    <li key={item.title} className="mc-benefit-card" data-benefit-kind={item.icon}>
                       <div className="mc-benefit-card-top">
-                        <span className="mc-benefit-icon" aria-hidden="true">
-                          {item.icon === "pricing" ? <Percent size={18} /> : item.icon === "crown" ? <Crown size={18} /> : <ShieldCheck size={18} />}
+                        <span className={`mc-benefit-icon mc-benefit-icon--${item.icon}`} aria-hidden="true">
+                          {item.icon === "pricing" ? <Percent size={20} /> : item.icon === "crown" ? <Crown size={20} /> : <ShieldCheck size={20} />}
                         </span>
                         <span className="mc-benefit-title">{item.title}</span>
                         <span className="mc-benefit-pill">{item.badge}</span>

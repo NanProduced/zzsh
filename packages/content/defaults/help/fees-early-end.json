@@ -1,0 +1,90 @@
+{
+  "key": "fees-early-end",
+  "kind": "help",
+  "file": "help/fees-early-end.json",
+  "meta": {
+    "id": "F03",
+    "slug": "fees-early-end",
+    "title": "提前结束如何计算费用？",
+    "summary": "按哈夫币净消耗比例分段计算补足：达到 70% 视为正常结算不收补足；物品只按实耗计费，责任归属决定费用由谁承担。",
+    "category": "fees",
+    "audience": ["renter", "owner"],
+    "keywords": ["提前结束", "提前结算", "补足", "70%", "消耗比例", "中途结算", "提前退"],
+    "updatedAt": "2026-10-06",
+    "related": ["fees-settlement", "fees-refund-status", "protection-coverage"],
+    "contactCta": true,
+    "mediaIds": []
+  },
+  "anchorAliases": {
+    "answer": "content-先看结论",
+    "formula": "content-补足怎样分段计算",
+    "responsibility": "content-费用由谁承担",
+    "changed-rule": "content-与旧平台说明的区别"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "help",
+    "value": [
+      { "type": "h2", "id": "先看结论", "children": [{ "text": "先看结论" }] },
+      { "type": "p", "children": [{ "text": "哈夫币净消耗比例达到本单 70% 时按正常结算，不产生提前补足；低于 70% 且属于租客自愿提前的，按分段规则产生哈夫补足。物品不参与比例判定，只按实际消耗计费，未消耗部分退回。" }] },
+      {
+        "type": "callout",
+        "variant": "info",
+        "children": [
+          { "type": "p", "children": [{ "text": "说明", "bold": true }] },
+          { "type": "p", "children": [{ "text": "补足只在正常交付并正式开租后适用；未正式开租就结束的订单不自动收取补足或包赔费。" }] }
+        ]
+      },
+      { "type": "h2", "id": "补足怎样分段计算", "children": [{ "text": "补足怎样分段计算" }] },
+      { "type": "p", "children": [{ "text": "记 c 为哈夫币净消耗比例（双方确认的哈夫净消耗 ÷ 本单全量哈夫净量），F 为本单全量哈夫币价差（买家价减号主价）。" }] },
+      {
+        "type": "table",
+        "children": [
+          {
+            "type": "tr",
+            "children": [
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "净消耗比例 c" }] }] },
+              { "type": "th", "children": [{ "type": "p", "children": [{ "text": "提前补足" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "c ≤ 50%" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "F × (1 − c)" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "50% < c < 70%" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "2.5 × F × (0.7 − c)" }] }] }
+            ]
+          },
+          {
+            "type": "tr",
+            "children": [
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "c ≥ 70%" }] }] },
+              { "type": "td", "children": [{ "type": "p", "children": [{ "text": "0，按正常结算" }] }] }
+            ]
+          }
+        ]
+      },
+      { "type": "p", "children": [{ "text": "曲线连续递减，不按整数档位跳扣；号主按实际消耗侧金额结算。具体金额以结算单明细为准。" }] },
+      { "type": "h2", "id": "费用由谁承担", "children": [{ "text": "费用由谁承担" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "租客自愿提前（非号主或账号原因）：补足由租客承担；已选包赔的，包赔费按全量哈夫与物品计算，与补足分列。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "号主要求提前或账号原因导致无法继续：不自动向租客收取补足，也不转嫁包赔费。" }] },
+      { "type": "p", "listStyleType": "disc", "indent": 1, "children": [{ "text": "谁先发起结束不等于谁承担责任，责任由客服按事实分类；提前结算在双方确认后还须客服复核同一版本才生效。" }] },
+      { "type": "h2", "id": "与旧平台说明的区别", "children": [{ "text": "与旧平台说明的区别" }] },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "children": [
+          { "type": "p", "children": [{ "text": "注意", "bold": true }] },
+          { "type": "p", "children": [{ "text": "旧平台帮助中「消耗金额小于总金额 70% 时禁止自行结算」等说法属于旧规则。新平台订单按本文的比例与流程处理；旧平台创建的订单仍适用其下单时的旧规则，两者不混用。" }] }
+        ]
+      }
+    ]
+  }
+}

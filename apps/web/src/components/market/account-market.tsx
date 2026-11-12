@@ -626,7 +626,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
       const fmt = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
       tags.push({
         id: "serviceWindow",
-        label: `时段: ${fmt(sw.startMinute)}—${sw.crossMidnight ? "次日 " : ""}${fmt(sw.endMinute)}`,
+        label: `上号时间: ${fmt(sw.startMinute)}—${sw.crossMidnight ? "次日 " : ""}${fmt(sw.endMinute)}`,
         onRemove: () => navigate(withFilterChange(filters, { filters: { ...selected, serviceWindow: undefined } })),
       });
     }

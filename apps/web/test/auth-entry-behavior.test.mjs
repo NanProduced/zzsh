@@ -485,6 +485,8 @@ test("legal page and metadata reject prototype keys through the same allowlist",
   if(name==="@/components/brand/brand-logo")return {BrandLogo:()=>null};
   if(name==="@/content/legal/documents")return legalDocuments;
   if(name==="@/lib/legal-server")return {readLegalDocument:async()=>({state:"UNAVAILABLE"})};
+    if (name === "@zzsh/ui/plate-document.css") return {};
+    if (name === "@zzsh/ui/plate-document") return { PlateDocument: ({ document }) => React.createElement("h2", null, document.value[0].children[0].text) };
   return require(name);
  },exports);
  for(const doc of ["toString","constructor","__proto__","missing"]){

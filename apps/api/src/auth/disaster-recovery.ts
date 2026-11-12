@@ -8,6 +8,7 @@ import {
   withTransaction,
   type AdminSecurityNotification,
 } from "./auth-security";
+import { endSupportPresenceForAdmin } from "../im/support-presence-session";
 
 const DISASTER_RECOVERY_TTL_MS = 10 * 60 * 1000;
 const DISASTER_RECOVERY_REQUEST_PREFIX = "req_disaster_";
@@ -173,6 +174,7 @@ export async function issueDisasterRecovery(
       [targetAdminId],
     );
     await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+    await endSupportPresenceForAdmin(client, targetAdminId, "REVOKED", new Date());
     await client.query(
       `DELETE FROM "zzsh_auth_admin"."verification" verification
         USING "zzsh_auth_admin"."user" target_user

@@ -1,0 +1,45 @@
+{
+  "key": "PUBLISH_RESOURCES",
+  "kind": "notice",
+  "file": "notices/PUBLISH_RESOURCES.json",
+  "meta": {
+    "title": "物品资源",
+    "sections": [
+      {
+        "id": "help",
+        "title": "填写说明",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "text": "申报可用于本次出租的全量库存。留空表示尚未申报，0 表示明确没有；数量和单位以目录及表单校验为准。"
+          }
+        ]
+      }
+    ]
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "notice",
+    "value": [
+      {
+        "type": "p",
+        "id": "help",
+        "children": [
+          {
+            "text": "填写说明",
+            "bold": true
+          }
+        ]
+      },
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "申报可用于本次出租的全量库存。留空表示尚未申报，0 表示明确没有；数量和单位以目录及表单校验为准。"
+          }
+        ]
+      }
+    ]
+  }
+}

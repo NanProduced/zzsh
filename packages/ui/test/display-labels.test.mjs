@@ -181,7 +181,7 @@ test("元→分精确解析，拒绝猜测与浮点漂移", () => {
 });
 
 test("退还放行决定是第三条轴，不宣称渠道结果或到账", () => {
-  for (const state of ["OWNER_DECISION_REQUIRED", "APPROVED", "REJECTED"]) {
+  for (const state of ["OWNER_DECISION_REQUIRED", "APPROVED", "AUTO_APPROVED", "REJECTED"]) {
     const text = guaranteeReleasePolicyLabel(state);
     assert.notEqual(text, UNRECOGNIZED_STATE_LABEL, `缺 ${state}`);
     assert.doesNotMatch(text, /已到账|渠道已退/);

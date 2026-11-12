@@ -94,7 +94,7 @@ type DatabaseIdentityConfig = {
   };
 };
 
-const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order", "zzsh_credit"] as const;
+const BUSINESS_SCHEMA_NAMES = ["zzsh_business_meta", "zzsh_iam", "zzsh_auth_user", "zzsh_auth_admin", "zzsh_supply", "zzsh_content", "zzsh_order", "zzsh_credit", "zzsh_docs"] as const;
 
 export async function assertBusinessRuntimeIdentity(pool: Pick<Pool, "query">, config: DatabaseIdentityConfig): Promise<void> {
   const identity = await pool.query<{

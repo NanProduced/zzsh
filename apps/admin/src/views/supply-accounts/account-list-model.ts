@@ -64,7 +64,6 @@ export function groupConditions(facts: SupplyFacts): ConditionGroups {
   if (typeof facts.ownerPaused !== "boolean") pending.push({ code: "PAUSE_UNKNOWN", who: nextStep("PAUSE_UNKNOWN") });
   const satisfied: string[] = [];
   if (facts.staffRestricted === false) satisfied.push("没有运营限制");
-  if (facts.ownerPaused === false) satisfied.push("号主未暂停");
   if (facts.occupancy === "FREE") satisfied.push("未被占用");
   return { blocked, pending, satisfied };
 }
@@ -97,7 +96,7 @@ export function independentFacts(f: SupplyFacts): Array<{ label: string; value: 
     { label: "公开", value: f.publicVisible === null ? "待核" : f.publicVisible ? "租客可见" : "未公开", tone: f.publicVisible === null ? "muted" : f.publicVisible ? "ok" : "muted" },
     { label: "占用", value: f.occupancy === "OCCUPIED" ? "占用中" : f.occupancy === "FREE" ? "空闲" : "待核", tone: f.occupancy === "OCCUPIED" ? "info" : f.occupancy === "FREE" ? "ok" : "muted" },
     { label: "运营限制", value: typeof f.staffRestricted !== "boolean" ? "待核" : f.staffRestricted ? "限制中" : "无", tone: typeof f.staffRestricted !== "boolean" ? "muted" : f.staffRestricted ? "warn" : "ok" },
-    { label: "号主暂停", value: typeof f.ownerPaused !== "boolean" ? "待核" : f.ownerPaused ? "已暂停" : "未暂停", tone: typeof f.ownerPaused !== "boolean" ? "muted" : f.ownerPaused ? "warn" : "ok" },
+    ...(f.ownerPaused === false ? [] : [{ label: "原账号状态", value: f.ownerPaused === true ? "存在旧暂停记录" : "待核", tone: f.ownerPaused === true ? "warn" as const : "muted" as const }]),
     { label: "新单资格", value: f.newOrders === null ? "待核" : f.newOrders ? "可接新单" : "不可接新单", tone: f.newOrders === null ? "muted" : f.newOrders ? "ok" : "warn" },
   ];
 }
@@ -105,7 +104,7 @@ export function independentFacts(f: SupplyFacts): Array<{ label: string; value: 
 /* ---------- 个人保存的视图（仅本浏览器） ---------- */
 export const SAVED_VERSION = 1;
 export type SavedView = { name: string; view: SupplyWorkView; kind: SupplyQueryKind; q: string; gameId: string; status?: AccountBusinessState | ""; eligibility?: string };
-const VIEWS: SupplyWorkView[] = ["all", "changes", "restricted", "paused", "orders"];
+const VIEWS: SupplyWorkView[] = ["all", "restricted", "orders"];
 const KINDS: SupplyQueryKind[] = ["account", "legacy", "owner", "nickname", "order", "link"];
 export const savedKey = (adminId: string) => "zzsh.admin.supply-accounts.saved-views:" + adminId;
 
@@ -126,14 +125,14 @@ export function serializeSavedViews(views: SavedView[], adminId: string): string
 
 /* ---------- 原因与下一步 ---------- */
 const NEXT_STEP: Record<string, string> = {
-  STAFF_RESTRICTED: "运营复核限制", OWNER_PAUSED: "号主自行恢复", CONFIRMATION_OR_MEDIA_REQUIRED: "核对规则接受或展示图；没查到的部分不要当成已经缺图",
+  STAFF_RESTRICTED: "运营复核限制", OWNER_PAUSED: "核对旧暂停记录", ACCOUNT_DELISTED: "号主重新填写上架资料", LEGACY_LISTING_RELIST_REQUIRED: "号主重新填写上架资料", CONFIRMATION_OR_MEDIA_REQUIRED: "核对规则接受或展示图；没查到的部分不要当成已经缺图",
   QUOTE_REQUIRED: "沿用已有草稿继续核价", ACCEPTANCE_REQUIRED: "确认本次报价与条款", MEDIA_REQUIRED: "补齐展示图后再上架",
   RULE_CHANGED: "按新规则重新核价并确认", ACCOUNT_NOT_PUBLISHABLE: "资料不能发布", LEGACY_LISTING_RELIST_REQUIRED: "请号主重新填写资料上架", CURRENT_VERSION_MISSING: "号主填写资料", PUBLICATION_REQUIRED: "确认上架",
   IDENTITY_REQUIRED: "号主完成实名", ADULT_REQUIRED: "号主不满足年龄要求，不能接单", OWNER_UNAVAILABLE: "运营核对号主账号状态",
   GAME_UNAVAILABLE: "运营核对游戏配置", GAME_SERVICE_UNAVAILABLE: "运营核对租赁服务开关", OCCUPIED: "占用解除后重新检查接单资格",
   OCCUPANCY_UNKNOWN: "运营核对占用状态", FUNDING_UNKNOWN: "运营核对押金与包赔申报", PUBLISHER_BAIL_UNCONFIRMED: "运营核对号主保证金",
-  HISTORICAL_VERSION: "改看当前版本", PUBLIC_UNKNOWN: "运营核对公开状态", NEW_ORDERS_UNKNOWN: "重新读取后核对",
-  RESTRICTION_UNKNOWN: "运营核对限制状态", PAUSE_UNKNOWN: "运营核对号主暂停状态",
+  HISTORICAL_VERSION: "查看当前资料", PUBLIC_UNKNOWN: "运营核对公开状态", NEW_ORDERS_UNKNOWN: "重新读取后核对",
+  RESTRICTION_UNKNOWN: "运营核对限制状态", PAUSE_UNKNOWN: "运营核对原账号状态",
 };
 export const nextStep = (code: string) => NEXT_STEP[code] ?? "运营核对";
 
@@ -156,7 +155,6 @@ export function compactTime(iso: string, now = new Date()): string {
   const y = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric" }).format(now).replace(/\D/g, "");
   return v("year") === y ? `${v("month")}-${v("day")} ${v("hour")}:${v("minute")}` : `${v("year")}-${v("month")}-${v("day")}`;
 }
-export const versionText = (seq: string | null | undefined) => seq ? "第" + seq + "版" : "版本未提供";
 
 /** 完整上海时间，用于紧凑时间的 Tooltip；无效时间不编造。 */
 export function fullShanghaiTime(iso: string): string {

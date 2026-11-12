@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Chip } from "@heroui/react";
-import { PortalHeader } from "./portal-header";
+import { PortalHeader, type PortalSearchMode } from "./portal-header";
 import { PortalFooter } from "./portal-footer";
 import { accountSearchHref } from "@/lib/account-search";
 export type ServiceSurface = "browse" | "detail" | "editor" | "account" | "utility";
@@ -37,6 +37,7 @@ type ServiceShellProps = {
   searchInputLabel?: string;
   searchPlaceholder?: string;
   searchCompactPlaceholder?: string;
+  searchMode?: PortalSearchMode;
 };
 
 export function ServiceShell({
@@ -58,6 +59,7 @@ export function ServiceShell({
   searchInputLabel = "搜索账号编号或关键词",
   searchPlaceholder = "搜索账号编号或关键词",
   searchCompactPlaceholder = searchPlaceholder,
+  searchMode,
 }: ServiceShellProps) {
   const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
@@ -66,7 +68,7 @@ export function ServiceShell({
   const trail = breadcrumbs !== undefined ? breadcrumbs : [{ label: "首页", href: "/" }, { label: title }];
   const context = contextLabel === undefined ? meta.label : contextLabel;
   return <div className={`portal-home portal-subpage functional-shell functional-shell--${surface}`}>
-    <PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={onSearch ?? ((value: string) => router.push(accountSearchHref(value)))} searchLabel={searchLabel} searchInputLabel={searchInputLabel} searchPlaceholder={searchPlaceholder} searchCompactPlaceholder={searchCompactPlaceholder} />
+    <PortalHeader home={false} query={query} onQueryChange={setQuery} onSearch={onSearch ?? ((value: string) => router.push(accountSearchHref(value)))} searchLabel={searchLabel} searchInputLabel={searchInputLabel} searchPlaceholder={searchPlaceholder} searchCompactPlaceholder={searchCompactPlaceholder} searchMode={searchMode} />
     {topContent ? <div className="functional-top-content portal-width">{topContent}</div> : null}
     <main id="main-content" className="portal-width subpage-main functional-main">
       {trail.length > 0 ? <div className={surface === "detail" ? "functional-detail-trail" : undefined}>

@@ -45,7 +45,12 @@ import {
   type UserObligationReader,
 } from "./user-identity";
 import type { ImIdentityIntentRepository, ImIdentityProvisioner } from "../im/identity-lifecycle";
-import { clearSupportPresenceForSession } from "../im/support-presence-session";
+import {
+  endSupportPresenceForAdmin,
+  endSupportPresenceForAuthSession,
+  markSupportPresenceLockedForSession,
+  markSupportPresenceUnlockedForSession,
+} from "../im/support-presence-session";
 import { assertAdminCommandAuthorizedInTransaction } from "./admin-auth-session";
 import { ADMIN_BRUTE_FORCE_POLICY, ADMIN_CAPTCHA_REQUIRED_REASON, adminAuthSubjects, clearAdminAuthFailures, gateAdminAuth, recordAdminAuthFailure, type AdminBruteForce } from "./admin-brute-force";
 import { resolveAdminClientIp } from "./admin-client-ip";
@@ -480,7 +485,11 @@ export async function readAdminContext(
 }
 
 /** Strict supply-context recheck; the session ID comes from prior SDK authentication. */
-export async function assertAdminContextInTransaction(client: PoolClient, context: {userId:string;sessionId:string}): Promise<void> {
+export async function assertAdminContextInTransaction(
+  client: PoolClient,
+  context: {userId:string;sessionId:string},
+  options: { allowLocked?: boolean } = {},
+): Promise<void> {
   const session = (await client.query<{locked:boolean;twoFactorEnabled:boolean;suspended:boolean}>(`SELECT s."locked",u."twoFactorEnabled",u."suspended" FROM "zzsh_auth_admin"."session" s JOIN "zzsh_auth_admin"."user" u ON u."id"=s."userId" WHERE s."id"=$1 AND s."userId"=$2 AND s."expiresAt">clock_timestamp()`, [context.sessionId,context.userId])).rows[0];
   // E-R3-03: same suspended gate as the locking command guard (assertAdminCommandAuthorizedInTransaction).
   if (!session || session.suspended === true) throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Authentication required");
@@ -488,7 +497,7 @@ export async function assertAdminContextInTransaction(client: PoolClient, contex
   if (!security) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Account unavailable");
   if (security.status === "FROZEN") throw new SecurityApiError(401, API_V1_ERROR_CODES.UNAUTHENTICATED, "Account unavailable");
   if (security.status !== "ACTIVE" || session.twoFactorEnabled !== true) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Additional verification required");
-  if (session.locked) throw new SecurityApiError(423, API_V1_ERROR_CODES.FORBIDDEN, "Account locked");
+  if (session.locked && !options.allowLocked) throw new SecurityApiError(423, API_V1_ERROR_CODES.FORBIDDEN, "Account locked");
 }
 
 export type AdminSessionSnapshot =
@@ -1083,14 +1092,15 @@ async function lockPin(request: NodeRequest, response: NodeResponse, requestId: 
     if (!row || !row.pinHash) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "PIN is not configured");
     if (row.locked) throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Session is already locked");
     await client.query(`UPDATE "zzsh_auth_admin"."session" SET "locked" = true, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [context.sessionId]);
-    // Clearing presence in the same transaction makes dispatch stop immediately; the
-    // client cannot call an authenticated presence endpoint once this session is locked.
-    const support = await clearSupportPresenceForSession(client, context.userId, context.sessionId);
+    // Locking pauses dispatch immediately but keeps reception ownership and timing.
+    // The page stops its IM connection; a locked-page liveness heartbeat keeps the
+    // interval alive until unlock reconnects, or the 30-minute lost sweep ends it.
+    const support = await markSupportPresenceLockedForSession(client, context.userId, context.sessionId);
     await recordAudit(client, {
       actorType: "admin", actorId: context.userId, sessionId: context.sessionId,
       action: "admin.pin.locked", objectType: "admin_session", objectId: context.sessionId,
       outcome: "SUCCESS", requestId,
-      details: { supportPresenceCleared: support.presence, supportSessionsClosed: support.sessions },
+      details: { supportPresencePaused: support.presence },
     });
   });
   sendSuccess(response, { status: "LOCKED" }, requestId);
@@ -1122,7 +1132,8 @@ async function unlockPin(request: NodeRequest, response: NodeResponse, requestId
         return;
       }
       await client.query(`UPDATE "zzsh_auth_admin"."session" SET "locked" = false, "pinFailures" = 0, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [context.sessionId]);
-      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.unlock", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { method: "pin" } });
+      const support = await markSupportPresenceUnlockedForSession(client, context.userId, context.sessionId);
+      await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.unlock", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { method: "pin", supportPresencePaused: support.presence } });
     });
     if (failure) throw new SecurityApiError(failure.status, failure.status === 423 ? API_V1_ERROR_CODES.FORBIDDEN : API_V1_ERROR_CODES.UNAUTHENTICATED, failure.message);
     sendSuccess(response, { status: "UNLOCKED", method: "PIN" }, requestId);
@@ -1141,7 +1152,8 @@ async function unlockPin(request: NodeRequest, response: NodeResponse, requestId
     } else {
       await client.query(`UPDATE "zzsh_auth_admin"."session" SET "pinHash" = $1, "locked" = false, "pinFailures" = 0, "updatedAt" = clock_timestamp() WHERE "id" = $2`, [nextHash, context.sessionId]);
     }
-    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.unlock", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { method: "password_2fa", pinReset: nextHash !== undefined } });
+    const support = await markSupportPresenceUnlockedForSession(client, context.userId, context.sessionId);
+    await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.pin.unlock", objectType: "admin_session", objectId: context.sessionId, outcome: "SUCCESS", requestId, details: { method: "password_2fa", pinReset: nextHash !== undefined, supportPresencePaused: support.presence } });
   });
   sendSuccess(response, { status: "UNLOCKED", method: "PASSWORD_2FA", pinReset: nextHash !== undefined }, requestId);
 }
@@ -1181,6 +1193,7 @@ async function changeAdminFreezeState(request: NodeRequest, response: NodeRespon
       await client.query(`UPDATE "zzsh_iam"."admin_security" SET "status" = 'FROZEN', "updated_at" = clock_timestamp() WHERE "admin_user_id" = $1`, [targetAdminId]);
       await client.query(`UPDATE "zzsh_iam"."admin_recovery_request" SET "status" = 'EXPIRED', "recovery_token_hash" = NULL WHERE "target_admin_user_id" = $1 AND "status" IN ('PENDING', 'ISSUED')`, [targetAdminId]);
       await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+      await endSupportPresenceForAdmin(client, targetAdminId, "REVOKED", new Date());
       resultingStatus = "FROZEN";
     } else {
       if (target.rows[0].status !== "FROZEN") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not frozen");
@@ -1289,12 +1302,15 @@ async function revokeSelfSessions(request: NodeRequest, response: NodeResponse, 
     await setAuditContext(client, "admin", context.userId, context.sessionId, requestId);
     const actor = await lockActor(client, context.userId);
     if (actor.status !== "ACTIVE") throw new SecurityApiError(409, API_V1_ERROR_CODES.CONFLICT, "Administrator is not active");
-    const deleted = await client.query(
-      `DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "id" = ANY($2::text[]) AND "id" <> $3 AND "expiresAt" > clock_timestamp()`,
+    const deleted = await client.query<{ id: string }>(
+      `DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1 AND "id" = ANY($2::text[]) AND "id" <> $3 AND "expiresAt" > clock_timestamp()
+       RETURNING "id"`,
       [context.userId, ids, context.sessionId],
     );
     const count = deleted.rowCount ?? 0;
     if (scope === "one" && count === 0) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Session not found");
+    const revokedAt = new Date();
+    for (const row of deleted.rows) await endSupportPresenceForAuthSession(client, row.id, "REVOKED", revokedAt);
     await recordAudit(client, {
       actorType: "admin",
       actorId: context.userId,
@@ -1365,6 +1381,7 @@ async function resetAdminCredential(request: NodeRequest, response: NodeResponse
        WHERE "admin_user_id" = $3`, [passwordChangeRequired, ADMIN_CREDENTIAL_RESET_TTL, targetAdminId]);
     const identifiers = [targetAdminId, user.email, user.phoneNumber].filter((value): value is string => Boolean(value));
     const sessions = await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+    await endSupportPresenceForAdmin(client, targetAdminId, "REVOKED", new Date());
     const challenges = await client.query(
       `WITH target_challenges AS (
          SELECT "identifier" FROM "zzsh_auth_admin"."verification" WHERE "value" = $1
@@ -1442,6 +1459,7 @@ async function forceLogoutAdmin(request: NodeRequest, response: NodeResponse, re
     if (!targetUser.rows[0]) throw new SecurityApiError(404, API_V1_ERROR_CODES.NOT_FOUND, "Administrator not found");
     const identifiers = [targetAdminId, targetUser.rows[0].email, targetUser.rows[0].phoneNumber].filter((value): value is string => Boolean(value));
     const sessions = await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [targetAdminId]);
+    await endSupportPresenceForAdmin(client, targetAdminId, "REVOKED", new Date());
     const challenges = await client.query(
       `WITH target_challenges AS (
          SELECT "identifier" FROM "zzsh_auth_admin"."verification" WHERE "value" = $1
@@ -1707,6 +1725,7 @@ async function confirmRecovery(request: NodeRequest, response: NodeResponse, req
     if (requestRow.requestedBy === context.userId) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "A second independent boss is required");
     await client.query(`UPDATE "zzsh_iam"."admin_recovery_request" SET "status" = 'ISSUED', "confirmed_by" = $1 WHERE "id" = $2`, [context.userId, recoveryRequestId]);
     await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [requestRow.targetAdminId]);
+    await endSupportPresenceForAdmin(client, requestRow.targetAdminId, "REVOKED", new Date());
     await recordAudit(client, { actorType: "admin", actorId: context.userId, sessionId: context.sessionId, action: "admin.recovery.issued", objectType: "admin_recovery_request", objectId: recoveryRequestId, outcome: "SUCCESS", requestId, details: { targetAdminId: requestRow.targetAdminId, targetIsBoss: target.rows[0].isBoss, targetStatus: target.rows[0].status } });
     const notification = { event: "admin.recovery.issued", actorId: context.userId, targetAdminId: requestRow.targetAdminId, requestId } satisfies AdminSecurityNotification;
     const notificationId = await queueAdminSecurityNotification(client, notification);
@@ -1754,6 +1773,7 @@ async function completeRecovery(request: NodeRequest, response: NodeResponse, re
     await client.query(`DELETE FROM "zzsh_auth_admin"."twoFactor" WHERE "userId" = $1`, [requestRow.targetAdminId]);
     await client.query(`UPDATE "zzsh_auth_admin"."user" SET "twoFactorEnabled" = false, "updatedAt" = clock_timestamp() WHERE "id" = $1`, [requestRow.targetAdminId]);
     await client.query(`DELETE FROM "zzsh_auth_admin"."session" WHERE "userId" = $1`, [requestRow.targetAdminId]);
+    await endSupportPresenceForAdmin(client, requestRow.targetAdminId, "REVOKED", new Date());
     const nextStatus = "PENDING_ENROLLMENT";
     await client.query(`UPDATE "zzsh_iam"."admin_security"
        SET "status" = $1, "password_change_required" = false, "bootstrap_expires_at" = clock_timestamp() + interval '15 minutes', "bootstrap_used_at" = NULL, "updated_at" = clock_timestamp()
