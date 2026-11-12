@@ -58,6 +58,7 @@ import {
   editableDeclaration,
   groupForField,
   inventoryEditorRows,
+  mediaAccessUrl,
   mergeInventory,
   supplyApi,
   supplyBlockerGroup,
@@ -69,7 +70,7 @@ import {
 } from "../../lib/supply-client";
 import { freezeRequest, IdentityPauseGate, isCurrentQuery } from "../../lib/supply-workspace-guards";
 import { loadSupplyIntent, prepareSupplyIntent, acceptSupplyIntent, retainUncertainSupplyIntent, clearSupplyIntent, sameSupplyIntent, SupplyIntentStorageError, type SupplyWriteIntent, type SupplyWriteAction, type SupplyWriteReceipt } from "../../lib/supply-write-intent";
-import { MEDIA_ACCEPT_ATTRIBUTE, mediaUploadFailureHint } from "../../lib/media-upload";
+import { compressListingScreenshot, MEDIA_ACCEPT_ATTRIBUTE, mediaUploadFailureHint } from "../../lib/media-upload";
 import { selectDeltaGame } from "../../lib/supply-games";
 import { requiredAccountFactsProblem } from "../../lib/supply-publication-required";
 import { DELTA_REGION_OPTIONS } from "../../lib/delta-region-options";
@@ -150,6 +151,8 @@ type MediaEntry = {
   purpose: MediaPurpose;
   category?: MediaCategory;
   file?: File;
+  transport?: "OSS_POST";
+  compress?: boolean;
   assetId?: string;
   reviewState?: string;
   publicDisplayEligible?: boolean;
@@ -961,7 +964,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         const assetId = record.receipt.assetId, category = record.body.category as MediaCategory;
         const purpose: MediaPurpose = record.body.purpose === "ACCOUNT_EVIDENCE" ? "ACCOUNT_EVIDENCE" : "ACCOUNT_DISPLAY";
         setDraft((previous) => previous.mediaBindings.some(row => row.assetId === assetId) ? previous : { ...previous, mediaBindings: [...previous.mediaBindings, { assetId, position: nextMediaPosition(previous.mediaBindings), category }] });
-        setMedia(previous => previous.some(row => row.assetId === assetId) ? previous : [...previous, { id: `recovered-${assetId}`, assetId, purpose, category, reviewState: record.receipt?.reviewState, status: "bound", bindingSaved: false, intentKey: record.key, uploadKey: String(record.body.uploadKey), context, previewUrl: `/api/supply/media/${encodeURIComponent(assetId)}/access` }]);
+        setMedia(previous => previous.some(row => row.assetId === assetId) ? previous : [...previous, { id: `recovered-${assetId}`, assetId, purpose, category, reviewState: record.receipt?.reviewState, status: "bound", bindingSaved: false, intentKey: record.key, uploadKey: String(record.body.uploadKey), context, previewUrl: mediaAccessUrl(assetId) }]);
       }
       if (!setWritePending(null)) return false;
       setIntentStorageIssue("");
@@ -1065,7 +1068,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           publicDisplayEligible: binding.publicDisplayEligible,
           publiclyReadable: binding.publiclyReadable,
           assetId: binding.assetId,
-          previewUrl: `/api/supply/media/${encodeURIComponent(binding.assetId)}/access`,
+          previewUrl: mediaAccessUrl(binding.assetId),
           bindingSaved: true,
           context: { epoch: epochRef.current, identity: identityRef.current, accountId: next.account.id, gameId: next.account.game_id },
           status: "bound",
@@ -1408,7 +1411,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
             publicDisplayEligible: binding.publicDisplayEligible,
             publiclyReadable: binding.publiclyReadable,
             assetId: binding.assetId,
-            previewUrl: `/api/supply/media/${encodeURIComponent(binding.assetId)}/access`,
+            previewUrl: mediaAccessUrl(binding.assetId),
             bindingSaved: true,
             context: { epoch: epochRef.current, identity: identityRef.current, accountId: loaded.account.id, gameId: loaded.account.game_id },
             status: "bound",
@@ -2368,11 +2371,18 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     const controller = beginRequest();
     if (currentContext(context, controller.signal)) setMedia((previous) => previous.map((item) => item.id === entry.id ? { ...item, status: "uploading", error: undefined } : item));
     setBusy(`upload-${entry.id}`);
+    let retryEntry = entry;
     try {
       const ready = await ensureReady(context, controller.signal, "upload", () => upload(entry, context));
       const id = accountRef.current;
       if (cancelledMedia.current.has(entry.id) || !ready || !id || !currentContext(context, controller.signal)) return;
-      const result = await writePersisted("media", { ...context, accountId: id }, { purpose: entry.purpose, category: entry.category ?? "SHOWCASE", mime: entry.file.type, size: entry.file.size, uploadKey: entry.uploadKey }, entry.intentKey, () => uploadSupplyMedia({ gameId: context.gameId, accountId: id, purpose: entry.purpose, file: entry.file!, intentKey: entry.intentKey, uploadKey: entry.uploadKey, signal: controller.signal, beforeBytesUpload: () => waitForIdentity(context) }));
+      const file = entry.compress ? await compressListingScreenshot(entry.file) : entry.file;
+      if (cancelledMedia.current.has(entry.id) || !currentContext(context, controller.signal)) return;
+      if (entry.compress) {
+        retryEntry = { ...entry, file, compress: false };
+        setMedia(previous => previous.map(item => item.id === entry.id ? { ...item, file, compress: false } : item));
+      }
+      const result = await writePersisted("media", { ...context, accountId: id }, { purpose: entry.purpose, category: entry.category ?? "SHOWCASE", mime: file.type, size: file.size, uploadKey: entry.uploadKey }, entry.intentKey, () => uploadSupplyMedia({ gameId: context.gameId, accountId: id, purpose: entry.purpose, file, transport: entry.transport, intentKey: entry.intentKey, uploadKey: entry.uploadKey, signal: controller.signal, beforeBytesUpload: () => waitForIdentity(context) }));
       if (!currentContext(context, controller.signal)) return;
       if (!result) return;
       setWritePending(null);
@@ -2387,7 +2397,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       if (cancelledMedia.current.has(entry.id)) return;
       if (currentContext(context, controller.signal)) {
         setMedia((previous) => previous.map((item) => item.id === entry.id ? { ...item, status: "failed", error: failure instanceof SupplyRequestError ? failure.message : "上传未完成" } : item));
-        if (!isAbort(failure) && uncertainSupplyWriteFailure(failure)) rememberWrite({ action: "upload", context, run: () => upload(entry, context) });
+        if (!isAbort(failure) && uncertainSupplyWriteFailure(failure)) rememberWrite({ action: "upload", context, run: () => upload(retryEntry, context) });
         reportWriteFailure(failure, context);
       }
     } finally {
@@ -2399,11 +2409,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (formDisabled || !gameId || (category === "PENALTY" && draftRef.current.attributes.ban_record !== true)) return;
     const context = captureContext(accountRef.current, gameId);
     if (!currentContext(context)) return;
+    const transport = globalThis.crypto?.subtle ? options?.accountMediaTransport : undefined;
     for (const file of files) {
       const entryId = newKey();
       cancelledMedia.current.delete(entryId);
       const hint = mediaUploadFailureHint(file);
-      const entry: MediaEntry = { id: entryId, purpose: "ACCOUNT_DISPLAY", category, file, status: "failed", error: hint ?? undefined, intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context, previewUrl: hint ? undefined : URL.createObjectURL(file) };
+      const entry: MediaEntry = { id: entryId, purpose: "ACCOUNT_DISPLAY", category, file, transport, compress: transport === "OSS_POST" && category === "SHOWCASE", status: "failed", error: hint ?? undefined, intentKey: newKey(), uploadKey: newKey(), bindingSaved: false, context, previewUrl: hint ? undefined : URL.createObjectURL(file) };
       setMedia((previous) => [...previous, entry]);
       if (hint) {
         setNotice("");

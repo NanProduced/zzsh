@@ -17,3 +17,29 @@ export function mediaUploadFailureHint(file: { type: string; size: number }): st
   }
   return null;
 }
+
+export async function compressListingScreenshot(file: File): Promise<File> {
+  if (typeof createImageBitmap !== "function") return file;
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file);
+    const longestSide = Math.max(bitmap.width, bitmap.height);
+    if (longestSide > 8192 || bitmap.width * bitmap.height > 40_000_000) return file;
+    if (longestSide <= 1920 && file.type === "image/webp") return file;
+    const scale = Math.min(1, 1920 / longestSide);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return file;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const compressed = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/webp", 0.86));
+    if (compressed?.type !== "image/webp" || !compressed.size || compressed.size > MAX_MEDIA_BYTES
+      || (scale === 1 && compressed.size >= file.size)) return file;
+    return new File([compressed], "screenshot.webp", { type: compressed.type });
+  } catch {
+    return file;
+  } finally {
+    bitmap?.close();
+  }
+}

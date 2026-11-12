@@ -21,7 +21,7 @@ const getPath = new RegExp(
   `^/(?:operation-result|games|games/${id}/(?:catalog|publishing-catalog|publishing-options|listing-filters|resource-income-preview|full-payout-terms)|gunsmith/games|gunsmith/games/${id}/firearms|gunsmith/firearms/${id}/codes|listings/lookup|listings(?:/${id}(?:/media/${id}|/legacy-images/${slot})?)?|me/(?:accounts|favorites)|accounts/${id}(?:/deposit-recommendation|/legacy-images/(?:display|penalty)/${slot})?|media/${id}/(?:access|content))$`,
 );
 const postPath = new RegExp(
-  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents|games/${id}/owner-income-preview)$`,
+  `^/(?:accounts|accounts/${id}/(?:drafts|quote|accept-rules|submit|withdraw|pause|resume)|media/upload-intents|media/uploads/${id}/complete|games/${id}/owner-income-preview)$`,
 );
 const putPath = new RegExp(
   `^/(?:accounts/${id}/draft|favorites/${id}|media/uploads/${id})$`,
@@ -30,6 +30,7 @@ const mediaPath = new RegExp(
   `^/(?:media/${id}/(?:access|content)|listings/${id}/(?:media/${id}|legacy-images/${slot})|accounts/${id}/legacy-images/(?:display|penalty)/${slot})$`,
 );
 const legacyMediaPath = new RegExp(`^/(?:listings/${id}/legacy-images/${slot}|accounts/${id}/legacy-images/(?:display|penalty)/${slot})$`);
+const originalMediaPath = new RegExp(`^/media/${id}/access$`);
 const error = (status: number, code: string, requestId: string) =>
   Response.json(
     { error: { code, message: "供给请求未完成", requestId } },
@@ -85,8 +86,14 @@ async function forward(
     cookies = userCookies(request.headers.get("cookie"));
   if (cookies) headers.set("cookie", cookies);
   if (method === "GET" && path === "/operation-result" && request.headers.has("idempotency-key")) headers.set("idempotency-key", request.headers.get("idempotency-key")!);
+  const directRead = method === "GET" && originalMediaPath.test(path)
+    && incoming.searchParams.size === 1 && incoming.searchParams.get("delivery") === "direct";
+  const browserOrigin = process.env.OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN?.trim() ?? "";
+  const allowDirectRead = directRead && browserOrigin.startsWith("https://") && isHttpOrigin(browserOrigin);
+  if (directRead && !allowDirectRead) incoming.searchParams.delete("delivery");
   const upload = method === "PUT" && path.startsWith("/media/uploads/"),
-    deadline = AbortSignal.timeout(15000);
+    complete = method === "POST" && path.startsWith("/media/uploads/"),
+    deadline = AbortSignal.timeout(complete ? 60000 : 15000);
   let body: ArrayBuffer | undefined;
   if (method !== "GET" && method !== "HEAD") {
     const mime = request.headers.get("content-type") ?? "";
@@ -122,7 +129,7 @@ async function forward(
   try {
     upstream = await fetch(
       new URL(
-        "/api/bff/user/supply" + path + new URL(request.url).search,
+        "/api/bff/user/supply" + path + incoming.search,
         apiOrigin,
       ),
       {
@@ -130,7 +137,7 @@ async function forward(
         headers,
         body,
         cache: "no-store",
-        redirect: "error",
+        redirect: allowDirectRead ? "manual" : "error",
         signal: deadline,
       },
     );
@@ -147,6 +154,17 @@ async function forward(
   for (const h of ["retry-after", "etag", "x-zzsh-legacy-missing"]) {
     const v = upstream.headers.get(h);
     if (v) responseHeaders.set(h, v);
+  }
+  if (allowDirectRead && upstream.status === 307) {
+    try {
+      const url = new URL(upstream.headers.get("location") ?? "");
+      if (url.origin !== new URL(browserOrigin).origin || url.username || url.password || url.hash) throw new Error();
+      responseHeaders.set("Location", url.href);
+      responseHeaders.set("Referrer-Policy", "no-referrer");
+      return new Response(null, { status: 307, headers: responseHeaders });
+    } catch {
+      return error(502, "INTERNAL_ERROR", requestId);
+    }
   }
   if (method === "HEAD") return new Response(null, { status: upstream.status, headers: responseHeaders });
   try {

@@ -2,9 +2,21 @@
 
 图片媒体由 API 的 `MediaStorage` 承接，服务端通过 `MEDIA_STORAGE=local|oss` 选择一个后端。账号展示/审核图片、保证金图片证据、游戏/皮肤/枪械/物资目录图和平台内容素材共用该后端；原图和清理元数据后的公开衍生图分别按 SHA256 保存。仅支持 JPEG、PNG、WebP，单张最多 10 MiB。固定品牌、字体和页面插画随应用部署；IM 附件走其独立链路，协议正文、资金导出和数据库备份不属于本媒体服务。
 
+## 账号图片直传和私有衍生图
+
+`OSS_ACCOUNT_MEDIA_DIRECT=1` 启用账号图片的 `OSS_POST` 上传能力，默认关闭。API 继续支持原有中继上传，上传意图只允许使用创建时选择的方式。Web 普通展示截图尽量转为长边不超过 1920 px 的 WebP，处罚截图和审核证据保留所选文件的原始字节。其他业务媒体沿用各自入口。
+
+- `GET /api/v1/supply/games/:gameId/publishing-options` 在启用时返回 `accountMediaTransport: "OSS_POST"`。`POST /api/v1/supply/media/upload-intents` 接受 `transport: "OSS_POST"`，验证账号归属和声明后返回限时 `ossUpload` 表单，绑定 `<prefix>private/account-upload/<intentId>`、实际声明大小和 MIME。客户端按返回字段构造 multipart 表单，最后附文件，向 OSS HTTPS 域名 POST。有效期沿用上传意图的 10 分钟。
+- `POST /api/v1/supply/media/uploads/:intentId/complete` 沿用写幂等键，提交 `{ uploadToken, contentHash }`，其中 `contentHash` 是实际上传文件的十六进制 SHA-256。API 按当前身份与账号权限从 OSS 读取暂存字节，完整解码并重新核对大小、MIME 和 SHA-256。原图及中继兼容衍生图沿用现有内容寻址键。若 `MEDIA_STORAGE=oss` 使用同地域内网 Endpoint，这些校验读写发生在内网，用户上传流量直达 OSS。
+- 新直传的展示图由 OSS 原生缩放并应用当前水印规则，同桶转存到 `<prefix>private/account-variants/<生成ID>/{640,1920}.webp`。API 读回核对格式、尺寸、解码和 SHA-256，与媒体资产一并记录成功的两个规格。原有中继图片路径仍使用原兼容衍生图。两个新规格保持私有，尚未接入公开 CDN。
+- `/system` 的「账号图片水印」由 Boss 管理，支持启用、Logo、角落、相对大小、不透明度和边距。Logo 选择已审核公开的 PNG 运营素材。OSS 可用时，可输入符合展示条件的账号素材编号，通过短签名预览两个规格的实际 OSS 处理结果。规则修改应用于以后生成的变体。
+- 用户原图 `/api/v1/supply/media/:id/access` 和管理端 `/api/v1/admin/supply/media/:id/content` 接受 `?delivery=direct`。通过当前会话、业务对象及角色权限校验后，账号原图返回 307 和仅该对象的 120 秒 OSS GET 签名。未选择直读的调用方仍收到现有二进制响应。签名过期前仍可用，权限变化会阻止再次签发。
+
+部署时先应用账号媒体业务迁移，并给 API 与用户 Web BFF 配置同一个 `OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN`。该域名应为独立的 OSS HTTPS CNAME，并避免共享应用身份 Cookie。Bucket 保持私有并阻止公共访问，CORS 仅允许所需客户端来源和直传 POST。为暂存前缀配置过期清理，启用 OSS 对象版本控制时同时处理历史版本。真实 OSS 表单、私有签名、转存、预览和客户端域名限制均需在隔离资源验证。 [OSS POST V4 签名](https://help.aliyun.com/en/oss/developer-reference/signature-version-4-recommend) · [转存处理结果](https://help.aliyun.com/zh/oss/user-guide/save-processed-images) · [OSS CNAME](https://help.aliyun.com/zh/oss/user-guide/access-buckets-via-custom-domain-names)
+
 ## 用户侧公开图片的目标架构（尚未实施）
 
-用户侧的公开展示图片，目标是客户端直接上传 OSS、浏览器或其他客户端直接从 OSS/CDN 读取图片字节，不经 ECS 对外转发。当前运行实现仍以 API 中继为主；此目标不表示浏览器直传、CDN 或相关配置已经上线。
+公开展示图片计划由浏览器及其他客户端直接从 CDN 读取。当前公开分发仍经 API 中继，账号直传须显式启用并单独验收。
 
 - 服务端先核对身份、上传用途和归属，签发限定对象、大小、有效期的短期上传授权；客户端不得持有长期凭据。上传的原图先放私有待处理区域，服务端验证实际字节、解码及大小等限制后生成安全衍生图，再按业务发布状态开放。跨端客户端分别接入并验证；不以客户端声明的 MIME 或上传成功替代服务端校验。
 - 仅验证通过且符合当前发布资格的公开衍生图进入独立公开分发范围；原图、私有凭证和内部文档图片不得因启用 CDN 被公开。现有原图与衍生图共用内容寻址前缀，不能直接将整个现有桶或前缀挂为公开 CDN。

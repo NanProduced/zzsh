@@ -334,6 +334,7 @@ export async function supplyRequest<T>(
   return body as T;
 }
 const id = (value: string) => encodeURIComponent(value);
+export const mediaAccessUrl = (assetId: string) => `/api/supply/media/${id(assetId)}/access?delivery=direct`;
 /**
  * `/me/accounts` pages by `after` (the previous page's last id). Older callers sent `cursor`,
  * which this endpoint ignores — that silently repeated the first page instead of advancing.
@@ -516,6 +517,13 @@ export const supplyApi = {
     }),
 };
 
+type SupplyMediaUploadIntent = {
+  intentId: string;
+  uploadToken: string;
+  transport?: "OSS_POST";
+  ossUpload?: { method: "POST"; url: string; fields: Record<string, string> } | null;
+};
+
 export async function uploadSupplyMedia(input: {
   gameId: string;
   accountId: string;
@@ -523,10 +531,11 @@ export async function uploadSupplyMedia(input: {
   file: Blob;
   intentKey: string;
   uploadKey: string;
+  transport?: "OSS_POST";
   signal?: AbortSignal;
   beforeBytesUpload?: () => Promise<boolean>;
 }): Promise<{ assetId: string; purpose: string; reviewState: string } | null> {
-  const intent = await supplyRequest<{ intentId: string; uploadToken: string }>(
+  const intent = await supplyRequest<SupplyMediaUploadIntent>(
     "/media/upload-intents",
     {
       method: "POST",
@@ -536,12 +545,45 @@ export async function uploadSupplyMedia(input: {
         purpose: input.purpose,
         mime: input.file.type,
         size: input.file.size,
+        ...(input.transport ? { transport: input.transport } : {}),
       },
       idempotencyKey: input.intentKey,
       signal: input.signal,
     },
   );
+  if (intent.transport !== input.transport) throw new SupplyRequestError(502, null, input.uploadKey);
   if (input.beforeBytesUpload && !(await input.beforeBytesUpload())) return null;
+  if (intent.transport === "OSS_POST") {
+    const digest = await crypto.subtle.digest("SHA-256", await input.file.arrayBuffer());
+    const contentHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    let uncertainUpload = false;
+    if (intent.ossUpload) {
+      const { url, fields, method } = intent.ossUpload;
+      const target = new URL(url);
+      if (method !== "POST" || target.protocol !== "https:" || target.username || target.password
+        || target.pathname !== "/" || target.search || target.hash) throw new SupplyRequestError(502, null, input.uploadKey);
+      const form = new FormData();
+      for (const [field, value] of Object.entries(fields)) form.append(field, value);
+      form.append("file", input.file, "image");
+      let uploaded: Response | undefined;
+      try {
+        uploaded = await fetch(target, { method, body: form, credentials: "omit", redirect: "error", signal: input.signal });
+      } catch (error) {
+        if (input.signal?.aborted) throw error;
+        uncertainUpload = true;
+      }
+      if (uploaded && !uploaded.ok && uploaded.status !== 409) throw new SupplyRequestError(uploaded.status, null, input.uploadKey);
+    }
+    if (input.beforeBytesUpload && !(await input.beforeBytesUpload())) return null;
+    try {
+      return await supplyRequest("/media/uploads/" + id(intent.intentId) + "/complete", {
+        method: "POST", body: { uploadToken: intent.uploadToken, contentHash }, idempotencyKey: input.uploadKey, signal: input.signal,
+      });
+    } catch (error) {
+      if (uncertainUpload && error instanceof SupplyRequestError && error.status === 409) throw new SupplyRequestError(0, null, input.uploadKey);
+      throw error;
+    }
+  }
   let response: Response;
   try {
     response = await fetch("/api/supply/media/uploads/" + id(intent.intentId), {

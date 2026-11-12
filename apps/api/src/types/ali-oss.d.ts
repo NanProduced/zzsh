@@ -10,6 +10,7 @@ declare module "ali-oss" {
     accessKeySecret: string;
     stsToken?: string;
     secure?: boolean;
+    cname?: boolean;
     timeout?: number;
     authorizationV4?: boolean;
   }
@@ -19,6 +20,10 @@ declare module "ali-oss" {
     head(name: string, options?: Record<string, unknown>): Promise<{ status: number; res: unknown }>;
     put(name: string, file: Buffer, options?: Record<string, unknown>): Promise<{ res: unknown; name: string }>;
     get(name: string, options?: Record<string, unknown>): Promise<{ content: Buffer; res: unknown; status: number }>;
+    getStream(name: string): Promise<{ stream: import("node:stream").Readable; res: { headers: Record<string, string | undefined> } }>;
+    signPostObjectPolicyV4(policy: object, date: Date): string;
+    signatureUrlV4(method: "GET", expires: number, request: { queries: Record<string, string> }, name: string): Promise<string>;
+    processObjectSave(source: string, target: string, process: string, bucket: string): Promise<{ status: number }>;
     delete(name: string, options?: Record<string, unknown>): Promise<{ res: unknown }>;
   }
 

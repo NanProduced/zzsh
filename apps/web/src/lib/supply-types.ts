@@ -332,6 +332,7 @@ export type PublishingCatalog = {
 export type PublishingOptions = {
   releaseId: string;
   generation: string;
+  accountMediaTransport?: "OSS_POST";
   declarationOptions?: {
     next_season_pass?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };
     demulan_unlocked?: { enabled: boolean; required: boolean; requiredAt: "QUOTE_AND_PUBLICATION"; label: string; type: "BOOLEAN"; public: true };

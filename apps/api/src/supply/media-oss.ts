@@ -2,6 +2,7 @@ import OSS from "ali-oss";
 import { join } from "node:path";
 
 import { ConfigurationError } from "../config/config";
+import { accountMediaBrowserOrigin, createOssAccountMedia, type OssAccountMedia } from "./account-media-oss";
 import { ALLOWED_IMAGE_MIMES, createLocalMediaStorage, MediaStorageError, STORAGE_KEY_PATTERN, type ImageMime, type MediaStorage } from "./media";
 
 export const OSS_REQUEST_TIMEOUT_MS = 30_000;
@@ -93,10 +94,15 @@ function storageFailure(): MediaStorageError {
 }
 
 export function defaultCreateClient(options: OssMediaStorageOptions, credentials: OssCredentials): OssObjectClient {
-  const client = new OSS({
+  return createClient(options, credentials);
+}
+
+function createClient(options: OssMediaStorageOptions, credentials: OssCredentials, browserOrigin?: string): OSS {
+  return new OSS({
     region: options.region,
     bucket: options.bucket,
-    endpoint: options.endpoint,
+    endpoint: browserOrigin ?? options.endpoint,
+    ...(browserOrigin ? { cname: true } : {}),
     secure: true,
     accessKeyId: credentials.accessKeyId,
     accessKeySecret: credentials.accessKeySecret,
@@ -104,13 +110,12 @@ export function defaultCreateClient(options: OssMediaStorageOptions, credentials
     authorizationV4: true,
     timeout: OSS_REQUEST_TIMEOUT_MS,
   });
-  return client;
 }
 
 export function createOssMediaStorage(
   options: OssMediaStorageOptions,
   credentials: OssCredentials,
-  deps: { createClient?: (options: OssMediaStorageOptions, credentials: OssCredentials) => OssObjectClient } = {},
+  deps: { createClient?: (options: OssMediaStorageOptions, credentials: OssCredentials) => OssObjectClient; accountMedia?: OssAccountMedia } = {},
 ): MediaStorage {
   const createClient = deps.createClient ?? defaultCreateClient;
   const target = Object.freeze({ bucket: options.bucket, region: options.region, endpoint: options.endpoint, objectPrefix: options.objectPrefix });
@@ -118,6 +123,7 @@ export function createOssMediaStorage(
   return {
     available: true,
     kind: "oss",
+    ...(deps.accountMedia ? { accountMedia: deps.accountMedia } : {}),
     configuration: Object.freeze({ target, credentialMode: credentials.stsToken ? "STS" : "ACCESS_KEY", automaticCredentialRefresh: false }),
     async write(bytes, contentHash, mime) {
       if (!STORAGE_KEY_PATTERN.test(contentHash)) throw new MediaStorageError("content hash is invalid");
@@ -159,7 +165,19 @@ export function createOssMediaStorage(
 // OSS adapter never turns SMS, identity or payment providers into real mode.
 export function resolveMediaStorage(env: NodeJS.ProcessEnv, workingDirectory: string): MediaStorage {
   const kind = env.MEDIA_STORAGE?.trim() || "local";
+  const browserOrigin = accountMediaBrowserOrigin(env);
+  if (browserOrigin && kind !== "oss") throw new ConfigurationError("OSS_ACCOUNT_MEDIA_DIRECT requires MEDIA_STORAGE=oss");
   if (kind === "local") return createLocalMediaStorage(join(workingDirectory, "uploads"));
-  if (kind === "oss") return createOssMediaStorage(loadOssMediaStorageOptions(env), loadOssCredentials(env));
+  if (kind === "oss") {
+    const options = loadOssMediaStorageOptions(env);
+    const credentials = loadOssCredentials(env);
+    if (!browserOrigin) return createOssMediaStorage(options, credentials);
+    const client = createClient(options, credentials);
+    const signer = createClient(options, credentials, browserOrigin);
+    const accountMedia = createOssAccountMedia(options, credentials, browserOrigin, client, (key, seconds, process) => signer.signatureUrlV4("GET", seconds, {
+      queries: { "response-cache-control": "private, no-store", "response-content-disposition": "inline", ...(process ? { "x-oss-process": process } : {}) },
+    }, key));
+    return createOssMediaStorage(options, credentials, { createClient: () => client, accountMedia });
+  }
   throw new ConfigurationError("MEDIA_STORAGE must be local or oss");
 }

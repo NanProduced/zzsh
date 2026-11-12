@@ -509,7 +509,7 @@ export function lightboxKeyAction(key: string): "close" | null {
 export type ZoomTarget = { src: string; alt: string; caption: string };
 
 export function mediaContentUrl(assetId: string): string {
-  return `/api/bff/admin/supply/media/${assetId}/content`;
+  return `/api/bff/admin/supply/media/${encodeURIComponent(assetId)}/content?delivery=direct`;
 }
 
 export function reasonIsDirty(reason: string): boolean {

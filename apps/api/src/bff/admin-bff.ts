@@ -626,7 +626,8 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     }
     return;
   }
-  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm") {
+  if (path === "/system/storage" || path === "/system/storage/check" || path === "/system/sms" || path === "/system/settlement-refund-policy" || path === "/system/opening-auto-confirm"
+    || path === "/system/account-image-watermark" || path === "/system/account-image-watermark/preview") {
     await handleSystemConfiguration(request, response, options.supply);
     return;
   }

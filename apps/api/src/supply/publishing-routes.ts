@@ -199,6 +199,7 @@ export async function handlePublishingRoute(
       {
         releaseId: release.id,
         generation: release.generation,
+        ...(options.mediaStorage.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
         termOptions,
         declarationOptions: {
           next_season_pass: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "下赛季通行证计划", type: "BOOLEAN", public: true },

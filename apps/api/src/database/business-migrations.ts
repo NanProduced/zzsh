@@ -308,6 +308,13 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_account_media_paths') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_account_media_paths FROM PUBLIC, ${runtimeUser}; GRANT SELECT ON zzsh_supply.legacy_account_media_paths TO ${runtimeUser}`);
   }
+  if ((await pool.query(`SELECT to_regclass('zzsh_supply.account_image_watermark') AS relation`)).rows[0]?.relation) {
+    await pool.query(`REVOKE ALL ON zzsh_supply.account_image_watermark, zzsh_supply.account_image_variant FROM PUBLIC, ${runtimeUser};
+      GRANT SELECT ON zzsh_supply.account_image_watermark, zzsh_supply.account_image_variant TO ${runtimeUser};
+      GRANT INSERT ON zzsh_supply.account_image_variant TO ${runtimeUser};
+      GRANT UPDATE (revision, enabled, logo_asset_id, position, size_percent, opacity_percent, margin_percent, updated_by_admin_id, updated_at)
+        ON zzsh_supply.account_image_watermark TO ${runtimeUser}`);
+  }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.legacy_skin_holding') AS relation`)).rows[0]?.relation) {
     await pool.query(`REVOKE ALL ON zzsh_supply.legacy_skin_holding FROM PUBLIC; GRANT SELECT,INSERT ON zzsh_supply.legacy_skin_holding TO ${runtimeUser}; REVOKE UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER ON zzsh_supply.legacy_skin_holding FROM ${runtimeUser}`);
   }
