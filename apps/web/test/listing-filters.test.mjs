@@ -421,3 +421,38 @@ test('skin owner stays scoped to the active category kind', () => {
   assert.equal(resolveSkinOwner(owners, '', 'AGENT'), '');
   assert.equal(resolveSkinOwner(undefined, 'owner_agent', 'AGENT'), '');
 });
+
+test('ratio sort and tactical core items serialize and reconcile correctly', () => {
+  const multiSortMetadata = {
+    ...metadata,
+    sorts: [
+      ...metadata.sorts.filter(s => s.key !== 'coreQuantity'),
+      { key: 'coreQuantity', label: '核心资源数量', enabled: true, order: 3, itemIds: ['item_haff', 'item_awm', 'item_helmet', 'item_armor'] },
+      { key: 'ratio', label: '比例排序', enabled: true, order: 5, itemIds: ['item_haff'] },
+    ],
+    items: [
+      ...metadata.items,
+      { id: 'item_awm', code: 'awm_round', name: 'AWM子弹', unit: 'ROUND' },
+      { id: 'item_helmet', code: 'level6_helmet', name: '6级头盔', unit: 'PIECE' },
+      { id: 'item_armor', code: 'level6_armor', name: '6级护甲', unit: 'PIECE' },
+    ],
+  };
+
+  const ratioFilters = { ...base, game: 'game_delta', sort: 'ratio', coreItemId: 'item_haff', direction: 'DESC' };
+  const ratioQuery = listingQuery(ratioFilters, multiSortMetadata);
+  assert.equal(ratioQuery.get('sort'), 'ratio');
+  assert.equal(ratioQuery.get('coreItemId'), 'item_haff');
+  assert.equal(ratioQuery.get('direction'), 'DESC');
+  assert.equal(listingFiltersUrl(ratioFilters), '/accounts?game=game_delta&sort=ratio&coreItemId=item_haff');
+
+  const tacticalFilters = { ...base, game: 'game_delta', sort: 'coreQuantity', coreItemId: 'item_awm', direction: 'ASC' };
+  const tacticalQuery = listingQuery(tacticalFilters, multiSortMetadata);
+  assert.equal(tacticalQuery.get('sort'), 'coreQuantity');
+  assert.equal(tacticalQuery.get('coreItemId'), 'item_awm');
+  assert.equal(tacticalQuery.get('direction'), 'ASC');
+  assert.equal(listingFiltersUrl(tacticalFilters), '/accounts?game=game_delta&sort=coreQuantity&direction=ASC&coreItemId=item_awm');
+
+  const reconciled = reconcileListingFilters(ratioFilters, multiSortMetadata);
+  assert.equal(reconciled.sort, 'ratio');
+  assert.equal(reconciled.coreItemId, 'item_haff');
+});

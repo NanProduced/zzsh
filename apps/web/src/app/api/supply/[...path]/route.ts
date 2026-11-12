@@ -70,6 +70,56 @@ async function forward(
   const { path: segments } = await context.params,
     path = "/" + segments.join("/"),
     method = request.method;
+  if (path === "/listings" && method === "GET") {
+    const sortType = incoming.searchParams.get("sortType");
+    const sortOrder = incoming.searchParams.get("sortOrder");
+    if (sortType) {
+      incoming.searchParams.delete("sortType");
+      if (sortType === "default") incoming.searchParams.set("sort", "latest");
+      else if (sortType === "money") incoming.searchParams.set("sort", "resourceTotal");
+      else if (sortType === "haff") {
+        incoming.searchParams.set("sort", "coreQuantity");
+        if (!incoming.searchParams.has("coreItemId")) incoming.searchParams.set("coreItemId", "haff");
+      } else if (sortType === "ratio") {
+        incoming.searchParams.set("sort", "ratio");
+        if (!incoming.searchParams.has("coreItemId")) incoming.searchParams.set("coreItemId", "haff");
+      } else if (sortType === "awm") {
+        incoming.searchParams.set("sort", "coreQuantity");
+        if (!incoming.searchParams.has("coreItemId")) incoming.searchParams.set("coreItemId", "awm");
+      } else if (sortType === "helmet") {
+        incoming.searchParams.set("sort", "coreQuantity");
+        if (!incoming.searchParams.has("coreItemId")) incoming.searchParams.set("coreItemId", "helmet");
+      } else if (sortType === "armor") {
+        incoming.searchParams.set("sort", "coreQuantity");
+        if (!incoming.searchParams.has("coreItemId")) incoming.searchParams.set("coreItemId", "armor");
+      }
+    }
+    if (sortOrder) {
+      incoming.searchParams.delete("sortOrder");
+      incoming.searchParams.set("direction", sortOrder.toUpperCase() === "ASC" ? "ASC" : "DESC");
+    }
+    const smallAmount = incoming.searchParams.get("smallAmount");
+    if (smallAmount === "1" || smallAmount === "true") {
+      incoming.searchParams.delete("smallAmount");
+      try {
+        const filters = JSON.parse(incoming.searchParams.get("filters") ?? "{}");
+        filters.resources = filters.resources ?? [];
+        const haff = filters.resources.find((r: { itemId: string }) => ["haff", "haff_base", "df_billable_haff"].includes(r.itemId));
+        if (haff) haff.maxQuantity = "150000000";
+        else filters.resources.push({ itemId: "haff", maxQuantity: "150000000" });
+        incoming.searchParams.set("filters", JSON.stringify(filters));
+      } catch {}
+    }
+    const lingchen = incoming.searchParams.get("lingchen");
+    if (lingchen === "1" || lingchen === "true") {
+      incoming.searchParams.delete("lingchen");
+      try {
+        const filters = JSON.parse(incoming.searchParams.get("filters") ?? "{}");
+        filters.serviceWindow = { startMinute: 0, endMinute: 480, crossMidnight: false, timezone: "Asia/Shanghai" };
+        incoming.searchParams.set("filters", JSON.stringify(filters));
+      } catch {}
+    }
+  }
   if (
     !(method === "GET" || method === "HEAD" ? getPath : method === "POST" ? postPath : putPath).test(
       path,

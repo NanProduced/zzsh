@@ -469,6 +469,23 @@ html[data-theme="dark"] .functional-shell.functional-shell--browse .market-secti
 .functional-shell.functional-shell--browse .market-results-toolbar h2 { margin:0; color:var(--color-text-primary); font-size:16px; font-weight:700; }
 .functional-shell.functional-shell--browse .market-results-toolbar p { margin:2px 0 0; color:var(--color-text-muted); font-size:12px; }
 .market-results-controls { flex-wrap:wrap; justify-content:flex-end; }
+.market-sort-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; padding:8px 12px; margin:12px 0 6px; background:var(--color-bg-surface); border:1px solid var(--color-border-subtle); border-radius:8px; }
+.market-zone-group { display:inline-flex; align-items:center; gap:6px; }
+.market-zone-btn { display:inline-flex; align-items:center; gap:5px; height:30px; padding:0 10px; border-radius:6px; font-size:12px; font-weight:500; color:var(--color-text-secondary); background:var(--color-bg-card); border:1px solid var(--color-border-default); cursor:pointer; user-select:none; transition:all 0.16s cubic-bezier(0.16, 1, 0.3, 1); }
+.market-zone-btn:hover { color:var(--color-text-primary); border-color:var(--color-border-strong); background:var(--color-bg-muted); }
+.market-zone-btn:active { transform:scale(0.97); }
+.market-zone-btn:focus-visible { outline:none; box-shadow:0 0 0 2px var(--color-bg-canvas), 0 0 0 4px var(--color-accent-brand); }
+.market-zone-btn--active { color:var(--color-accent-brand-ink); background:color-mix(in srgb, var(--color-accent-brand) 12%, var(--color-bg-card)); border-color:color-mix(in srgb, var(--color-accent-brand) 45%, var(--color-border-default)); font-weight:600; box-shadow:0 1px 3px rgba(0, 0, 0, 0.04); }
+.market-sort-divider { width:1px; height:18px; background:var(--color-border-subtle); margin:0 2px; }
+.market-sort-items { display:inline-flex; align-items:center; gap:4px; flex-wrap:wrap; }
+.market-sort-tab { display:inline-flex; align-items:center; gap:4px; height:30px; padding:0 9px; border-radius:6px; font-size:12px; color:var(--color-text-secondary); background:transparent; border:1px solid transparent; cursor:pointer; user-select:none; transition:all 0.16s cubic-bezier(0.16, 1, 0.3, 1); }
+.market-sort-tab:hover { color:var(--color-text-primary); background:var(--color-bg-muted); }
+.market-sort-tab:active { transform:scale(0.97); }
+.market-sort-tab:focus-visible { outline:none; box-shadow:0 0 0 2px var(--color-bg-canvas), 0 0 0 4px var(--color-accent-brand); }
+.market-sort-tab--active { color:var(--color-accent-brand-ink); font-weight:600; background:color-mix(in srgb, var(--color-accent-brand) 8%, transparent); }
+.market-sort-arrows { display:inline-flex; flex-direction:column; justify-content:center; align-items:center; font-size:7px; line-height:5px; margin-left:2px; color:var(--color-text-muted); opacity:0.55; }
+.market-sort-arrow { transition:color 0.14s ease, opacity 0.14s ease; }
+.market-sort-arrow.active { color:var(--color-accent-brand-ink); font-weight:bold; opacity:1; }
 .market-sort-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .market-sort-field { display:flex; align-items:center; gap:6px; color:var(--color-text-secondary); font-size:12px; }
 .market-sort-field > span { white-space:nowrap; }
@@ -743,6 +760,11 @@ span.detail-shot-image { display:flex; min-height:110px; align-items:center; jus
   .functional-shell.functional-shell--browse .functional-title-block h1 { font-size:24px; }
   .market-filter-summary-count { font-size:11px; }
   .market-filter-details > summary { padding-inline:11px; }
+  .market-sort-bar { display:flex; flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; scrollbar-width:none; padding:6px 8px; gap:8px; margin:8px 0 4px; }
+  .market-sort-bar::-webkit-scrollbar { display:none; }
+  .market-zone-group, .market-sort-items { flex-shrink:0; flex-wrap:nowrap; }
+  .market-sort-divider { flex-shrink:0; }
+  .market-zone-btn, .market-sort-tab { flex-shrink:0; white-space:nowrap; }
   .market-sort-controls { display:flex; flex-wrap:nowrap; align-items:center; gap:6px; width:auto; flex:1; min-width:0; }
   .market-sort-field { gap:4px; }
   .market-ui-select--toolbar { width:100%; max-width:none; }

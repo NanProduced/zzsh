@@ -35,7 +35,7 @@ export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false
     if(f.options?.some(o=>!allowedCodes(c,f,legacy).includes(o.value)))throw invalid("Unknown option code","config.fields.options");
     if(!legacy && f.levels?.some(l=>!allowedLevels(c,f.key).includes(l)))throw invalid("Unknown allowed level","config.fields.levels");
   }
-  for(const sort of config.sorts)if(sort.itemIds?.some(id=>!c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE")))throw invalid("Core sort requires enabled HAFF_BASE item","config.sorts.itemIds");
+  for(const sort of config.sorts)if(sort.itemIds?.some(id=>!c.items.some(i=>i.id===id&&["HAFF_BASE","ROUND","PIECE"].includes(i.unit))))throw invalid("Core sort requires enabled inventory item","config.sorts.itemIds");
 }
 export type ListingReadMode="NATIVE"|"LEGACY_READ_ONLY"|"MIXED"|"UNCONFIGURED";
 // Mode selection is a pure decision: no release means legacy snapshots (when a
@@ -61,8 +61,8 @@ export async function validateListingQuery(client:PoolClient,q:ListingQueryV2,st
   if(!state.config || (!state.legacyReadOnly && !state.ruleReleaseId))throw new SecurityApiError(503,"LISTING_QUERY_UNAVAILABLE","Listing filters or rules are not configured");
   const config=state.config,c=state.catalog,legacy=state.allowLegacyOptions;
   if(config.fields.some(f=>f.key==="skinGroups"&&f.categoryIds!==undefined))throw retiredSkinCategory();
-  const sort=config.sorts.find(s=>s.key===q.sort&&s.enabled);if(!sort)throw invalid("Sort is disabled","sort");
-  if(q.coreItemId && (!sort.itemIds?.includes(q.coreItemId)||!c.items.some(i=>i.id===q.coreItemId&&i.unit==="HAFF_BASE")))throw invalid("Invalid core item","coreItemId");
+  const sort=config.sorts.find(s=>s.key===q.sort&&s.enabled)??(q.sort==="ratio"?config.sorts.find(s=>s.key==="coreQuantity"&&s.enabled):null);if(!sort)throw invalid("Sort is disabled","sort");
+  if(q.coreItemId && !c.items.some(i=>i.id===q.coreItemId&&["HAFF_BASE","ROUND","PIECE"].includes(i.unit)))throw invalid("Invalid core item","coreItemId");
   for(const [key,value] of Object.entries(q.filters)) {
     const f=config.fields.find(f=>f.key===key&&f.enabled);if(!f)throw invalid("Filter is disabled","filters."+key);
     if(key==="resources")for(const r of q.filters.resources!) {const item=f.items?.find(i=>i.itemId===r.itemId);if(!item||!c.items.some(i=>i.id===r.itemId))throw invalid("Resource is unavailable or outside configured bounds","filters.resources.itemId");for(const bound of ["minQuantity","maxQuantity"] as const){const quantity=r[bound];if(quantity!==undefined&&(BigInt(quantity)<BigInt(item.min)||BigInt(quantity)>BigInt(item.max)))throw invalid("Resource is unavailable or outside configured bounds",`filters.resources.${bound}`);}}
@@ -90,7 +90,17 @@ export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListing
     ...(f.levels?{levels:legacyOptions?f.levels:f.levels.filter(n=>allowedLevels(c,f.key).includes(n))}:{}),
     ...(f.categoryIds?{categoryIds:f.categoryIds.filter(id=>c.categories.some(a=>a.id===id))}:{}),
   })).map((field):FilterField=>{if(skinGrouping!=="TYPE"||c.game.code!=="delta"||field.key!=="skinGroups")return field;const {categoryIds,...rest}=field;return {...rest,ownerKinds:field.ownerKinds??["AGENT","MELEE_TYPE","FIREARM"]};}).sort((a,b)=>a.order-b.order)||[];
-  const sorts=config?.sorts.filter(s=>s.enabled).map(s=>({...s,...(legacy?{label:legacyListingSortLabel(s.key,s.label)}:{}),...(s.itemIds?{itemIds:s.itemIds.filter(id=>c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE"))}:{})})).sort((a,b)=>a.order-b.order)||[];
+  const sorts=config?.sorts.filter(s=>s.enabled).map(s=>({...s,...(legacy?{label:legacyListingSortLabel(s.key,s.label)}:{}),...(s.itemIds?{itemIds:s.itemIds.filter(id=>c.items.some(i=>i.id===id&&["HAFF_BASE","ROUND","PIECE"].includes(i.unit)))}:{})})).sort((a,b)=>a.order-b.order)||[];
+  if(!sorts.some(s=>s.key==="ratio")&&sorts.some(s=>s.key==="coreQuantity")){
+    const coreSort=sorts.find(s=>s.key==="coreQuantity")!;
+    sorts.push({
+      key:"ratio",
+      label:"比例排序",
+      enabled:true,
+      order:coreSort.order+1,
+      itemIds:coreSort.itemIds,
+    });
+  }
   const shared={gameId:c.game.id,queryVersion:2 as const,...(skinGrouping==="TYPE"?{skinGrouping:"TYPE" as const}:{}),filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,fields,sorts,directions:["ASC","DESC"] as Array<"ASC"|"DESC">,items:c.items.filter(i=>fields.some(f=>f.items?.some(r=>r.itemId===i.id))||config?.sorts.some(s=>s.itemIds?.includes(i.id))),categories:c.categories.filter(a=>fields.some(f=>f.categoryIds?.includes(a.id))),skinCatalogUrl:`/api/v1/supply/games/${checkedId(c.game.id,"gameId")}/catalog`,limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
   if(legacy)return {...shared,available:Boolean(config&&signingReady),readMode:"LEGACY_READ_ONLY" as const,reasonCode:!config?"FILTERS_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:null,defaultSort:{sort:"latest",direction:"DESC" as const,label:"更新时间"}};
   return {...shared,available:Boolean(config&&state.ruleReleaseId&&signingReady),reasonCode:!config?"FILTERS_UNCONFIGURED":!state.ruleReleaseId?"RULES_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:state.ruleReleaseId,defaultSort:{sort:"latest",direction:"DESC" as const,label:"最新发布"}};

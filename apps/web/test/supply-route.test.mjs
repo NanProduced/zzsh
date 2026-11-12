@@ -27,6 +27,27 @@ test('listing v2 BFF preserves encoded filters, rewrites metadata and bounds raw
     assert.equal(long.status,400);assert.equal((await long.json()).error.details[0].path,'url');assert.equal(calls,before);
   }finally{globalThis.fetch=old;}
 });
+test('listing v2 BFF adapts convenience sort and zone parameters into canonical query',async()=>{
+  const old=globalThis.fetch;let seen;
+  globalThis.fetch=async url=>{seen=String(url);return Response.json({items:[]});};
+  try{
+    const req=new Request('http://127.0.0.1:3100/api/supply/listings?queryVersion=2&gameId=delta&sortType=haff&sortOrder=asc&smallAmount=1&lingchen=1');
+    const r=await GET(req,ctx(['listings']));
+    assert.equal(r.status,200);
+    const parsed=new URL(seen);
+    assert.equal(parsed.searchParams.get('sort'),'coreQuantity');
+    assert.equal(parsed.searchParams.get('coreItemId'),'haff');
+    assert.equal(parsed.searchParams.get('direction'),'ASC');
+    assert.equal(parsed.searchParams.has('sortType'),false);
+    assert.equal(parsed.searchParams.has('sortOrder'),false);
+    assert.equal(parsed.searchParams.has('smallAmount'),false);
+    assert.equal(parsed.searchParams.has('lingchen'),false);
+    const filters=JSON.parse(parsed.searchParams.get('filters'));
+    assert.equal(filters.resources[0].maxQuantity,'150000000');
+    assert.equal(filters.serviceWindow.startMinute,0);
+    assert.equal(filters.serviceWindow.endMinute,480);
+  }finally{globalThis.fetch=old;}
+});
 test('supply BFF forwards only user cookies, preserves query and adapts public URLs',async()=>{
   const old=globalThis.fetch;let seen;
   globalThis.fetch=async(url,options)=>{seen={url:String(url),options};return Response.json({items:[{url:'/api/v1/supply/listings/a/media/m',resourceTotal:{amount:'125.00'}}],sessionToken:'must-not-forward'});};

@@ -60,7 +60,8 @@ export function buildListingCandidates(query:ListingQueryV2,after:ListingPositio
   const publication=`pub.published_at`;
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
-  const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  const ratio=`CASE WHEN ${price}>0 THEN ((SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})::numeric / ${price}) END`;
+  const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:query.sort==="ratio"?ratio:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
   where.push(PUBLIC_STANDARD_TIER_GUARD);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;

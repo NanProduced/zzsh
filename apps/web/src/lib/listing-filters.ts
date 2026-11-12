@@ -270,7 +270,7 @@ export function listingQuery(
   if (metadata?.ruleReleaseId) query.set("ruleReleaseId", metadata.ruleReleaseId);
   query.set("sort", filters.sort);
   query.set("direction", filters.direction);
-  if (filters.sort === "coreQuantity" && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
+  if ((filters.sort === "coreQuantity" || filters.sort === "ratio") && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
   if (Object.keys(filters.filters).length) {
     query.set("filters", serializeListingConditions(filters.filters));
   }
@@ -329,7 +329,7 @@ export function listingFiltersUrl(filters: ListingFilters): string {
   if (Object.keys(filters.filters).length) query.set("filters", serializeListingConditions(filters.filters));
   if (filters.sort !== "latest") query.set("sort", filters.sort);
   if (filters.direction !== "DESC") query.set("direction", filters.direction);
-  if (filters.sort === "coreQuantity" && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
+  if ((filters.sort === "coreQuantity" || filters.sort === "ratio") && filters.coreItemId) query.set("coreItemId", filters.coreItemId);
   if (filters.viewMode === "grid") query.set("view", "grid");
   return "/accounts" + (query.size ? "?" + query.toString() : "");
 }
@@ -454,7 +454,7 @@ export function reconcileListingFilters(
   const directions = metadata.directions.length ? metadata.directions : [metadata.defaultSort.direction];
   const direction = directions.includes(filters.direction) ? filters.direction : metadata.defaultSort.direction;
   const sortConfig = metadata.sorts.find((entry) => entry.key === sort);
-  const coreItemId = sort === "coreQuantity"
+  const coreItemId = (sort === "coreQuantity" || sort === "ratio")
     ? (sortConfig?.itemIds?.includes(filters.coreItemId ?? "") ? filters.coreItemId : sortConfig?.itemIds?.[0] ?? null)
     : null;
   const limit = Math.max(1, Math.min(filters.limit, metadata.limits.limit, 50));

@@ -397,7 +397,9 @@ function legacySearchPredicate(q: string | null, p: (value: unknown) => string):
 export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingPosition|null,admission?:LegacyPublicAdmission) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[VISIBLE,legacyAdmissionSql(admission,p),`a.game_id=${p(query.gameId)}`,...legacySearchPredicate(query.q,p),...candidatePredicates(query.filters,null,p,"COALESCE(d.snapshot->'attributes',v.attributes)")];
-  const key=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  const legacyPrice=`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`;
+  const legacyRatio=`CASE WHEN ${legacyPrice}>0 THEN ((SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})::numeric / ${legacyPrice}) END`;
+  const key=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?legacyPrice:query.sort==="ratio"?legacyRatio:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
@@ -420,8 +422,11 @@ export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPo
   const publication=`pub.published_at`;
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
-  const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
-  const legacyKey=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
+  const nativeRatio=`CASE WHEN ${price}>0 THEN ((SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})::numeric / ${price}) END`;
+  const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:query.sort==="ratio"?nativeRatio:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
+  const legacyPrice=`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`;
+  const legacyRatio=`CASE WHEN ${legacyPrice}>0 THEN ((SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})::numeric / ${legacyPrice}) END`;
+  const legacyKey=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?legacyPrice:query.sort==="ratio"?legacyRatio:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
   // No cursor means no seek conjunct at all; an empty string would leave a
   // dangling AND in both branch WHERE clauses.
   const nativeSeek:string[]=[],legacySeek:string[]=[];

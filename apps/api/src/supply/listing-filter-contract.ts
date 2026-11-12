@@ -12,7 +12,7 @@ export type FilterKey=keyof typeof LISTING_OPERATORS;
 export type Region={province:string;city:string};
 export type ServiceWindow={startMinute:number;endMinute:number;crossMidnight:boolean;timezone:"Asia/Shanghai"};
 export type ListingFilters={resources?:{itemId:string;minQuantity?:string;maxQuantity?:string}[];safeBoxCodes?:string[];vitality?:{min:number};bear?:{min:number};gradingCodes?:string[];gradingRanks?:string[];loginMethodCodes?:string[];regions?:Region[];serviceWindow?:ServiceWindow;skinGroups?:{categoryId?:string;ownerKind?:"AGENT"|"MELEE_TYPE"|"FIREARM";ids:string[];match:"ANY"|"ALL"}[]};
-export type ListingSort="latest"|"resourceTotal"|"coreQuantity";
+export type ListingSort="latest"|"resourceTotal"|"coreQuantity"|"ratio";
 export type FilterField={key:FilterKey;operator:string;label:string;enabled:boolean;order:number;items?:{itemId:string;min:string;max:string}[];options?:{value:string;label:string}[];levels?:number[];regions?:Region[];categoryIds?:string[];ownerKinds?:("AGENT"|"MELEE_TYPE"|"FIREARM")[]};
 export type FilterConfig={schemaVersion:1;fields:FilterField[];sorts:{key:ListingSort;label:string;enabled:boolean;order:number;itemIds?:string[]}[]};
 export type ListingQueryV2={queryVersion:2;gameId:string;q:string|null;filters:ListingFilters;sort:ListingSort;direction:"ASC"|"DESC";coreItemId:string|null;limit:number;cursor:string|null;filterRevision:string|null;catalogRevision:string|null;ruleReleaseId:string|null};
@@ -57,10 +57,10 @@ export function parseListingQueryV2(q:URLSearchParams,raw:string):ListingQueryV2
   for(const key of q.keys())if(!allowed.includes(key)||q.getAll(key).length!==1)throw invalid("Unknown or repeated query parameter",key);
   if(q.get("queryVersion")!=="2")throw invalid("Unsupported query version","queryVersion");
   const gameId=checkedId(q.get("gameId"),"gameId"),sort=q.get("sort")??"latest",direction=q.get("direction")??"DESC";
-  if(!["latest","resourceTotal","coreQuantity"].includes(sort))throw invalid("Invalid sort","sort");
+  if(!["latest","resourceTotal","coreQuantity","ratio"].includes(sort))throw invalid("Invalid sort","sort");
   if(direction!=="ASC"&&direction!=="DESC")throw invalid("Invalid direction","direction");
   const coreItemId=q.has("coreItemId")?checkedId(q.get("coreItemId"),"coreItemId"):null;
-  if((sort==="coreQuantity")!==(coreItemId!==null))throw invalid("coreQuantity requires an explicit core item only","coreItemId");
+  if((sort==="coreQuantity"||sort==="ratio")!==(coreItemId!==null))throw invalid("coreQuantity and ratio require an explicit core item only","coreItemId");
   const limitText=q.get("limit")??"20";if(!/^[1-9]\d?$/.test(limitText)||Number(limitText)>50)throw invalid("Limit must be 1–50","limit");
   let value:unknown={};if(q.has("filters")){try{value=JSON.parse(q.get("filters")!);}catch{throw invalid("Malformed filter JSON","filters");}}
   for(const key of ["filterRevision","catalogRevision"])if(q.has(key)&&!(/^[1-9]\d{0,18}$/.test(q.get(key)!)))throw invalid("Invalid revision",key);
@@ -83,7 +83,7 @@ export function parseFilterConfig(value:unknown):FilterConfig {
     if(optionKey==="categoryIds"){if(f.ownerKinds!==undefined){if(f.categoryIds!==undefined)throw invalid("Skin type and legacy category configuration conflict","config.fields");field.ownerKinds=unique(array(f.ownerKinds,"config.fields.ownerKinds",3).map(value=>{if(!["AGENT","MELEE_TYPE","FIREARM"].includes(value as string))throw invalid("Invalid skin type","config.fields.ownerKinds");return value as "AGENT"|"MELEE_TYPE"|"FIREARM";}),"config.fields.ownerKinds",String);}else field.categoryIds=ids(f.categoryIds,"config.fields.categoryIds",100);}
     return field;
   }),"config.fields",x=>x.key);
-  const sorts=unique(array(c.sorts,"config.sorts",3).map(x=>{const s=checkedObject(x,"config.sorts",["key","label","enabled","order","itemIds"]);if(!["latest","resourceTotal","coreQuantity"].includes(s.key as string)||typeof s.enabled!=="boolean")throw invalid("Unsupported sort","config.sorts");const key=s.key as ListingSort,label=checkedText(s.label,"config.sorts.label",40);if(key==="latest"&&label!=="最新发布")throw invalid("Latest must be named 最新发布","config.sorts.label");if(key!=="coreQuantity"&&s.itemIds!==undefined)throw invalid("Unsupported sort parameters","config.sorts.itemIds");return {key,label,enabled:s.enabled,order:integer(s.order,"config.sorts.order",1000),...(key==="coreQuantity"?{itemIds:ids(s.itemIds,"config.sorts.itemIds",16)}:{})};}),"config.sorts",x=>x.key);
+  const sorts=unique(array(c.sorts,"config.sorts",4).map(x=>{const s=checkedObject(x,"config.sorts",["key","label","enabled","order","itemIds"]);if(!["latest","resourceTotal","coreQuantity","ratio"].includes(s.key as string)||typeof s.enabled!=="boolean")throw invalid("Unsupported sort","config.sorts");const key=s.key as ListingSort,label=checkedText(s.label,"config.sorts.label",40);if(key==="latest"&&label!=="最新发布")throw invalid("Latest must be named 最新发布","config.sorts.label");if(key!=="coreQuantity"&&key!=="ratio"&&s.itemIds!==undefined)throw invalid("Unsupported sort parameters","config.sorts.itemIds");return {key,label,enabled:s.enabled,order:integer(s.order,"config.sorts.order",1000),...(key==="coreQuantity"||key==="ratio"?{itemIds:ids(s.itemIds,"config.sorts.itemIds",16)}:{})};}),"config.sorts",x=>x.key);
   if(!sorts.some(s=>s.key==="latest"&&s.enabled))throw invalid("Enabled latest sort is required","config.sorts");
   return {schemaVersion:1,fields,sorts};
 }

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
 import useEmblaCarousel from "embla-carousel-react";
-import { LayoutGrid, List, RotateCw, SlidersHorizontal, X } from "lucide-react";
+import { Coins, LayoutGrid, List, Moon, RotateCw, SlidersHorizontal, TrendingUp, X } from "lucide-react";
 import { ManagedMarketBanner, ManagedMarketContact } from "@/components/content/market-content";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
@@ -534,6 +534,180 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   const sortOptions = useMemo(() => activeMetadata?.sorts.filter((sort) => sort.enabled).sort((a, b) => a.order - b.order) ?? [], [activeMetadata]);
   const selectedSort = activeMetadata?.sorts.find((sort) => sort.key === filters.sort);
   const coreOptions = selectedSort?.itemIds?.map((id) => activeMetadata?.items.find((item) => item.id === id)).filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
+
+  const haffItem = useMemo(
+    () => activeMetadata?.items.find((i) => i.unit === "HAFF_BASE" || i.code === "haff_base" || i.code === "df_billable_haff" || i.code === "haff"),
+    [activeMetadata]
+  );
+  const awmItem = useMemo(
+    () => activeMetadata?.items.find((i) => i.code === "awm_round" || i.code === "df_billable_awm_bullet" || i.code === "awm"),
+    [activeMetadata]
+  );
+  const helmetItem = useMemo(
+    () => activeMetadata?.items.find((i) => i.code === "level6_helmet" || i.code === "df_billable_level6_helmet" || i.code === "helmet"),
+    [activeMetadata]
+  );
+  const armorItem = useMemo(
+    () => activeMetadata?.items.find((i) => i.code === "level6_armor" || i.code === "df_billable_level6_armor" || i.code === "armor"),
+    [activeMetadata]
+  );
+
+  const isSmallAmountActive = Boolean(
+    filters.filters.resources?.some(
+      (r) => (r.itemId === haffItem?.id || r.itemId === "haff" || r.itemId === "haff_base" || r.itemId === "df_billable_haff") && r.maxQuantity === "150000000"
+    )
+  );
+  const isHighRatioActive = filters.sort === "ratio" && filters.direction === "DESC";
+  const isLingchenActive = Boolean(
+    filters.filters.serviceWindow &&
+    filters.filters.serviceWindow.startMinute === 0 &&
+    filters.filters.serviceWindow.endMinute === 480
+  );
+
+  const toggleSmallAmount = useCallback(() => {
+    const existing = filters.filters.resources ?? [];
+    const filtered = existing.filter(
+      (r) => !(r.itemId === haffItem?.id || r.itemId === "haff" || r.itemId === "haff_base" || r.itemId === "df_billable_haff")
+    );
+    if (!isSmallAmountActive) {
+      filtered.push({
+        itemId: haffItem?.id ?? "haff",
+        maxQuantity: "150000000",
+      });
+    }
+    navigate(
+      withFilterChange(filters, {
+        filters: {
+          ...filters.filters,
+          resources: filtered.length ? filtered : undefined,
+        },
+      })
+    );
+  }, [filters, haffItem?.id, isSmallAmountActive, navigate]);
+
+  const toggleHighRatio = useCallback(() => {
+    if (isHighRatioActive) {
+      navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
+    } else {
+      navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
+    }
+  }, [filters, haffItem?.id, isHighRatioActive, navigate]);
+
+  const toggleLingchen = useCallback(() => {
+    if (isLingchenActive) {
+      const nextConditions = { ...filters.filters };
+      delete nextConditions.serviceWindow;
+      navigate(withFilterChange(filters, { filters: nextConditions }));
+    } else {
+      navigate(
+        withFilterChange(filters, {
+          filters: {
+            ...filters.filters,
+            serviceWindow: {
+              startMinute: 0,
+              endMinute: 480,
+              crossMidnight: false,
+              timezone: "Asia/Shanghai",
+            },
+          },
+        })
+      );
+    }
+  }, [filters, isLingchenActive, navigate]);
+
+  const sortTabs = useMemo(() => [
+    {
+      id: "default",
+      label: "默认排序",
+      isActive: filters.sort === "latest",
+      direction: filters.sort === "latest" ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "latest") {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
+        }
+      },
+    },
+    {
+      id: "haff",
+      label: "哈夫币排序",
+      isActive: filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id),
+      direction: (filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id)) ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id)) {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
+        }
+      },
+    },
+    {
+      id: "money",
+      label: "价格排序",
+      isActive: filters.sort === "resourceTotal",
+      direction: filters.sort === "resourceTotal" ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "resourceTotal") {
+          navigate(withFilterChange(filters, { direction: filters.direction === "ASC" ? "DESC" : "ASC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "resourceTotal", direction: "ASC", coreItemId: null }));
+        }
+      },
+    },
+    {
+      id: "ratio",
+      label: "比例排序",
+      isActive: filters.sort === "ratio",
+      direction: filters.sort === "ratio" ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "ratio") {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
+        }
+      },
+    },
+    ...(awmItem ? [{
+      id: "awm",
+      label: "AWM排序",
+      isActive: filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id,
+      direction: (filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id) ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id) {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: awmItem.id, direction: "DESC" }));
+        }
+      },
+    }] : []),
+    ...(helmetItem ? [{
+      id: "helmet",
+      label: "六头排序",
+      isActive: filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id,
+      direction: (filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id) ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id) {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: helmetItem.id, direction: "DESC" }));
+        }
+      },
+    }] : []),
+    ...(armorItem ? [{
+      id: "armor",
+      label: "六甲排序",
+      isActive: filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id,
+      direction: (filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id) ? filters.direction : null,
+      onClick: () => {
+        if (filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id) {
+          navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
+        } else {
+          navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: armorItem.id, direction: "DESC" }));
+        }
+      },
+    }] : []),
+  ], [filters, haffItem?.id, awmItem, helmetItem, armorItem, navigate]);
   const breadcrumbs = game
     ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "租号" }]
     : [{ label: "首页", href: "/" }, { label: "三角洲行动" }, { label: "租号" }];
@@ -764,58 +938,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         <div className="market-results-toolbar">
           <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p className="sr-only" aria-live="polite" aria-atomic="true">{feed.status === "ready" ? (resultCount ? `已加载 ${resultCount} 条` : "暂时没有符合条件的账号") : feed.status === "error" ? currentError?.title ?? "结果读取失败" : listingNotOpen ? "暂未开放选号" : readyToBrowse ? "正在读取结果" : "正在准备账号列表"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
           <div className="market-results-controls">
-            {activeMetadata && !lookupNumber && compact && <div className="market-sort-controls" aria-label="账号排序">
-              <MarketSelect
-                className="market-ui-select--toolbar"
-                label="排序方式"
-                value={`${filters.sort}|${filters.direction}`}
-                placeholder="排序方式"
-                options={sortOptions.flatMap((sort) => activeMetadata.directions.map((direction) => ({
-                  value: `${sort.key}|${direction}`,
-                  label: activeMetadata.directions.length > 1 ? `${sort.label} ${direction === "ASC" ? "升序" : "降序"}` : sort.label,
-                })))}
-                onChange={(next) => {
-                  if (!next) return;
-                  const [key, direction] = next.split("|");
-                  const config = activeMetadata.sorts.find((entry) => entry.key === key);
-                  navigate(withFilterChange(filters, {
-                    sort: key ?? filters.sort,
-                    direction: (direction as ListingFilters["direction"]) ?? filters.direction,
-                    coreItemId: key === "coreQuantity" ? config?.itemIds?.[0] ?? null : null,
-                  }));
-                }}
-              />
-            </div>}
-            {activeMetadata && !lookupNumber && !compact && <div className="market-sort-controls" aria-label="账号排序">
-              <div className="market-sort-field"><span>排序</span><MarketSelect
-                className="market-ui-select--toolbar"
-                label="排序"
-                value={filters.sort}
-                placeholder="排序方式"
-                options={sortOptions.map((sort) => ({ value: sort.key, label: sort.label }))}
-                onChange={(key) => {
-                if (!key) return;
-                const config = activeMetadata.sorts.find((entry) => entry.key === key);
-                const nextDirection = activeMetadata.directions.includes(filters.direction) ? filters.direction : activeMetadata.defaultSort.direction;
-                navigate(withFilterChange(filters, { sort: key, direction: nextDirection, coreItemId: key === "coreQuantity" ? config?.itemIds?.[0] ?? null : null }));
-              }} /></div>
-              {activeMetadata.directions.length > 1 && <div className="market-sort-field"><span>方向</span><MarketSelect
-                className="market-ui-select--toolbar"
-                label="排序方向"
-                value={filters.direction}
-                placeholder="排序方向"
-                options={activeMetadata.directions.map((direction) => ({ value: direction, label: direction === "ASC" ? "升序" : "降序" }))}
-                onChange={(direction) => { if (direction) navigate(withFilterChange(filters, { direction: direction as ListingFilters["direction"] })); }}
-              /></div>}
-              {filters.sort === "coreQuantity" && <div className="market-sort-field"><span>核心资源</span><MarketSelect
-                className="market-ui-select--toolbar"
-                label="核心资源"
-                value={filters.coreItemId}
-                placeholder="选择资源"
-                options={coreOptions.map((item) => ({ value: item.id, label: resourceItemDisplayName(item, { gameCode: game?.code, itemId: item.id }) }))}
-                onChange={(coreItemId) => navigate(withFilterChange(filters, { coreItemId }))}
-              /></div>}
-            </div>}
             <div className="market-results-actions">
               <button type="button" className="market-toolbar-action" onClick={refreshResults} disabled={!readyToBrowse || refreshing} aria-busy={refreshing || undefined} aria-label={refreshing ? "正在刷新结果" : "刷新结果"} title={refreshing ? "正在刷新结果" : "刷新结果"}><RotateCw size={15} aria-hidden="true" /><span className="market-toolbar-action-label">{refreshing ? "刷新中…" : "刷新结果"}</span></button>
             </div>
@@ -826,6 +948,73 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
           </div>
         </div>
 
+        {activeMetadata && !lookupNumber && (
+          <div className="market-sort-bar" role="toolbar" aria-label="专区筛选与账号排序">
+            <div className="market-zone-group" role="group" aria-label="快捷专区">
+              <button
+                type="button"
+                className={`market-zone-btn ${isSmallAmountActive ? "market-zone-btn--active" : ""}`}
+                aria-pressed={isSmallAmountActive}
+                onClick={toggleSmallAmount}
+                title="哈夫币 ≤ 150M，低门槛快捷租号"
+              >
+                <Coins size={14} aria-hidden="true" />
+                <span>小额专区</span>
+              </button>
+              <button
+                type="button"
+                className={`market-zone-btn ${isHighRatioActive ? "market-zone-btn--active" : ""}`}
+                aria-pressed={isHighRatioActive}
+                onClick={toggleHighRatio}
+                title="按哈夫币/租金比例降序排列"
+              >
+                <TrendingUp size={14} aria-hidden="true" />
+                <span>高比例</span>
+              </button>
+              <button
+                type="button"
+                className={`market-zone-btn ${isLingchenActive ? "market-zone-btn--active" : ""}`}
+                aria-pressed={isLingchenActive}
+                onClick={toggleLingchen}
+                title="服务时段覆盖 00:00–08:00 凌晨档"
+              >
+                <Moon size={14} aria-hidden="true" />
+                <span>凌晨专场</span>
+              </button>
+            </div>
+
+            <div className="market-sort-divider" aria-hidden="true" />
+
+            <div className="market-sort-items" role="group" aria-label="排序维度">
+              {sortTabs.map((tab) => {
+                const isDesc = tab.direction === "DESC";
+                const isAsc = tab.direction === "ASC";
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={`market-sort-tab ${tab.isActive ? "market-sort-tab--active" : ""}`}
+                    aria-pressed={tab.isActive}
+                    onClick={tab.onClick}
+                    title={`${tab.label}${
+                      tab.isActive
+                        ? isDesc
+                          ? "（当前降序，点击切换为升序）"
+                          : "（当前升序，点击切换为降序）"
+                        : "（点击按此排序）"
+                    }`}
+                  >
+                    <span>{tab.label}</span>
+                    <span className="market-sort-arrows" aria-hidden="true">
+                      <span className={`market-sort-arrow market-sort-arrow--up ${isAsc ? "active" : ""}`}>▲</span>
+                      <span className={`market-sort-arrow market-sort-arrow--down ${isDesc ? "active" : ""}`}>▼</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {activeTags.length > 0 && feed.items.length > 0 ? (
           <div className="market-active-chips" role="group" aria-label="当前已选筛选条件，可单项移除">
