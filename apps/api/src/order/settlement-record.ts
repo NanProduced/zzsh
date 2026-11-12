@@ -238,7 +238,7 @@ type Basis = {
   fundingPolicyRef: string;
   fundingPolicyVersion: string | null;
   disclosureVersion: string | null;
-  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3" | "personal-quote-v4" | "personal-quote-v5";
+  personalQuoteSchema: "personal-quote-v1" | "personal-quote-v2" | "personal-quote-v3" | "personal-quote-v4" | "personal-quote-v5" | "personal-quote-v6";
   listingVersionId: string;
   listingHash: string;
   fullPayoutSelected: boolean;
@@ -296,6 +296,11 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
     const policy=normalizePricingPolicy(personalDoc.pricingPolicy);
     if(policy.pricingModel!=="FIXED_FEE" || policy.priceVersionId!==quote.priceVersionId)throw new Error("fixed fee policy binding mismatch");
   } else if (personalDoc?.schema === "personal-quote-v5") throw new Error("fixed fee personal quote requires a fixed fee basis");
+  if (personalDoc?.schema === "personal-quote-v6") {
+    const policy=normalizePricingPolicy(personalDoc.pricingPolicy);
+    if(quote.schemaVersion!==2||quote.mode!=="SPREAD"||basis.schema!=="settlement-pricing-v1"
+      ||policy.pricingModel!=="SPREAD"||policy.priceVersionId!==quote.priceVersionId)throw new Error("scheduled spread policy binding mismatch");
+  }
   if(!personal||typeof personal!=="object"||Array.isArray(personal)||typeof order.quote.confirmationDigest!=="string"
     ||createHash("sha256").update(canonicalize({...personal,quote,settlementPricing:basis})).digest("hex")!==order.quote.confirmationDigest)throw new Error("settlement pricing signature mismatch");
   return basis;
@@ -320,7 +325,8 @@ function buildSettlementBasis(order: LockedOrder, payment: { id: string; amountC
   const membership = personal?.membership as Record<string, unknown> | undefined;
   const guarantee = personal?.guarantee as Record<string, unknown> | undefined;
   const ruleRefs = personal?.ruleRefs as Record<string, unknown> | undefined;
-  const growthV4=personal?.schema==='personal-quote-v4'||personal?.schema==='personal-quote-v5';
+  const growthV4=personal?.schema==='personal-quote-v4'||personal?.schema==='personal-quote-v5'||personal?.schema==='personal-quote-v6';
+  if(personal?.schema==='personal-quote-v6'&&!settlementPricing)return {reasons:['SETTLEMENT_PRICING_INVALID']};
   if (!personal || !funding || !guarantee || !ruleRefs
     || personal.userId !== order.renterUserId || personal.listingHash !== order.contentHash
     || ruleRefs.releaseId !== order.ruleReleaseId || order.quote.ruleReleaseId !== order.ruleReleaseId
@@ -381,10 +387,10 @@ function buildSettlementBasis(order: LockedOrder, payment: { id: string; amountC
     fullPayoutSelected = declaration.selected;
     fundingPolicyVersion = funding.fullPayoutPolicyVersion;
     disclosureVersion = funding.disclosureVersion;
-  } else if(personal.schema==='personal-quote-v4'||personal.schema==='personal-quote-v5'){
+  } else if(personal.schema==='personal-quote-v4'||personal.schema==='personal-quote-v5'||personal.schema==='personal-quote-v6'){
     const declaration=personal.fullPayoutDeclaration as Record<string,unknown>|undefined,growth=personal.membershipGrowth as Record<string,unknown>|undefined;
     if(!declaration||Object.keys(declaration).sort().join(',')!=='schema,selected'||declaration.schema!=='full-payout-declaration-v1'||typeof declaration.selected!=='boolean'
-      ||Object.keys(personal).sort().join(',')!==(personal.schema==='personal-quote-v5'?'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,pricingPolicy,ruleRefs,schema,userId':'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,ruleRefs,schema,userId')
+      ||Object.keys(personal).sort().join(',')!==(personal.schema!=='personal-quote-v4'?'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,pricingPolicy,ruleRefs,schema,userId':'accountId,fullPayoutDeclaration,funding,guarantee,listingHash,listingVersionId,membershipGrowth,ownerUserId,ruleRefs,schema,userId')
       ||Object.keys(funding).sort().join(',')!=='baseDepositCents,disclosureVersion,fullPayoutPolicyRef,fullPayoutPolicyVersion,publisherBailRequirementCents,sourceRef,version'
       ||typeof funding.fullPayoutPolicyVersion!=='string'||!funding.fullPayoutPolicyVersion.trim()||typeof funding.disclosureVersion!=='string'||!funding.disclosureVersion.trim()
       ||!growth||Object.keys(growth).sort().join(',')!=='binding,depositBenefitVersion,depositCents,depositEntitlementId,depositSource,depositValidUntil,effectiveTier,entitlementIds,policyTier,policyVersion,pricePlanDigest,schema,selectedBenefitVersion,selectedEntitlementId,selectedSource,selectedValidUntil'
@@ -681,7 +687,7 @@ function probe(order: LockedOrder, openingId: string, basis: Basis, lines: Settl
     fullPayoutPolicyRef: basis.fundingPolicyRef,
     ...(basis.settlementPricing?.schema === "settlement-pricing-v3"
       ? {pricingMode:"FIXED_FEE_TOTAL_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio,fixedFeeRate:basis.settlementPricing.fixedFeeRate}
-      : basis.settlementPricing ? {pricingMode:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio} : {}),
+      : basis.settlementPricing ? {pricingMode:basis.personalQuoteSchema==='personal-quote-v6'?"ACTUAL_TOTAL_DISCOUNT_V2" as const:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio} : {}),
     haff: lines.find((line) => line.pricingKind === "HAFF_RATIO") ?? basis.haff,
     items: lines.filter((line) => line.pricingKind !== "HAFF_RATIO"),
   };

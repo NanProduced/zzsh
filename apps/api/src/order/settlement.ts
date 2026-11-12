@@ -72,7 +72,7 @@ export type ComputeSettlementInput = {
   fullPayoutPolicyRef: string | null;
   /** Original order's frozen total-discount ratio. */
   totalPayableRatio?: string | null;
-  pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1" | "FIXED_FEE_TOTAL_V1";
+  pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1" | "ACTUAL_TOTAL_DISCOUNT_V2" | "FIXED_FEE_TOTAL_V1";
   fixedFeeRate?: string;
   haff: SettlementInventoryLine;
   items: readonly SettlementInventoryLine[];
@@ -344,7 +344,8 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
   let exactHb = rat(0n);
   let F = rat(0n);
   const fixedPricing = input.pricingMode === "FIXED_FEE_TOTAL_V1";
-  const totalPricing = input.pricingMode === "ACTUAL_TOTAL_DISCOUNT_V1" || fixedPricing;
+  const stableSpreadPricing = input.pricingMode === "ACTUAL_TOTAL_DISCOUNT_V2";
+  const totalPricing = input.pricingMode === "ACTUAL_TOTAL_DISCOUNT_V1" || stableSpreadPricing || fixedPricing;
   if (input.pricingMode !== undefined && !totalPricing) reasons.push("PRICING_MODE_INVALID");
   let fixedRate: ReturnType<typeof parseNonNegativeDecimal> | null = null;
   const fixedPrepaidLines: FixedFeeLine[] = [];
@@ -530,13 +531,13 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     if (payable === null) {
       reasons.push("TOTAL_DISCOUNT_UNKNOWN");
     } else {
-      const allocated=allocateCombinedDiscount(gross,payable,fixedPricing?"STABLE":"LEGACY");
+      const allocated=allocateCombinedDiscount(gross,payable,fixedPricing||stableSpreadPricing?"STABLE":"LEGACY");
       if(!allocated)reasons.push("DISCOUNT_OWNER_FUNDING_INSUFFICIENT");
       else{Hb=allocated[0]!;Gb=allocated.slice(1).reduce((sum,value)=>sum+value,0n);}
     }
   }
   const makeupCents = totalPricing?rRoundCents(makeup):rRoundCents(radd(exactHb, makeup)) - rRoundCents(exactHb);
-  if (fixedPricing) {
+  if (fixedPricing || stableSpreadPricing) {
     // Discount and excess usage are settled against the combined prepayment before the deposit.
     const remaining = resourcePrepaid - Hb - Gb - makeupCents;
     const resourceRefund = remaining > 0n ? remaining : 0n;

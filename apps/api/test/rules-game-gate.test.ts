@@ -71,7 +71,7 @@ test('uninstalled or incomplete pricing schedule schema is visible without guess
   assert.deepEqual(await readPricingSchedules(client(true,false),'game-1'),{available:false,reason:'INCOMPLETE',asOf:'2026-11-12T00:00:00.000000Z'});
 });
 
-test('spread scheduling cannot switch to a price outside the current release contract',async()=>{
+test('scheduled spread cannot be enabled before its whole order contract is ready',async()=>{
   let writes=0;
   const client={query:async(sql:string)=>{
     if(sql.includes('pricing_schedule_available'))return {rows:[{ready:true}]};
@@ -81,14 +81,14 @@ test('spread scheduling cannot switch to a price outside the current release con
     if(sql.includes('MAX(generation)'))return {rows:[{generation:'1'}]};
     if(sql.includes('SELECT s.id,s.price_version_id'))return {rows:[{id:'spread-policy',priceVersionId:'spread-price'}]};
     if(sql.includes('FROM zzsh_supply.billable_item'))return {rows:[{name:'哈夫币',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',unitQuantity:null,buyerUnitAmount:null,ownerUnitAmount:null}]};
-    if(sql.includes('SELECT r.price_version_id'))return {rows:[{priceVersionId:'fixed-release-price'}]};
-    if(sql.includes('SELECT p.id FROM zzsh_supply.price_version'))return {rows:[]};
-    if(sql.includes('INSERT INTO'))writes++;
+    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule s'))return {rows:[{id:'spread-policy',generation:'2',effectiveAt:'2026-01-02T00:00:00.000000Z',priceVersionId:'spread-price',mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null,haffRule:compatRule()}]};
+    if(sql.includes('SELECT p.id,p.haff_rule'))return {rows:[{id:'spread-price',haffRule:compatRule()}]};
+    if(sql.includes('INSERT INTO')){writes++;return {rows:[]};}
     throw new Error('unexpected pricing query');
   }} as never;
   const actor={userId:'boss-1',isBoss:true},input={gameId:'game-1',expectedGeneration:'1',effectiveAt:'2099-01-01T00:00:00.000Z'};
-  await assert.rejects(schedulePricingMode(client,actor,{...input,pricingModel:'SPREAD'}),/价差价格与当前规则/);
-  await assert.rejects(scheduleSpreadPrice(client,actor,{...input,priceVersionId:'spread-price'}),/价差价格与当前规则/);
+  await assert.rejects(schedulePricingMode(client,actor,{...input,pricingModel:'SPREAD'}),(error:{status?:number})=>error.status===503);
+  await assert.rejects(scheduleSpreadPrice(client,actor,{...input,priceVersionId:'spread-price'}),(error:{status?:number})=>error.status===503);
   await assert.rejects(scheduleSpreadPrice(client,{...actor,isBoss:false},{...input,priceVersionId:'spread-price'}),(error:{status?:number})=>error.status===403);
   assert.equal(writes,0);
 });

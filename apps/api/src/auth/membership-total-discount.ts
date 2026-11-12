@@ -128,7 +128,7 @@ export type TotalDiscountQuoteResult = { quote: InternalQuote; baseCents: bigint
  * amounts. A discounted HAFF row keeps its buyer exact rational at or above the owner's exact rational:
  * the exacter of `payable/100` and the original owner fraction, which still rounds to the allocated cents.
  */
-export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: string): TotalDiscountQuoteResult | null {
+export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: string, ordering?: "LEGACY" | "STABLE"): TotalDiscountQuoteResult | null {
   if (quote.schemaVersion === 4) {
     try {
       if (!quote.pricingInputs.commissionRate || !fixedFeeAllowsPayableRatio(quote.pricingInputs.commissionRate, payableRatio)) return null;
@@ -140,7 +140,7 @@ export function applyTotalDiscountToQuote(quote: InternalQuote, payableRatio: st
   if (payableCents === null || payableCents > baseCents) return null;
   if (payableCents < ownerTotalCents) return null; // owner income can never be reduced by a member discount
   const facts: DiscountLineFact[] = quote.lines.map((line) => ({ itemId: line.itemId, buyerCents: centsOfAmount(line.buyerAmount.amount), ownerCents: centsOfAmount(line.ownerAmount.amount) }));
-  const payableLines = allocateCombinedDiscount(facts, payableCents, quote.schemaVersion === 4 ? "STABLE" : "LEGACY");
+  const payableLines = allocateCombinedDiscount(facts, payableCents, ordering ?? (quote.schemaVersion === 4 ? "STABLE" : "LEGACY"));
   if (!payableLines) return null;
   const baseRatioByItem = new Map(quote.pricingInputs.exactRatios.map((ratio) => [ratio.itemId, ratio]));
   const nextLines: QuoteLine[] = [];

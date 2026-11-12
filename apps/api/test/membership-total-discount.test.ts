@@ -100,6 +100,19 @@ test("total discount rounds the combined base once: 3 + 3 cents at 90% is 5, nev
   assert.notEqual(Object.values(buyers).reduce((sum, value) => sum + Number(value), 0), 0.06);
 });
 
+test("new scheduled-spread tie allocation stays stable and settles partial consumption", () => {
+  const input=threePlusThree();input.lines[0]!.itemId="a";input.lines[1]!.itemId="B";
+  const base=computeDeltaQuote(input);assert(base.quotable);
+  const discounted=applyTotalDiscountToQuote(base.quote,"0.9","STABLE");assert(discounted);
+  assert.deepEqual(Object.fromEntries(discounted.quote.lines.map(line=>[line.itemId,line.buyerAmount.amount])),{B:"0.02",a:"0.03"});
+  const partial=computeSettlement({orderId:"order-1",settlementVersionId:"sv-1",openingVersionId:"op-1",quoteDigest:"d".repeat(64),paymentDigest:"p".repeat(64),
+    roundingPolicy:SETTLEMENT_ROUNDING_POLICY,feePolicyVersion:"1",renterUserId:"renter-1",ownerUserId:"owner-1",depositAmount:"0.00",capturedAmount:"0.05",
+    fullPayout:"NOT_SELECTED",fullPayoutPolicyRef:null,rentalStarted:true,endReason:"TENANT_VOLUNTARY_EARLY",
+    haff:settlementLine(discounted.quote,"a","5600"),items:[settlementLine(discounted.quote,"B","1")]});
+  assert.equal(partial.ok,true,JSON.stringify(partial));assert.equal(partial.amounts!.haffConsumedBuyer.amount,"0.02");
+  assert.equal(BigInt(partial.amounts!.renterCharge.amount.replace(".",""))+BigInt(partial.amounts!.renterRefund.amount.replace(".","")),5n);
+});
+
 test("total discount refuses invalid ratios and owner-income reduction, and keeps zero bases legal", () => {
   assert.equal(payableCentsFor(600n, "0.9"), 540n);
   assert.equal(payableCentsFor(5n, "1"), 5n);

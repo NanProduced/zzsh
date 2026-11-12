@@ -43,6 +43,8 @@ test("frozen v4 validation binds separate sources and cannot reclassify old v3 o
  const v5={...personal,schema:"personal-quote-v5",pricingPolicy:{schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:"schedule-1",generation:"1",effectiveAt:"2026-10-01T00:00:00Z",priceVersionId:"price-1"}};
  assert(frozenPersonalGrowthV4Valid(v5,expected,"0"));assert(!frozenPersonalGrowthV4Valid({...v5,pricingPolicy:{...v5.pricingPolicy,pricingModel:"SPREAD"}},expected,"0"));
  assert(!frozenPersonalGrowthV4Valid({...v5,pricingPolicy:null},expected,"0"));
+ const v6={...v5,schema:"personal-quote-v6",pricingPolicy:{...v5.pricingPolicy,pricingModel:"SPREAD"}};
+ assert(frozenPersonalGrowthV4Valid(v6,expected,"0"));assert(!frozenPersonalGrowthV4Valid({...v6,pricingPolicy:v5.pricingPolicy},expected,"0"));
 });
 test("selected total discount is verified against the original quote before it is frozen",()=>{
  const base=quote("47","0"),discounted=applyTotalDiscountToQuote(base,"0.99");assert(discounted);

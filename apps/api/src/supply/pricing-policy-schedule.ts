@@ -4,6 +4,7 @@ import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimeli
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
 import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
+import { validateDeltaHaffRule } from "./delta-rental";
 import { effectivePublicationStateSql } from "./listing-query";
 import { assertPriceVersionResources } from "./rules";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
@@ -15,6 +16,17 @@ type EntitlementRow = { id?: string; startsAt: string; endsAt: string; pricing: 
 const modeNames: readonly RentalMode[] = ["ordinary", "custom", "fast"];
 const instantSql = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 type PricingModel = "SPREAD" | "FIXED_FEE";
+
+// Keep closed until v6 settlement, cancellation, compensation and database ACLs pass together.
+export const SCHEDULED_SPREAD_ORDER_ENABLED: boolean = false;
+
+function spreadRule(value: unknown) {
+  try {
+    const rule=validateDeltaHaffRule(value,"SPREAD");
+    if(rule.schema!=="haff-ratio-v2")throw new Error("scheduled spread requires the versioned rental modes");
+    return rule;
+  } catch { throw conflict("生效中的价差出租规则无法核实"); }
+}
 
 async function requirePricingScheduleSchema(client:PoolClient):Promise<void> {
   const row=(await client.query<{ready:boolean}>(`SELECT /* pricing_schedule_available */
@@ -68,6 +80,7 @@ export async function readEffectivePricingMode(client: PoolClient, gameId: strin
     ||(row.pricingModel==="SPREAD"&&(row.priceMode!=="SPREAD"||row.rates!==null))
     ||(row.pricingModel==="FIXED_FEE"&&(row.priceMode!=="PERCENT"||(row.haffRule as {schema?:unknown}|null)?.schema!=="haff-ratio-v3"||!sealedEnabledRentalModes(row.haffRule))))
     throw conflict("生效中的抽成模式或价格政策无法核实");
+  if(row.pricingModel==="SPREAD")spreadRule(row.haffRule);
   if(row.pricingModel==="FIXED_FEE")try{parseFixedFeeRates(row.rates);}catch{throw conflict("生效中的固定手续费率无法核实");}
   return {id:row.id,generation:row.generation,effectiveAt:row.effectiveAt,pricingModel:row.pricingModel,
     priceScheduleId:row.priceScheduleId,priceVersionId:row.priceVersionId};
@@ -111,15 +124,16 @@ export async function readEffectiveSpreadPrice(client:PoolClient,gameId:string,a
   let at:string;
   try{at=normalizeTime(asOf)??"";}catch{throw invalid("Pricing policy time is invalid");}
   if(!at||typeof gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId))throw invalid("Pricing policy reference is invalid");
-  const row=(await client.query<{id:string;generation:string;effectiveAt:string;priceVersionId:string;mode:string|null;status:string|null;roundingPolicy:string|null;rates:unknown}>(
+  const row=(await client.query<{id:string;generation:string;effectiveAt:string;priceVersionId:string;mode:string|null;status:string|null;roundingPolicy:string|null;rates:unknown;haffRule:unknown}>(
     `SELECT s.id,s.generation::text AS generation,${instantSql("s.effective_at")} AS "effectiveAt",s.price_version_id AS "priceVersionId",
-      p.mode,p.status,p.rounding_policy AS "roundingPolicy",p.fixed_fee_rates AS rates FROM zzsh_supply.pricing_policy_schedule s
+      p.mode,p.status,p.rounding_policy AS "roundingPolicy",p.fixed_fee_rates AS rates,p.haff_rule AS "haffRule" FROM zzsh_supply.pricing_policy_schedule s
       LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=s.game_id
       WHERE s.game_id=$1 AND s.pricing_model='SPREAD' AND s.effective_at<=$2::timestamptz
       ORDER BY s.effective_at DESC,s.generation DESC LIMIT 1`,[gameId,at])).rows[0];
   if(!row)return null;
   if(row.mode!=="SPREAD"||row.status!=="SEALED"||row.roundingPolicy!=="HALF_UP_CENT_V1"||row.rates!==null)throw conflict("生效中的价差政策无法核实");
-  return {scheduleId:row.id,generation:row.generation,effectiveAt:row.effectiveAt,priceVersionId:row.priceVersionId};
+  return {scheduleId:row.id,generation:row.generation,effectiveAt:row.effectiveAt,priceVersionId:row.priceVersionId,
+    roundingPolicy:row.roundingPolicy,haffRule:spreadRule(row.haffRule)};
 }
 
 /** asOf comes from the server transaction; absence or an invalid price version is never a zero-fee fallback. */
@@ -298,7 +312,7 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
   return { id, generation, effectiveAt };
 }
 
-/** Spread remains bound to the current release until its order-price contract is separated. */
+/** Publish a sealed price policy independently of the release carrying terms and funding. */
 export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string;isBoss:boolean},input:{
   gameId:string;priceVersionId:string;expectedGeneration:string;effectiveAt:string;
 }):Promise<{id:string;generation:string;effectiveAt:string}> {
@@ -306,6 +320,7 @@ export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string
   if(!actor||actor.isBoss!==true)throw new SecurityApiError(403,"FORBIDDEN","Only a boss can schedule pricing policies");
   if(typeof actor.userId!=="string"||!idPattern.test(actor.userId)||!input||![input.gameId,input.priceVersionId].every(value=>typeof value==="string"&&idPattern.test(value))
     ||typeof input.expectedGeneration!=="string"||!/^(0|[1-9]\d{0,18})$/.test(input.expectedGeneration))throw invalid("Pricing policy reference is invalid");
+  if(!SCHEDULED_SPREAD_ORDER_ENABLED)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
   let effectiveAt:string;
   try{effectiveAt=normalizeTime(input.effectiveAt)??"";}catch{throw invalid("Pricing policy effective time is invalid");}
   if(!effectiveAt)throw invalid("Pricing policy effective time is invalid");
@@ -314,11 +329,10 @@ export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string
   const now=(await client.query<{at:string}>(`SELECT ${instantSql("clock_timestamp()")} AS at`)).rows[0]?.at;
   if(!now||effectiveAt<=now)throw invalid("价格政策生效时间必须晚于当前时间");
   if(!(await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`,[input.gameId])).rows.length)throw notFound();
-  const price=(await client.query<{id:string}>(`SELECT p.id FROM zzsh_supply.price_version p
-    JOIN zzsh_supply.rule_release r ON r.price_version_id=p.id AND r.game_id=p.game_id
-    JOIN zzsh_supply.game g ON g.id=r.game_id AND g.current_release_id=r.id
+  const price=(await client.query<{id:string;haffRule:unknown}>(`SELECT p.id,p.haff_rule AS "haffRule" FROM zzsh_supply.price_version p
     WHERE p.id=$1 AND p.game_id=$2 AND p.status='SEALED' AND p.mode='SPREAD' AND p.fixed_fee_rates IS NULL AND p.rounding_policy='HALF_UP_CENT_V1'`,[input.priceVersionId,input.gameId])).rows[0];
-  if(!price)throw conflict("价差价格与当前规则尚未接通，不能安排生效");
+  if(!price)throw conflict("价差价格版本尚未封存");
+  spreadRule(price.haffRule);
   const current=(await client.query<{generation:string}>(`SELECT COALESCE(MAX(generation),0)::text AS generation
     FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 AND pricing_model='SPREAD'`,[input.gameId])).rows[0];
   if(!current||current.generation!==input.expectedGeneration)throw conflict("价格政策版本已变化，请刷新后重试");
@@ -339,6 +353,7 @@ export async function schedulePricingMode(client: PoolClient, actor: {userId:str
     ||!input||typeof input.gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.gameId)
     ||!["SPREAD","FIXED_FEE"].includes(input.pricingModel)||typeof input.expectedGeneration!=="string"
     ||!/^(0|[1-9]\d{0,18})$/.test(input.expectedGeneration))throw invalid("Pricing mode reference is invalid");
+  if(input.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
   let effectiveAt:string;
   try{effectiveAt=normalizeTime(input.effectiveAt)??"";}catch{throw invalid("Pricing mode effective time is invalid");}
   if(!effectiveAt)throw invalid("Pricing mode effective time is invalid");
@@ -358,11 +373,9 @@ export async function schedulePricingMode(client: PoolClient, actor: {userId:str
     ORDER BY s.effective_at DESC,s.generation DESC LIMIT 1`,[input.gameId,input.pricingModel,effectiveAt])).rows[0];
   if(!price)throw conflict("抽成模式尚无生效的价格政策");
   await assertPriceVersionResources(client,input.gameId,price.priceVersionId,input.pricingModel==="FIXED_FEE"?"PERCENT":"SPREAD");
-  // shortcut: a spread price must match the release until independent spread order binding is supported.
   if(input.pricingModel==="SPREAD"){
-    const release=(await client.query<{priceVersionId:string}>(`SELECT r.price_version_id AS "priceVersionId" FROM zzsh_supply.game g
-      JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id WHERE g.id=$1`,[input.gameId])).rows[0];
-    if(!release||release.priceVersionId!==price.priceVersionId)throw conflict("价差价格与当前规则尚未接通，不能安排切换");
+    const spread=await readEffectiveSpreadPrice(client,input.gameId,effectiveAt);
+    if(!spread||spread.priceVersionId!==price.priceVersionId)throw conflict("价差价格政策无法核实");
   }
   if(input.pricingModel==="FIXED_FEE") {
     const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt});

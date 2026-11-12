@@ -102,7 +102,7 @@ function fixture() {
       priceScheduleId:'schedule-1',priceVersionId:state.defaultMode==='FIXED_FEE'?'fixed-price':'fixture_price',priceMode:state.defaultMode==='FIXED_FEE'?'PERCENT':'SPREAD',priceStatus:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:state.defaultMode==='FIXED_FEE'?rates:null,haffRule:fixedRule}];
     else if (sql.includes('FROM zzsh_supply.pricing_policy_schedule s')) rows = sql.includes("s.pricing_model='FIXED_FEE'")
       ? [{id:'schedule-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixed-price',mode:'PERCENT',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',haffRule:fixedRule,rates}]
-      : [{id:'spread-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixture_price',mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null}];
+      : [{id:'spread-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixture_price',mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null,haffRule:compatRule('47')}];
     else if (sql.includes('commission_rate')) rows = state.ruleExists ? [release] : [];
     else if (sql.includes('FROM zzsh_supply.billable_item')) rows = sql.includes("i.unit<>'HAFF_BASE'") ? items.filter(row => row.unit !== "HAFF_BASE") : items;
     else if (sql.includes('FROM zzsh_supply.term_option')) rows = sql.includes('daily_consumption=$2')

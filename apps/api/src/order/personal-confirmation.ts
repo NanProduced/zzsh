@@ -7,11 +7,11 @@ import { readRentalMembership } from "../auth/rental-membership";
 import { type GrowthOfferPlan } from "../auth/membership-growth";
 import {selectPersonalGrowthOffer,type GrowthConfirmationKnown} from "./personal-growth-confirmation";
 import { canonicalize, computeContentHash, normalizeQuote, type ContentPayloadInput } from "../supply/content-hash";
-import { computeDeltaQuote, computePublishedFixedFeeQuote, computeFixedUnitAmounts, projectDeltaQuote, type HaffRatioRule, type InternalQuote, type QuoteInput } from "../supply/pricing";
+import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSpreadQuote, computeFixedUnitAmounts, projectDeltaQuote, type HaffRatioRule, type InternalQuote, type PublishedQuoteProof, type QuoteInput } from "../supply/pricing";
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
-import { readEffectiveFixedFeePrice } from "../supply/pricing-policy-schedule";
+import { readEffectiveFixedFeePrice, readEffectiveSpreadPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
@@ -39,6 +39,7 @@ export type MembershipGrowthQuoteCandidate = { plan: GrowthOfferPlan; quote: Int
 export type MembershipGrowthConfirmationReader = (client: PoolClient, input: {
   userId: string; ownerUserId: string; accountId: string; gameId: string; listingVersionId: string; listingHash: string;
   ruleReleaseId: string; priceVersionId: string; quantityDigest: string; baseQuote: InternalQuote; quoteInput: QuoteInput;asOfUtc?:string;
+  publishedSpreadListing?: PublishedQuoteProof & {listingVersionId:string;ownerUserId:string};
 }) => Promise<
   | GrowthConfirmationKnown
   | { knowledge: "UNKNOWN"; reason: string }
@@ -236,8 +237,10 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   const originalRelease=(await client.query(`SELECT p.id,p.status,p.mode,p.haff_rule,p.commission_rate::text,p.rounding_policy,r.term_version_id FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE r.id=$1 AND r.game_id=$2`,[input.releaseId,account.game_id])).rows[0];
   if(!originalRelease || originalRelease.status!=="SEALED" || originalRelease.id!==version.payload.ruleRefs.priceVersionId)unavailable("Frozen price version unavailable");
   const attrs=version.payload.declaration.attributes;
+  const original=normalizeQuote(version.payload.quoteValues);
   let asOfUtc=readAsOfUtc;
   let pricingPolicy: ContentPayloadInput["pricingPolicy"];
+  let publishedSpreadListing: (PublishedQuoteProof & {listingVersionId:string;ownerUserId:string}) | undefined;
   let release=originalRelease;
   if (fixedFee) {
     asOfUtc ??= (await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
@@ -248,12 +251,32 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     pricingPolicy={schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:effective!.scheduleId,generation:effective!.generation,effectiveAt:effective!.effectiveAt,priceVersionId:effective!.priceVersionId};
     release={...originalRelease,id:effective!.priceVersionId,mode:"PERCENT",haff_rule:effective!.haffRule as HaffRatioRule,
       commission_rate:effective!.commissionRate,rounding_policy:effective!.roundingPolicy};
+  } else if (version.origin==="NATIVE" && version.payload.schemaVersion===2 && original.mode==="SPREAD") {
+    const schema=(await client.query<{prices:boolean;modes:boolean;rates:boolean}>(`SELECT
+      to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
+      to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
+      EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.price_version') AND attname='fixed_fee_rates' AND attnum>0 AND NOT attisdropped) AS rates`)).rows[0];
+    if(!schema||typeof schema.prices!=="boolean"||typeof schema.modes!=="boolean"||typeof schema.rates!=="boolean"||schema.prices!==schema.modes
+      ||(schema.prices&&!schema.rates))unavailable("Pricing policy schema is unavailable");
+    if(schema?.prices){
+      asOfUtc ??= (await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+      if(!asOfUtc)unavailable("Pricing policy clock is unavailable");
+      const effective=await readEffectiveSpreadPrice(client,account.game_id,asOfUtc!);
+      if(effective){
+        if(!SCHEDULED_SPREAD_ORDER_ENABLED)unavailable("Scheduled spread settlement contract is not enabled");
+        if(!options.membershipGrowthReader||!ownerDeclaration)unavailable("Scheduled spread confirmation requires the current membership policy");
+        pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
+        publishedSpreadListing={accountId:account.id,gameId:account.game_id,contentHash:version.content_hash,payload:version.payload,
+          listingVersionId:version.id,ownerUserId:account.owner_user_id};
+        release={...originalRelease,id:effective.priceVersionId,mode:"SPREAD",haff_rule:effective.haffRule,commission_rate:null,rounding_policy:effective.roundingPolicy};
+      }
+    }
+    if(!publishedSpreadListing&&(version.payload.pricingPolicy||original.priceVersionId!==originalRelease.id))unavailable("Published spread policy is unavailable");
   }
   const rows=(await client.query<FrozenPriceLine>(`SELECT p.item_id,p.pricing_kind,p.unit_quantity::text,p.buyer_unit_amount::text,p.owner_unit_amount::text,
     i.unit AS item_unit,i.name AS item_name,i.enabled AS item_enabled FROM zzsh_supply.price_line p JOIN zzsh_supply.billable_item i ON i.id=p.item_id
     WHERE p.price_version_id=$1 AND p.customer_tier=$2 AND i.game_id=$3 ORDER BY p.item_id`,[release.id,calculationTier,account.game_id])).rows;
   const prices=new Map(rows.map(r=>[r.item_id,r]));
-  const original=normalizeQuote(version.payload.quoteValues);
   if(!legacy && original.lines.some(l=>!prices.has(l.itemId)))unavailable("Required membership price is missing");
   const term=(await client.query(`SELECT code,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 AND code=$2`,[release.term_version_id,version.payload.declaration.termOptionCode])).rows[0];
   if(!term)unavailable("Frozen term unavailable");
@@ -266,7 +289,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   };
   const result=legacy?{quotable:true as const,quote:original}:fixedFee
     ?computePublishedFixedFeeQuote(quoteInput,{accountId:account.id,gameId:account.game_id,contentHash:version.content_hash,payload:version.payload})
-    :computeDeltaQuote(quoteInput);
+    :publishedSpreadListing?computePublishedSpreadQuote(quoteInput,publishedSpreadListing):computeDeltaQuote(quoteInput);
   if(!result.quotable)unavailable("Membership price cannot be calculated");
   if(!result.quotable)throw new Error("unreachable");
   const binding = {
@@ -284,10 +307,10 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     const growth = await options.membershipGrowthReader(client, {
       userId: context.userId, ownerUserId: account.owner_user_id, accountId: account.id, gameId: account.game_id,
       listingVersionId: version.id, listingHash: version.content_hash, ruleReleaseId: input.releaseId, priceVersionId: release.id,
-      quantityDigest: binding.quantityDigest, baseQuote: result.quote, quoteInput,asOfUtc,
+      quantityDigest: binding.quantityDigest, baseQuote: result.quote, quoteInput,asOfUtc,...(publishedSpreadListing?{publishedSpreadListing}:{}),
     });
     if (growth.knowledge === "UNKNOWN") throw new SecurityApiError(503, "MEMBERSHIP_UNKNOWN", "Membership growth is unknown; confirm later");
-    growthSelection=selectPersonalGrowthOffer(growth,binding,asOfUtc,result.quote);
+    growthSelection=selectPersonalGrowthOffer(growth,binding,asOfUtc,result.quote,publishedSpreadListing?"STABLE":undefined);
     selectedQuote=growthSelection.quote;
   }
   selectedQuote.ruleReleaseId=input.releaseId;
@@ -301,13 +324,14 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
     || priceVersionId!==originalRelease.id || termVersionId!==originalRelease.term_version_id)unavailable("Personal rule references cannot be verified");
 
-  const projection={quote:projectTenantPriceQuote(quote,fixedFee?result.quote:original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
+  const projection={quote:projectTenantPriceQuote(quote,fixedFee||publishedSpreadListing?result.quote:original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
     ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})};
   let settlementPricing:ReturnType<typeof freezeSettlementPricing>|undefined;
   const settlementRatio=growthSelection===null?"1":growthSelection.payableRatio;
   if(settlementRatio!==undefined){
     try{settlementPricing=freezeSettlementPricing(result.quote,settlementRatio,rows,release.commission_rate);}catch{unavailable("Frozen settlement pricing is unavailable");}
   }
+  if(publishedSpreadListing&&!settlementPricing)unavailable("Scheduled spread settlement pricing is unavailable");
   return {account,version:{...version,payload:version.payload!,content_hash:version.content_hash!},membership,ownerDeclaration,v2Funding,f,guarantee,growthSelection,settlementPricing,quote,ruleRefs,binding,projection,pricingPolicy};
 }
 
@@ -333,7 +357,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
         publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,
         disclosureVersion:v2Funding!.disclosureVersion,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote}
     : {schema:"personal-quote-v1" as const,listingHash:version.content_hash,userId:context.userId,ruleRefs:version.payload.ruleRefs,membership:{tier:membership!.tier,version:membership!.version,sourceRef:membership!.sourceRef},guarantee:guaranteeSnapshot,funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutSelected:(f as LegacyConfirmationFunding).fullPayoutSelected,fullPayoutPolicyRef:f.fullPayoutPolicyRef,fullPayoutFeeCents:(f as LegacyConfirmationFunding).fullPayoutFeeCents,vipWaiver:f.vipWaiver,svipWaiver:f.svipWaiver},quote};
-  const snapshot=growthSelection ? {schema:pricingPolicy?"personal-quote-v5" as const:"personal-quote-v4" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,fullPayoutDeclaration:ownerDeclaration!,ruleRefs,membershipGrowth:growthSelection.growth,guarantee:guaranteeSnapshot,
+  const snapshot=growthSelection ? {schema:pricingPolicy?.pricingModel==="FIXED_FEE"?"personal-quote-v5" as const:pricingPolicy?.pricingModel==="SPREAD"?"personal-quote-v6" as const:"personal-quote-v4" as const,userId:context.userId,ownerUserId:account.owner_user_id,accountId:account.id,listingVersionId:version.id,listingHash:version.content_hash,fullPayoutDeclaration:ownerDeclaration!,ruleRefs,membershipGrowth:growthSelection.growth,guarantee:guaranteeSnapshot,
     ...(pricingPolicy?{pricingPolicy}:{}),
     funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,disclosureVersion:v2Funding!.disclosureVersion},quote,...(settlementPricing?{settlementPricing}:{})} : {...baseSnapshot,...(settlementPricing?{settlementPricing}:{})};
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");

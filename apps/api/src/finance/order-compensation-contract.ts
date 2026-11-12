@@ -33,7 +33,7 @@ const obj = (value: unknown): value is Record<string, unknown> => !!value && typ
 export function nativeCompensationBasis(order: NativeBasis): { selected: boolean; sourceDigest: string } | null {
   try {
     const snapshot = order.quote, personal = snapshot.personal;
-    if (!token.test(order.paymentId) || !positiveCents.test(order.paidCents) || !obj(personal) || !['personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5'].includes(String(personal.schema)) ||
+    if (!token.test(order.paymentId) || !positiveCents.test(order.paidCents) || !obj(personal) || !['personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5','personal-quote-v6'].includes(String(personal.schema)) ||
       personal.ownerUserId !== order.ownerUserId || personal.userId !== order.renterUserId || personal.accountId !== order.accountId ||
       personal.listingVersionId !== order.listingVersionId || personal.listingHash !== order.contentHash || snapshot.listingHash !== order.contentHash ||
       !obj(personal.ruleRefs) || personal.ruleRefs.releaseId !== order.ruleReleaseId || !obj(personal.fullPayoutDeclaration) ||
@@ -46,6 +46,12 @@ export function nativeCompensationBasis(order: NativeBasis): { selected: boolean
       if (quote.schemaVersion !== 4 || quote.ruleReleaseId !== order.ruleReleaseId || policy.pricingModel !== 'FIXED_FEE' || policy.priceVersionId !== quote.priceVersionId
         || !obj(settlement) || settlement.schema !== 'settlement-pricing-v3' || settlement.priceVersionId !== quote.priceVersionId
         || settlement.fixedFeeRate !== quote.pricingInputs.commissionRate) return null;
+    } else if (personal.schema === 'personal-quote-v6') {
+      const policy = normalizePricingPolicy(personal.pricingPolicy);
+      const settlement = snapshot.settlementPricing;
+      if (quote.schemaVersion !== 2 || quote.mode !== 'SPREAD' || quote.ruleReleaseId !== order.ruleReleaseId
+        || policy.pricingModel !== 'SPREAD' || policy.priceVersionId !== quote.priceVersionId
+        || !obj(settlement) || settlement.schema !== 'settlement-pricing-v1' || settlement.priceVersionId !== quote.priceVersionId) return null;
     } else if (quote.schemaVersion === 4) return null;
     const signed = { ...personal, quote, ...(snapshot.settlementPricing === undefined ? {} : { settlementPricing: snapshot.settlementPricing }) };
     if (typeof snapshot.confirmationDigest !== 'string' || sha(signed) !== snapshot.confirmationDigest) return null;

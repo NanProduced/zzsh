@@ -36,7 +36,7 @@ import {
   GrowthRuleError,
   growthWindowStartAt,
 } from "./membership-growth";
-import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
+import { computeDeltaQuote, computePublishedSpreadQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
 import { FIXED_FEE_ALGORITHM } from "../supply/fixed-fee";
 import { normalizeRentalPricing } from "../supply/delta-rental";
@@ -548,7 +548,7 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract):
   return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, precomputedBase?: InternalQuote): { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, precomputedBase?: InternalQuote, discountOrdering?: "STABLE"): { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string } | null {
   const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
   base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
@@ -563,7 +563,7 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
     const result = precomputedBase ? { quotable: true as const, quote: normalizeQuote({ ...precomputedBase,
       tenantDeposit: depositCents === null ? null : yuanAmountObject(BigInt(depositCents)) }) } : computeDeltaQuote(base);
     if (!result.quotable) return null;
-    const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
+    const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio, discountOrdering);
     if (!discounted) return null;
     return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput), payableRatio: contract.payableRatio };
   }
@@ -935,6 +935,15 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     return { knowledge: "UNKNOWN", reason: "LEGACY_QUOTE_SOURCE_INVALID", asOfUtc };
   const fixed = input.baseQuote.schemaVersion === 4;
   if (fixed && !matchesFixedBaseQuote(input.baseQuote, input)) return { knowledge: "UNKNOWN", reason: "FIXED_FEE_BASE_INVALID", asOfUtc };
+  const spreadProof=input.publishedSpreadListing;
+  // Only new scheduled-spread confirmations use the deterministic DB-compatible tie break; old orders retain their frozen allocation.
+  if(spreadProof){
+    if(spreadProof.accountId!==input.accountId||spreadProof.ownerUserId!==input.ownerUserId||spreadProof.gameId!==input.gameId
+      ||spreadProof.listingVersionId!==input.listingVersionId||spreadProof.contentHash!==input.listingHash
+      ||spreadProof.payload.ruleRefs.releaseId!==input.ruleReleaseId)return {knowledge:"UNKNOWN",reason:"SPREAD_LISTING_BINDING_INVALID",asOfUtc};
+    const rebuilt=computePublishedSpreadQuote(input.quoteInput,spreadProof);
+    if(!rebuilt.quotable||canonicalize(rebuilt.quote)!==canonicalize(input.baseQuote))return {knowledge:"UNKNOWN",reason:"SPREAD_BASE_INVALID",asOfUtc};
+  }
   let model: Awaited<ReturnType<typeof readMembershipGrowthModel>>;
   try { model = await readMembershipGrowthModel(client, input.userId, asOfUtc); }
   catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
@@ -960,7 +969,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
-  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN", legacy || fixed ? input.baseQuote : undefined);
+  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN", legacy || fixed || spreadProof ? input.baseQuote : undefined, spreadProof?"STABLE":undefined);
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
   let rows: StoredQuoteEntitlement[];
   try {
@@ -975,7 +984,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
     if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
     if (!configuredModeContract(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
-    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined, false, legacy || fixed ? input.baseQuote : undefined);
+    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined, false, legacy || fixed || spreadProof ? input.baseQuote : undefined, spreadProof?"STABLE":undefined);
     if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     candidates.push(candidate);
     entitlementIds.push(entitlement.id);

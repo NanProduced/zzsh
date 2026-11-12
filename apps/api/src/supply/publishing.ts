@@ -53,7 +53,7 @@ import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwner
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
-import { readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel } from "./pricing-policy-schedule";
+import { readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -1078,8 +1078,11 @@ export async function resolveIncomePreviewRelease(client:PoolClient,gameId:strin
   }
   if(selected.model==="SPREAD"){
     const effective=await readEffectiveSpreadPrice(client,gameId,context.asOf);
-    if(!effective||effective.priceVersionId!==base.priceVersionId||base.mode!=="SPREAD")return {available:false as const,reason:"PRICING_POLICY_MISMATCH"};
-    return {available:true as const,release:base};
+    if(effective)return {available:true as const,release:{...base,priceVersionId:effective.priceVersionId,mode:"SPREAD" as const,
+      commissionRate:null,roundingPolicy:effective.roundingPolicy,priceStatus:"SEALED",haffRule:effective.haffRule,
+      pricingPolicy:{schema:"pricing-policy-v1" as const,pricingModel:"SPREAD" as const,scheduleId:effective.scheduleId,
+        generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId}}};
+    return {available:false as const,reason:"PRICING_POLICY_MISMATCH"};
   }
   if((selected.model==="LEGACY_SPREAD"&&base.mode!=="SPREAD")||(selected.model==="LEGACY_PERCENT"&&base.mode!=="PERCENT"))
     return {available:false as const,reason:"PRICING_POLICY_MISMATCH"};
@@ -1211,7 +1214,8 @@ export async function quoteListing(
       pricingPolicy={schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
     }else if(selected?.model==="SPREAD"){
       const effective=await readEffectiveSpreadPrice(client,a.game_id,selected.asOf);
-      if(!effective||effective.priceVersionId!==release.price_version_id||release.mode!=="SPREAD")throw conflict("当前价差政策与上架规则尚未同步");
+      if(!effective)throw conflict("当前价差政策无法核实");
+      priceVersionId=effective.priceVersionId;priceMode="SPREAD";priceRule=effective.haffRule;priceRounding=effective.roundingPolicy;commissionRate=null;
       pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
     }else if(selected?.model==="LEGACY_SPREAD"||selected?.model==="LEGACY_PERCENT"){
       const expected=selected.model==="LEGACY_SPREAD"?"SPREAD":"PERCENT";
@@ -1636,6 +1640,7 @@ export async function submitListing(
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
   if(v.payload?.schemaVersion===4)throw conflict("固定手续费订单结算暂未就绪");
+  if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
   await assertCurrentRelease(client, a, v);
   await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);

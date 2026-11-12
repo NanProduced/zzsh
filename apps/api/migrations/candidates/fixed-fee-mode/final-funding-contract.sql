@@ -21,7 +21,7 @@ DECLARE
 BEGIN
   IF NEW.confirmation_id IS NULL THEN RETURN NEW; END IF;
   personal:=NEW.quote_snapshot->'personal';
-  IF personal->>'schema' NOT IN ('personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5') THEN RETURN NEW; END IF;
+  IF personal->>'schema' NOT IN ('personal-quote-v2','personal-quote-v3','personal-quote-v4','personal-quote-v5','personal-quote-v6') THEN RETURN NEW; END IF;
   SELECT a.game_id,p.id AS price_id,p.funding_policy AS policy,v.payload,
     p.full_payout_terms_version_id,p.full_payout_terms_digest,p.full_payout_disclosure_version INTO binding
     FROM zzsh_supply.rental_account a

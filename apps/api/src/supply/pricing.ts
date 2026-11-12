@@ -175,7 +175,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   return computeDeltaQuoteInternal(input);
 }
 
-function computeDeltaQuoteInternal(input: QuoteInput, retainedFixedSelection?: ReturnType<typeof normalizeRentalPricing>): QuoteResult {
+function computeDeltaQuoteInternal(input: QuoteInput, retainedPublishedSelection?: ReturnType<typeof normalizeRentalPricing>): QuoteResult {
   const reasons = new Set<QuoteReasonCode>();
   const fail = (code: QuoteReasonCode): void => {
     reasons.add(code);
@@ -204,7 +204,7 @@ function computeDeltaQuoteInternal(input: QuoteInput, retainedFixedSelection?: R
   }
 
   const hasHaffLines = input.lines.some((line) => line.pricingKind === "HAFF_RATIO");
-  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier }, retainedFixedSelection);
+  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier }, retainedPublishedSelection);
   for (const reason of deltaHaff.reasonCodes) fail(reason);
   const { haffSchema, ownerDenominator, buyerDenominator, spreadDelta, conditions } = deltaHaff;
 
@@ -379,17 +379,22 @@ function computeDeltaQuoteInternal(input: QuoteInput, retainedFixedSelection?: R
   };
 }
 
+export type PublishedQuoteProof = { accountId: string; gameId: string; contentHash: string; payload: ContentPayloadInput };
+
 /** The caller must supply the authenticated, published listing read from the database. */
-export function computePublishedFixedFeeQuote(input: QuoteInput, proof: { accountId: string; gameId: string; contentHash: string; payload: ContentPayloadInput }): QuoteResult {
+function computePublishedQuote(input: QuoteInput, proof: PublishedQuoteProof, model: "FIXED_FEE" | "SPREAD"): QuoteResult {
   const failed: QuoteResult = { quotable: false, reasonCodes: ["RULE_INPUT_MISSING"] };
   try {
-    if (input.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM || !proof || !/^[a-f0-9]{64}$/.test(proof.contentHash)) return failed;
+    if (!proof || !/^[a-f0-9]{64}$/.test(proof.contentHash)
+      || (model === "FIXED_FEE" ? input.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM : input.mode !== "SPREAD" || input.haffRule?.schema !== "haff-ratio-v2" || input.fixedFeeAlgorithm !== undefined)) return failed;
     const payload = normalizeContentPayload(proof.payload);
-    if (payload.schemaVersion !== 4 || payload.accountId !== proof.accountId || payload.gameId !== proof.gameId
+    if (payload.schemaVersion !== (model === "FIXED_FEE" ? 4 : 2) || payload.accountId !== proof.accountId || payload.gameId !== proof.gameId
       || computeContentHash(payload) !== proof.contentHash) return failed;
     const original = normalizeQuote(payload.quoteValues);
-    if (!payload.pricingPolicy || payload.pricingPolicy.pricingModel !== "FIXED_FEE"
-      || original.priceVersionId !== payload.pricingPolicy.priceVersionId || original.ruleReleaseId !== payload.ruleRefs.releaseId) return failed;
+    if (model === "FIXED_FEE" && (!payload.pricingPolicy || payload.pricingPolicy.pricingModel !== "FIXED_FEE")
+      || model === "SPREAD" && (original.mode !== "SPREAD" || payload.pricingPolicy && payload.pricingPolicy.pricingModel !== "SPREAD")
+      || original.priceVersionId !== (payload.pricingPolicy?.priceVersionId ?? payload.ruleRefs.priceVersionId)
+      || original.ruleReleaseId !== payload.ruleRefs.releaseId) return failed;
     const accepted = normalizeRentalPricing(payload.declaration.attributes.rentalPricing);
     const selected = normalizeRentalPricing(input.conditions.rentalPricing);
     if (accepted.rentalMode !== selected.rentalMode || accepted.ownerRatioB !== selected.ownerRatioB) return failed;
@@ -414,6 +419,14 @@ export function computePublishedFixedFeeQuote(input: QuoteInput, proof: { accoun
     return result.quotable && (result.quote.termSeconds !== original.termSeconds
       || JSON.stringify(result.quote.expiryDisclosures) !== JSON.stringify(original.expiryDisclosures)) ? failed : result;
   } catch { return failed; }
+}
+
+export function computePublishedFixedFeeQuote(input: QuoteInput, proof: PublishedQuoteProof): QuoteResult {
+  return computePublishedQuote(input, proof, "FIXED_FEE");
+}
+
+export function computePublishedSpreadQuote(input: QuoteInput, proof: PublishedQuoteProof): QuoteResult {
+  return computePublishedQuote(input, proof, "SPREAD");
 }
 
 export const computeQuote = computeDeltaQuote;

@@ -350,9 +350,9 @@ export function resolveDeltaHaffContext(input: {
   hasHaffLines: boolean;
   conditions: DeltaHaffConditions;
   customerTier?: CustomerTier;
-}, retainedFixedSelection?: RentalPricingSelection): DeltaHaffContext {
-  if (input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA) return resolveFixedHaffContext(input, retainedFixedSelection);
-  if (input.haffRule?.schema === DELTA_HAFF_COMPAT_SCHEMA) return resolveCompatHaffContext(input);
+}, retainedPublishedSelection?: RentalPricingSelection): DeltaHaffContext {
+  if (input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA) return resolveFixedHaffContext(input, retainedPublishedSelection);
+  if (input.haffRule?.schema === DELTA_HAFF_COMPAT_SCHEMA) return resolveCompatHaffContext(input, retainedPublishedSelection);
   if (input.conditions.rentalPricing || (input.customerTier && input.customerTier !== "STANDARD")) return { haffSchema: null, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   const reasons = new Set<DeltaQuoteReasonCode>();
   const fail = (code: DeltaQuoteReasonCode): void => { reasons.add(code); };
@@ -483,7 +483,7 @@ function resolveFixedHaffContext(input: Parameters<typeof resolveDeltaHaffContex
   } catch { return failed; }
 }
 
-function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0]): DeltaHaffContext {
+function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0], retainedSelection?: RentalPricingSelection): DeltaHaffContext {
   const failed: DeltaHaffContext = { haffSchema: DELTA_HAFF_COMPAT_SCHEMA, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   try {
     const rule = validateDeltaHaffRule(input.haffRule, input.mode);
@@ -498,7 +498,8 @@ function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffConte
     const c = input.conditions;
     const base = compatBaseRatio(rule, c);
     const owner = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "B");
-    if (selection.rentalMode !== "ordinary") {
+    const retained = retainedSelection !== undefined && selection.rentalMode === retainedSelection.rentalMode && selection.ownerRatioB === retainedSelection.ownerRatioB;
+    if (selection.rentalMode !== "ordinary" && !retained) {
       const min = compatRatioBound(mode.min!, base); const max = mode.max === undefined ? null : compatRatioBound(mode.max, base);
       // 无上限时只校验 B ≥ 下限；有上限时保持原有 max ≥ min 且 min ≤ B ≤ max。
       if (subtractDecimal(owner, min).value < 0n || (max !== null && (subtractDecimal(max, min).value < 0n || subtractDecimal(max, owner).value < 0n))) return failed;

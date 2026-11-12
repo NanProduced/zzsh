@@ -60,6 +60,8 @@ test("v2 creation bounds the original credential body without pre-validating suc
 import { createControlledConfirmationFundingReader, issuePersonalConfirmation, rebuildPersonalConfirmation, verifyPersonalConfirmation } from "../src/order/personal-confirmation";
 import { computeContentHash, type ContentPayloadInput } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
+import { quoteToGrowthOfferPlan } from "../src/auth/membership-growth";
+import { compatRule } from "./pricing-compat-fixture";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 import { evaluatePublication } from "../src/supply/publishing";
 import { withIdempotency } from "../src/supply/supply-util";
@@ -104,6 +106,48 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const options={key,gate:async()=>({publisherBail:"NOT_REQUIRED" as const,occupancy:"FREE" as const,reference:v2?`policy:price-1:fixture:trb3b1:${runId}:funding-v1:NOT_REQUIRED`:"fixture"}),fundingReader:v2?controlled:legacy};
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
+
+test("scheduled spread remains closed while an old listing without a plan retains v4 pricing",async()=>{
+  const f=personalRefsFixture(true,"SPREAD"),oldRule=compatRule("47"),newRule=compatRule("50");
+  const input={priceVersionId:"price-1",mode:"SPREAD" as const,roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD" as const,haffRule:oldRule,
+    lines:[{itemId:"haff",quantity:"60000000",unit:"HAFF_BASE" as const,pricingKind:"HAFF_RATIO" as const,customerTier:"STANDARD" as const},
+      {itemId:"item",quantity:"5",unit:"PIECE" as const,pricingKind:"FIXED_UNIT" as const,unitQuantity:"1",buyerUnitAmount:"2",ownerUnitAmount:"1",customerTier:"STANDARD" as const}],
+    conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"custom" as const,ownerRatioB:"45"}},
+    termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY" as const},deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}};
+  const old=computeQuote(input);assert(old.quotable);old.quote.ruleReleaseId=f.input.releaseId;
+  f.payload.schemaVersion=2;f.payload.declaration.attributes={safe_box_code:"box-a",vit_level:6,bear_level:6,rentalPricing:input.conditions.rentalPricing,
+    full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}};
+  f.payload.declaration.inventory=input.lines.map(line=>({itemId:line.itemId,quantity:line.quantity}));
+  f.payload.declaration.termOptionCode="daily-10m";f.payload.declaration.pricingOptionCode="";
+  f.payload.quoteValues=old.quote as unknown as Record<string,unknown>;f.rehash();
+  const frozen=JSON.stringify(f.payload),state={enabled:true,price:"price-2",buyer:"3"};
+  const original=(f.client as any).query.bind(f.client),client={query:async(sql:string,values?:unknown[])=>{
+    if(sql.includes("to_regclass('zzsh_supply.pricing_policy_schedule')"))return{rows:[{prices:state.enabled,modes:state.enabled,rates:state.enabled}],rowCount:1};
+    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule s'))return{rows:state.enabled?[{id:'spread-schedule',generation:'2',effectiveAt:'2026-01-01T00:00:00.000000Z',priceVersionId:state.price,mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null,haffRule:newRule}]:[]};
+    if(sql.includes('AS at'))return{rows:[{at:'2026-10-25T00:00:00.000000Z'}],rowCount:1};
+    if(sql.includes('SELECT p.id,p.status'))return{rows:[{id:'price-1',status:'SEALED',mode:'SPREAD',haff_rule:oldRule,commission_rate:null,rounding_policy:'HALF_UP_CENT_V1',term_version_id:'term-1'}],rowCount:1};
+    if(sql.includes('/* current-trade-resources */'))return{rows:[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true},{id:'item',code:'fixture',unit:'PIECE',enabled:true}],rowCount:2};
+    if(sql.includes('FROM zzsh_supply.price_line'))return{rows:[{item_id:'haff',pricing_kind:'HAFF_RATIO',unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null,item_unit:'HAFF_BASE',item_enabled:true},
+      {item_id:'item',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:state.enabled?state.buyer:'2',owner_unit_amount:'1',item_unit:'PIECE',item_enabled:true}],rowCount:2};
+    if(sql.includes('FROM zzsh_supply.term_option'))return{rows:[input.termOption],rowCount:1};
+    return original(sql,values);
+  }} as never;
+  const options={...f.options,membershipGrowthReader:async(_client:unknown,request:any)=>{
+    const binding={userId:request.userId,ownerUserId:request.ownerUserId,accountId:request.accountId,listingVersionId:request.listingVersionId,ruleReleaseId:request.ruleReleaseId,quantityDigest:request.quantityDigest};
+    return {knowledge:"KNOWN" as const,policyVersion:"1",effectiveTier:"STANDARD" as const,policyTier:"STANDARD" as const,asOfUtc:request.asOfUtc,entitlementIds:[],
+      candidates:[{quote:request.baseQuote,payableRatio:"1",plan:quoteToGrowthOfferPlan(request.baseQuote,{source:"GROWTH",benefitVersion:"1",binding})}]};
+  }};
+  state.enabled=false;const legacy=await rebuildPersonalConfirmation(client,f.context,f.input,options);
+  assert.equal(legacy.snapshot.schema,"personal-quote-v4");assert.equal(legacy.snapshot.quote.priceVersionId,"price-1");
+  assert.equal(JSON.stringify(f.payload),frozen);
+  const issued=await issuePersonalConfirmation(client,f.context,f.input,options);state.enabled=true;
+  await assert.rejects(rebuildPersonalConfirmation(client,f.context,f.input,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+  await assert.rejects(verifyPersonalConfirmation(client,f.context,f.input,issued.confirmationToken,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+  const listingQuote=structuredClone(old.quote);listingQuote.priceVersionId="listing-price";
+  f.payload.quoteValues=listingQuote as unknown as Record<string,unknown>;
+  f.payload.pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:"listing-schedule",generation:"1",effectiveAt:"2026-01-01T00:00:00Z",priceVersionId:"listing-price"};
+  f.rehash();await assert.rejects(rebuildPersonalConfirmation(client,f.context,f.input,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+});
 
 test("a non-growth spread quote freezes its own price basis for later actual consumption", async () => {
   const f = personalRefsFixture(true, "SPREAD");

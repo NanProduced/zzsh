@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, growthContributionSourceDigest, mapAcceptedSettlementToGrowthFacts, membershipGrowthPostCommitCallback, normalizeGrowthInstant, policyTierForGrowthProjection, readGrowthSourceCompleteness, readMembershipGrowth, readMembershipGrowthQuoteCandidates, readMembershipGrowthQuoteCandidatesAt, resolveGrowthEffectiveTime, settlementBackfillActorAllowed } from "../src/auth/membership-growth-integration";
-import { computeDeltaQuote, computePublishedFixedFeeQuote, type QuoteInput } from "../src/supply/pricing";
+import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSpreadQuote, type QuoteInput } from "../src/supply/pricing";
 import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
@@ -479,6 +479,29 @@ test("one unified entitlement discounts the actual ordinary, custom and fast bas
       assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
       assert.equal(gift.plan.depositCents, "10000");
       assert.equal(JSON.stringify(input), before, "membership never rewrites base pricing input");
+      if(rentalMode==="custom"){
+        const published=structuredClone(base.quote);published.ruleReleaseId="release-1";
+        const listing:ContentPayloadInput={schemaVersion:2,accountId:"account-1",gameId:"game-1",
+          declaration:{title:"synthetic",description:null,attributes:{safe_box_code:"box-a",vitLevel:6,bearLevel:6,rentalPricing:input.conditions.rentalPricing},
+            inventory:input.lines.map(line=>({itemId:line.itemId,quantity:line.quantity})),skins:[],entitlements:[],termOptionCode:"daily-10m",pricingOptionCode:"",mediaBindings:[]},
+          ruleRefs:{releaseId:"release-1",priceVersionId:"price-v1",termVersionId:"term-1",agreementVersionId:"agreement-1",agreementDigest:"d".repeat(64)},
+          quoteValues:published as unknown as Record<string,unknown>};
+        const proof={accountId:"account-1",ownerUserId:"owner-1",gameId:"game-1",listingVersionId:"listing-1",contentHash:computeContentHash(listing),payload:listing};
+        const changed:QuoteInput={...input,priceVersionId:"price-v2",haffRule:compatRule("50"),
+          lines:input.lines.map(line=>line.itemId==="item"?{...line,buyerUnitAmount:"3"}:line)};
+        assert.equal(computeDeltaQuote(changed).quotable,false,"new submissions must obey the narrowed range");
+        const repriced=computePublishedSpreadQuote(changed,proof);assert(repriced.quotable);
+        assert.equal(repriced.quote.resourceTotal.amount,"177.16");assert.equal(repriced.quote.ownerTotal.amount,"138.33");
+        const request={userId:"user-1",gameId:"game-1",accountId:"account-1",listingVersionId:"listing-1",listingHash:proof.contentHash,
+          priceVersionId:"price-v2",baseQuote:repriced.quote,ruleReleaseId:"release-1",ownerUserId:"owner-1",quantityDigest:"quantity-1",
+          quoteInput:changed,asOfUtc:at,publishedSpreadListing:proof};
+        const client=growthReaderClient(state,[contribution],policy,"10000.00","a".repeat(64),false,changed.haffRule,[entitlement]);
+        const carried=await readMembershipGrowthQuoteCandidatesAt(client,request);assert.equal(carried.knowledge,"KNOWN",JSON.stringify(carried));
+        const forged=await readMembershipGrowthQuoteCandidatesAt(client,{...request,publishedSpreadListing:{...proof,contentHash:"0".repeat(64)}});
+        assert.equal(forged.knowledge,"UNKNOWN");
+        const changedSelection={...changed,conditions:{...changed.conditions,rentalPricing:{rentalMode:"custom" as const,ownerRatioB:"46"}}};
+        assert.equal(computePublishedSpreadQuote(changedSelection,proof).quotable,false,"the retained ratio cannot be changed");
+      }
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
