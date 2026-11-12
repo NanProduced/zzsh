@@ -8,7 +8,7 @@ test('old skipped below-minimum roles are not added when final base becomes larg
 test('early and approved manual completion use the original frozen ratio and final immutable accounting amounts',()=>{for(const patch of [{calculationMode:'MANUAL' as const},{classification:'EARLY' as const},{calculationMode:'MANUAL' as const,classification:'EARLY' as const}]){const r=prepareAccrualFromFrozenPayment(basis(),{...posting,...patch,ownerNetCents:'3000',renterRefundCents:'2000'});assert.equal(r.knowledge,'KNOWN');assert.equal(r.baseCents,'4800');assert.deepEqual(r.items.map(i=>i.amountCents),['240','240']);}});
 test('unknown classification, missing original and negative final base remain UNKNOWN rather than fabricated zero',()=>{for(const patch of [{calculationMode:'UNKNOWN' as const},{classification:'UNKNOWN' as const},{compensationFeeCents:'5001'}]){const r=prepareAccrualFromFrozenPayment(basis(),{...posting,...patch});assert.equal(r.knowledge,'UNKNOWN');assert.equal(r.reason,'UNKNOWN_BASE_MAPPING');assert.equal(r.baseCents,null);}assert.equal(prepareAccrualFromFrozenPayment(null,posting).reason,'MISSING_ORIGINAL_BASIS');});
 test('legacy, foreign payment and unbalanced source cannot generate new earnings',()=>{assert.throws(()=>prepareAccrualFromFrozenPayment(basis(),{...posting,origin:'LEGACY_MYSQL'}));assert.throws(()=>prepareAccrualFromFrozenPayment(basis(),{...posting,confirmationId:'other'}));assert.throws(()=>prepareAccrualFromFrozenPayment(basis(),{...posting,ownerNetCents:'3999'}));});
-test('economic root excludes mutable policy/version/posting timestamps but retains role and beneficiary',()=>{const a=prepareAccrualFromFrozenPayment(basis(),posting),b=prepareAccrualFromFrozenPayment(basis(),{...posting,postingId:'correction',postingDigest:'b'.repeat(64),postedAt:'2026-10-05T03:12:10.123456Z'});assert.equal(a.items[0]!.economicKey,b.items[0]!.economicKey);assert.notEqual(a.digest,b.digest);assert.notEqual(a.items[0]!.economicKey,a.items[1]!.economicKey);});
+test('economic root excludes mutable policy/version/posting timestamps but retains role and beneficiary',()=>{const a=prepareAccrualFromFrozenPayment(basis(),posting),b=prepareAccrualFromFrozenPayment(basis(),{...posting,postingId:'correction',postingDigest:'b'.repeat(64),postedAt:'2026-10-05T03:12:10.123456Z'});assert(a.knowledge==='KNOWN'&&b.knowledge==='KNOWN');assert.equal(a.items[0]!.economicKey,b.items[0]!.economicKey);assert.notEqual(a.digest,b.digest);assert.notEqual(a.items[0]!.economicKey,a.items[1]!.economicKey);});
 
 // Independent HALF_UP boundary: two 50% shares of 2 cents are 1+1; of 1 cent are 1+1 and exceed the source.
 test('final cumulative referral pair cannot exceed its source after per-role rounding',()=>{
@@ -39,6 +39,7 @@ test('fixed-fee commission excludes coverage and early makeup, and uses the froz
  const below=fixedPosting();Object.assign(below,{capturedCents:'95',ownerNetCents:'90',platformContributionCents:'5'});
  Object.assign(below.fixedFeeEvidence!,{ownerGrossCents:'100',serviceFeeCents:'10',distributionDiscountCents:'5'});
  const skipped=prepareAccrualFromFrozenPayment(fixed,below);assert.equal(skipped.knowledge,'KNOWN');assert.deepEqual(skipped.items,[]);
+ if(skipped.knowledge==='KNOWN')assert.equal(skipped.skipReason,'NO_PAYABLE_COMMISSION');
 });
 test('manual distribution discount rounds adjusted gross times frozen discount once without changing payment',()=>{
  const fixed=fixedBasis('100','0.1','0.9'),f=fixedPosting();Object.assign(f,{calculationMode:'MANUAL',capturedCents:'100',ownerNetCents:'4',renterRefundCents:'0',platformContributionCents:'96'});
@@ -62,6 +63,7 @@ test('fixed-fee commissions reject missing, unbound, cancelled, changed or contr
  ]){const f=fixedPosting();mutate(f);const result=prepareAccrualFromFrozenPayment(fixed,f);assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.baseCents,null);assert.deepEqual(result.items,[]);}
  const bad=fixedBasis('1','0.08','0.9'),result=prepareAccrualFromFrozenPayment(bad,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.baseCents,null);
  const fast=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.95','fast'),fixedPosting());assert.equal(fast.knowledge,'KNOWN');assert.deepEqual(fast.items,[]);
+ if(fast.knowledge==='KNOWN')assert.equal(fast.skipReason,'NO_ELIGIBLE_REFERRAL');
 });
 test('a fixed fast order cannot accrue even when its frozen roles contradict its mode',()=>{
  const forged=fixedBasis('100','0.1','0.95','fast');forged.roles[0]!.status='ELIGIBLE';
@@ -85,4 +87,5 @@ test('fixed-fee final per-role rounding cannot exceed the source base',()=>{
  assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.reason,'ROUNDED_REFERRALS_EXCEED_BASE');assert.deepEqual(result.items,[]);
  const below=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.9','ordinary','2','50'),f);
  assert.equal(below.knowledge,'KNOWN');assert.equal(below.baseCents,'1');assert.deepEqual(below.items,[]);
+ if(below.knowledge==='KNOWN')assert.equal(below.skipReason,'NO_PAYABLE_COMMISSION');
 });

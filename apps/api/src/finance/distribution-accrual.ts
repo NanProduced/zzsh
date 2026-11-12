@@ -68,7 +68,9 @@ export function prepareAccrualFromFrozenPayment(basis:PaymentDistributionBasis|n
   const economicKey=earningEconomicKey({kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:basis.orderId},r.beneficiaryUserId,r.role);
   return{economicKey,beneficiaryUserId:r.beneficiaryUserId,role:r.role,amountCents:(r.role==='RENTER_REFERRAL'?pair.renterCents:pair.ownerCents)??'0',dueAt:dueAt(f.postedAt,basis.policyConfig!.settlementDelayDays),policyVersion:basis.policyVersion!,basisDigest:basis.digest,postingDigest:f.postingDigest,relationDigest:r.relationDigest};
  });
- return{knowledge:'KNOWN' as const,baseDefinition:fixed?'FIXED_FEE_MINUS_MEMBERSHIP_DISCOUNT_V1':legacyRental?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND_V1':'FINAL_POSTING_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE_V1',baseCents:base,items,digest:sha(canonicalize({orderId:basis.orderId,confirmationId:basis.confirmationId,basisDigest:basis.digest,postingId:f.postingId,postingDigest:f.postingDigest,base,items}))};
+ return{knowledge:'KNOWN' as const,baseDefinition:fixed?'FIXED_FEE_MINUS_MEMBERSHIP_DISCOUNT_V1':legacyRental?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND_V1':'FINAL_POSTING_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE_V1',baseCents:base,items,
+  ...(fixed&&items.length===0?{skipReason:eligible.length?'NO_PAYABLE_COMMISSION' as const:'NO_ELIGIBLE_REFERRAL' as const}:{}),
+  digest:sha(canonicalize({orderId:basis.orderId,confirmationId:basis.confirmationId,basisDigest:basis.digest,postingId:f.postingId,postingDigest:f.postingDigest,base,items}))};
 }
 
 
