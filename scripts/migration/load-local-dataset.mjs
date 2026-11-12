@@ -146,8 +146,9 @@ if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strict
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const usesSystemUser = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemUserId === "string"));
 const usesSystemAccount = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemAccountId === "string"));
+const usesSystemOrder = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemOrderId === "string"));
 let systemUserMigration = null;
-if (usesSystemUser || usesSystemAccount) {
+if (usesSystemUser || usesSystemAccount || usesSystemOrder) {
     try { systemUserMigration = mod("legacy-load/system-user-migration"); }
     catch { throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED"); }
 }
@@ -157,16 +158,21 @@ if (usesSystemUser
 if (usesSystemAccount
     && (typeof systemUserMigration?.systemAccountMigrationId !== "function" || typeof systemUserMigration?.withSystemAccountMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_ACCOUNT_MIGRATION_BUILD_REQUIRED");
+if (usesSystemOrder
+    && (typeof systemUserMigration?.systemOrderMigrationId !== "function" || typeof systemUserMigration?.withSystemOrderMigrationBatch !== "function"))
+    throw new Error("NEXT_SYSTEM_ORDER_MIGRATION_BUILD_REQUIRED");
 const systemUserTarget = systemUserMigration ? {
     systemIdentifier: registered.instance?.systemIdentifier, databaseOid: registered.oid, marker: registered.marker,
     nonce: registered.nonce, roleOid: registered.migrationRoleOid,
 } : null;
 const systemUserId = usesSystemUser ? systemUserMigration.systemUserMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemAccountId = usesSystemAccount ? systemUserMigration.systemAccountMigrationId(sha(manifestBytes), systemUserTarget) : null;
+const systemOrderId = usesSystemOrder ? systemUserMigration.systemOrderMigrationId(sha(manifestBytes), systemUserTarget) : null;
 
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
     ...(systemUserId ? {systemUserId} : {}),
     ...(systemAccountId ? {systemAccountId} : {}),
+    ...(systemOrderId ? {systemOrderId} : {}),
     ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
@@ -525,7 +531,35 @@ async function applyAccounts() {
         });
     },100);
 }
-async function applyOrders() { await runPhase("orders", async (row) => { const gameId = gameIds.get(row.gameCode), accountId = mod("legacy-load/legacy-account-seam").legacyAccountId("legacy_mysql_restore", "la_rental_accounts", row.account.legacyId); const input = { source: row.source, account: { ...row.account, accountId, gameId }, owner: row.owner, renter: row.renter }; return mod("order/legacy-order-read").importLegacyOrderRead(client, input, actor); }); }
+function orderInput(row) {
+    const gameId = gameIds.get(row.gameCode); if (!gameId) throw new Error("TARGET_GAME_NOT_BOUND");
+    const accountId = mod("legacy-load/legacy-account-seam").legacyAccountId("legacy_mysql_restore", "la_rental_accounts", row.account.legacyId);
+    return {source:row.source,account:{...row.account,accountId,gameId},owner:row.owner,renter:row.renter};
+}
+async function applyOrders() {
+    if (registered.migrationProfile !== NEXT_MIGRATION_PROFILE)
+        return runPhase("orders", row => mod("order/legacy-order-read").importLegacyOrderRead(client, orderInput(row), actor));
+    const file=domainFile("orders");if(!file)return;
+    const proof=await preflightBoundSourceBatches(file,manifest.files.orders,100);
+    return runBatches("orders",readBoundSourceBatches(file,manifest.files.orders,proof),async batch=>{
+        const admitted=new Set(),ids=new Set(),orderModule=mod("order/legacy-order-read");
+        for(const row of batch){
+            const input=orderInput(row),normalized=orderModule.normalizeLegacyOrderReadInput(input);
+            if(row.sourceId!==input.source.legacyId||row.sourceDigest!==input.source.digest||ids.has(normalized.id))
+                throw new Error("LEGACY_SYSTEM_ORDER_SOURCE_BINDING_INVALID");
+            ids.add(normalized.id);admitted.add(JSON.stringify({orderId:normalized.id,legacyId:input.source.legacyId,
+                sourceDigest:input.source.digest,bindingDigest:normalized.bindingDigest}));
+        }
+        const orderActor={kind:"SYSTEM_ORDER_MIGRATION",id:systemOrderId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+            requestId:"core-legacy-dataset-"+expectedOid,
+            assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||!fenceEpoch)throw new Error("TARGET_FENCE_EPOCH_LOST");
+                await assertMigrationFenceHeld(targetClient,registered,fenceEpoch);assertRoundWindow();},
+            assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error("LEGACY_SYSTEM_ORDER_SOURCE_NOT_ADMITTED");}};
+        return systemUserMigration.withSystemOrderMigrationBatch(client,orderActor,async()=>{
+            const results=[];for(const row of batch)results.push(await orderModule.importLegacyOrderRead(client,orderInput(row),orderActor));return results;
+        });
+    },100);
+}
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {
         if (resourceState.protectedDataset?.manifestSha256 !== manifest.sourceDatasetSha256 || resourceState.protectedDataset?.epoch?.oid !== expectedOid

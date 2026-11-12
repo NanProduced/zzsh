@@ -77,7 +77,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1, evidence: { status: { realNameBound: false } } } }, { sourceId: "102", input: { id: 2, evidence: { status: { realNameBound: false } } } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag, accountFixture = false } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag, accountFixture = false, orderFixture = false } = {}) {
   if(migrationProfile===NEXT_MIGRATION_PROFILE && populationMode===undefined){
     populationMode='SELECTED_BUSINESS_SCOPE';selectedScope=planSelectedBusinessScope({accounts:[],orders:[],pays:[]});selectedFixture=true;
   }
@@ -99,7 +99,9 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const accountRows = accountFixture ? [{sourceId:"10",sourceDigest:"c".repeat(64),evidenceRef:"synthetic:account",ownerLegacyId:"101",
     ownerUserId:"synthetic-user-101",ownerSourceDigest:"a".repeat(64),gameCode:"delta",sourceStatus:"3",sourceDeleted:false,
     sourceUpdatedAt:"2026-01-01T00:00:00.000Z",snapshot:{schema:"synthetic"}}] : failure === "account-batch-changed" ? [{sourceId:"10"}] : [];
-  for (const [name, rows] of Object.entries({ users: userRows, accounts: accountRows, orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
+  const orderRows = orderFixture ? [{sourceId:"100",sourceDigest:"d".repeat(64),source:{legacyId:"100",digest:"d".repeat(64),row:{}},
+    account:{legacyId:"10"},owner:{},renter:{},gameCode:"delta"}] : [];
+  for (const [name, rows] of Object.entries({ users: userRows, accounts: accountRows, orders: orderRows, ...(continuationRows ? {continuations:continuationRows} : {}) })) {
     const file = name + ".jsonl", body = rows.map(row => JSON.stringify(row) + "\n").join("");
     files.set(path.join(ds, file), body);
     fileEntries[name] = { file, sha256: sha(body), rows:rows.length };
@@ -107,7 +109,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
   const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
   const continuationFixture=continuationDomains===undefined && migrationProfile===NEXT_MIGRATION_PROFILE ? {source:0,parameterComplete:0,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:0,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}} : continuationDomains;
-  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: accountFixture ? {"1":"delta"} : {}, files: fileEntries,
+  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: accountFixture || orderFixture ? {"1":"delta"} : {}, files: fileEntries,
     ...(continuationFixture?{domains:{continuations:continuationFixture}}:{}),
     ...(identityProfiles && refundPolicy ? { refundRelationshipPolicy: LEGACY_REFUND_RELATIONSHIP_POLICY } : {}),
     ...(selectedFixture ? { source: path.join(restricted, "fixture-source"), sourceReceiptSha256: "a".repeat(64) } : {}),
@@ -177,6 +179,9 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
         await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; },
       systemAccountMigrationId(source,target) { return "synthetic-account-system-" + sha(JSON.stringify([source,target])); },
       async withSystemAccountMigrationBatch(c,acting,body) { commands.push("SYSTEM_ACCOUNT_BATCH");await acting.assertMigrationFence(c);
+        const result=await body();await acting.assertMigrationFence(c);return result; },
+      systemOrderMigrationId(source,target) { return "synthetic-order-system-" + sha(JSON.stringify([source,target])); },
+      async withSystemOrderMigrationBatch(c,acting,body) { commands.push("SYSTEM_ORDER_BATCH");await acting.assertMigrationFence(c);
         const result=await body();await acting.assertMigrationFence(c);return result; } },
     "legacy-load/legacy-account-seam": { legacyAccountId(_system,_entity,id) { return "synthetic-account-"+id; },
       async createLegacyOwnerRentalAccount(_c,input,acting) {const accountId="synthetic-account-"+input.legacyId;
@@ -192,6 +197,11 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       async recordLegacyReadSnapshot(_c,accountId,input,acting) {await acting.assertSourceEvidence({operation:"SNAPSHOT",accountId,
         sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,
         payloadDigest:modules["supply/legacy-listing-read"].legacyReadSnapshotMigrationDigest(input)});commands.push("SYNTHETIC_ACCOUNT_SNAPSHOT");} },
+    "order/legacy-order-read": {normalizeLegacyOrderReadInput(input){return {id:"synthetic-order-"+input.source.legacyId,bindingDigest:sha(JSON.stringify(input))};},
+      async importLegacyOrderRead(_c,input,acting){const normalized=modules["order/legacy-order-read"].normalizeLegacyOrderReadInput(input);
+        await acting.assertSourceEvidence({orderId:normalized.id,legacyId:input.source.legacyId,sourceDigest:input.source.digest,
+          bindingDigest:failure==="order-source-mismatch" ? "0".repeat(64) : normalized.bindingDigest});
+        commands.push("SYNTHETIC_ORDER_IMPORT");return {orderId:normalized.id,replayed:false};} },
     "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, async migrateLegacyOwner(_client, row, acting) {
       if (migrationProfile === NEXT_MIGRATION_PROFILE) { assert.equal(acting.kind,"SYSTEM_USER_MIGRATION");
         await acting.assertSourceEvidence({sourceSystem:row.evidence.sourceSystem,sourceEntity:row.evidence.sourceEntity,legacyId:row.evidence.legacyId,sourceDigest:row.evidence.sourceDigest,evidenceDigest:row.evidenceDigest}); commands.push("SYNTHETIC_MIGRATE_USER"); }
@@ -348,16 +358,31 @@ test('NEXT account batch binds the source and system actor before all three acco
   assert.equal(rejected.state.phases.accounts.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ACCOUNT_CREATE'));
 });
 
+test('NEXT order batch binds the complete source and target before import', async () => {
+  const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
+    fenceFixture:true,accountFixture:true,orderFixture:true};
+  const applied=await load(options);assert.ifError(applied.error);assert.equal(applied.exit,undefined);
+  assert.match(applied.state.binding.systemOrderId,/^synthetic-order-system-/);
+  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_SNAPSHOT')<applied.commands.indexOf('SYSTEM_ORDER_BATCH'));
+  assert(applied.commands.indexOf('SYSTEM_ORDER_BATCH')<applied.commands.indexOf('SYNTHETIC_ORDER_IMPORT'));
+  assert.equal(applied.state.phases.orders.nextIndex,1);
+  const rejected=await load({...options,failure:'order-source-mismatch'});assert.equal(rejected.exit,1);
+  assert.match(rejected.state.error.message,/LEGACY_SYSTEM_ORDER_SOURCE_NOT_ADMITTED/);
+  assert.equal(rejected.state.phases.orders.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ORDER_IMPORT'));
+});
+
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
   const options = { instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, verifiedFirst:true };
   const failed = await load({ ...options, failure:'lost-commit', exitAfterUsers:true });
   assert.equal(failed.state.status, 'COMMIT_UNKNOWN'); assert.match(failed.state.binding.systemUserId, /^synthetic-system-/);
   assert.match(failed.state.binding.systemAccountId, /^synthetic-account-system-/);
+  assert.match(failed.state.binding.systemOrderId, /^synthetic-order-system-/);
   const recovered = await load({ ...options, previous:failed, recover:true });
   assert.ifError(recovered.error); assert.equal(recovered.exit, undefined);
   const receipt = JSON.parse([...recovered.files].find(([file]) => file.startsWith(path.join(out, 'recovery-')))[1]);
   assert.equal(receipt.binding.systemUserId, failed.state.binding.systemUserId); assert.equal(receipt.knowledge, 'EXACT_PENDING_KEYS_REQUIRE_INSPECTION');
   assert.equal(receipt.binding.systemAccountId, failed.state.binding.systemAccountId);
+  assert.equal(receipt.binding.systemOrderId, failed.state.binding.systemOrderId);
   assert(!recovered.commands.includes('SYNTHETIC_MIGRATE_USER')); assert(!recovered.commands.includes('COMMIT'));
 });
 

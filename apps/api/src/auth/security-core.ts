@@ -60,12 +60,15 @@ export async function recordAudit(
     details?: Record<string, unknown>;
     legacyUserMigrationManifestSha256?: string;
     legacyAccountMigrationManifestSha256?: string;
+    legacyOrderMigrationManifestSha256?: string;
   },
 ): Promise<void> {
-  if (values.legacyUserMigrationManifestSha256 !== undefined && values.legacyAccountMigrationManifestSha256 !== undefined)
+  const sources = [values.legacyUserMigrationManifestSha256,values.legacyAccountMigrationManifestSha256,values.legacyOrderMigrationManifestSha256].filter(value => value !== undefined);
+  if (sources.length > 1)
     throw new Error("Only one legacy migration source is allowed");
-  const migrationSource = values.legacyUserMigrationManifestSha256 ?? values.legacyAccountMigrationManifestSha256;
-  const sourceColumn = values.legacyUserMigrationManifestSha256 !== undefined ? '"legacy_user_migration_manifest_sha256"' : '"legacy_account_migration_manifest_sha256"';
+  const migrationSource = sources[0];
+  const sourceColumn = values.legacyUserMigrationManifestSha256 !== undefined ? '"legacy_user_migration_manifest_sha256"'
+    : values.legacyAccountMigrationManifestSha256 !== undefined ? '"legacy_account_migration_manifest_sha256"' : '"legacy_order_migration_manifest_sha256"';
   await client.query(
     `INSERT INTO "zzsh_iam"."audit_event"
       ("id", "actor_type", "actor_id", "session_id", "action", "object_type", "object_id", "outcome", "request_id", "reason", "occurred_at", "details"${migrationSource === undefined ? "" : `, ${sourceColumn}`})

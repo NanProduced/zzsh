@@ -4,6 +4,7 @@ import { loadEffectiveAdminAccess, requirePermission } from "../auth/admin-autho
 import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
+import { authorizeSystemOrderMigration, type SystemOrderMigrationActor } from "../legacy-load/system-user-migration";
 import { assertGameScope, conflict, ensureOnlyFields, fingerprintRequest, invalid, sha256Hex, withIdempotency } from "../supply/supply-util";
 import type { SettlementStage, SettlementStageCode } from "./settlement-record";
 
@@ -115,14 +116,20 @@ export function legacyAccountMetricSource(input: LegacyOrderReadInput) {
 }
 
 /** Caller owns the transaction. No public import route or transaction engine. */
-export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrderReadInput, actor: { id: string; sessionId: string; requestId: string }) {
+export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrderReadInput,
+  actor: { id: string; sessionId: string; requestId: string } | SystemOrderMigrationActor) {
   const normalized = normalizeLegacyOrderReadInput(input), operation = "order.legacy.read-import";
-  const result = await withIdempotency(client, { realm: "admin", principalId: actor.id, operation },
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_ORDER_MIGRATION" ? actor : null;
+  const result = await withIdempotency(client, { realm: systemActor ? "system" : "admin", principalId: actor.id, operation },
     sha256Hex(JSON.stringify(["legacy_mysql_restore", "la_order", input.source.legacyId])), fingerprintRequest(operation, normalized.id, input), async () => {
-      await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
-      const access = await loadEffectiveAdminAccess(client, actor.id);
-      requirePermission(access, "supply.catalog.manage"); requirePermission(access, "order.read");
-      await assertGameScope(client, actor.id, access?.isBoss === true, input.account.gameId);
+      if (systemActor) await authorizeSystemOrderMigration(client,systemActor,{orderId:normalized.id,legacyId:input.source.legacyId,
+        sourceDigest:input.source.digest,bindingDigest:normalized.bindingDigest});
+      else {
+        await assertAdminContextInTransaction(client, { userId: actor.id, sessionId: (actor as {sessionId:string}).sessionId });
+        const access = await loadEffectiveAdminAccess(client, actor.id);
+        requirePermission(access, "supply.catalog.manage"); requirePermission(access, "order.read");
+        await assertGameScope(client, actor.id, access?.isBoss === true, input.account.gameId);
+      }
     }, async () => {
       await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [(BigInt(`0x${sha256Hex(normalized.id).slice(0, 15)}`)).toString()]);
       const existing = (await client.query<{ id: string; digest: string }>("SELECT id,binding_digest AS digest FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=$1", [input.source.legacyId])).rows[0];
@@ -135,13 +142,20 @@ export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrd
         (id,source_system,source_entity,legacy_id,source_digest,evidence_ref,original_order_no,account_id,game_id,owner_user_id,renter_user_id,
          legacy_account_id,legacy_account_entity,legacy_account_source_digest,legacy_account_no,legacy_owner_id,legacy_owner_no,owner_source_digest,
          legacy_renter_id,legacy_renter_no,renter_source_digest,source_order_status,source_pay_status,source_created_at,source_paid_at,source_cancelled_at,source_completed_at,
-         due_amount_cents,recorded_paid_amount_cents,deposit_amount_cents,source_snapshot,snapshot_schema_version,binding_digest,created_by_admin_id)
-        VALUES($1,'legacy_mysql_restore','la_order',$2,$3,$4,$5,$6,$7,$8,$9,$10,'la_rental_accounts',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::jsonb,1,$29,$30)`,
+         due_amount_cents,recorded_paid_amount_cents,deposit_amount_cents,source_snapshot,snapshot_schema_version,binding_digest,created_by_admin_id${systemActor ? ",created_by_migration_id,migration_manifest_sha256" : ""})
+        VALUES($1,'legacy_mysql_restore','la_order',$2,$3,$4,$5,$6,$7,$8,$9,$10,'la_rental_accounts',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28::jsonb,1,$29,$30${systemActor ? ",$31,$32" : ""})`,
       [normalized.id,input.source.legacyId,input.source.digest,input.source.evidenceRef,r.order_sn,input.account.accountId,input.account.gameId,input.owner.userId,input.renter.userId,
         input.account.legacyId,input.account.sourceDigest,input.account.businessNo,input.owner.legacyId,input.owner.businessNo,input.owner.sourceDigest,input.renter.legacyId,input.renter.businessNo,input.renter.sourceDigest,
-        Number(r.order_status),Number(r.pay_is),normalized.createdAt,normalized.paidAt,normalized.cancelledAt,normalized.completedAt,normalized.dueCents,normalized.paidCents,normalized.depositCents,JSON.stringify(r),normalized.bindingDigest,actor.id]);
+        Number(r.order_status),Number(r.pay_is),normalized.createdAt,normalized.paidAt,normalized.cancelledAt,normalized.completedAt,normalized.dueCents,normalized.paidCents,normalized.depositCents,JSON.stringify(r),normalized.bindingDigest,systemActor ? null : actor.id,
+        ...(systemActor ? [systemActor.id,systemActor.sourceDatasetSha256] : [])]);
       const accountMetricSource = legacyAccountMetricSource(input);
-      await recordAudit(client, { actorType: "admin", actorId: actor.id, sessionId: actor.sessionId, requestId: actor.requestId, action: "order.legacy.read_imported", objectType: "rental_order", objectId: normalized.id, outcome: "SUCCESS", details: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_order", legacyId: input.source.legacyId, sourceDigest: input.source.digest, bindingDigest: normalized.bindingDigest, ruleOrigin: "LEGACY_ORDER", result: "IMPORTED", ...(accountMetricSource ? { accountMetricSource } : {}) } });
+      await recordAudit(client, { actorType: systemActor ? "system" : "admin", actorId: actor.id,
+        ...(systemActor ? {legacyOrderMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
+        requestId: actor.requestId, action: "order.legacy.read_imported", objectType: "rental_order", objectId: normalized.id, outcome: "SUCCESS",
+        details: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_order", legacyId: input.source.legacyId, sourceDigest: input.source.digest,
+          bindingDigest: normalized.bindingDigest, ...(systemActor ? {sourceDatasetSha256:systemActor.sourceDatasetSha256,
+            migrationRunDigest:systemActor.id.slice("legacy-order-migration:".length)} : {}),
+          ruleOrigin: "LEGACY_ORDER", result: "IMPORTED", ...(accountMetricSource ? { accountMetricSource } : {}) } });
       return { status: 200, body: { orderId: normalized.id } };
     });
   return { ...result.body as { orderId: string }, replayed: result.replayed };

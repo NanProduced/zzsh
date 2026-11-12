@@ -6,6 +6,7 @@ type MigrationTarget = Readonly<{ systemIdentifier: string; databaseOid: string;
 type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; evidenceDigest: string }>;
 export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
+export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
 
 export function systemUserMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
   if (typeof sourceDatasetSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceDatasetSha256) || !target
@@ -43,13 +44,29 @@ export function systemAccountMigrationId(sourceDatasetSha256: string, target: Mi
   return `legacy-account-migration:${createHash("sha256").update(userId).digest("hex")}`;
 }
 
-type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor;
+export type SystemOrderMigrationActor = Readonly<{
+  kind: "SYSTEM_ORDER_MIGRATION";
+  id: string;
+  requestId: string;
+  sourceDatasetSha256: string;
+  target: MigrationTarget;
+  assertMigrationFence: (client: PoolClient) => Promise<void>;
+  assertSourceEvidence: (source: OrderSource) => Promise<void>;
+}>;
+
+export function systemOrderMigrationId(sourceDatasetSha256: string, target: MigrationTarget): string {
+  const userId = systemUserMigrationId(sourceDatasetSha256, target);
+  return `legacy-order-migration:${createHash("sha256").update(userId).digest("hex")}`;
+}
+
+type SystemMigrationActor = SystemUserMigrationActor | SystemAccountMigrationActor | SystemOrderMigrationActor;
 const activeBatches = new WeakMap<PoolClient, { actor: SystemMigrationActor; transactionId: string | null;
   fence: SystemMigrationActor["assertMigrationFence"]; source: SystemMigrationActor["assertSourceEvidence"]; binding: string }>();
 
 function expectedActorId(actor: SystemMigrationActor): string {
   if (actor.kind === "SYSTEM_USER_MIGRATION") return systemUserMigrationId(actor.sourceDatasetSha256, actor.target);
   if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION") return systemAccountMigrationId(actor.sourceDatasetSha256, actor.target);
+  if (actor.kind === "SYSTEM_ORDER_MIGRATION") return systemOrderMigrationId(actor.sourceDatasetSha256, actor.target);
   throw forbidden("Legacy system migration kind is invalid");
 }
 function actorBinding(actor: SystemMigrationActor): string {
@@ -87,7 +104,7 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
       JOIN pg_database d ON d.datname=current_database() WHERE r.rolname=current_user`,
     [actor.target.roleOid, actor.target.databaseOid, actor.target.marker, actor.target.nonce, actor.target.systemIdentifier])).rows[0];
   if (row?.authorized !== true) throw forbidden("Legacy system migration requires the protected migration role");
-  if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION") {
+  if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION" || actor.kind === "SYSTEM_ORDER_MIGRATION") {
     const accountGuard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(
       (SELECT count(*)=4 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.rental_account'),
         to_regclass('zzsh_supply.listing_version'),to_regclass('zzsh_supply.legacy_supply_map'),
@@ -118,6 +135,33 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
       JOIN pg_class s ON s.oid=to_regclass('zzsh_supply.legacy_listing_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
     if (accountGuard?.authorized !== true) throw forbidden("Legacy system account migration requires protected source guards");
   }
+  if (actor.kind === "SYSTEM_ORDER_MIGRATION") {
+    const orderGuard = (await client.query<{authorized:boolean}>(`SELECT COALESCE(o.relowner=r.oid
+      AND EXISTS (SELECT 1 FROM pg_attribute c WHERE c.attrelid=a.oid AND c.attname='legacy_order_migration_manifest_sha256' AND NOT c.attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=o.oid AND c.conname='legacy_order_migration_source' AND c.convalidated
+        AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
+      AND NOT EXISTS (SELECT 1 FROM (VALUES
+        (a.oid,'legacy_system_order_audit_insert',7,'zzsh_iam.guard_legacy_system_order_audit()','(new.legacy_order_migration_manifest_sha256 IS NOT NULL)'),
+        (a.oid,'legacy_system_order_audit_update',19,'zzsh_iam.guard_legacy_system_order_audit()','((old.legacy_order_migration_manifest_sha256 IS NOT NULL) OR (new.legacy_order_migration_manifest_sha256 IS NOT NULL))'),
+        (a.oid,'legacy_system_order_audit_delete',11,'zzsh_iam.guard_legacy_system_order_audit()','(old.legacy_order_migration_manifest_sha256 IS NOT NULL)'),
+        (o.oid,'legacy_system_order_insert',7,'zzsh_order.guard_legacy_system_order()','(new.created_by_migration_id IS NOT NULL)'),
+        (o.oid,'legacy_order_read_binding',7,'zzsh_order.guard_legacy_order_read_binding()',NULL),
+        (o.oid,'legacy_order_read_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
+        (o.oid,'legacy_order_read_audit',5,'zzsh_order.check_legacy_order_read_audit()',NULL)
+      ) required(relation,name,kind,fn,qualification) WHERE NOT EXISTS (
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation
+          AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
+          AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
+          AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
+          AND (required.fn<>'zzsh_iam.guard_legacy_system_order_audit()' OR
+            (position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-order-migration:' IN p.prosrc)>0))
+          AND (required.fn<>'zzsh_order.guard_legacy_system_order()' OR position('current_user<>session_user' IN p.prosrc)>0)
+          AND (required.fn<>'zzsh_order.check_legacy_order_read_audit()' OR
+            (t.tgdeferrable AND t.tginitdeferred AND position('legacy_order_migration_manifest_sha256' IN p.prosrc)>0))))
+      ,false) AS authorized FROM pg_roles r JOIN pg_class a ON a.oid=to_regclass('zzsh_iam.audit_event')
+      JOIN pg_class o ON o.oid=to_regclass('zzsh_order.legacy_order_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
+    if (orderGuard?.authorized !== true) throw forbidden("Legacy system order migration requires protected source guards");
+  }
   return row.transactionId;
 }
 
@@ -147,6 +191,10 @@ export function withSystemAccountMigrationBatch<T>(client: PoolClient, actor: Sy
   if (actor.kind !== "SYSTEM_ACCOUNT_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   return withSystemMigrationBatch(client, actor, work);
 }
+export function withSystemOrderMigrationBatch<T>(client: PoolClient, actor: SystemOrderMigrationActor, work: () => Promise<T>): Promise<T> {
+  if (actor.kind !== "SYSTEM_ORDER_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  return withSystemMigrationBatch(client, actor, work);
+}
 
 async function authorizeSystemMigration(client: PoolClient, actor: SystemMigrationActor, validateSource: () => Promise<void>): Promise<void> {
   const batch = activeBatches.get(client);
@@ -174,5 +222,13 @@ export function authorizeSystemAccountMigration(client: PoolClient, actor: Syste
       || !/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.accountId !== expectedAccountId
       || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.payloadDigest))
     throw forbidden("Legacy system account source is invalid");
+  return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
+}
+export function authorizeSystemOrderMigration(client: PoolClient, actor: SystemOrderMigrationActor, source: OrderSource): Promise<void> {
+  if (actor.kind !== "SYSTEM_ORDER_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
+  const expectedOrderId = `legacy_order_${createHash("sha256").update(JSON.stringify(["legacy_mysql_restore", "la_order", source.legacyId])).digest("hex").slice(0,40)}`;
+  if (!/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.orderId !== expectedOrderId
+      || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.bindingDigest))
+    throw forbidden("Legacy system order source is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
 }
