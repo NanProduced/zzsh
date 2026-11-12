@@ -86,18 +86,19 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
     AND r.oid::text=$1 AND d.oid::text=$2 AND shobj_description(d.oid,'pg_database')=$3
     AND current_setting('zzsh.regression_run',true)=$4 AND (SELECT system_identifier::text FROM pg_control_system())=$5
     AND r.oid=a.relowner AND r.oid=u.relowner AND current_setting('session_replication_role')='origin'
-    AND EXISTS (SELECT 1 FROM pg_attribute c WHERE c.attrelid=a.oid AND c.attname='legacy_user_migration_manifest_sha256' AND NOT c.attisdropped)
+    AND EXISTS (SELECT 1 FROM pg_attribute c WHERE c.attrelid=a.oid AND c.attname='legacy_migration_manifest_sha256' AND NOT c.attisdropped)
     AND NOT EXISTS (SELECT 1 FROM (VALUES
-      ('legacy_system_user_audit_insert',7,'(new.legacy_user_migration_manifest_sha256 IS NOT NULL)'),
-      ('legacy_system_user_audit_update',19,'((old.legacy_user_migration_manifest_sha256 IS NOT NULL) OR (new.legacy_user_migration_manifest_sha256 IS NOT NULL))'),
-      ('legacy_system_user_audit_delete',11,'(old.legacy_user_migration_manifest_sha256 IS NOT NULL)')
+      ('legacy_system_audit_insert',7,'(new.legacy_migration_manifest_sha256 IS NOT NULL)'),
+      ('legacy_system_audit_update',19,'((old.legacy_migration_manifest_sha256 IS NOT NULL) OR (new.legacy_migration_manifest_sha256 IS NOT NULL))'),
+      ('legacy_system_audit_delete',11,'(old.legacy_migration_manifest_sha256 IS NOT NULL)')
     ) required(name,kind,qualification)
       WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
         WHERE t.tgrelid=a.oid AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
           AND t.tgtype=required.kind::smallint
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
-          AND p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_user_audit()') AND p.proowner=a.relowner AND NOT p.prosecdef
+          AND p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()') AND p.proowner=a.relowner AND NOT p.prosecdef
           AND position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-user-migration:' IN p.prosrc)>0
+          AND position('legacy-account-migration:' IN p.prosrc)>0 AND position('legacy-order-migration:' IN p.prosrc)>0
           AND position('initialAvatar,presetId' IN p.prosrc)>0 AND position('zzsh_supply.profile_avatar' IN p.prosrc)>0))
     ,false) AS authorized
     FROM pg_roles r JOIN pg_class a ON a.oid=to_regclass('zzsh_iam.audit_event')
@@ -110,13 +111,9 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
       (SELECT count(*)=4 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.rental_account'),
         to_regclass('zzsh_supply.listing_version'),to_regclass('zzsh_supply.legacy_supply_map'),
         to_regclass('zzsh_supply.legacy_listing_read_snapshot')) AND c.relowner=r.oid)
-      AND EXISTS (SELECT 1 FROM pg_attribute c WHERE c.attrelid=a.oid AND c.attname='legacy_account_migration_manifest_sha256' AND NOT c.attisdropped)
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=s.oid AND c.conname='legacy_snapshot_migration_source' AND c.convalidated
         AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
       AND NOT EXISTS (SELECT 1 FROM (VALUES
-        (a.oid,'legacy_system_account_audit_insert',7,'zzsh_iam.guard_legacy_system_account_audit()','(new.legacy_account_migration_manifest_sha256 IS NOT NULL)'),
-        (a.oid,'legacy_system_account_audit_update',19,'zzsh_iam.guard_legacy_system_account_audit()','((old.legacy_account_migration_manifest_sha256 IS NOT NULL) OR (new.legacy_account_migration_manifest_sha256 IS NOT NULL))'),
-        (a.oid,'legacy_system_account_audit_delete',11,'zzsh_iam.guard_legacy_system_account_audit()','(old.legacy_account_migration_manifest_sha256 IS NOT NULL)'),
         (s.oid,'legacy_system_snapshot_insert',7,'zzsh_supply.guard_legacy_system_snapshot()','(new.created_by_migration_id IS NOT NULL)'),
         (s.oid,'legacy_system_snapshot_audit',5,'zzsh_supply.guard_legacy_system_snapshot_audit()','(new.created_by_migration_id IS NOT NULL)'),
         (s.oid,'legacy_read_snapshot_insert',7,'zzsh_supply.guard_legacy_read_snapshot()',NULL),
@@ -127,24 +124,17 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
           AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A')
           AND t.tgtype=required.kind::smallint AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
-          AND (required.fn<>'zzsh_iam.guard_legacy_system_account_audit()' OR
-            (position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-account-migration:' IN p.prosrc)>0))
           AND (required.fn<>'zzsh_supply.guard_legacy_system_snapshot()' OR position('current_user<>session_user' IN p.prosrc)>0)
-          AND (required.fn<>'zzsh_supply.guard_legacy_system_snapshot_audit()' OR position('legacy_account_migration_manifest_sha256' IN p.prosrc)>0)
+          AND (required.fn<>'zzsh_supply.guard_legacy_system_snapshot_audit()' OR position('legacy_migration_manifest_sha256' IN p.prosrc)>0)
           AND (required.name<>'legacy_system_snapshot_audit' OR (t.tgdeferrable AND t.tginitdeferred))))
-      ,false) AS authorized FROM pg_roles r JOIN pg_class a ON a.oid=to_regclass('zzsh_iam.audit_event')
-      JOIN pg_class s ON s.oid=to_regclass('zzsh_supply.legacy_listing_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
+      ,false) AS authorized FROM pg_roles r JOIN pg_class s ON s.oid=to_regclass('zzsh_supply.legacy_listing_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
     if (accountGuard?.authorized !== true) throw forbidden("Legacy system account migration requires protected source guards");
   }
   if (actor.kind === "SYSTEM_ORDER_MIGRATION") {
     const orderGuard = (await client.query<{authorized:boolean}>(`SELECT COALESCE(o.relowner=r.oid
-      AND EXISTS (SELECT 1 FROM pg_attribute c WHERE c.attrelid=a.oid AND c.attname='legacy_order_migration_manifest_sha256' AND NOT c.attisdropped)
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=o.oid AND c.conname='legacy_order_migration_source' AND c.convalidated
         AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
       AND NOT EXISTS (SELECT 1 FROM (VALUES
-        (a.oid,'legacy_system_order_audit_insert',7,'zzsh_iam.guard_legacy_system_order_audit()','(new.legacy_order_migration_manifest_sha256 IS NOT NULL)'),
-        (a.oid,'legacy_system_order_audit_update',19,'zzsh_iam.guard_legacy_system_order_audit()','((old.legacy_order_migration_manifest_sha256 IS NOT NULL) OR (new.legacy_order_migration_manifest_sha256 IS NOT NULL))'),
-        (a.oid,'legacy_system_order_audit_delete',11,'zzsh_iam.guard_legacy_system_order_audit()','(old.legacy_order_migration_manifest_sha256 IS NOT NULL)'),
         (o.oid,'legacy_system_order_insert',7,'zzsh_order.guard_legacy_system_order()','(new.created_by_migration_id IS NOT NULL)'),
         (o.oid,'legacy_order_read_binding',7,'zzsh_order.guard_legacy_order_read_binding()',NULL),
         (o.oid,'legacy_order_read_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
@@ -154,13 +144,10 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor): Pro
           AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
           AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
-          AND (required.fn<>'zzsh_iam.guard_legacy_system_order_audit()' OR
-            (position('current_user<>session_user' IN p.prosrc)>0 AND position('legacy-order-migration:' IN p.prosrc)>0))
           AND (required.fn<>'zzsh_order.guard_legacy_system_order()' OR position('current_user<>session_user' IN p.prosrc)>0)
           AND (required.fn<>'zzsh_order.check_legacy_order_read_audit()' OR
-            (t.tgdeferrable AND t.tginitdeferred AND position('legacy_order_migration_manifest_sha256' IN p.prosrc)>0))))
-      ,false) AS authorized FROM pg_roles r JOIN pg_class a ON a.oid=to_regclass('zzsh_iam.audit_event')
-      JOIN pg_class o ON o.oid=to_regclass('zzsh_order.legacy_order_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
+            (t.tgdeferrable AND t.tginitdeferred AND position('legacy_migration_manifest_sha256' IN p.prosrc)>0))))
+      ,false) AS authorized FROM pg_roles r JOIN pg_class o ON o.oid=to_regclass('zzsh_order.legacy_order_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
     if (orderGuard?.authorized !== true) throw forbidden("Legacy system order migration requires protected source guards");
   }
   return row.transactionId;

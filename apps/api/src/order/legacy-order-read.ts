@@ -150,7 +150,7 @@ export async function importLegacyOrderRead(client: PoolClient, input: LegacyOrd
         ...(systemActor ? [systemActor.id,systemActor.sourceDatasetSha256] : [])]);
       const accountMetricSource = legacyAccountMetricSource(input);
       await recordAudit(client, { actorType: systemActor ? "system" : "admin", actorId: actor.id,
-        ...(systemActor ? {legacyOrderMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
+        ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
         requestId: actor.requestId, action: "order.legacy.read_imported", objectType: "rental_order", objectId: normalized.id, outcome: "SUCCESS",
         details: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_order", legacyId: input.source.legacyId, sourceDigest: input.source.digest,
           bindingDigest: normalized.bindingDigest, ...(systemActor ? {sourceDatasetSha256:systemActor.sourceDatasetSha256,

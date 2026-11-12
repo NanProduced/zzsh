@@ -12,8 +12,8 @@ export type LegacyNumberLoginTarget = Readonly<{ userId: string; username: strin
 // The system marker is owner-written; old databases and administrator imports retain their original path.
 const TRUSTED_LEGACY_USER_SOURCE = `(e.actor_type='admin' OR (e.actor_type='system' AND e.session_id IS NULL
   AND e.action='user.legacy_owner.migrated'
-  AND to_jsonb(e)->>'legacy_user_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
-  AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_user_migration_manifest_sha256'
+  AND to_jsonb(e)->>'legacy_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
+  AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_migration_manifest_sha256'
   AND e.details->>'migrationRunDigest' ~ '^[a-f0-9]{64}$'
   AND e.actor_id='legacy-user-migration:'||(e.details->>'migrationRunDigest')))`;
 

@@ -104,7 +104,7 @@ class FakeClient {
   async query<T = Record<string, unknown>>(text: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
     const sql = text.replace(/\s+/g, " ").trim();
     this.queries.push(sql);
-    if (sql.includes("legacy_system_user_audit_insert"))
+    if (sql.includes("legacy_system_audit_insert"))
       return { rows: [{ authorized: this.systemMigrationAuthorized, transactionId: this.systemTransactionId } as T], rowCount: 1 };
     if (sql.startsWith("SELECT pg_current_xact_id()"))
       return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true } as T], rowCount: 1 };

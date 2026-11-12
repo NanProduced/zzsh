@@ -101,8 +101,8 @@ export async function createLegacyOwnerRentalAccount(
                       AND e.details->>'sourceSystem'=$2 AND e.details->>'sourceEntity'='la_user'
                       AND e.details->>'legacyId'=$3 AND e.details->>'sourceDigest'=$4
                       AND (e.actor_type='admin' OR (e.actor_type='system' AND e.session_id IS NULL
-                        AND to_jsonb(e)->>'legacy_user_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
-                        AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_user_migration_manifest_sha256'
+                        AND to_jsonb(e)->>'legacy_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
+                        AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_migration_manifest_sha256'
                         AND e.details->>'migrationRunDigest' ~ '^[a-f0-9]{64}$'
                         AND e.actor_id='legacy-user-migration:'||(e.details->>'migrationRunDigest')))) AS migration_proven
              FROM zzsh_auth_user."user" u
@@ -138,7 +138,7 @@ export async function createLegacyOwnerRentalAccount(
       await recordAudit(client, {
         actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        ...(systemActor ? {legacyAccountMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyAccountCreationActor).sessionId}),
+        ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyAccountCreationActor).sessionId}),
         requestId: actor.requestId,
         action: "supply.legacy.account_created",
         objectType: "rental_account",

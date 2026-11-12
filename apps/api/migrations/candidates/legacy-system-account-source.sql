@@ -1,42 +1,4 @@
--- Candidate only: record system imports without claiming an administrator operated them.
-ALTER TABLE zzsh_iam.audit_event ADD COLUMN legacy_account_migration_manifest_sha256 text
-  CHECK (legacy_account_migration_manifest_sha256 ~ '^[a-f0-9]{64}$');
-
-CREATE FUNCTION zzsh_iam.guard_legacy_system_account_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE owner_oid oid; actor_role record;
-BEGIN
-  IF TG_OP <> 'INSERT' THEN
-    RAISE EXCEPTION 'system account migration source is immutable' USING ERRCODE='40001';
-  END IF;
-  SELECT relowner INTO owner_oid FROM pg_class WHERE oid=TG_RELID;
-  SELECT oid,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls INTO actor_role FROM pg_roles WHERE rolname=current_user;
-  IF actor_role.oid IS DISTINCT FROM owner_oid OR current_user<>session_user
-     OR actor_role.rolsuper OR actor_role.rolcreatedb OR actor_role.rolcreaterole OR actor_role.rolbypassrls
-     OR NEW.actor_type IS DISTINCT FROM 'system' OR NEW.session_id IS NOT NULL
-     OR NEW.action NOT IN ('supply.legacy.account_created','supply.publication.legacy_observed','supply.legacy.read_snapshot_recorded')
-     OR NEW.object_type IS DISTINCT FROM 'rental_account' OR NEW.object_id IS NULL OR NEW.outcome IS DISTINCT FROM 'SUCCESS'
-     OR COALESCE(NEW.details->>'migrationRunDigest','') !~ '^[a-f0-9]{64}$'
-     OR NEW.actor_id IS DISTINCT FROM 'legacy-account-migration:'||(NEW.details->>'migrationRunDigest')
-     OR NEW.details->>'sourceDatasetSha256' IS DISTINCT FROM NEW.legacy_account_migration_manifest_sha256
-     OR NEW.details->>'sourceSystem' IS DISTINCT FROM 'legacy_mysql_restore'
-     OR NEW.details->>'sourceEntity' IS DISTINCT FROM 'la_rental_accounts'
-     OR COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
-     OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$'
-     OR COALESCE(NEW.details->>'payloadDigest','') !~ '^[a-f0-9]{64}$' THEN
-    RAISE EXCEPTION 'legacy system account source requires the migration owner' USING ERRCODE='42501';
-  END IF;
-  RETURN NEW;
-END $$;
-CREATE TRIGGER legacy_system_account_audit_insert BEFORE INSERT ON zzsh_iam.audit_event
-  FOR EACH ROW WHEN (NEW.legacy_account_migration_manifest_sha256 IS NOT NULL)
-  EXECUTE FUNCTION zzsh_iam.guard_legacy_system_account_audit();
-CREATE TRIGGER legacy_system_account_audit_update BEFORE UPDATE ON zzsh_iam.audit_event
-  FOR EACH ROW WHEN (OLD.legacy_account_migration_manifest_sha256 IS NOT NULL OR NEW.legacy_account_migration_manifest_sha256 IS NOT NULL)
-  EXECUTE FUNCTION zzsh_iam.guard_legacy_system_account_audit();
-CREATE TRIGGER legacy_system_account_audit_delete BEFORE DELETE ON zzsh_iam.audit_event
-  FOR EACH ROW WHEN (OLD.legacy_account_migration_manifest_sha256 IS NOT NULL)
-  EXECUTE FUNCTION zzsh_iam.guard_legacy_system_account_audit();
-
+-- Candidate only; apply after legacy-system-source.sql.
 ALTER TABLE zzsh_supply.legacy_listing_read_snapshot
   ALTER COLUMN created_by_admin_id DROP NOT NULL,
   ADD COLUMN created_by_migration_id text,
@@ -66,7 +28,7 @@ BEGIN
     WHERE a.actor_type='system' AND a.actor_id=NEW.created_by_migration_id AND a.session_id IS NULL
       AND a.action='supply.legacy.read_snapshot_recorded' AND a.object_type='rental_account'
       AND a.object_id=NEW.account_id AND a.outcome='SUCCESS'
-      AND a.legacy_account_migration_manifest_sha256=NEW.migration_manifest_sha256
+      AND a.legacy_migration_manifest_sha256=NEW.migration_manifest_sha256
       AND a.details->>'sourceSystem'=NEW.source_system AND a.details->>'sourceEntity'=NEW.source_entity
       AND a.details->>'legacyId'=NEW.legacy_id AND a.details->>'sourceDigest'=NEW.source_digest
       AND a.details#>>'{after,observationVersionId}'=NEW.observation_version_id) THEN
@@ -77,8 +39,6 @@ END $$;
 CREATE CONSTRAINT TRIGGER legacy_system_snapshot_audit AFTER INSERT ON zzsh_supply.legacy_listing_read_snapshot
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.created_by_migration_id IS NOT NULL)
   EXECUTE FUNCTION zzsh_supply.guard_legacy_system_snapshot_audit();
-REVOKE ALL ON FUNCTION zzsh_iam.guard_legacy_system_account_audit(),
-  zzsh_supply.guard_legacy_system_snapshot(),zzsh_supply.guard_legacy_system_snapshot_audit() FROM PUBLIC;
-COMMENT ON COLUMN zzsh_iam.audit_event.legacy_account_migration_manifest_sha256 IS '旧账号系统迁移绑定的源数据集摘要；空值不表示系统来源。';
+REVOKE ALL ON FUNCTION zzsh_supply.guard_legacy_system_snapshot(),zzsh_supply.guard_legacy_system_snapshot_audit() FROM PUBLIC;
 COMMENT ON COLUMN zzsh_supply.legacy_listing_read_snapshot.created_by_migration_id IS '系统迁移执行身份；管理员导入时为空。';
 COMMENT ON COLUMN zzsh_supply.legacy_listing_read_snapshot.migration_manifest_sha256 IS '系统迁移的源数据集摘要；管理员导入时为空。';

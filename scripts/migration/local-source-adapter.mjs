@@ -333,9 +333,9 @@ function sourceBatchDigest(rows) {
 }
 
 const SYSTEM_AUDIT_DOMAINS = Object.freeze({
-    users: {objectType:"user", marker:"legacy_user_migration_manifest_sha256", actions:["user.legacy_owner.migrated"]},
-    accounts: {objectType:"rental_account", marker:"legacy_account_migration_manifest_sha256", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
-    orders: {objectType:"rental_order", marker:"legacy_order_migration_manifest_sha256", actions:["order.legacy.read_imported"]},
+    users: {objectType:"user", actions:["user.legacy_owner.migrated"]},
+    accounts: {objectType:"rental_account", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
+    orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
 });
 
 /** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
@@ -345,7 +345,7 @@ export async function readSystemMigrationAudits(query,domain,objectIds) {
         throw new Error("SYSTEM_MIGRATION_AUDIT_QUERY_INVALID");
     if(!objectIds.length)return new Map();
     const rows=(await query(`SELECT e.object_id,e.action,e.actor_type,e.actor_id,e.session_id,
-      to_jsonb(e)->>'${spec.marker}' AS source_manifest,e.details FROM zzsh_iam.audit_event e
+      to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest,e.details FROM zzsh_iam.audit_event e
       WHERE e.object_type=$1 AND e.outcome='SUCCESS' AND e.action=ANY($2::text[]) AND e.object_id=ANY($3::text[])`,
       [spec.objectType,spec.actions,[...new Set(objectIds)]])).rows;
     const grouped=new Map();for(const row of rows){const current=grouped.get(row.object_id)??[];current.push(row);grouped.set(row.object_id,current);}

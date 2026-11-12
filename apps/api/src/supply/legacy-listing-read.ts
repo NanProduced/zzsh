@@ -240,7 +240,7 @@ export async function recordLegacyReadSnapshot(client: PoolClient, accountId: st
   await client.query(`INSERT INTO zzsh_supply.legacy_listing_read_snapshot(account_id,observation_version_id,source_system,source_entity,legacy_id,source_digest,source_status,source_updated_at,evidence_ref,snapshot,created_by_admin_id${systemActor ? ",created_by_migration_id,migration_manifest_sha256" : ""})
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11${systemActor ? ",$12,$13" : ""})`, values);
   await recordAudit(client,{actorType:systemActor ? "system" : "admin",actorId:actor.id,
-    ...(systemActor ? {legacyAccountMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
+    ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as {sessionId:string}).sessionId}),
     requestId:actor.requestId,action:"supply.legacy.read_snapshot_recorded",objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"旧站账号资料与原始金额只读保存；不创建新平台发布或交易事实",details:{sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,
       ...(systemActor ? {sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-account-migration:".length),payloadDigest} : {}),
       sourceStatus:input.sourceStatus,readOnly:true,after:{readSnapshot:"RECORDED",observationVersionId:input.observationVersionId},result:"READ_SNAPSHOT_RECORDED"}});

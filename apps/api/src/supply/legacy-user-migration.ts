@@ -395,7 +395,7 @@ export async function migrateLegacyOwner(
       await recordAudit(client, {
         actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        ...(systemActor ? { legacyUserMigrationManifestSha256: systemActor.sourceDatasetSha256 } : { sessionId: (actor as LegacyOwnerMigrationActor).sessionId }),
+        ...(systemActor ? { legacyMigrationManifestSha256: systemActor.sourceDatasetSha256 } : { sessionId: (actor as LegacyOwnerMigrationActor).sessionId }),
         requestId: actor.requestId,
         action: "user.legacy_owner.migrated",
         objectType: "user",

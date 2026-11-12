@@ -638,7 +638,7 @@ export async function recordLegacyObservation(
       await recordAudit(client, {
         actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        ...(systemActor ? {legacyAccountMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyImportActor).sessionId}),
+        ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyImportActor).sessionId}),
         requestId: actor.requestId,
         action: "supply.publication.legacy_observed",
         objectType: "rental_account",
