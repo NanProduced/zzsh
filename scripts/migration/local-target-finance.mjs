@@ -21,6 +21,14 @@ export async function importEmptyCoverageChunk(module,client,actor,inputs,review
     const result=await (isNext ? module.importReviewedCompactEmptyFinanceObservationBatch : module.importReviewedEmptyFinanceObservationBatch)(client,actor,inputs,scope);
     return{...result.body,replayed:result.body.created===0};
 }
+export function readEmptyCoverageInputs(chunk, expectedHash) {
+    const bytes = readFileSync(chunk.file);
+    if (expectedHash !== null && (!/^[a-f0-9]{64}$/.test(expectedHash ?? "") || sha(bytes) !== expectedHash))
+        throw new Error("PREPARED_CHUNK_SHA_CHANGED");
+    const rows = JSON.parse(bytes);
+    if (!Array.isArray(rows) || rows.length !== chunk.rows) throw new Error("PREPARED_CHUNK_ROWS_CHANGED");
+    return rows.map(row => row.input);
+}
 function freezePhase(ctx, name, rows) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
     mkdirSync(dir); const file = join(dir, name + ".json"); const previous = ctx.state.generatedPhases[name]; if (previous) {
     const bytes = readFileSync(file);
@@ -67,12 +75,15 @@ export async function applyFinancialDomains(ctx) {
     // as it is complete, so a full-source round never holds one entry per subject and source kind.
     const emptyDir = join(ctx.output, "phases", "financeEmptyCoverage");
     if (!existsSync(emptyDir)) mkdirSync(emptyDir, { recursive: true });
-    const emptyDescriptors = [];
+    const emptyDescriptors = [], emptyContentHashes = new Map();
     const emitEmptyChunk = chunk => {
         const file = join(emptyDir, chunk.digest + ".json");
+        const content = JSON.stringify(chunk.entries), contentHash = sha(content);
+        if (ctx.isNextMigration && emptyContentHashes.has(chunk.digest)) throw new Error("PREPARED_CHUNK_DUPLICATE");
+        emptyContentHashes.set(chunk.digest, contentHash);
         if (existsSync(file)) {
-            if (sha(readFileSync(file)) !== sha(JSON.stringify(chunk.entries))) throw new Error("PREPARED_CHUNK_SHA_CHANGED");
-        } else writeFileSync(file, JSON.stringify(chunk.entries), { flag: "wx" });
+            if (sha(readFileSync(file)) !== contentHash) throw new Error("PREPARED_CHUNK_SHA_CHANGED");
+        } else writeFileSync(file, content, { flag: "wx" });
         emptyDescriptors.push({ sourceId: chunk.sourceId, digest: chunk.digest, rows: chunk.rows, domains: chunk.domains, file });
     };
     const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan({ ...ctx, emitEmptyChunk });
@@ -85,6 +96,8 @@ export async function applyFinancialDomains(ctx) {
         if (previous.digest !== fundsPlan.emptyCoverage.digest || previous.rows !== fundsPlan.emptyCoverage.rows)
             throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         assertEmptyCoverageReceiptMode(previous,ctx.isNextMigration);
+        if (ctx.isNextMigration && JSON.stringify(previous.chunks) !== JSON.stringify(emptyDescriptors))
+            throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         for (const chunk of previous.chunks) if (!existsSync(chunk.file)) throw new Error("PREPARED_CHUNK_MISSING");
     } else {
         state.generatedPhases ??= {};
@@ -98,7 +111,7 @@ export async function applyFinancialDomains(ctx) {
     await applyInvitationDomains(ctx,reviewCommon,resource,canonical);
     await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
     await ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
-        const module=mod("finance/personal-finance-observation-maintenance"),inputs=JSON.parse(readFileSync(chunk.file,"utf8")).map(row=>row.input);
+        const module=mod("finance/personal-finance-observation-maintenance"),inputs=readEmptyCoverageInputs(chunk,ctx.isNextMigration ? emptyContentHashes.get(chunk.digest) : null);
         const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
         return importEmptyCoverageChunk(module,client,actor,inputs,reviews,ctx.isNextMigration);
     },5);

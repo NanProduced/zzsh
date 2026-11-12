@@ -1,9 +1,23 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { assertFundsWriterCoverage, createEmptyCoverageSink, EMPTY_COVERAGE_CHUNK_SIZE } from "./local-funds-plan.mjs";
-import { importEmptyCoverageChunk } from "./local-target-finance.mjs";
+import { importEmptyCoverageChunk, readEmptyCoverageInputs } from "./local-target-finance.mjs";
 
 const entry = (index, domain = "earnings") => ({ sourceId: `subject-${index}:${domain}`, domain, input: { index } });
+
+test("a frozen empty-coverage chunk is rechecked immediately before import", t => {
+  const dir=mkdtempSync(join(tmpdir(),"zzsh-empty-coverage-"));t.after(()=>rmSync(dir,{recursive:true}));
+  const file=join(dir,"chunk.json"), rows=[entry(1),entry(2)], bytes=JSON.stringify(rows);
+  const digest=createHash("sha256").update(bytes).digest("hex"), descriptor={file,rows:rows.length};
+  writeFileSync(file,bytes);assert.deepEqual(readEmptyCoverageInputs(descriptor,digest),rows.map(row=>row.input));
+  rows[1].input.index=3;writeFileSync(file,JSON.stringify(rows));
+  assert.throws(()=>readEmptyCoverageInputs(descriptor,digest),/PREPARED_CHUNK_SHA_CHANGED/);
+  assert.throws(()=>readEmptyCoverageInputs(descriptor,undefined),/PREPARED_CHUNK_SHA_CHANGED/);
+});
 
 test("the sink chunks at the loader's existing size and keeps source order", () => {
   const seen = [];
