@@ -27,26 +27,31 @@ export const EMPTY_COVERAGE_CHUNK_SIZE = 400;
 export function emptyCoverageChunkDigest(rows) { return sha(rows.map(row => row.sourceId).join("\n")); }
 export function assertEmptyCoverageReceiptMode(phase,isNext){
  if(typeof isNext!=='boolean'||!phase||typeof phase!=='object'||Array.isArray(phase))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
- if(isNext&&phase.receiptMode!=='BATCH_V2')throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
+ if(isNext&&!['BATCH_V2','SYSTEM_BATCH_V1'].includes(phase.receiptMode))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
  if(!isNext&&Object.hasOwn(phase,'receiptMode'))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED');
 }
 
 /** Compare original batch receipts and audits without interpreting absence as success. */
 export function compareCompactCoverageEvidence(expected,receipts,audits,actor){
- if(!Array.isArray(expected)||!Array.isArray(receipts)||!Array.isArray(audits)||!actor?.userId||!actor?.sessionId
+ const system=actor?.kind==='SYSTEM_FINANCE_MIGRATION',actorId=system?actor?.id:actor?.userId,sessionId=system?null:actor?.sessionId;
+ if(!Array.isArray(expected)||!Array.isArray(receipts)||!Array.isArray(audits)||!actorId||(!system&&!sessionId)
+  ||system&&(!/^legacy-finance-migration:[a-f0-9]{64}$/.test(actorId)||!/^[a-f0-9]{64}$/.test(actor.sourceDatasetSha256??''))
   ||expected.some(row=>!/^history-empty-batch-[a-f0-9]{40}$/.test(row?.batchId??'')||!/^[a-f0-9]{64}$/.test(row?.fingerprint??'')
-   ||row.body?.schema!=='finance-empty-coverage-batch.v1'||row.body.batchId!==row.batchId||row.body.actor?.userId!==actor.userId
-   ||row.body.actor?.sessionId!==actor.sessionId||typeof row.body.requestId!=='string'||!row.body.requestId)
+   ||row.body.batchId!==row.batchId||typeof row.body.requestId!=='string'||!row.body.requestId
+   ||(system ? row.body.schema!=='finance-empty-coverage-batch.system.v1'||row.body.sourceDatasetSha256!==actor.sourceDatasetSha256
+      ||row.body.migrationRunDigest!==actorId.slice('legacy-finance-migration:'.length)||row.body.financialEffect!=='NONE'
+     : row.body.schema!=='finance-empty-coverage-batch.v1'||row.body.actor?.userId!==actorId||row.body.actor?.sessionId!==sessionId))
   ||new Set(expected.map(row=>row.batchId)).size!==expected.length)throw Error('COMPACT_COVERAGE_READBACK_INPUT_INVALID');
  const receiptById=Map.groupBy(receipts,row=>row.key),auditById=Map.groupBy(audits,row=>row.object_id),differences=[];
- const scopeKey=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]);
+ const scopeKey=JSON.stringify([system?'system':'admin',actorId,'finance.history.empty_batch.import.v1',null]);
  for(const proof of expected){
   const receipt=receiptById.get(proof.batchId)??[],audit=auditById.get(proof.batchId)??[];
   if(receipt.length!==1||receipt[0].scope_key!==scopeKey||receipt[0].request_fingerprint!==proof.fingerprint||receipt[0].response_status!==200
    ||receipt[0].publish_required!==false||!isDeepStrictEqual(receipt[0].response_body,proof.body))
    differences.push({batchId:proof.batchId,reason:'BATCH_RECEIPT_MISSING_OR_CHANGED'});
   if(audit.length!==1||audit[0].action!=='finance.history.empty_batch.imported'||audit[0].object_type!=='personal_finance_observation_coverage_batch'
-   ||audit[0].actor_type!=='admin'||audit[0].outcome!=='SUCCESS'||audit[0].actor_id!==actor.userId||audit[0].session_id!==actor.sessionId
+   ||audit[0].actor_type!==(system?'system':'admin')||audit[0].outcome!=='SUCCESS'||audit[0].actor_id!==actorId||audit[0].session_id!==sessionId
+   ||system&&audit[0].source_manifest!==actor.sourceDatasetSha256
    ||audit[0].request_id!==proof.body.requestId||!isDeepStrictEqual(audit[0].details,proof.body))
    differences.push({batchId:proof.batchId,reason:'BATCH_AUDIT_MISSING_OR_CHANGED'});
  }
@@ -56,13 +61,15 @@ export function compareCompactCoverageEvidence(expected,receipts,audits,actor){
 
 /** Independent readback queries only the exact frozen batch keys, in bounded groups. */
 export async function readCompactCoverageEvidence(query,expected,actor){
- if(typeof query!=='function'||!Array.isArray(expected)||!actor?.userId||!actor?.sessionId
+ const system=actor?.kind==='SYSTEM_FINANCE_MIGRATION',actorId=system?actor?.id:actor?.userId;
+ if(typeof query!=='function'||!Array.isArray(expected)||!actorId||(!system&&!actor?.sessionId)
   ||new Set(expected.map(row=>row.batchId)).size!==expected.length)throw Error('COMPACT_COVERAGE_READBACK_INPUT_INVALID');
  compareCompactCoverageEvidence(expected,[],[],actor);
- const scopeKey=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),differences=[];let matched=0;
+ const scopeKey=JSON.stringify([system?'system':'admin',actorId,'finance.history.empty_batch.import.v1',null]),differences=[];let matched=0;
  for(let i=0;i<expected.length;i+=500){const part=expected.slice(i,i+500),ids=part.map(row=>row.batchId);
   const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])`,[scopeKey,ids])).rows;
-  const audits=(await query(`SELECT object_id,action,object_type,actor_type,outcome,actor_id,session_id,request_id,details FROM zzsh_iam.audit_event WHERE action='finance.history.empty_batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=ANY($1::text[])`,[ids])).rows;
+  const audits=(await query(`SELECT e.object_id,e.action,e.object_type,e.actor_type,e.outcome,e.actor_id,e.session_id,e.request_id,e.details,
+    to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest FROM zzsh_iam.audit_event e WHERE e.action='finance.history.empty_batch.imported' AND e.object_type='personal_finance_observation_coverage_batch' AND e.object_id=ANY($1::text[])`,[ids])).rows;
   const checked=compareCompactCoverageEvidence(part,receipts,audits,actor);matched+=checked.matched;differences.push(...checked.differences);
  }
  const receiptTotal=(await query(`SELECT count(*)::text AS n FROM zzsh_supply.idempotency_record WHERE right(scope_key,length($1::text))=$1`,[',"finance.history.empty_batch.import.v1",null]'])).rows[0]?.n;

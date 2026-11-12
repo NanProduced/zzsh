@@ -81,6 +81,8 @@ test('next-round readback must prove every compact empty coverage batch receipt'
  const phase={schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:800,chunks:[{},{}]};
  const readback={emptyFinancialCoverage:{sourceRebuilt:true,expected:800,readable:800,actual:800,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}}};
  assert.equal(compactEmptyCoverageReadbackMatches(phase,readback),true);
+ assert.equal(compactEmptyCoverageReadbackMatches({...phase,receiptMode:'SYSTEM_BATCH_V1'},
+  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{...readback.emptyFinancialCoverage.batchProof,mode:'SYSTEM_BATCH_V1'}}}),true);
  for(const changed of [{...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:undefined}},
   {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{mode:'BATCH_V2',expected:2,matched:1}}},
   {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,readable:799}}])assert.equal(compactEmptyCoverageReadbackMatches(phase,changed),false);

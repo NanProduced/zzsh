@@ -568,17 +568,34 @@ try {
     if(rebuilt.inputSha256!==state.fundsSupplement?.inputSha256)throw new Error("EMPTY_COVERAGE_SOURCE_BINDING_CHANGED");
     assertRebuiltEmptyCoverageManifest(phase,rebuilt.emptyCoverage,checkedChunks);
     let readable=0,expected=0,batch=[];const compactProofs=[];
+    const systemFinance=compact&&phase.receiptMode==='SYSTEM_BATCH_V1';
+    let financeActor;
+    if(systemFinance){
+      const target={systemIdentifier:registration.instance?.systemIdentifier,databaseOid:registration.oid,marker:registration.marker,
+        nonce:registration.nonce,roleOid:registration.migrationRoleOid};
+      const id=mod('legacy-load/system-user-migration').systemFinanceMigrationId(state.binding.datasetSha256,target);
+      if(state.binding.systemFinanceId!==id)throw new Error('SYSTEM_FINANCE_SOURCE_BINDING_CHANGED');
+      financeActor={kind:'SYSTEM_FINANCE_MIGRATION',id,sourceDatasetSha256:state.binding.datasetSha256,target,requestId:'core-legacy-dataset-'+state.binding.oid};
+    }
     async function checkEmptyBatch(){
       const actual=new Map((await query(`SELECT c.id,c.user_id,c.source_kind,c.source_count,c.imported_count,c.isolated_count,c.body_digest,c.source_canonical,(SELECT count(*)::text FROM zzsh_order.personal_finance_observation o WHERE o.user_id=c.user_id AND o.source_system=c.source_system AND o.source_kind=c.source_kind AND (o.source_event_at IS NULL OR o.source_event_at<=c.source_cutoff)) AS actual_count FROM zzsh_order.personal_finance_observation_coverage c WHERE c.id=ANY($1::text[])`,[batch.map(r=>r.id)])).rows.map(r=>[r.id,r]));
       for(const row of batch){const found=actual.get(row.id);if(!found||found.user_id!==row.userId||found.source_kind!==row.sourceKind||found.source_count!==0||found.imported_count!==0||found.isolated_count!==0||found.actual_count!=='0'||found.body_digest!==row.bodyDigest||found.source_canonical!==row.canonical)difference("financeEmptyCoverage",row.id,"PROVED_EMPTY_COVERAGE_DRIFT");else readable++;}batch=[];
     }
     for(const chunk of chunks){const chunkRows=JSON.parse(readFileSync(chunkFile(chunk)));
       if(compact){
+        if(systemFinance){
+          const proof=mod("finance/personal-finance-observation-maintenance").systemCompactEmptyFinanceBatchProof(chunkRows.map(row=>row.input),financeActor);
+          if(proof.body.inputSha256!==state.fundsSupplement.inputSha256||proof.body.cutoff!==new Date(manifest.sourceCutoff).toISOString())
+            throw new Error('SYSTEM_FINANCE_SOURCE_BINDING_CHANGED');
+          compactProofs.push(proof);
+        }
+        else {
         if(typeof state.binding.actorId!=='string'||typeof state.binding.sessionId!=='string'||!registration.instance?.systemIdentifier)throw new Error('COMPACT_COVERAGE_ACTOR_OR_TARGET_MISSING');
         compactProofs.push(mod("finance/personal-finance-observation-maintenance").compactEmptyFinanceBatchProof(chunkRows.map(row=>row.input),{
           ref:'CORE_FULL_LEGACY_'+state.binding.oid,attempt:'dataset-'+state.binding.datasetSha256.slice(0,16),actor:{userId:state.binding.actorId,sessionId:state.binding.sessionId},
           resource:{migrationProfile:registration.migrationProfile,systemIdentifier:registration.instance.systemIdentifier,oid:Number(registration.oid),nonce:registration.nonce},
           inputSha256:state.fundsSupplement.inputSha256,cutoff:new Date(manifest.sourceCutoff).toISOString()},'core-legacy-dataset-'+state.binding.oid));
+        }
       }
       for(const row of chunkRows){batch.push(mod("finance/personal-finance-observation-maintenance").planFinanceObservations(row.input).coverage);expected++;
         if(batch.length===500)await checkEmptyBatch();}
@@ -586,9 +603,9 @@ try {
     if(batch.length)await checkEmptyBatch();
     let batchProof;
     if(compact){
-      const actor={userId:state.binding.actorId,sessionId:state.binding.sessionId},checked=await readCompactCoverageEvidence(query,compactProofs,actor);
+      const actor=systemFinance?financeActor:{userId:state.binding.actorId,sessionId:state.binding.sessionId},checked=await readCompactCoverageEvidence(query,compactProofs,actor);
       for(const item of checked.differences)difference('financeEmptyCoverage',item.batchId,item.reason);
-      batchProof={mode:'BATCH_V2',expected:checked.expected,matched:checked.matched};
+      batchProof={mode:phase.receiptMode,expected:checked.expected,matched:checked.matched};
     }
     const total=(await query(`SELECT count(*)::int n FROM zzsh_order.personal_finance_observation_coverage WHERE source_system='legacy_mysql_restore' AND source_count=0 AND source_kind=ANY($1::text[])`,[Object.values(phase.kinds)])).rows[0].n;
     if(expected!==phase.rows||total!==expected)difference("financeEmptyCoverage","COHORT","EMPTY_COVERAGE_TARGET_COUNT_DRIFT");

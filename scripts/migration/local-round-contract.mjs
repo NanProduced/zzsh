@@ -365,10 +365,10 @@ export function assertRoundOpeningPartition(dataset, opening) {
 /** NEXT must prove the batch receipts as well as every original coverage row. */
 export function compactEmptyCoverageReadbackMatches(phase,readback){
  const proof=readback?.emptyFinancialCoverage,batch=proof?.batchProof;
- return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&phase.receiptMode==='BATCH_V2'&&Array.isArray(phase.chunks)
+ return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&['BATCH_V2','SYSTEM_BATCH_V1'].includes(phase.receiptMode)&&Array.isArray(phase.chunks)
   &&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&proof?.sourceRebuilt===true&&proof.expected===phase.rows
   &&proof.readable===phase.rows&&proof.actual===phase.rows&&proof.chunks===phase.chunks.length
-  &&batch?.mode==='BATCH_V2'&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
+  &&batch?.mode===phase.receiptMode&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
 }
 
 export function systemCoreAttributionMatches(checkpoint,readback){

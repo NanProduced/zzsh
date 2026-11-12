@@ -59,11 +59,28 @@ test('compact coverage readback requires the exact physical batch receipt and au
  assert.throws(()=>compareCompactCoverageEvidence(expected,[receipt()],[audit()],{}),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
 });
 
+test('system compact coverage readback binds the system source and original receipt',async()=>{
+ const actor={kind:'SYSTEM_FINANCE_MIGRATION',id:'legacy-finance-migration:'+'d'.repeat(64),sourceDatasetSha256:'c'.repeat(64)},batchId='history-empty-batch-'+'b'.repeat(40);
+ const body={schema:'finance-empty-coverage-batch.system.v1',batchId,sourceDatasetSha256:actor.sourceDatasetSha256,migrationRunDigest:'d'.repeat(64),requestId:'synthetic',financialEffect:'NONE'};
+ const proof={batchId,fingerprint:'a'.repeat(64),body},scope=JSON.stringify(['system',actor.id,'finance.history.empty_batch.import.v1',null]);
+ const receipt={scope_key:scope,key:batchId,request_fingerprint:proof.fingerprint,response_status:200,publish_required:false,response_body:body};
+ const audit={object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'system',outcome:'SUCCESS',
+  actor_id:actor.id,session_id:null,request_id:'synthetic',source_manifest:actor.sourceDatasetSha256,details:body};
+ assert.deepEqual(compareCompactCoverageEvidence([proof],[receipt],[audit],actor),{expected:1,matched:1,differences:[]});
+ for(const bad of [{...audit,actor_type:'admin'},{...audit,session_id:'fake'},{...audit,source_manifest:'e'.repeat(64)}])
+  assert.notDeepEqual(compareCompactCoverageEvidence([proof],[receipt],[bad],actor).differences,[]);
+ const query=async(sql,args)=>sql.includes('count(*)')?{rows:[{n:'1'}]}:sql.includes('idempotency_record')
+  ?(assert.equal(args[0],scope),{rows:[receipt]}):{rows:[audit]};
+ assert.equal((await readCompactCoverageEvidence(query,[proof],actor)).matched,1);
+});
+
 test('old and next migration checkpoints cannot silently exchange empty coverage receipt formats',()=>{
  assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({},false));
  assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},true));
+ assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({receiptMode:'SYSTEM_BATCH_V1'},true));
  assert.throws(()=>assertEmptyCoverageReceiptMode({},true),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
  assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
+ assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:'SYSTEM_BATCH_V1'},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
  assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:null},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
  assert.throws(()=>assertEmptyCoverageReceiptMode({},undefined),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
 });
