@@ -149,9 +149,16 @@ export async function qualifyReviewedLegacyParticipants(c:PoolClient,actor:Actor
 const fingerprint=(operation:string,input:LegacyInvitationFactsInput)=>digestFingerprint(operation,invitationFactHash(input));
 function expectedReceipt(input:LegacyInvitationFactsInput){const p=prepareLegacyInvitationFacts(input,invitationFactHash(input));return{bodyDigest:p.bodyDigest,sourceDigest:invitationFactHash(input.source),policyVersionId:input.policy?.versionId??null,participants:p.subjects.length,codes:p.subjects.length,relations:p.relations.length,financialEffects:false,
  subjectProofs:p.subjects.map(s=>({userId:s.userId,sourceDigest:s.sourceDigest}))};}
+async function requireOriginalAudit(c:PoolClient,actor:Actor,bodyDigest:string,action:string,details:Record<string,unknown>){
+ const rows=(await c.query(`/* invitation-facts original audit */ SELECT actor_type,actor_id,session_id,details FROM zzsh_iam.audit_event
+  WHERE object_id=$1 AND action=$2 AND object_type='legacy_invitation_batch' AND outcome='SUCCESS'`,[bodyDigest,action])).rows;
+ if(rows.length!==1||rows[0].actor_type!=='admin'||rows[0].actor_id!==actor.userId||typeof rows[0].session_id!=='string'||!rows[0].session_id||canonicalize(rows[0].details)!==canonicalize(details))
+  throw conflict('Original invitation audit is missing or differs');
+}
 async function requireImportReceipt(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInput){
- const p=prepareLegacyInvitationFacts(input,invitationFactHash(input)),row=(await c.query('/* invitation-facts original receipt */ SELECT request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2',[JSON.stringify(['admin',actor.userId,legacyInvitationFactsOperation,null]),p.key])).rows[0];
- if(!row||row.request_fingerprint!==fingerprint(legacyInvitationFactsOperation,input)||row.response_status!==200||canonicalize(row.response_body)!==canonicalize(expectedReceipt(input)))throw conflict('Original successful invitation import receipt required');
+ const p=prepareLegacyInvitationFacts(input,invitationFactHash(input)),row=(await c.query('/* invitation-facts original receipt */ SELECT request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2',[JSON.stringify(['admin',actor.userId,legacyInvitationFactsOperation,null]),p.key])).rows[0];
+ if(!row||row.request_fingerprint!==fingerprint(legacyInvitationFactsOperation,input)||row.response_status!==200||row.publish_required!==false||canonicalize(row.response_body)!==canonicalize(expectedReceipt(input)))throw conflict('Original successful invitation import receipt required');
+ await requireOriginalAudit(c,actor,p.bodyDigest,factAction,{bodyDigest:p.bodyDigest,source:input.source,facts:input.subjects,financialEffects:false});
 }
 async function identityProofs(c:PoolClient,input:LegacyInvitationFactsInput,lock:boolean){
  const all=[...input.subjects,...input.anchors.map(a=>a.fact)],rows=(await c.query(`/* invitation-facts identities */ SELECT x.user_id,x.legacy_id,x.identity_digest,
@@ -183,9 +190,9 @@ async function immutableRows(c:PoolClient,input:LegacyInvitationFactsInput,subje
 import {invitationFactRelation as prepareEdge} from './legacy-invitation-facts';
 async function anchors(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInput){
  if(!input.anchors.length)return;
- const keys=[...new Set(input.anchors.map(a=>a.batchKey))],rows=(await c.query('/* invitation-facts parent receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])',[JSON.stringify(['admin',actor.userId,legacyInvitationFactsOperation,null]),keys])).rows;
+ const keys=[...new Set(input.anchors.map(a=>a.batchKey))],rows=(await c.query('/* invitation-facts parent receipts */ SELECT key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])',[JSON.stringify(['admin',actor.userId,legacyInvitationFactsOperation,null]),keys])).rows;
  const receipts=new Map(rows.map(r=>[r.key,{...r,proofs:new Map((Array.isArray(r.response_body?.subjectProofs)?r.response_body.subjectProofs:[]).map((p:any)=>[p.userId,p.sourceDigest]))}]));
- for(const a of input.anchors){const r=receipts.get(a.batchKey),body=r?.response_body;if(!r||r.request_fingerprint!==digestFingerprint(legacyInvitationFactsOperation,a.batchDigest)||r.response_status!==200||body?.bodyDigest!==a.batchDigest||body?.sourceDigest!==invitationFactHash(input.source)||body.policyVersionId!==(input.policy?.versionId??null)||r.proofs.get(a.fact.userId)!==invitationFactSourceDigest(input.source,a.fact))throw conflict('Original imported parent receipt differs');}
+ for(const a of input.anchors){const r=receipts.get(a.batchKey),body=r?.response_body;if(!r||r.request_fingerprint!==digestFingerprint(legacyInvitationFactsOperation,a.batchDigest)||r.response_status!==200||r.publish_required!==false||body?.bodyDigest!==a.batchDigest||body?.sourceDigest!==invitationFactHash(input.source)||body.policyVersionId!==(input.policy?.versionId??null)||r.proofs.get(a.fact.userId)!==invitationFactSourceDigest(input.source,a.fact))throw conflict('Original imported parent receipt differs');}
  await immutableRows(c,input,input.anchors.map(a=>a.fact));
 }
 async function currentPolicy(c:PoolClient,input:LegacyInvitationFactsInput,lock=false){
@@ -225,7 +232,7 @@ export async function importReviewedLegacyInvitationFacts(c:PoolClient,actor:Act
   await recordAudit(c,{actorType:'admin',actorId:actor.userId,sessionId:actor.sessionId,requestId:actor.requestId,action:factAction,objectType:'legacy_invitation_batch',objectId:p.bodyDigest,outcome:'SUCCESS',reason:'Reviewed original invitation facts; no financial replay',details:{bodyDigest:p.bodyDigest,source:input.source,facts:input.subjects,financialEffects:false}});
   await admitted(c,actor,input,scope,'IMPORT');await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{status:200,body:expectedReceipt(input)};
  });
- if(canonicalize(result.body)!==canonicalize(expectedReceipt(input)))throw conflict('Original invitation receipt differs');await identityProofs(c,input,false);await immutableRows(c,input,input.subjects,true);await admitted(c,actor,input,scope,'IMPORT');return result;
+ if(canonicalize(result.body)!==canonicalize(expectedReceipt(input)))throw conflict('Original invitation receipt differs');await requireImportReceipt(c,actor,input);await identityProofs(c,input,false);await immutableRows(c,input,input.subjects,true);await admitted(c,actor,input,scope,'IMPORT');return result;
 }
 
 async function countsProof(c:PoolClient,input:LegacyInvitationFactsInput){
@@ -251,12 +258,12 @@ export async function closeReviewedLegacyInvitationCounts(c:PoolClient,actor:Act
 /** Absence is UNKNOWN; this never writes a replacement key or repairs an uncertain commit. */
 export async function recoverReviewedLegacyInvitationFacts(c:PoolClient,actor:Actor,input:LegacyInvitationFactsInput,reviewedDigest:string,scope:LegacyInvitationFactsAdmission,phase:'IMPORT'|'COUNTS'='IMPORT'){
  const p=prepareLegacyInvitationFacts(input,reviewedDigest);await admitted(c,actor,input,scope,phase,true);const operation=phase==='IMPORT'?legacyInvitationFactsOperation:legacyInvitationCountsOperation;
- const row=(await c.query('/* invitation-facts original receipt */ SELECT request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2',[JSON.stringify(['admin',actor.userId,operation,null]),p.key])).rows[0];if(!row)return{knowledge:'UNKNOWN' as const,receipt:null};
+ const row=(await c.query('/* invitation-facts original receipt */ SELECT request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2',[JSON.stringify(['admin',actor.userId,operation,null]),p.key])).rows[0];if(!row)return{knowledge:'UNKNOWN' as const,receipt:null};
  if(phase==='COUNTS')await requireImportReceipt(c,actor,input);
- if(row.request_fingerprint!==fingerprint(operation,input)||row.response_status!==200)throw conflict('Original invitation receipt key/body differs');await identityProofs(c,input,false);await immutableRows(c,input,input.subjects,true);
- if(phase==='IMPORT'){if(canonicalize(row.response_body)!==canonicalize(expectedReceipt(input)))throw conflict('Original invitation import receipt differs');}
+ if(row.request_fingerprint!==fingerprint(operation,input)||row.response_status!==200||row.publish_required!==false)throw conflict('Original invitation receipt key/body differs');await identityProofs(c,input,false);await immutableRows(c,input,input.subjects,true);
+ if(phase==='IMPORT'){if(canonicalize(row.response_body)!==canonicalize(expectedReceipt(input)))throw conflict('Original invitation import receipt differs');await requireOriginalAudit(c,actor,p.bodyDigest,factAction,{bodyDigest:p.bodyDigest,source:input.source,facts:input.subjects,financialEffects:false});}
  else{const counts=await countsProof(c,input),expected={bodyDigest:p.bodyDigest,sourceDigest:invitationFactHash(input.source),subjects:counts.length,known:counts.filter(s=>s.knowledge==='KNOWN').length,unknown:counts.filter(s=>s.knowledge==='UNKNOWN').length,financialEffects:false};
-  if(canonicalize(row.response_body)!==canonicalize(expected))throw conflict('Original invitation count receipt differs');
+  if(canonicalize(row.response_body)!==canonicalize(expected))throw conflict('Original invitation count receipt differs');await requireOriginalAudit(c,actor,p.bodyDigest,countAction,expected);
   const current=(await c.query('SELECT user_id,invitees_knowledge FROM zzsh_order.distribution_participant WHERE user_id=ANY($1::text[])',[counts.map(s=>s.userId)])).rows,m=new Map(current.map(r=>[r.user_id,r.invitees_knowledge]));if(counts.some(s=>m.get(s.userId)!==s.knowledge))throw conflict('Current original invitation count coverage differs');
  }await admitted(c,actor,input,scope,phase,true);return{knowledge:'KNOWN' as const,receipt:{status:row.response_status,body:row.response_body}};
 }

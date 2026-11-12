@@ -52,7 +52,7 @@ test('bounded packets bind previously imported parents by their original key and
 test('cross-type dependencies may share a packet without conflating the two independent ancestry graphs',()=>{const items=[raw('1'),raw('2')];items[0]!.userSource.inviter_id='2';items[1]!.userSource.first_leader='1';const p=planned(items,2);assert.equal(p.packets.length,1);assert.equal(p.summary.unknownParentFacts,0);assert.equal(p.summary.relations,2);});
 
 function database(){
- const participants=new Map<string,any>(),codes=new Map<string,any>(),edges=new Map<string,any>(),receipts=new Map<string,any>(),audits=new Map<string,any>();
+ const participants=new Map<string,any>(),codes=new Map<string,any>(),edges=new Map<string,any>(),receipts=new Map<string,any>(),audits=new Map<string,any>(),auditActors=new Map<string,any>();
  const state={now:at,mode:'T',identity:true,owner:true,codeConflict:false,failAudit:false,revokeAfterAudit:false,expireAfterAudit:false,actorFrozen:false,policy:uniform(),queries:[] as string[],writes:0};
  const client={connectionParameters:{host:'127.0.0.1',port:55432,database:'zzsh_dev_daily',user:'daily_m'},getTransactionStatus:()=>state.mode,query:async(sql:string,args:any[]=[])=>{
   state.queries.push(sql);const rows=(values:any[]=[])=>({rows:values,rowCount:values.length});
@@ -69,6 +69,7 @@ function database(){
   if(sql.includes('invitation-facts codes'))return rows([...codes.values()].filter(c=>args[0].includes(c.user_id)));
   if(sql.includes('invitation-facts original edges'))return rows([...edges.values()].filter(e=>args[0].includes(e.child_user_id)));
   if(sql.includes('invitation-facts canonical provenance'))return rows(audits.has(args[0]+':'+args[1])?[{details:audits.get(args[0]+':'+args[1])}]:[]);
+  if(sql.includes('invitation-facts original audit'))return rows(audits.has(args[0]+':'+args[1])?[{...auditActors.get(args[0]+':'+args[1]),details:audits.get(args[0]+':'+args[1])}]:[]);
   if(sql.includes('invitation-facts parent receipts'))return rows(args[1].flatMap((key:string)=>receipts.has(args[0]+':'+key)?[{key,...receipts.get(args[0]+':'+key)}]:[]));
   if(sql.includes('invitation-facts original receipt'))return rows(receipts.has(args[0]+':'+args[1])?[receipts.get(args[0]+':'+args[1])]:[]);
   if(sql.includes('invitation-facts all original children'))return rows([...edges.values()].filter(e=>args[0].includes(e.parent_user_id)).sort((a,b)=>a.id<b.id?-1:1));
@@ -79,11 +80,11 @@ function database(){
   if(sql.startsWith('INSERT INTO zzsh_order.distribution_invite_code')){state.writes++;for(const c of JSON.parse(args[0]))codes.set(c.id,{id:c.id,user_id:c.user_id,display_code:c.code,match_code:c.code.toUpperCase(),source_type:'LEGACY_MYSQL',source_system:'legacy_mysql_restore',source_entity:'la_user',source_id:c.legacy_id,source_digest:c.digest});return rows();}
   if(sql.startsWith('INSERT INTO zzsh_order.invitation_relation')){state.writes++;for(const e of JSON.parse(args[0]))edges.set(e.id,{...e,policy_version_id:args[1],source_type:'LEGACY_MYSQL'});return rows();}
   if(sql.startsWith('UPDATE zzsh_order.distribution_participant')){state.writes++;const updates=JSON.parse(args[0]);for(const x of updates){const p=participants.get(x.user_id);assert.equal(p.revision,x.revision);p.invitees_knowledge=x.knowledge;p.revision=String(BigInt(p.revision)+1n);}return{rows:[],rowCount:updates.length};}
-  if(sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')){if(state.failAudit)throw Error('AUDIT_WRITE_REJECTED');state.writes++;audits.set(args[6]+':'+args[4],JSON.parse(args[10]));if(state.revokeAfterAudit)state.actorFrozen=true;if(state.expireAfterAudit)state.now='2026-11-02T16:00:00.000Z';return rows();}
-  if(sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"')){state.writes++;receipts.set(args[0]+':'+args[1],{request_fingerprint:args[2],response_status:args[3],response_body:JSON.parse(args[4])});return rows();}
+  if(sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')){if(state.failAudit)throw Error('AUDIT_WRITE_REJECTED');state.writes++;audits.set(args[6]+':'+args[4],JSON.parse(args[10]));auditActors.set(args[6]+':'+args[4],{actor_type:args[1],actor_id:args[2],session_id:args[3]});if(state.revokeAfterAudit)state.actorFrozen=true;if(state.expireAfterAudit)state.now='2026-11-02T16:00:00.000Z';return rows();}
+  if(sql.startsWith('INSERT INTO "zzsh_supply"."idempotency_record"')){state.writes++;receipts.set(args[0]+':'+args[1],{request_fingerprint:args[2],response_status:args[3],response_body:JSON.parse(args[4]),publish_required:args[5]});return rows();}
   throw Error('Unexpected actual maintenance query: '+sql.slice(0,100));
  }} as unknown as PoolClient;
- return{client,state,participants,codes,edges,receipts,audits};
+ return{client,state,participants,codes,edges,receipts,audits,auditActors};
 }
 async function bind(db:ReturnType<typeof database>,packet:LegacyInvitationFactsInput,phase:'IMPORT'|'COUNTS'='IMPORT',mode:'execute'|'recover'='execute'){return bindReviewedLegacyInvitationFacts(db.client,actor,review(packet,phase),mode);}
 
@@ -176,6 +177,19 @@ test('missing original receipt stays UNKNOWN and forged/runtime/wrong owner/expi
  await assert.rejects(importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),{kind:'REVIEWED_LEGACY_INVITATION_FACTS'}));assert.equal(db.state.writes,0);
  for(const mutation of [(d:typeof db)=>{d.state.owner=false;},(d:typeof db)=>{d.state.mode='I';},(d:typeof db)=>{d.state.now='2026-11-02T16:00:00.000Z';},(d:typeof db)=>{(d.client as any).connectionParameters.user='runtime';}]){const d=database();mutation(d);await assert.rejects(bind(d,packet));assert.equal(d.state.writes,0);}
  const r=review(packet);r.resource.database='zzsh_test_regression';r.resource.oid=2220718;await assert.rejects(bindReviewedLegacyInvitationFacts(db.client,actor,r));assert.equal(db.state.writes,0);
+});
+test('invitation recovery requires the original actor and both import and count audits',async()=>{
+ const packet=planned([raw('1')]).packets[0]!,db=database(),importScope=await bind(db,packet);
+ await importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),importScope);
+ const importAudit=hash(packet)+':distribution.legacy_facts.imported',originalActor=db.auditActors.get(importAudit);
+ db.auditActors.set(importAudit,{...originalActor,actor_id:'other'});await assert.rejects(importReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),importScope));db.auditActors.set(importAudit,originalActor);
+ const countScope=await bind(db,packet,'COUNTS');await closeReviewedLegacyInvitationCounts(db.client,actor,packet,hash(packet),countScope);
+ const later={...actor,sessionId:'later_session'},laterScope=await bindReviewedLegacyInvitationFacts(db.client,later,{...review(packet,'COUNTS'),actor:{userId:later.userId,sessionId:later.sessionId}},'recover');
+ assert.equal((await recoverReviewedLegacyInvitationFacts(db.client,later,packet,hash(packet),laterScope,'COUNTS')).knowledge,'KNOWN');
+ const countAudit=hash(packet)+':distribution.legacy_facts.counts_closed',details=db.audits.get(countAudit),before=db.state.writes;
+ db.audits.delete(countAudit);await assert.rejects(recoverReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),countScope,'COUNTS'));db.audits.set(countAudit,details);
+ const receipt=[...db.receipts.values()].find(r=>r.response_body?.subjects===1);receipt.publish_required=true;
+ await assert.rejects(recoverReviewedLegacyInvitationFacts(db.client,actor,packet,hash(packet),countScope,'COUNTS'));assert.equal(db.state.writes,before);
 });
 test('delivery clone admits count closure only with exact independent epoch, role, actor and live system identifier',async()=>{
  const packet=planned([raw('1')]).packets[0]!,db=database(),r:LegacyInvitationFactsReview={...review(packet,'COUNTS'),
