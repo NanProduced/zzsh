@@ -2316,63 +2316,187 @@ html[data-theme="dark"] .account-nav a[aria-current="page"] .account-nav-chevron
   background: var(--color-bg-card);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
+/* 实名认证中心（方案二：高质感安全凭证卡与平滑交互） */
 .account-center-main .sec-identity-card,
-.sec-identity-card { padding: 0; border: 0; background: transparent; box-shadow: none; }
+.sec-identity-card {
+  position: relative;
+  overflow: hidden;
+  padding: 24px 28px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 16px;
+  background: var(--color-bg-card);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.03);
+}
+
+.sec-identity-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #059669 0%, #10b981 50%, #34d399 100%);
+  opacity: 0.9;
+}
+
 .account-security-controls .account-card-heading { margin-bottom: 6px; }
 .account-security-controls .account-card-heading h3 { font-size: 18px; font-weight: 700; color: var(--color-text-primary); margin: 0; }
 .sec-card-note { margin: 4px 0 0; color: var(--color-text-secondary); font-size: var(--type-meta-size); line-height: var(--type-meta-leading); }
+
 .sec-identity-summary {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 10px 0 20px;
+  gap: 20px;
+  padding: 20px 24px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--account-success, #059669) 7%, var(--color-bg-card)) 0%, var(--color-bg-card) 100%);
+  border: 1px solid color-mix(in srgb, var(--account-success, #059669) 18%, var(--color-border-subtle));
+  transition: all 0.2s ease;
 }
+
+.sec-identity-summary[data-state="pending"] {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--account-accent, #d97706) 6%, var(--color-bg-card)) 0%, var(--color-bg-card) 100%);
+  border-color: color-mix(in srgb, var(--account-accent, #d97706) 20%, var(--color-border-subtle));
+}
+
 .sec-identity-summary-icon {
   display: grid;
-  width: 56px;
-  height: 56px;
+  width: 58px;
+  height: 58px;
   flex: 0 0 auto;
   place-items: center;
   border-radius: 16px;
-  color: var(--color-text-secondary);
-  background: var(--color-bg-elevated);
+  color: #ffffff;
+  background: linear-gradient(135deg, #059669 0%, #10b981 100%);
+  box-shadow: 0 4px 14px color-mix(in srgb, #059669 35%, transparent);
 }
-.sec-identity-summary[data-state="verified"] .sec-identity-summary-icon {
-  color: var(--account-success);
-  background: color-mix(in srgb, var(--account-success) 10%, transparent);
+
+.sec-identity-summary[data-state="pending"] .sec-identity-summary-icon {
+  color: #ffffff;
+  background: linear-gradient(135deg, #d97706 0%, #f59e0b 100%);
+  box-shadow: 0 4px 14px color-mix(in srgb, #d97706 30%, transparent);
 }
+
 .sec-identity-summary-body {
   min-width: 0;
   flex: 1 1 auto;
 }
+
 .sec-identity-summary-title-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
+
 .sec-identity-summary-title {
   margin: 0;
   font-size: 20px;
   font-weight: 700;
   color: var(--color-text-primary);
   line-height: 1.35;
+  letter-spacing: -0.01em;
 }
+
 .sec-identity-summary-desc {
   margin: 6px 0 0;
-  font-size: 13px;
+  font-size: 13.5px;
   color: var(--color-text-secondary);
   line-height: 1.6;
-  max-width: 56ch;
+  max-width: 64ch;
 }
+
+/* 实名资料凭证行（Digital Credential Cards） */
+.sec-identity-rows {
+  margin-top: 20px;
+  border-top: none;
+  display: grid;
+  gap: 12px;
+}
+
+.sec-identity-rows .sec-row {
+  display: grid;
+  grid-template-columns: 44px minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 16px 20px;
+  padding: 16px 20px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sec-identity-rows .sec-row:hover {
+  background: color-mix(in srgb, var(--color-bg-elevated) 80%, var(--color-bg-card));
+  border-color: color-mix(in srgb, var(--account-success, #059669) 25%, var(--color-border-subtle));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.sec-identity-rows .sec-row-icon-cell {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--color-bg-card);
+  color: var(--account-success, #059669);
+  border: 1px solid color-mix(in srgb, var(--account-success, #059669) 15%, var(--color-border-subtle));
+}
+
+.sec-identity-rows .sec-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sec-identity-rows .sec-row-title {
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+}
+
+.sec-identity-rows .sec-row-desc {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.sec-identity-rows .sec-row-state-col {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: right;
+}
+
+.sec-identity-rows .sec-row-value {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+}
+
+.sec-identity-rows .sec-row-side {
+  display: none;
+}
+
 .sec-identity-notes {
-  margin-top: 18px;
+  margin-top: 20px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-bg-elevated) 50%, var(--color-bg-card));
+  border: 1px dashed var(--color-border-subtle);
 }
+
 .sec-identity-notes .account-module-note {
-  margin: 6px 0 0;
-  color: var(--color-text-muted);
-  font-size: 12px;
+  margin: 4px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
   line-height: 1.6;
+}
+
+.sec-identity-notes .account-module-note:first-child {
+  margin-top: 0;
 }
 .sec-card > .account-module-note { margin-block: 14px 0; }
 .sec-card > .info-callout,
@@ -3652,14 +3776,153 @@ html[data-theme="dark"] .account-nav a[aria-current="page"] .account-nav-chevron
 .avatar-upload-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 @media (max-width: 520px) { .avatar-dialog { padding: 16px; } .avatar-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }  }
 
-.identity-verification-form { display: grid; gap: 12px; margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--color-border-subtle); }
-.identity-verification-form h3 { margin: 0; color: var(--color-text-primary); font-size: 16px; font-weight: 650; }
-.identity-verification-form form { display: grid; gap: 14px; max-width: 580px; }
-.identity-verification-form a { color: var(--color-accent-brand-ink); font-size: 13px; text-underline-offset: 4px; text-decoration: underline; }
-.identity-verification-field { display: grid; gap: 7px; color: var(--color-text-secondary); font-size: 13px; }
-.identity-verification-field input { width: 100%; min-height: 44px; padding: 10px 12px; border: 1px solid var(--color-border-default); border-radius: 8px; color: var(--color-text-primary); background: var(--color-bg-surface); font: inherit; }
-.identity-verification-field input:focus-visible, .identity-verification-consent input:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 3px; }
-.identity-verification-consent { display: flex; align-items: flex-start; gap: 10px; color: var(--color-text-secondary); font-size: 12px; line-height: 1.8; }
-.identity-verification-consent input { width: 17px; height: 17px; flex: 0 0 auto; margin-top: 3px; accent-color: var(--color-accent-brand); }
-.identity-verification-disclosure { white-space: pre-wrap; }
-.identity-verification-form .button { justify-self: start; }
+/* 实名认证提交表单（安全合规与极佳交互体验） */
+.identity-verification-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 24px 26px;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 14px;
+  background: var(--color-bg-card);
+}
+
+.identity-verification-form h3 {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: 16.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.identity-verification-form form {
+  display: grid;
+  gap: 16px;
+  max-width: 520px;
+}
+
+.identity-verification-disclosure {
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--account-accent, #d97706) 6%, var(--color-bg-elevated));
+  border: 1px solid color-mix(in srgb, var(--account-accent, #d97706) 20%, var(--color-border-subtle));
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+}
+
+.identity-verification-form a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--account-accent, #d97706);
+  font-size: 13px;
+  font-weight: 500;
+  text-underline-offset: 4px;
+  text-decoration: underline;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.identity-verification-form a:hover {
+  color: color-mix(in srgb, var(--account-accent, #d97706) 80%, #000);
+}
+
+.identity-verification-form a:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--color-bg-card, #ffffff), 0 0 0 4px color-mix(in srgb, var(--account-accent, #d97706) 65%, transparent) !important;
+  border-radius: 4px;
+}
+
+.identity-verification-field {
+  display: grid;
+  gap: 8px;
+  color: var(--color-text-primary);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.identity-verification-field input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--color-border-default);
+  border-radius: 10px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-elevated);
+  font: inherit;
+  font-size: 14px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+.identity-verification-field input:hover:not(:disabled) {
+  border-color: var(--color-border-strong, #a1a1aa);
+}
+
+.identity-verification-field input:focus-visible {
+  outline: none !important;
+  border-color: var(--account-accent, #d97706) !important;
+  box-shadow: 0 0 0 2px var(--color-bg-card, #ffffff), 0 0 0 4.5px color-mix(in srgb, var(--account-accent, #d97706) 65%, transparent) !important;
+}
+
+.identity-verification-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.65;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+
+.identity-verification-consent:hover {
+  background: color-mix(in srgb, var(--account-accent, #d97706) 4%, var(--color-bg-elevated));
+  border-color: color-mix(in srgb, var(--account-accent, #d97706) 25%, var(--color-border-subtle));
+}
+
+.identity-verification-consent input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 2px;
+  accent-color: var(--account-accent, #d97706);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.identity-verification-consent input:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--color-bg-card, #ffffff), 0 0 0 4px color-mix(in srgb, var(--account-accent, #d97706) 65%, transparent) !important;
+}
+
+.identity-verification-form .button {
+  justify-self: start;
+  min-height: 42px;
+  padding: 0 24px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.identity-verification-form .button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--account-accent, #d97706) 30%, transparent);
+}
+
+.identity-verification-form .button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.identity-verification-form .button:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--color-bg-card, #ffffff), 0 0 0 4.5px color-mix(in srgb, var(--account-accent, #d97706) 65%, transparent) !important;
+}
