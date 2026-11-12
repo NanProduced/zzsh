@@ -128,7 +128,7 @@ export function serializeSavedViews(views: SavedView[], adminId: string): string
 const NEXT_STEP: Record<string, string> = {
   STAFF_RESTRICTED: "运营复核限制", OWNER_PAUSED: "号主自行恢复", CONFIRMATION_OR_MEDIA_REQUIRED: "核对规则接受或展示图；没查到的部分不要当成已经缺图",
   QUOTE_REQUIRED: "沿用已有草稿继续核价", ACCEPTANCE_REQUIRED: "确认本次报价与条款", MEDIA_REQUIRED: "补齐展示图后再上架",
-  RULE_CHANGED: "按新规则重新核价并确认", ACCOUNT_NOT_PUBLISHABLE: "资料不能发布", CURRENT_VERSION_MISSING: "号主填写资料", PUBLICATION_REQUIRED: "确认上架",
+  RULE_CHANGED: "按新规则重新核价并确认", ACCOUNT_NOT_PUBLISHABLE: "资料不能发布", LEGACY_LISTING_RELIST_REQUIRED: "请号主重新填写资料上架", CURRENT_VERSION_MISSING: "号主填写资料", PUBLICATION_REQUIRED: "确认上架",
   IDENTITY_REQUIRED: "号主完成实名", ADULT_REQUIRED: "号主不满足年龄要求，不能接单", OWNER_UNAVAILABLE: "运营核对号主账号状态",
   GAME_UNAVAILABLE: "运营核对游戏配置", GAME_SERVICE_UNAVAILABLE: "运营核对租赁服务开关", OCCUPIED: "占用解除后重新检查接单资格",
   OCCUPANCY_UNKNOWN: "运营核对占用状态", FUNDING_UNKNOWN: "运营核对押金与包赔申报", PUBLISHER_BAIL_UNCONFIRMED: "运营核对号主保证金",

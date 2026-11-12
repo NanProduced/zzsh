@@ -530,6 +530,7 @@ export async function publicationBlockers(
           [a.game_id],
         )
       ).rows[0];
+  if (game?.code === "delta" && (v.schema_version === 3 || v.payload?.schemaVersion === 3)) reasons.push("LEGACY_LISTING_RELIST_REQUIRED");
   if (!game?.enabled) reasons.push("GAME_UNAVAILABLE");
   if (v.review_state === "DRAFT" && v.payload && v.origin === "NATIVE" && v.payload.ruleRefs.catalogRevision !== game?.catalog_revision) reasons.push("RULE_CHANGED");
   const rentalService = shared
@@ -1970,7 +1971,7 @@ export function orderAccountTitleFact(input: { snapshotTitle?: unknown; currentT
 
 export type PublicAvailabilityState = "RENTABLE" | "PENDING_PAYMENT" | "RENTED" | "OCCUPIED" | "OFFLINE" | "UNKNOWN" | "UNAVAILABLE" | "LEGACY_READ_ONLY";
 export type PublicListingReadMode = "RENTABLE" | "DETAIL";
-const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED"]);
+const READABLE_NON_RENTAL_BLOCKERS = new Set(["OWNER_PAUSED", "OCCUPIED", "OCCUPANCY_UNKNOWN", "PUBLISHER_BAIL_UNCONFIRMED", "FUNDING_UNKNOWN", "RULE_CHANGED", "CONFIRMATION_OR_MEDIA_REQUIRED", "QUOTE_REQUIRED", "ACCEPTANCE_REQUIRED", "MEDIA_REQUIRED", "LEGACY_LISTING_RELIST_REQUIRED"]);
 
 export function publicAvailability(blockers: readonly string[], current: boolean, gate: SupplyGate | null): PublicAvailabilityState {
   if (!current || blockers.includes("OWNER_PAUSED")) return "OFFLINE";

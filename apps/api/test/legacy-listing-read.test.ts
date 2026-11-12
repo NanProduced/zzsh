@@ -102,6 +102,7 @@ test("legacy read query validation rejects conditions outside the configured con
 test("legacy candidate SQL applies shared predicates to the observation attributes and explicit sort keys", () => {
   const query: ListingQueryV2 = { ...baseQuery, q: "846M", filters: { resources: [{ itemId: "item_haff", minQuantity: "1000000000" }], regions: [{ province: "北京市", city: "丰台区" }] } };
   const { text, values } = buildLegacyListingCandidates(query, null);
+  assert.match(text, /NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\)/);
   assert.match(text, /legacy_listing_read_snapshot/);
   assert.match(text, /\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'region_province'/);
   assert.match(text, /l\.item_id=\$3 AND l\.quantity>=\$4/);
@@ -122,6 +123,8 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   assert.match(text, /COALESCE\(us\.age_status,'UNKNOWN'\)='ADULT'/);
   assert.match(text, /NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication/);
   const mixed = buildMixedListingCandidates(query, null);
+  assert.match(mixed.text, /NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\)/);
+  assert.match(mixed.text, /v\.schema_version<>3/);
   assert.match(mixed.text, /h\.source_status=3/);
   assert.match(mixed.text, new RegExp(LEGACY_NATIVE_TAKEOVER_GUARD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

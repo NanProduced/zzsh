@@ -396,6 +396,7 @@ const BLOCKER_LABELS: Record<string, string> = {
   GAME_SERVICE_UNAVAILABLE: "租赁服务未启用",
   RULE_CHANGED: "规则已切换(需新版本)",
   ACCOUNT_NOT_PUBLISHABLE: "当前账号资料暂不能发布",
+  LEGACY_LISTING_RELIST_REQUIRED: "请号主重新填写账号资料后上架",
   PUBLISHER_BAIL_UNCONFIRMED: "号主保证金未确认",
   FUNDING_UNKNOWN: "资金资格依据尚未核定",
   OCCUPIED: "租用占用中",

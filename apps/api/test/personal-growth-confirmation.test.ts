@@ -86,7 +86,7 @@ test("actual confirmation rebuild skips readRentalMembership when growth is conf
 test("legacy confirmation uses its frozen base with new growth and rejects missing source or policy",async t=>{
  const order:typeof import("../src/order/order")=require("../src/order/order"),publishing:typeof import("../src/supply/publishing")=require("../src/supply/publishing"),funding:typeof import("../src/supply/funding-authority")=require("../src/supply/funding-authority"),reference:typeof import("../src/supply/legacy-published-reference")=require("../src/supply/legacy-published-reference");
  t.mock.method(order,"assertFreshCreateAuthorization",async()=>({ownerUserId:"owner-1",gameId:"game"}));
- t.mock.method(publishing,"evaluatePublication",async()=>[]);t.mock.method(funding,"isProductionConfirmationFundingReader",()=>true);
+  const evaluate=t.mock.method(publishing,"evaluatePublication",async()=>[]);t.mock.method(funding,"isProductionConfirmationFundingReader",()=>true);
  let sourceValid=true;
  t.mock.method(reference,"readLegacyPublishedReference",async()=>sourceValid?{digest:"c".repeat(64),observationVersionId:"observation",sourceDigest:"a".repeat(64),legacyId:"42",gradingCode:null,slots:[{position:0,path:"accountsImage/20261101/fixture.png"}]}:null);
  const payload=normalizeContentPayload(legacyPayload());
@@ -136,6 +136,8 @@ test("legacy confirmation uses its frozen base with new growth and rejects missi
  await assert.rejects(()=>rebuildPersonalConfirmation(client,user,{...request,fullPayoutTermsAcceptance:{termsVersionId:"other",termsDigest:terms.termsDigest,disclosureVersion:terms.disclosureVersion}},options),(e:unknown)=>(e as {status:number}).status===409);
  const accepted=await rebuildPersonalConfirmation(client,user,{...request,fullPayoutTermsAcceptance:{termsVersionId:terms.termsVersionId,termsDigest:terms.termsDigest,disclosureVersion:terms.disclosureVersion}},options);
  assert.equal(accepted.snapshot.schema,"personal-quote-v4");assert.equal(accepted.projection.compensationDisclosure?.selected,true);
+  evaluate.mock.mockImplementation(async()=>["LEGACY_LISTING_RELIST_REQUIRED"]);
+  await assert.rejects(()=>rebuildPersonalConfirmation(client,user,request,options),(e:unknown)=>(e as {code:string,status:number}).code==="CONFIRMATION_CHANGED"&&(e as {status:number}).status===409);
  assert.equal(statements.some(sql=>/^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)),false);
 });
 

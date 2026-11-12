@@ -582,7 +582,7 @@ test("v3 detail SQL carries only the matched shard record and never replaces the
   const params = jsonRecordParams(detailCall.values);
   assert.equal(params.length, 1, "only the 4/5/6 branch receives admission JSON");
   assert.deepEqual(params[0]!.map(record => record.accountId), ["account_1"], "one matched record, never the whole shard");
-  assert.match(detailCall.sql, /h\.source_status=3 AND \(a\.legacy_hold='NONE' AND d\.account_id IS NULL\)\)/, "status 3 stays on its own (absent) admission");
+  assert.match(detailCall.sql, /h\.source_status=3 AND NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\) AND \(a\.legacy_hold='NONE' AND d\.account_id IS NULL\)\)/, "retired Delta status-3 sources cannot reappear through public detail");
   assert.match(detailCall.sql, /h\.source_status IN\(4,5,6\)/);
   // A miss sends no 4/5/6 branch at all.
   const miss = capturingLegacyClient(legacyProjectionRow({ id: "account_9", source_status: 4 }));

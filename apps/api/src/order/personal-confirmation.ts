@@ -188,6 +188,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   const publication=purpose === "READ" ? await readListingPublication(client,account,version) : (await client.query<{source:string}>(`SELECT source FROM zzsh_supply.listing_publication WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3 AND rule_release_id=$4 AND content_hash=$5 LIMIT 1`,[version.id,account.id,account.owner_user_id,version.rule_release_id,version.content_hash])).rows[0];
   if(!isEffectivePublicationState(version.review_state, publication?.source)) { if(purpose === "READ") throw notFound(); unavailable("Listing publication evidence cannot be verified"); }
   const blockers=purpose === "READ" ? await evaluatePricePreviewPublication(client,account,version,options.gate) : await evaluatePublication(client,account,version,options.gate);
+  if(blockers.includes("LEGACY_LISTING_RELIST_REQUIRED"))throw new SecurityApiError(409,"CONFIRMATION_CHANGED","旧账号已下架，请号主重新填写资料上架");
   if(blockers.includes("OCCUPIED"))throw new SecurityApiError(409,"OCCUPIED","Account is occupied");
   if(purpose === "READ" && blockers.includes("RULE_CHANGED")) throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
   if(blockers.length)unavailable("Listing eligibility is unavailable");

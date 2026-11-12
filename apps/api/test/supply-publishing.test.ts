@@ -279,10 +279,7 @@ test("an authoritative completed rental blocks publication even when the old acc
 });
 
 test("the three migration account states keep their server-side listing rules", async () => {
-  // Round seven migrates accounts in exactly two states: listed at the cutoff and delisted at the cutoff.
-  // A delisted one stays UNRESOLVED and must never publish on the same account - the owner has to create a
-  // new account instead. A listed one becomes NONE after takeover, so it rents, and after a pause it can
-  // resume because the hold no longer blocks it. Neither may publish once a rental has completed.
+  // The hold rules still apply independently of the retired legacy-quote version.
   const draft = { id: "v", account_id: "a", origin: "NATIVE", review_state: "DRAFT", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
   const delisted = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "UNRESOLVED" } as never, draft as never, nativeGate, "WRITE");
   assert.equal(delisted.includes("ACCOUNT_NOT_PUBLISHABLE"), true, "a delisted legacy account must not publish on the same account");
@@ -292,6 +289,24 @@ test("the three migration account states keep their server-side listing rules", 
   assert.equal(paused.includes("ACCOUNT_NOT_PUBLISHABLE"), false, "pausing is a runtime state, not a hold");
   const settled = await publicationBlockers(nativeGateClient() as never, { ...nativeAccount, legacy_hold: "NONE" } as never, draft as never, async () => ({ ...await nativeGate(), rentalCompleted: true }), "WRITE");
   assert.equal(settled.includes("RENTAL_COMPLETED"), true, "a settled rental must not return to a listing");
+});
+
+test("a migrated legacy-price listing must be resubmitted before new orders, without blocking native spread or fixed versions", async () => {
+  const version = { id: "v", account_id: "a", origin: "NATIVE", review_state: "APPROVED", rule_release_id: null, content_hash: null, payload: null, attributes: {}, title: "" };
+  for (const purpose of ["READ", "WRITE"] as const) {
+    const retired = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, { ...version, schema_version: 3 } as never, nativeGate, purpose);
+    assert(retired.includes("LEGACY_LISTING_RELIST_REQUIRED"));
+    for (const schema_version of [1, 2, 4]) {
+      const current = await publicationBlockers(nativeGateClient() as never, nativeAccount as never, { ...version, schema_version } as never, nativeGate, purpose);
+      assert(!current.includes("LEGACY_LISTING_RELIST_REQUIRED"));
+    }
+    const base = nativeGateClient(), other = { query: async (sql: string) => {
+      const result = await base.query(sql);
+      return sql.includes("FROM zzsh_supply.game WHERE id=$1") ? { ...result, rows: result.rows.map(row => ({ ...row, code: "other" })) } : result;
+    } };
+    const otherGame = await publicationBlockers(other as never, nativeAccount as never, { ...version, schema_version: 3 } as never, nativeGate, purpose);
+    assert(!otherGame.includes("LEGACY_LISTING_RELIST_REQUIRED"));
+  }
 });
 
 test("historical observations cannot bypass publication gates when resuming", async () => {
