@@ -1492,6 +1492,20 @@
       "when": 1794456000014,
       "tag": "0212_publication_credit_snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1794456000015,
+      "tag": "0213_docs_schema_comments",
+      "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1794456000016,
+      "tag": "0214_support_presence_comments",
+      "breakpoints": true
     }
   ]
 }

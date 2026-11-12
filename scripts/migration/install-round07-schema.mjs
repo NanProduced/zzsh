@@ -178,6 +178,7 @@ export async function assertInitialDatabaseReadback(client,baseline,seedProof,ta
   const expected=new Map((baseline.seedCounts??[]).map(row=>[row.table,row.count]));
   assert(expected.size===INITIAL_SEED_TABLES.size&&[...INITIAL_SEED_TABLES].every(name=>Number.isSafeInteger(expected.get(name))), 'SCHEMA_SEED_MANIFEST_INVALID');
   const schemas=['zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit'];
+  if(tailSeeds)schemas.push('zzsh_docs');
   if(tailSeeds){
     const namespaces=(await client.query(`SELECT nspname name FROM pg_namespace WHERE left(nspname,5)='zzsh_' ORDER BY nspname`)).rows.map(row=>row.name);
     assert.deepEqual(namespaces,[...schemas,'zzsh_business_meta'].sort(),'SCHEMA_UNEXPECTED_BUSINESS_SCHEMA');

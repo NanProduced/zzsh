@@ -25,6 +25,8 @@ test('stable seed contract binds the independent reference and immutable 0174 ba
  assert.equal(proof.reference.through,'0188_poststart_support_cancel');
  const opening={singleton:true,wait_minutes:40,revision:1,updated_by_admin_id:null};
  assert.equal(tables['zzsh_order.opening_auto_confirm_policy'].sha256,initialSeedRowsDigest([opening]));
+ const watermark={singleton:true,revision:1,enabled:false,logo_asset_id:null,position:'se',size_percent:12,opacity_percent:55,margin_percent:2,updated_by_admin_id:null};
+ assert.equal(tables['zzsh_supply.account_image_watermark'].sha256,initialSeedRowsDigest([watermark]));
 });
 
 test('any added tail requires a reviewed target proof before initialization',()=>{
