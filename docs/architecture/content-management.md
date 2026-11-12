@@ -134,7 +134,7 @@ Plate 迁移接在云信 `0197`、OSS `0198–0200` 之后。按 journal 依次�
 
 `0111_platform_updates.sql` 的已执行SHA-256为 `99c1cd0acad4223fc9bcceacc4cb8348cfb452984ea5af091837a14fa55501f1`，使用CRLF；根 `.gitattributes` 的精确文件例外保留原字节。不得由Git换行规范化或SQL格式化改变其迁移校验值。
 
-首装完成结构迁移并激活首位 Boss 后，在 API 的 `APP_PROFILE=migration` 配置下执行 `npm run migrate:business -w @zzsh/api -- --bootstrap-content=<Boss管理员ID>`。命令先校验迁移身份和版本账，再在同一事务核对确认清单、初始化 31 条内容及 3 份协议条款。相同种子可重复执行，已有运营内容发生冲突则整笔初始化回滚。已有环境通过协议条款发布审批补齐缺失的生效文书。缺少生效的提前结算告知时，v2 新建单返回 503，订单、接受记录和幂等回执均不写入。
+首装完成结构迁移并创建初始管理员后，在 API 的 `APP_PROFILE=migration` 配置下执行 `npm run migrate:business -w @zzsh/api -- --bootstrap-content=<Boss管理员ID>`。初始 Boss 可以尚未登录或绑定 TOTP；命令先校验迁移身份、版本账与初始 Boss 记录，再在同一事务核对确认清单、初始化 31 条内容及 3 份协议条款。Boss ID 仅用于满足现有内容归属字段，系统审计记录标明初始化来源，不代表该管理员登录或审批。相同种子可重复执行，已有运营内容发生冲突则整笔初始化回滚。已有环境通过协议条款发布审批补齐缺失的生效文书。缺少生效的提前结算告知时，v2 新建单返回 503，订单、接受记录和幂等回执均不写入。
 
 Web 服务器设置 `ZZSH_API_ORIGIN` 与 `ZZSH_WEB_ORIGIN`，独立环境 Origin 必须与 API 配置一致；生产不使用本地缺省值。新增手册复用已有正文格式；新增固定位置须登记标识、约束、默认呈现与消费代码，不能只在后台新增一个无用户端绑定的资源。新增语法必须同时补齐 API 校验、编辑预览、各消费端渲染和兼容规则。
 

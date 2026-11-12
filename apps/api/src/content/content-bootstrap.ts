@@ -105,6 +105,19 @@ function noticePayload(entry: Record<string, unknown>, document: PlateDocumentEn
 
 export type BootstrapResult = { status: "CREATED" | "ALREADY_INITIALIZED"; created: number; manifestDigest: string };
 
+/** First deployment may reference an initial Boss before that person signs in. */
+export async function assertContentBootstrapBoss(client: PoolClient, adminId: string): Promise<void> {
+  const boss = (await client.query<{ isBoss: boolean; status: string; firstActivatedAt: Date | null; username: string | null; suspended: boolean }>(
+    `SELECT s."is_boss" AS "isBoss",s."status",s."first_activated_at" AS "firstActivatedAt",u."username",u."suspended"
+    FROM "zzsh_iam"."admin_security" s
+    JOIN "zzsh_auth_admin"."user" u ON u."id"=s."admin_user_id"
+    WHERE s."admin_user_id"=$1 FOR SHARE OF s,u`, [adminId])).rows[0];
+  const initial = boss?.status === "PENDING_ENROLLMENT" && boss.firstActivatedAt === null
+    && typeof boss.username === "string" && ["zz00001", "zz00002"].includes(boss.username.toLowerCase());
+  if (!boss || boss.isBoss !== true || boss.suspended !== false || !(boss.status === "ACTIVE" || initial))
+    throw invalid("Content bootstrap requires an active Boss or an unactivated initial Boss");
+}
+
 export async function bootstrapDefaultContent(
   client: PoolClient,
   input: { actorAdminId: string; requestId: string },

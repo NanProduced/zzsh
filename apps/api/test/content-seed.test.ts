@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
+import { assertContentBootstrapBoss } from "../src/content/content-bootstrap";
 
 import {
   contentSeedCarouselId,
@@ -11,6 +12,19 @@ import {
 } from "../src/content/content-seed";
 
 type ItemRow = { id: string; type: string; gameId: string | null; revision: string; sortOrder: number };
+
+test("content bootstrap accepts only active Boss or an unactivated reserved initial Boss", async () => {
+  type Fixture = { isBoss: boolean; status: string; firstActivatedAt: Date | null; username: string | null; suspended: boolean };
+  const initial: Fixture = { isBoss: true, status: "PENDING_ENROLLMENT", firstActivatedAt: null, username: "zz00001", suspended: false };
+  const client = (row: Fixture | null) => ({ query: async () => ({ rows: row ? [row] : [] }) }) as unknown as PoolClient;
+  await assertContentBootstrapBoss(client(initial), "boss");
+  await assertContentBootstrapBoss(client({ ...initial, status: "ACTIVE", username: "other" }), "boss");
+  for (const row of [null, { ...initial, isBoss: false }, { ...initial, suspended: true },
+    { ...initial, status: "FROZEN" }, { ...initial, username: "other" },
+    { ...initial, firstActivatedAt: new Date() }]) {
+    await assert.rejects(assertContentBootstrapBoss(client(row), "boss"));
+  }
+});
 type VersionRow = { id: string; itemId: string; sequence: number; state: string; title: string; summary: string; body: string; coverMediaId: string | null; revision: string; publishedAt: Date | null; publishedByAdminId: string | null; payload: unknown; updateSettings?: unknown };
 type CarouselRow = { id: string; slotCode: string; mediaId: string; imageAlt: string; title: string; description: string; linkUrl: string | null; enabled: boolean; sortOrder: number; startsAt: Date | null; endsAt: Date | null; createdByAdminId: string };
 

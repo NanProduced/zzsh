@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { SecurityApiError, withTransaction } from "../auth/security-core";
-import { bootstrapDefaultContent } from "../content/content-bootstrap";
+import { assertContentBootstrapBoss, bootstrapDefaultContent } from "../content/content-bootstrap";
 import { bootstrapLegalDocuments } from "../legal/legal-bootstrap";
 import { ConfigurationError, loadConfig } from "../config/config";
 import { assertBusinessMigrationIdentity, createBusinessPool } from "./business";
@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   const bootstrapFlag = process.argv.find(arg => arg === "--bootstrap-content" || arg.startsWith("--bootstrap-content="));
   const actorAdminId = bootstrapFlag?.slice("--bootstrap-content=".length);
   if (bootstrapFlag && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(actorAdminId ?? "")) {
-    throw new ConfigurationError("--bootstrap-content=<active-boss-admin-id> is required");
+    throw new ConfigurationError("--bootstrap-content=<boss-admin-id> is required");
   }
   const config = loadConfig();
   if (config.profile !== "migration") {
@@ -30,11 +30,7 @@ async function main(): Promise<void> {
     if (actorAdminId) {
       const result = await withTransaction(pool, async client => {
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended('confirmed-content-bootstrap', 0))");
-        const boss = await client.query(
-          `SELECT 1 FROM "zzsh_iam"."admin_security" WHERE "admin_user_id" = $1 AND "is_boss" AND "status" = 'ACTIVE' FOR SHARE`,
-          [actorAdminId],
-        );
-        if (!boss.rows.length) throw new ConfigurationError("Content bootstrap requires an active Boss admin id");
+        await assertContentBootstrapBoss(client, actorAdminId);
         const input = { actorAdminId, requestId: randomUUID() };
         return { content: await bootstrapDefaultContent(client, input), legal: await bootstrapLegalDocuments(client, input) };
       });
