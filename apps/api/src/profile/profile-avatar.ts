@@ -167,8 +167,6 @@ export async function ensureInitialProfileAvatar(
   requestId: string,
   presetId?: ProfileAvatarPresetId,
 ): Promise<{ created: boolean; presetId: ProfileAvatarPresetId }> {
-  const existing = await loadProfileAvatar(client, realm, subjectId);
-  if (existing) return { created: false, presetId: existing.defaultPresetId };
   const selected = presetId ?? randomPresetId();
   const row = await insertProfileAvatar(client, realm, subjectId, selected, selected);
   if (!row) {
