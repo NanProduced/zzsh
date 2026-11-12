@@ -36,9 +36,62 @@ OSS 目标使用 `OSS_BUCKET`、`OSS_REGION`、`OSS_ENDPOINT`、`OSS_OBJECT_PREF
 
 存储目标由部署配置管理，页面不提供在线切换或密钥编辑。现有适配器的 STS 凭据只在启动时读取，没有自动续期；长期使用临时凭据前必须接入刷新机制，不能把一次 Token 注入当作持续可用。
 
+## 公司账号首次部署 OSS/CDN
+
+本节适用于首次给一个环境配置公司账号下的账号图片存储。生产、线上测试和本地测试分别使用独立 Bucket、域名和运行身份；实际名称、负责人和凭据引用由部署记录保管，不把密钥写入仓库。常规版本更新复用当前已生效配置，不重新创建 Bucket、覆盖水印策略或重新初始化已存在的媒体资料。
+
+| 配置项 | 首次部署要求 |
+| --- | --- |
+| OSS Bucket | 创建与业务部署地域相匹配的专用 Bucket，保持私有并阻止公共访问；业务前缀非空且以 `/` 结尾。确认图片处理能力、容量、对象版本和生命周期规则。 |
+| 上传域名 | 为浏览器准备独立的 HTTPS OSS 上传域名，不与应用认证 Cookie 共享作用域；若使用自定义域名，完成 OSS 绑定、DNS 和证书。OSS 默认公网域名能否用于直传和浏览器内联读取须在目标 Bucket 实测。 |
+| CDN 域名 | 使用独立的图片加速域名，业务类型为图片小文件。完成域名归属验证、CNAME 和 HTTPS 证书部署；正式证书使用适用于公司业务的证书并安排续期。 |
+| 加速区域与备案 | 中国内地或全球加速需要域名备案；仅境外测试可按实际情况选择不含中国内地的区域。公司上线前确认地域、备案及数据出境要求。 |
+| 运行身份 | 使用专用 RAM 身份，按实际对象前缀授予上传、读取、图片转存、复制和删除所需的最小权限，并仅对本环境 CDN 域名授予 `cdn:RefreshObjectCaches`。不要使用主账号密钥、`PowerUserAccess` 或账号级 OSS 全权限。 |
+| CDN 回源身份 | 使用单独的受限身份，初始仅允许读取 `<prefix>public/listing/*`；不可读取上传暂存、原图、私有变体和内部文档。旧图是否公开另行核准后再授权对应目录。 |
+| 水印 | 在管理端“系统配置 → 账号图片水印”选择已审核公开的 PNG Logo，设置位置、大小、透明度和边距；用新上传的合成图核验 640 与 1920 两档。配置只作用于随后生成的变体。 |
+| 生命周期与监控 | 为 `<prefix>private/account-upload/` 设置覆盖上传有效期和恢复窗口的清理周期；原图、私有变体及已投放对象不得按同一规则盲删。配置容量、费用、证书到期、投放失败和刷新失败监控。 |
+
+建议按以下顺序配置并验收：
+
+1. 在目标公司账号创建 Bucket 和独立 RAM 运行身份，先以 `OSS_ACCOUNT_IMAGE_CDN_MODE=off` 部署。按服务器所在地选择 OSS Endpoint；同地域 ECS 可使用官方内网 Endpoint，浏览器直传仍使用外网 HTTPS 上传域名。运行身份当前从环境读取 `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET` 及可选 `ALIBABA_CLOUD_SECURITY_TOKEN`；通过受限部署配置注入，当前代码不会自动续期 STS。OSS 图片转存可能需要源 Bucket 级处理权限及目标对象写权限，按[官方转存权限说明](https://help.aliyun.com/zh/oss/user-guide/save-processed-images)对专用 Bucket 核验，勿为排错临时授予全账号权限。
+2. 配置 OSS CORS，明确允许实际用户站的完整 Origin、账号直传所需 POST 及必要请求头；私有直读或其他客户端需要的 GET 等方法按实际调用单独核定。API 和用户 Web BFF 的 `OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN` 必须一致。用合成图片验证浏览器直接向 OSS 上传、服务端完成校验、原图字节及两档水印衍生图读回。 [OSS 跨域配置](https://help.aliyun.com/zh/oss/user-guide/configure-cross-origin-resource-sharing) · [地域与 Endpoint](https://help.aliyun.com/zh/oss/user-guide/regions-and-endpoints)
+3. 在 CDN 添加加速域名，以目标 Bucket 的 OSS 公网域名为源站，设置 HTTPS 回源、回源 HOST 和 SNI，部署覆盖加速域名的证书并配置 CNAME。按实际账号权限配置私有 Bucket 回源，避免使用默认全 Bucket 或全账号只读授权；先核实同账号回源角色是否被其他域名共用，共用时不得直接覆盖其策略。使用受限身份后，以合成对象验证公开目录可读、私有目录拒绝。 [添加 CDN 域名](https://help.aliyun.com/zh/cdn/add-a-domain-name) · [私有 Bucket 回源](https://help.aliyun.com/zh/cdn/user-guide/grant-alibaba-cloud-cdn-access-permissions-on-private-oss-buckets)
+4. 为 `/<prefix>public/listing/` 设置 300 秒节点缓存、开启“忽略源站不缓存标头”、关闭“客户端跟随 CDN 缓存策略”和“响应过期缓存”。规则按权重生效：具体目录权重应高于根目录；例如根目录设 0 秒、权重 1，公开目录设 300 秒、权重 99。确认规则下发完成后，再将所有 API 工作进程的模式一致切至 `serve`。 [缓存规则与优先级](https://help.aliyun.com/zh/cdn/user-guide/configure-the-cdn-cache-expiration-time)
+5. 在目标环境用虚构账号走浏览器直传、上架、列表、详情、编号查询和收藏，检查实际请求域名、两个规格和水印。再限制该账号公开，核对投放源对象删除、CDN 刷新任务完成及旧 URL 拒绝；恢复后核对新版本 URL。刷新受理不等于全网完成，需查询任务状态并实测；旧缓存失效时间以渠道结果为准。 [CDN 刷新与预热](https://help.aliyun.com/zh/cdn/user-guide/refresh-and-prefetch-resources)
+
+CDN 回源身份的最小读取策略可按下列形式配置，其中 `<prefix>` 含末尾斜线；该策略不授予应用上传或删除权限。同账号 CDN 回源可能复用账号级角色，必须核实该角色及其他 CDN 域名的实际使用范围；不能隔离时应改用独立受限身份或独立账号，再做正反向访问验证。
+
+```json
+{
+  "Version": "1",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["oss:GetObject"],
+    "Resource": ["acs:oss:*:*:<bucket>/<prefix>public/listing/*"]
+  }]
+}
+```
+
+部署参数示例只展示字段名，值由目标环境提供：
+
+```dotenv
+MEDIA_STORAGE=oss
+OSS_BUCKET=<环境专用Bucket>
+OSS_REGION=<Bucket地域，例如oss-cn-hangzhou>
+OSS_ENDPOINT=<服务端访问的官方HTTPS Endpoint>
+OSS_OBJECT_PREFIX=<环境专用前缀，必须以斜线结尾>/
+OSS_ACCOUNT_MEDIA_DIRECT=1
+OSS_ACCOUNT_MEDIA_BROWSER_ORIGIN=https://<独立OSS上传域名>
+OSS_ACCOUNT_IMAGE_CDN_MODE=off
+OSS_ACCOUNT_IMAGE_CDN_ORIGIN=https://<独立CDN图片域名>
+OSS_ACCOUNT_LEGACY_CDN=0
+```
+
+上述 `off` 是验收前的起始值，公开/私有路径和撤回能力验证通过后才切 `serve`。旧平台图片需按前文准备获审清单、核对迁移后账号公开资格并独立验收，不能因新图成功便自动开启；本节账号图片的直传与 CDN 不代表目录图、内容素材或内部文档图片也已完成同等改造。对象存储、图片处理、CDN 流量和 HTTPS 请求可能分别计费，按公司账号实际价格与配额确认。
+
 ## 新环境的初始对象准备
 
-本地开发、团队线上测试和生产使用各自的 Bucket 与运行身份。Bucket/Object 保持 private；原图与衍生图共用后端，不能将整个前缀公开。浏览器沿 API/BFF 地址读取，由服务器检查当前公开资格或私有权限。测试 ECS 优先与 Bucket 同地域，使用匹配的 HTTPS Endpoint。
+本地开发、团队线上测试和生产使用各自的 Bucket 与运行身份。Bucket/Object 保持 private；原图与衍生图共用后端，不能将整个前缀公开。账号公开展示图在 CDN 投放就绪后由浏览器直接读取 CDN；私有原图先由 API/BFF 校验权限再签发短期 OSS 地址；其他素材按其当前实现读取。测试 ECS 优先与 Bucket 同地域，使用匹配的 HTTPS Endpoint。
 
 切换 Bucket 或后端前，按目标数据库的同一数据快照生成引用清单。每项记录 `mediaId`、用途、原图/衍生图、`storageKey`、SHA256、字节数、MIME、审核/访问状态及来源快照标识；按对象键去重，并保留全部业务引用。研究图、探针、无引用保全件和未知图片不自动上传；无法确定的映射单列，不补零或自动审核。
 
