@@ -52,10 +52,11 @@ export async function authorizeLegacyPublicSlot(client: PoolClient, listing: Rec
 }
 
 /** Listings must already have passed their ordinary public-read guards. */
-export async function attachLegacyPathImages<T extends Record<string, unknown>>(client: PoolClient, listings: T[]): Promise<T[]> {
+export async function readLegacyPublicSlots<T extends Record<string, unknown>>(client: PoolClient, listings: T[]): Promise<Map<T, Array<{ position: number; path: string }>>> {
   const wanted = listings.filter(item => item.source === "LEGACY_READ_ONLY" && typeof item.id === "string" && Array.isArray(item.media) && item.media.length === 0);
   const nativeReferences = await readNativeReferences(client, listings);
-  if (!wanted.length && !nativeReferences.size) return listings;
+  const slots = new Map<T, Array<{ position: number; path: string }>>();
+  if (!wanted.length && !nativeReferences.size) return slots;
   const rows = wanted.length ? (await client.query<{ accountId: string; observationVersionId: string; displayPaths: string[] }>(
     `SELECT p.account_id AS "accountId",p.observation_version_id AS "observationVersionId",p.display_paths AS "displayPaths"
        FROM zzsh_supply.legacy_account_media_paths p
@@ -70,14 +71,24 @@ export async function attachLegacyPathImages<T extends Record<string, unknown>>(
       WHERE EXISTS (SELECT 1 FROM zzsh_supply.legacy_account_media_paths private_media WHERE private_media.penalty_paths @> ARRAY[candidate.path]::text[])`, [allPaths],
   )).rows.map(row => row.path)) : new Set<string>();
   const images = new Map(rows.map(row => [row.accountId, row]));
-  return listings.map(item => {
+  for (const item of listings) {
     if (typeof item.id === "string" && typeof item.versionId === "string") {
       const reference = nativeReferences.get(key(item.id, item.versionId));
-      if (reference) return { ...item, legacyImages: reference.slots.map(({ position }) => ({ position, url: `/api/v1/supply/listings/${item.id}/legacy-images/${position}` })) };
+      if (reference) { slots.set(item, reference.slots); continue; }
     }
     const image = typeof item.id === "string" ? images.get(item.id) : undefined, paths = image?.displayPaths;
-    if (!paths || !Array.isArray(paths) || paths.some(path => !isLegacyImagePath(path)) || !wanted.includes(item) || item.versionId !== image.observationVersionId) return item;
-    return { ...item, legacyImages: paths.flatMap((path, index) => blocked.has(path) ? [] : [{ position: index, url: `/api/v1/supply/listings/${item.id}/legacy-images/${index}` }]) };
+    if (!paths || !Array.isArray(paths) || paths.some(path => !isLegacyImagePath(path)) || !wanted.includes(item) || item.versionId !== image.observationVersionId) continue;
+    slots.set(item, paths.flatMap((path, position) => blocked.has(path) ? [] : [{ position, path }]));
+  }
+  return slots;
+}
+
+export async function attachLegacyPathImages<T extends Record<string, unknown>>(client: PoolClient, listings: T[]): Promise<T[]> {
+  const slots = await readLegacyPublicSlots(client, listings);
+  if (!slots.size) return listings;
+  return listings.map(item => {
+    const images = slots.get(item);
+    return images ? { ...item, legacyImages: images.map(({ position }) => ({ position, url: `/api/v1/supply/listings/${item.id}/legacy-images/${position}` })) } : item;
   });
 }
 

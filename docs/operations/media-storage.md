@@ -22,7 +22,9 @@
 - 新发布、换版、下架、素材审核和限制变更触发投放队列。账号暂停继续按原详情资格处理。已撤下的版本不会复用，撤下操作删除回源对象后请求 CDN 按 URL 刷新。刷新任务受理和各节点完成分别核验。边缘缓存目标不超过 300 秒，禁用过期内容回退，浏览器需要再验证。实际冷回源、热缓存和旧 URL 撤回时效须在隔离域名实测。 [CDN 缓存刷新](https://help.aliyun.com/en/cdn/developer-reference/api-cdn-2018-05-10-refreshobjectcaches)
 - CDN 回源身份仅授权 `<prefix>public/listing/*` 当前版本的 `GetObject`。使用独立同账号或跨账号回源身份，核对暂存、原图、内部件和对象版本访问均拒绝。默认的一键 OSS 回源授权范围过宽。处理和投放身份需读写所需私有及投放前缀，允许删除投放对象和刷新指定 CDN 域名。 [CDN 回源配置参数](https://help.aliyun.com/zh/cdn/developer-reference/parameters-for-configuring-features-for-domain-names)
 
-旧平台路径图、其他业务素材及内部文档继续经原授权链路读取。历史对象迁移清单、真实 OSS/CDN 权限和跨端验证均需独立验收。
+旧平台路径图另以 `OSS_ACCOUNT_LEGACY_CDN=1` 启用，须提供审核通过的展示清单文件 `OSS_ACCOUNT_LEGACY_CDN_MANIFEST` 和其文件摘要 `OSS_ACCOUNT_LEGACY_CDN_MANIFEST_SHA256`。清单格式为 `{"schema":"zzsh.legacy-image-cdn.v1","images":[{"path":"accountsImage/20261112/example.png","sha256":"<sha256>","byteSize":123,"mime":"image/png"}]}`。每条必须同时匹配现行账号公开资格、已核来源版本及展示引用，并排除被任一账号引用为处罚图的路径。已迁入源仍保留 `<prefix>legacy/accountsImage/YYYYMMDD/...`，投放前核对实际 SHA-256、大小、MIME、解码和隐私元数据，投放版本使用 `<prefix>public/legacy/<分发版本>/accountsImage/YYYYMMDD/...`。
+
+有已核清单但确认 OSS 尚未上传的路径由业务数据标记「正在迁移中」。正常 CDN 读取和已有该状态的页面不逐图调用 API 探测。格式或校验不符显示不可用，缺少获审清单的历史引用继续使用原授权链路。开启旧图 CDN 时只为回源身份追加 `<prefix>public/legacy/*` 当前版本的 `GetObject`，撤权先删回源再刷新，重新投放使用新版本。其他业务素材及内部文档沿用现有授权链路。
 
 ## 配置与查看
 

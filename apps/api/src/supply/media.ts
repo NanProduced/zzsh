@@ -56,9 +56,14 @@ export async function decodeImage(bytes: Buffer): Promise<{ info: ImageInfo; pub
 }
 
 export async function inspectAccountWebp(bytes: Buffer, maxEdge: number): Promise<ImageInfo> {
-  const { decoder, metadata, info } = await imageDecoder(bytes, maxEdge * maxEdge);
-  if (info.mime !== "image/webp" || Math.max(info.width, info.height) > maxEdge
-    || metadata.exif || metadata.xmp || metadata.iptc || metadata.comments?.length) throw new MediaValidationError("Invalid OSS account image variant");
+  const info = await inspectPublicAccountImage(bytes, maxEdge * maxEdge);
+  if (info.mime !== "image/webp" || Math.max(info.width, info.height) > maxEdge) throw new MediaValidationError("Invalid OSS account image variant");
+  return info;
+}
+
+export async function inspectPublicAccountImage(bytes: Buffer, pixelLimit = MAX_MEDIA_PIXELS): Promise<ImageInfo> {
+  const { decoder, metadata, info } = await imageDecoder(bytes, pixelLimit);
+  if (metadata.exif || metadata.xmp || metadata.iptc || metadata.comments?.length) throw new MediaValidationError("Display image contains private metadata");
   await decoder.raw().toBuffer();
   return info;
 }

@@ -32,7 +32,7 @@ export type SkinTag = {
   isCollectible?: boolean | null;
   defaultState?: "UNKNOWN" | "DEFAULT" | "NON_DEFAULT";
 };
-export type ListingMedia = { assetId: string; url: string; coverUrl?: string; category?: "SHOWCASE" | "PENALTY"; legacy?: boolean };
+export type ListingMedia = { assetId: string; url: string; coverUrl?: string; category?: "SHOWCASE" | "PENALTY"; legacy?: boolean; legacyState?: "PENDING_IMPORT" | "UNAVAILABLE" };
 export type ListingCardData = {
   historicalReadOnly?: boolean;
   canCreateOrder?: boolean;
@@ -309,7 +309,9 @@ export function toListingCard(listing: PublicListing): ListingCardData {
 }
 function projectListingMedia(listing: PublicListing): ListingMedia[] {
   if (listing.media.length === 0 && Array.isArray(listing.legacyImages)) {
-    return [...listing.legacyImages].sort((a, b) => a.position - b.position).map(({ position, url }) => ({ assetId: `legacy-slot-${position}`, url, legacy: true }));
+    return [...listing.legacyImages].sort((a, b) => a.position - b.position).map(({ position, url, cdnUrl, state }) => ({
+      assetId: `legacy-slot-${position}`, url: cdnUrl ?? url, ...(cdnUrl ? {} : { legacy: true, ...(state ? { legacyState: state } : {}) }),
+    }));
   }
   return [...listing.media]
     .sort((a, b) => a.position - b.position)

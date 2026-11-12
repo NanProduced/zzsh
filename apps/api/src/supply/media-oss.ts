@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { ConfigurationError } from "../config/config";
 import { accountMediaBrowserOrigin, createOssAccountMedia, type OssAccountMedia } from "./account-media-oss";
 import { createAccountCdnRefresh, createAccountImageCdn, loadAccountImageCdnTarget, type AccountImageCdn } from "./account-image-cdn";
+import { createLegacyImageCdn, loadLegacyImageCdnManifest } from "./legacy-image-cdn";
 import { ALLOWED_IMAGE_MIMES, createLocalMediaStorage, MediaStorageError, STORAGE_KEY_PATTERN, type ImageMime, type MediaStorage } from "./media";
 
 export const OSS_REQUEST_TIMEOUT_MS = 30_000;
@@ -169,6 +170,7 @@ export function resolveMediaStorage(env: NodeJS.ProcessEnv, workingDirectory: st
   const kind = env.MEDIA_STORAGE?.trim() || "local";
   const browserOrigin = accountMediaBrowserOrigin(env);
   const cdnTarget = loadAccountImageCdnTarget(env);
+  const legacyManifest = loadLegacyImageCdnManifest(env, workingDirectory);
   if (cdnTarget && (kind !== "oss" || (cdnTarget.mode === "serve" && !browserOrigin) || cdnTarget.origin === browserOrigin)) {
     throw new ConfigurationError("Account CDN requires OSS with a separate CDN domain and account media processing in serve mode");
   }
@@ -179,7 +181,10 @@ export function resolveMediaStorage(env: NodeJS.ProcessEnv, workingDirectory: st
     const credentials = loadOssCredentials(env);
     if (!browserOrigin && !cdnTarget) return createOssMediaStorage(options, credentials);
     const client = createClient(options, credentials);
-    const accountImageCdn = cdnTarget ? createAccountImageCdn(cdnTarget, options, client, createAccountCdnRefresh(credentials)) : undefined;
+    const refresh = cdnTarget ? createAccountCdnRefresh(credentials) : undefined;
+    const accountImageCdn = cdnTarget && refresh ? {
+      ...createAccountImageCdn(cdnTarget, options, client, refresh), legacy: createLegacyImageCdn(cdnTarget, options, client, refresh, legacyManifest),
+    } : undefined;
     if (!browserOrigin) return createOssMediaStorage(options, credentials, { createClient: () => client, accountImageCdn });
     const signer = createClient(options, credentials, browserOrigin);
     const accountMedia = createOssAccountMedia(options, credentials, browserOrigin, client, (key, seconds, process) => signer.signatureUrlV4("GET", seconds, {

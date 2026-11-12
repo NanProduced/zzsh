@@ -1395,7 +1395,8 @@ export async function mountAuthHandlers(
     readPublicListing(client, await readPublishingAccount(client, id), supplyGateReader, legacyPublicAdmission, false, "DETAIL", legacyPublicAdmissionDetail);
   const mediaStorage = options.mediaStorage ?? createLocalMediaStorage(join(process.cwd(), "uploads"));
   if (mediaStorage.accountImageCdn) {
-    app.get(AccountImageCdnLifecycle).start({ pool: options.pool, storage: mediaStorage, cdn: mediaStorage.accountImageCdn, gate: supplyGateReader });
+    app.get(AccountImageCdnLifecycle).start({ pool: options.pool, storage: mediaStorage, cdn: mediaStorage.accountImageCdn, gate: supplyGateReader,
+      legacyPublicAdmission, legacyPublicAdmissionDetail });
   }
   const orderHoldSeconds = options.orderHoldSeconds ?? (() => {
     const raw = process.env.ORDER_HOLD_SECONDS?.trim();

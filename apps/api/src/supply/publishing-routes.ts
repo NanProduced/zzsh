@@ -32,6 +32,7 @@ import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
 import { attachAccountImageCdn } from "./account-image-cdn";
+import { attachLegacyPathImages } from "./legacy-path-projection";
 import {
   assertGameScope,
   bodyOf,
@@ -399,8 +400,10 @@ export async function handlePublishingRoute(
           }
         }
         if (rows.length === 200) hasMore = true;
+        const cdn = options.mediaStorage?.accountImageCdn;
+        const projected = cdn?.legacy?.enabled ? await attachLegacyPathImages(client, items) : items;
         return {
-          items: await attachAccountImageCdn(client, items, options.mediaStorage?.accountImageCdn),
+          items: await attachAccountImageCdn(client, projected, cdn),
           nextCursor: hasMore
             ? Buffer.from(
                 JSON.stringify({

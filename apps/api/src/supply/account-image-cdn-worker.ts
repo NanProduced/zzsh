@@ -3,16 +3,19 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { SecurityApiError } from "../auth/security-core";
+import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { AccountImageCdn, AccountImageDelivery } from "./account-image-cdn";
 import type { AccountMediaVariant } from "./account-media-oss";
 import { readAccountWatermarkPolicy, resolveAccountImageWatermark } from "./account-image-watermark";
 import { inspectImage, loadMediaAsset, logOrphanedMediaObjects, MediaStorageError, recordAccountMediaVariants, type MediaStorage } from "./media";
 import { readPublicListing, readPublishingAccount, type SupplyGateReader } from "./publishing";
 import { newSupplyId } from "./supply-util";
+import { synchronizeLegacyImages } from "./legacy-image-cdn-worker";
 
-type QueueItem = { accountId: string; revision: string };
+type QueueItem = { accountId: string; revision: string; nativeCandidate?: boolean; legacyCandidate?: boolean };
 type DeliveryRow = AccountImageDelivery & { state: "READY" | "PUBLISHING" | "REVOKING"; removable: boolean };
-type CdnWorkerOptions = { pool: Pool; storage: MediaStorage; cdn: AccountImageCdn; gate: SupplyGateReader };
+type CdnWorkerOptions = { pool: Pool; storage: MediaStorage; cdn: AccountImageCdn; gate: SupplyGateReader;
+  legacyPublicAdmission?: LegacyPublicAdmission; legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex };
 
 async function readDesired(client: PoolClient, accountId: string, gate: SupplyGateReader): Promise<string[]> {
   await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -56,7 +59,7 @@ async function variantsFor(client: PoolClient, assetId: string, storage: MediaSt
 
 async function synchronizeAccount(client: PoolClient, item: QueueItem, options: CdnWorkerOptions, stopping: () => boolean, readEligible: typeof readDesired): Promise<boolean> {
   const { cdn, gate, storage } = options;
-  const desired = cdn.mode === "drain" ? [] : await readEligible(client, item.accountId, gate);
+  const desired = cdn.mode === "drain" || item.nativeCandidate === false ? [] : await readEligible(client, item.accountId, gate);
   await client.query(
     `UPDATE zzsh_supply.account_image_cdn_delivery SET state='REVOKING'
       WHERE account_id=$1 AND (state='PUBLISHING' OR (state='READY' AND NOT asset_id=ANY($2::text[])))`, [item.accountId, desired],
@@ -115,16 +118,27 @@ export async function runAccountImageCdnBatch(options: CdnWorkerOptions, stoppin
     acquired = (await client.query(`SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired`, [lock])).rows[0]?.acquired === true;
     if (!acquired || stopping()) return;
     const items = (await client.query<QueueItem>(
-      `SELECT q.account_id AS "accountId", q.request_revision::text AS revision FROM zzsh_supply.account_image_cdn_queue q
-        WHERE CASE WHEN $1 THEN EXISTS (SELECT 1 FROM zzsh_supply.account_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state<>'REVOKED')
-          ELSE q.due_at <= clock_timestamp() END
-        ORDER BY EXISTS (SELECT 1 FROM zzsh_supply.account_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state='REVOKING') DESC,
-          (q.request_revision > 1) DESC, q.due_at, q.account_id LIMIT 8`, [options.cdn.mode === "drain"],
+      `SELECT q.account_id AS "accountId", q.request_revision::text AS revision, q.legacy_candidate AS "legacyCandidate",
+          EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=q.account_id) AS "nativeCandidate"
+         FROM zzsh_supply.account_image_cdn_queue q
+         CROSS JOIN LATERAL (SELECT EXISTS (SELECT 1 FROM zzsh_supply.account_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state<>'REVOKED') AS native_active,
+           EXISTS (SELECT 1 FROM zzsh_supply.legacy_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state IN ('PUBLISHING','READY','REVOKING')) AS legacy_active) active
+        WHERE CASE WHEN $1 THEN active.native_active OR active.legacy_active
+          ELSE q.due_at <= clock_timestamp() AND ($2 OR NOT q.legacy_candidate OR active.native_active OR active.legacy_active OR EXISTS (SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=q.account_id)) END
+        ORDER BY (EXISTS (SELECT 1 FROM zzsh_supply.account_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state='REVOKING')
+          OR EXISTS (SELECT 1 FROM zzsh_supply.legacy_image_cdn_delivery d WHERE d.account_id=q.account_id AND d.state='REVOKING')) DESC,
+          (q.request_revision > 1) DESC, q.due_at, q.account_id LIMIT 8`, [options.cdn.mode === "drain", Boolean(options.cdn.legacy?.enabled)],
     )).rows;
     for (const item of items) {
       if (broken || stopping()) return;
       let complete = false;
-      try { complete = await synchronizeAccount(client, item, options, () => broken || stopping(), readEligible); }
+      try {
+        const isStopping = () => broken || stopping();
+        const legacy = options.cdn.legacy && item.legacyCandidate
+          ? await synchronizeLegacyImages(client, item, options.cdn.legacy, options, isStopping) : true;
+        const native = await synchronizeAccount(client, item, options, isStopping, readEligible);
+        complete = legacy && native;
+      }
       catch { console.error(JSON.stringify({ event: "zzsh_account_image_cdn_sync_failed", accountId: item.accountId })); }
       if (broken) return;
       await client.query(`UPDATE zzsh_supply.account_image_cdn_queue SET due_at=clock_timestamp() + $3::integer * interval '1 second'

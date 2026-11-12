@@ -4,12 +4,15 @@ import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
+import sharp from "sharp";
 
 import { attachAccountImageCdn, createAccountImageCdn, loadAccountImageCdnTarget, type AccountImageDelivery } from "../src/supply/account-image-cdn";
 import { runAccountImageCdnBatch } from "../src/supply/account-image-cdn-worker";
 import type { AccountMediaVariant } from "../src/supply/account-media-oss";
 import { createUnavailableMediaStorage } from "../src/supply/media";
 import { unknownSupplyGate } from "../src/supply/publishing";
+import { createLegacyImageCdn, parseLegacyImageCdnManifest, type LegacyImageCdn, type LegacyImageCdnDelivery, type LegacyImageProof } from "../src/supply/legacy-image-cdn";
+import { synchronizeLegacyImages } from "../src/supply/legacy-image-cdn-worker";
 
 const options = { bucket: "cdn-test-bucket", objectPrefix: "isolated/", region: "oss-cn-shenzhen", endpoint: "https://oss-cn-shenzhen.aliyuncs.com" };
 const origin = "https://cdn.example.com";
@@ -129,4 +132,108 @@ test("the worker keeps partial publication undisclosed, retires the attempt, and
   await batch();
   assert.equal(deliveryRows[2]?.state, "REVOKING");
   assert.deepEqual((await project()).media, listing.media);
+});
+
+test("legacy CDN verifies the sealed approved byte proof, retains the source path, and distinguishes missing from outage", async () => {
+  const png = await sharp({ create: { width: 48, height: 24, channels: 3, background: "red" } }).png().toBuffer();
+  const path = "accountsImage/20261112/showcase.png";
+  const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const entry = { path, sha256: digest(png), mime: "image/png", byteSize: png.length };
+  const manifest = Buffer.from(JSON.stringify({ schema: "zzsh.legacy-image-cdn.v1", images: [entry] }));
+  assert.throws(() => parseLegacyImageCdnManifest(manifest, "0".repeat(64)), /SHA-256/);
+  const proofs = parseLegacyImageCdnManifest(manifest, digest(manifest));
+  const proof = proofs.get(path)!;
+  assert.deepEqual(proof, entry);
+  let outage = false;
+  const sourceKey = `isolated/legacy/${path}`;
+  const events: string[] = [];
+  const objects = new Map<string, Buffer>();
+  const legacy = createLegacyImageCdn({ mode: "serve", origin }, options, {
+    async getStream(key) {
+      if (outage) throw Object.assign(new Error("backend unavailable"), { status: 503 });
+      const bytes = objects.get(key);
+      if (!bytes) throw Object.assign(new Error("missing"), { code: "NoSuchKey", status: 404 });
+      return { stream: Readable.from([bytes]), res: { headers: { "content-type": "image/png" } } };
+    },
+    async copy(target, source, bucket) {
+      assert.equal(bucket, options.bucket);
+      assert.equal(source, sourceKey);
+      events.push(`copy:${target}`);
+      objects.set(target, objects.get(source)!);
+    },
+    async delete(key) { events.push(`delete:${key}`); objects.delete(key); return { res: {} }; },
+  }, async urls => { events.push(`refresh:${urls[0]}`); return "257"; }, proofs);
+  assert.equal(await legacy.inspectSource(proof), "PENDING_IMPORT");
+  outage = true;
+  assert.equal(await legacy.inspectSource(proof), "UNAVAILABLE");
+  outage = false;
+  objects.set(sourceKey, Buffer.alloc(png.length));
+  assert.equal(await legacy.inspectSource(proof), "UNAVAILABLE");
+  objects.set(sourceKey, png);
+  assert.equal(await legacy.inspectSource(proof), "READY");
+  const delivery = { id: published.id, accountId: published.accountId, versionId: "observation_1", position: 0, sourcePath: path };
+  await assert.rejects(legacy.publish({ ...delivery, sourcePath: "accountsImage/20261112/penalty.png" }, proof), /unapproved/);
+  const distributed = `isolated/public/legacy/${delivery.id}/${path}`;
+  await legacy.publish(delivery, proof);
+  assert.equal(legacy.url(delivery), `${origin}/${distributed}`);
+  await legacy.revoke(delivery);
+  assert.deepEqual(events, [`copy:${distributed}`, `delete:${distributed}`, `refresh:${origin}/${distributed}`]);
+  assert.equal(objects.get(sourceKey), png);
+  assert.notEqual(legacy.url(delivery), legacy.url({ ...delivery, id: `cdn_${"b".repeat(32)}` }));
+
+  const listing = { id: delivery.accountId, versionId: delivery.versionId, media: [], legacyImages: [{ position: 0, url: "/authorized-old-url" }, { position: 1, url: "/other-authorized-url" }] };
+  const db = { query: async () => ({ rows: [
+    { ...delivery, ...proof, state: "PENDING_IMPORT" },
+    { ...delivery, ...proof, state: "READY", position: 1, versionId: "other_version" },
+    { ...delivery, ...proof, state: "READY", position: 2 },
+  ] }) } as unknown as PoolClient;
+  const projection = await attachAccountImageCdn(db, [listing], { mode: "serve", legacy, url: () => "", async publish() {}, async revoke() { return ""; } });
+  assert.deepEqual(projection[0]?.legacyImages, [{ ...listing.legacyImages[0], state: "PENDING_IMPORT" }, listing.legacyImages[1]]);
+});
+
+test("a confirmed missing legacy object remains private until a subsequent verified import and loses its URL on revocation", async () => {
+  const proof: LegacyImageProof = { path: "accountsImage/20261112/showcase.png", sha256: "a".repeat(64), byteSize: 128, mime: "image/png" };
+  const slot = { versionId: "observation_1", position: 0, proof };
+  type Row = LegacyImageCdnDelivery & LegacyImageProof & { state: string; removable: boolean };
+  const rows: Row[] = [];
+  let source: "PENDING_IMPORT" | "READY" = "PENDING_IMPORT";
+  let eligible = true;
+  const events: string[] = [];
+  const cdn: LegacyImageCdn = {
+    enabled: true, proof: () => proof, inspectSource: async () => source, url: row => `${origin}/${row.id}`,
+    async publish(row) { events.push(`publish:${row.id}`); assert.equal(rows.find(item => item.id === row.id)?.state, "PUBLISHING"); },
+    async revoke(row) { events.push(`revoke:${row.id}`); return "fixture"; },
+  };
+  const client = { async query(sql: string, args: unknown[]) {
+    if (sql.startsWith("SELECT id, account_id")) return { rows: rows.filter(row => row.state !== "REVOKED").map(row => ({ ...row })) };
+    if (sql.startsWith("INSERT INTO zzsh_supply.legacy_image_cdn_delivery")) {
+      rows.push({ ...proof, id: String(args[0]), accountId: String(args[1]), versionId: String(args[3]), position: Number(args[4]), sourcePath: String(args[5]), state: String(args[9]), removable: false });
+      return { rowCount: 1 };
+    }
+    const row = rows.find(item => item.id === args[0])!;
+    assert.ok(row, sql);
+    if (sql.startsWith("WITH q AS MATERIALIZED")) { row.state = "READY"; row.removable = true; }
+    else if (sql.includes("SET state='REVOKED'")) row.state = "REVOKED";
+    else if (sql.includes("SET state='REVOKING'")) row.state = "REVOKING";
+    else if (sql.includes("SET state=$2")) row.state = String(args[1]);
+    else throw new Error("Unexpected legacy test query");
+    return { rowCount: 1 };
+  } } as unknown as PoolClient;
+  const sync = () => synchronizeLegacyImages(client, { accountId: published.accountId, revision: "3" }, cdn, { gate: unknownSupplyGate }, () => false, async () => eligible ? [slot] : []);
+  await sync();
+  await sync();
+  assert.deepEqual(rows.map(row => row.state), ["PENDING_IMPORT"]);
+  assert.deepEqual(events, []);
+  source = "READY";
+  await sync();
+  assert.deepEqual(rows.map(row => row.state), ["REVOKED", "READY"]);
+  const publicVersion = rows[1]!.id;
+  eligible = false;
+  await sync();
+  assert.equal(rows[1]?.state, "REVOKED");
+  assert.deepEqual(events, [`publish:${publicVersion}`, `revoke:${publicVersion}`]);
+  eligible = true;
+  await sync();
+  assert.equal(rows[2]?.state, "READY");
+  assert.notEqual(rows[2]?.id, publicVersion);
 });

@@ -121,6 +121,19 @@ test('market uses the small CDN cover, details use the full variant, and missing
   assert.equal(detail.media[1].url, listing.media[0].url);
 });
 
+test('legacy CDN image loads directly while a confirmed missing slot keeps its migration status', () => {
+  const cdnUrl = 'https://listing-images.example.com/public/legacy/cdn_v/accountsImage/20261112/showcase.png';
+  const legacy = { ...listing, media: [], legacyImages: [
+    { position: 0, url: '/api/supply/listings/account_1/legacy-images/0', cdnUrl },
+    { position: 1, url: '/api/supply/listings/account_1/legacy-images/1', state: 'PENDING_IMPORT' },
+  ] };
+  const card = toListingCard(legacy);
+  assert.equal(card.imageUrl, cdnUrl);
+  assert.equal(card.media[0].legacy, undefined);
+  assert.equal(card.media[1].legacy, true);
+  assert.equal(card.media[1].legacyState, 'PENDING_IMPORT');
+});
+
 test('detail breadcrumb stays generic without a server-confirmed game', () => {
   for (const value of [null, undefined, '']) {
     assert.deepEqual(detailBreadcrumbs(value), [
