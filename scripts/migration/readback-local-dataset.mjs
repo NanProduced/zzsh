@@ -1,6 +1,8 @@
 import {assertEmptyCoverageReceiptMode,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,readCompactCoverageEvidence,continuationCommissionEffects,prepareLocalFundsPlan} from "./local-funds-plan.mjs";
 import { acquireMigrationTransactionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertReadbackTarget, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
+import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
+import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
@@ -42,6 +44,33 @@ for (const [name, entry] of Object.entries(manifest.files)) {
   if (entry.file !== basename(entry.file)) throw new Error("DATASET_FILE_PATH_INVALID");
   const digest = createHash("sha256"); for await (const bytes of createReadStream(join(dataset, entry.file))) digest.update(bytes);
   if (digest.digest("hex") !== entry.sha256) throw new Error("DATASET_FILE_SHA_MISMATCH:" + name);
+}
+let listedSource, listedBinding, listedSourceOrigin, listedSourceReceipt;
+if (registration.migrationProfile === NEXT_MIGRATION_PROFILE) {
+  const source = readBoundSelectedSourceReceipt(manifest.source, manifest.sourceReceiptSha256);
+  listedSourceReceipt = source;
+  if (source.status !== "CAPTURED_READ_ONLY" || source.rollbackConfirmed !== true || source.clientClosed !== true)
+    throw new Error("LEGACY_LISTED_SOURCE_RECEIPT_UNCONFIRMED");
+  ({source:listedSource,origin:listedSourceOrigin}=await legacyListedSourceForReadback(state.sourceScopeVerification,
+    () => verifySelectedPopulationFiles({datasetDir:dataset,sourceDir:manifest.source,dataset:manifest,source})));
+  if (listedSource?.schema !== "zzsh.legacy-listed-source-scope.v2") throw new Error("LEGACY_LISTED_SOURCE_PROOF_UNAVAILABLE");
+  for (const name of ["accounts", "games"]) {
+    const entry = source.files?.[name];
+    if (!entry && name === "games") continue;
+    if (!entry || entry.file !== basename(entry.file) || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? ""))
+      throw new Error("LEGACY_LISTED_SOURCE_FILE_INVALID:" + name);
+    const file = join(manifest.source, entry.file), stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("LEGACY_LISTED_SOURCE_FILE_INVALID:" + name);
+    // The existing account capture proof below already hashes and reads the full account source.
+    if (name === "accounts") continue;
+    const digest = createHash("sha256"); for await (const chunk of createReadStream(file)) digest.update(chunk);
+    if (digest.digest("hex") !== entry.sha256) throw new Error("LEGACY_LISTED_SOURCE_FILE_CHANGED:" + name);
+  }
+  listedBinding = { sourceReceiptSha256: manifest.sourceReceiptSha256, sourceAccountsSha256: source.files.accounts.sha256,
+    sourceGamesSha256: source.files.games?.sha256 ?? null, datasetAccountsSha256: manifest.files.accounts?.sha256 ?? null,
+    gameBindingsSha256: hash(JSON.stringify(manifest.gameBindings ?? {})) };
+  if (Object.entries(listedBinding).some(([key, value]) => listedSource.binding?.[key] !== value))
+    throw new Error("LEGACY_LISTED_SOURCE_BINDING_CHANGED");
 }
 const credential = JSON.parse(readFileSync(credentialPath));
 assertReadbackTarget(registration, state.binding, credential);
@@ -133,7 +162,20 @@ if (originalMetricSources) {
     originalMetricSources[domain] = records;
   }
 }
+let listedAccountSources = originalMetricSources?.accounts ?? null;
+if (listedSource && !listedAccountSources) {
+  const entry = listedSourceReceipt.files.accounts, path = join(manifest.source, entry.file), digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  if (digest.digest("hex") !== entry.sha256) throw new Error("LEGACY_LISTED_SOURCE_FILE_CHANGED:accounts");
+  listedAccountSources = new Map();
+  for await (const raw of rows(path)) {
+    if (!raw?.id || listedAccountSources.has(raw.id)) throw new Error("LEGACY_LISTED_SOURCE_ACCOUNT_INVALID");
+    listedAccountSources.set(raw.id, legacyAccountCaptureProof(raw, canonical));
+  }
+  if (listedAccountSources.size !== entry.rows) throw new Error("LEGACY_LISTED_SOURCE_ACCOUNT_COUNT_CHANGED");
+}
 const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}), ...(registration.migrationProfile ? {migrationProfile:registration.migrationProfile} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
+if (listedSource) { report.legacyListedSource = listedSource; report.legacyListedSourceOrigin = listedSourceOrigin; }
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
 async function batched(domain, apply, collect = null, batchSize = 1000, source = null) { let batch = [], count = 0; for await (const row of source ?? rows(join(dataset, manifest.files[domain].file))) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === batchSize) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
@@ -241,22 +283,53 @@ try {
     report.identityProfiles = { ...identityProfiles, source: identitySource };
   }
   report.registrationTime = registrationTime;
+  const legacyListedTarget = { expectedMapped: 0, verifiedMapped: 0, missingTarget: 0, missingSnapshot: 0, published: 0 };
+  const listedExpectedIds = [], listedVerifiedIds = [], listedMissingIds = [], listedMissingSnapshotIds = [], listedPublishedIds = [];
   const accounts = await batched("accounts", async batch => {
     const actual = new Map((await query(`SELECT m.legacy_id,m.account_id,m.source_digest,m.evidence_ref,m.version_id,a.owner_user_id,a.game_id,a.current_version_id,a.legacy_hold,v.origin,v.review_state,
+       EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id) AS has_publication,
        h.account_id snapshot_account,h.snapshot,h.source_digest snapshot_digest,to_char(h.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') snapshot_updated_at,h.source_status
        FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id JOIN zzsh_supply.listing_version v ON v.id=m.version_id
        LEFT JOIN zzsh_supply.legacy_listing_read_snapshot h ON h.account_id=m.account_id
        WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(row => row.sourceId)])).rows.map(row => [row.legacy_id, row]));
     for (const row of batch) {
-      if (originalMetricSources && !matchesLegacyAccountCapture(originalMetricSources.accounts.get(row.sourceId), row, canonical)) difference("accounts", row.sourceId, "ACCOUNT_CAPTURE_METRIC_SOURCE_DRIFT");
+      const nextDelta = registration.migrationProfile === NEXT_MIGRATION_PROFILE && row.gameCode === "delta";
+      const listed = nextDelta && Number(row.sourceStatus) === 3 && !row.sourceDeleted;
+      if (listed) { legacyListedTarget.expectedMapped++; listedExpectedIds.push(row.sourceId); }
+      const captured = listedAccountSources?.get(row.sourceId);
+      const captureMatches = (!listedSource || Boolean(captured && captured.sourceId === row.sourceId && captured.sourceDigest === row.sourceDigest))
+        && (!originalMetricSources || matchesLegacyAccountCapture(originalMetricSources.accounts.get(row.sourceId), row, canonical));
+      if (!captureMatches) difference("accounts", row.sourceId, "ACCOUNT_CAPTURE_METRIC_SOURCE_DRIFT");
       const found = actual.get(row.sourceId);
-      if (!found) { difference("accounts", row.sourceId, "TARGET_ACCOUNT_MAP_MISSING"); continue; }
-      if (found.account_id !== accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId) || found.source_digest !== row.sourceDigest || found.evidence_ref !== row.evidenceRef || found.owner_user_id !== row.ownerUserId || found.game_id !== state.gameBindings[row.gameCode] || found.version_id !== found.current_version_id || found.origin !== "LEGACY_OBSERVATION" || found.review_state !== "IMPORTED_UNVERIFIED" || found.legacy_hold !== "UNRESOLVED") difference("accounts", row.sourceId, "SOURCE_OWNER_GAME_OBSERVATION_OR_HOLD_DRIFT");
+      if (!found) { if (listed) { legacyListedTarget.missingTarget++; listedMissingIds.push(row.sourceId); } difference("accounts", row.sourceId, "TARGET_ACCOUNT_MAP_MISSING"); continue; }
+      const sourceMatches = found.account_id === accountId("legacy_mysql_restore", "la_rental_accounts", row.sourceId) && found.source_digest === row.sourceDigest && found.evidence_ref === row.evidenceRef && found.owner_user_id === row.ownerUserId && found.game_id === state.gameBindings[row.gameCode] && found.version_id === found.current_version_id && found.origin === "LEGACY_OBSERVATION" && found.review_state === "IMPORTED_UNVERIFIED" && found.legacy_hold === "UNRESOLVED";
+      if (!sourceMatches) difference("accounts", row.sourceId, "SOURCE_OWNER_GAME_OBSERVATION_OR_HOLD_DRIFT");
       const snapshotExpected = row.snapshot && row.sourceUpdatedAt && [0, 3, 4, 5, 6].includes(Number(row.sourceStatus)) && !row.sourceDeleted;
-      if (snapshotExpected ? !found.snapshot_account || canonical(found.snapshot) !== canonical(row.snapshot) || found.snapshot_digest !== row.sourceDigest || found.snapshot_updated_at !== row.sourceUpdatedAt || Number(found.source_status) !== Number(row.sourceStatus) : found.snapshot_account !== null) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
+      if (nextDelta && found.has_publication !== false) difference("accounts", row.sourceId, "MIGRATED_ACCOUNT_HAS_PUBLICATION");
+      if (listed && !snapshotExpected) difference("accounts", row.sourceId, "LISTED_SOURCE_SNAPSHOT_MISSING");
+      const snapshotMatches = snapshotExpected ? Boolean(found.snapshot_account) && canonical(found.snapshot) === canonical(row.snapshot) && found.snapshot_digest === row.sourceDigest && found.snapshot_updated_at === row.sourceUpdatedAt && Number(found.source_status) === Number(row.sourceStatus) : found.snapshot_account === null;
+      if (!snapshotMatches) difference("accounts", row.sourceId, "HISTORICAL_SNAPSHOT_DRIFT_OR_UNPROVED_PUBLIC_FACT");
+      if (listed) {
+        if (!snapshotExpected || !snapshotMatches) { legacyListedTarget.missingSnapshot++; listedMissingSnapshotIds.push(row.sourceId); }
+        if (found.has_publication !== false) { legacyListedTarget.published++; listedPublishedIds.push(row.sourceId); }
+        if (captureMatches && sourceMatches && snapshotExpected && snapshotMatches && found.has_publication === false) {
+          legacyListedTarget.verifiedMapped++; listedVerifiedIds.push(row.sourceId);
+        }
+      }
     }
   }, accountKeys);
   report.domains.accounts = { expected: accounts };
+  if (registration.migrationProfile === NEXT_MIGRATION_PROFILE) report.legacyListedTarget = {
+    ...legacyListedTarget,
+    ...(listedSource ? { sourceProofSha256: hash(JSON.stringify(listedSource)),
+      expectedMappedIdsSha256: legacyListedIdsDigest(listedExpectedIds), verifiedMappedIdsSha256: legacyListedIdsDigest(listedVerifiedIds),
+      missingTargetIdsSha256: legacyListedIdsDigest(listedMissingIds), missingSnapshotIdsSha256: legacyListedIdsDigest(listedMissingSnapshotIds),
+      publishedIdsSha256: legacyListedIdsDigest(listedPublishedIds) } : {}),
+    scope: "MAPPED_DELTA_ACCOUNT_FACTS_ONLY", marketAndDirectOrder: "NOT_ASSESSED", sourceIsolations: "SEE_SOURCE_SCOPE_VERIFICATION",
+  };
+  if (report.legacyListedTarget) report.legacyListedTarget.status = listedSource
+    ? legacyListedTargetMatches(listedSource, report.legacyListedTarget, listedBinding) ? "MAPPED_HISTORICAL_NOT_PUBLISHED" : "REVIEW_REQUIRED"
+    : "SOURCE_SCOPE_NOT_ASSESSED";
   let deleted = 0;
   const accountMetricAudit = { expected: 0, matched: 0 };
   const orders = await batched("orders", async batch => {

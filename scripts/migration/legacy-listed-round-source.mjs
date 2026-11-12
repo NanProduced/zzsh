@@ -351,7 +351,7 @@ export async function verifyRoundBoundSourcePlan(plan,ctx,canonicalize){
  if(ctx.policyBundle&&!samePath(ctx.policyBundle,b.policyBundleFile)||ctx.policyBundleSha&&ctx.policyBundleSha!==b.policyBundleSha256
    ||ctx.policyAuthority&&!samePath(ctx.policyAuthority,b.policyAuthorityFile)||ctx.policyAuthoritySha&&ctx.policyAuthoritySha!==b.policyAuthoritySha256
    ||ctx.sourceBinding&&!samePath(ctx.sourceBinding,b.sourceBindingFile))throw new Error('LISTED_POLICY_ARGUMENT_CHANGED');
- return {round,core,audit,policy,authority,sourceDir,batch,dependencyLayout,dependencyProof};
+ return {round,core,audit,policy,authority,sourceDir,batch,dependencyLayout,dependencyProof,gameBindings:dataset.gameBindings};
 }
 
 /** The v2 execution must follow a fully rolled-back trial of this exact plan and target. */

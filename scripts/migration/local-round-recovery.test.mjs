@@ -8,7 +8,7 @@ import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, legacyListedProofVersion, legacyListedTargetMatches, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readLfLines } from "./local-source-adapter.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
@@ -182,7 +182,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     releaseMigrationSessionFence: fenceFixture ? async () => { commands.push('UNFENCE'); } : releaseMigrationSessionFence,
     advisoryLockSql, assertLiveTarget, assertNextMigrationWriteReady: fenceFixture ? () => {} : assertNextMigrationWriteReady,
     captureMaintenanceLockEpoch: fenceFixture ? async () => { commands.push('FENCE_EPOCH'); return { fixture: true }; } : captureMaintenanceLockEpoch,
-    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
+    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
     readBoundSelectedSourceReceipt: (_source, _digest) => ({}),
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
@@ -541,7 +541,9 @@ test("unknown coverage commit keeps all five original chunk keys and stops", asy
   assert.equal(r.state.phases.financeEmptyCoverage.nextIndex,0);
 });
 
-async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift, sourceToolDrift = false, instance = null, registryProfile = null, v2Capture = false, sameOutputStopped = false, sameOutputStages = [{ name: "core-and-funds", status: "INTENT" }], sameOutputArtifacts = [], identityProfiles = true, legalInput = true, selectedPopulation = false, selectedSourceMismatch = false, refundMismatch = false, refundPolicy = true, openingStats = {}, displayCoverage = true, packedPreflight = false, distributionInvalid = false, inspectPreflight = false, inlineGrowth = false, inlineLogInvalid = false } = {}) {
+async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift, sourceToolDrift = false, instance = null, registryProfile = null, v2Capture = false, sameOutputStopped = false, sameOutputStages = [{ name: "core-and-funds", status: "INTENT" }], sameOutputArtifacts = [], identityProfiles = true, legalInput = true, selectedPopulation = false, selectedSourceMismatch = false, refundMismatch = false, refundPolicy = true, openingStats = {}, displayCoverage = true, packedPreflight = false, distributionInvalid = false, inspectPreflight = false, inlineGrowth = false, inlineLogInvalid = false, inspectAsNext = false } = {}) {
+  const simulateNextResume = resumeCase === 'next-legacy-unproven';
+  if (simulateNextResume) { instance={host:'127.0.0.1',port:55435,systemIdentifier:'12345'};registryProfile=NEXT_MIGRATION_PROFILE;v2Capture=true;selectedPopulation=true; }
   const files = new Map(), directories = [], spawns = [], logs = [], reads = [], liveCommands = [], logOpens = [], scopeChecks = [];
   const targetSchema = reservationStatus === "ROUND06_BOOTSTRAP_RESERVED" ? ["1", "2", "3", "4", "5"].map(x => x.repeat(64)) : schema;
   const cohort = resumeCase === "bad-package" || selectedPopulation ? 1 : 0;
@@ -634,6 +636,12 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     ...(withGrowth || resumeCase ? { growth: { policyId, policyEffectiveAt: effectiveAt, approvedBy: "Root", approvalRef: "ROOT-FIXTURE-GROWTH", attempt: 1, ...(packedPreflight ? {packageLayout:'PACKED_V2'} : {}), ...(inlineGrowth ? {approvalLayout:'INLINE_INTENT_V1'} : {}) } } : {}),
     ...(missingBootstrap ? {} : { bootstrapEvidence: evidence }),
   };
+  if (simulateNextResume || inspectAsNext) {
+    inputBody.target.migrationProfile=NEXT_MIGRATION_PROFILE;
+    inputBody.sourceBinding=put(path.join(restricted,'source-binding.json'),{});
+    const workflowInput=put(path.join(restricted,'workflow-input.json'),{});
+    inputBody.sourceWorkflow=put(path.join(restricted,'source-workflow.json'),{input:workflowInput});
+  }
   if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(reservationStatus) && dependencyDrift !== "missing") inputBody.dependencyBinding = {
     buildManifest: put(path.join(restricted, "dependency-build.json"), {}), sourceManifest: put(path.join(restricted, "dependency-source.json"), {}), sourceSnapshot: "C:\\fixture",
     proof: put(path.join(restricted, "dependency-proof.json"), { status: "ROUND_DEPENDENCY_CLOSURE_VERIFIED", entrypoints: 32, closureFiles: [["fixture", "a".repeat(64)]], closureSha256: "c".repeat(64) }) };
@@ -653,6 +661,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
       strictBatch: strict, schemaHashes: schema, executionWindow: oldWindow, status: resumeCase === "unknown" ? "COMMIT_UNKNOWN" : "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED",
       pending: resumeCase === "unknown" ? { stage: "COMMIT_UNKNOWN" } : null, poolClosed: true, unlock: true, maintenanceClosed: true, rollbackConfirmed: true,
       phases: Object.fromEntries(phaseNames.map(name => [name, { complete: name !== (resumeCase === "missing-phase" ? "storedOpening" : ""), quarantined: 0, nextIndex: ["users", "accounts", "orders", "accountDisplay", "storedOpening", "skinHoldings"].includes(name) ? cohort : 0 }])), skinHoldingsPreparation: { ready: cohort, isolated: 0 } };
+    if (simulateNextResume) oldCheckpoint.sourceScopeVerification={legacyListed:{scope:'ALL_CAPTURED_GAMES',sourceCount:1}};
     oldCheckpointPath = path.join(oldOut, "loader", "checkpoint.json");
     const oldCheckpointRef = put(oldCheckpointPath, oldCheckpoint); oldCheckpointBytes = Buffer.from(files.get(oldCheckpointPath));
     inputBody.resume = { schema: "zzsh.local-round-growth-resume.v1", previousInput: oldInput, previousReceipt: oldReceipt, checkpoint: oldCheckpointRef };
@@ -697,7 +706,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     assertSameDirectoryResumeSafe,
     inspectRoundResumeOutput: directory => directory === oldOut && oldReceiptRef ? { sequence: 1, previousReceipt: oldReceiptRef } : directory === out && sameOutputReceipt ? { sequence: 1, previousReceipt: sameOutputReceipt, stageNames: sameOutputStages.map(stage => stage.name) } : null,
     reserveRoundResumeOutput: directory => { const attempt = path.join(directory, "round-attempt-000001"); directories.push(attempt); return attempt; },
-    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage,
+    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, legacyListedProofVersion, legacyListedTargetMatches,
     verifyDisplayCaptureInputs:async()=>({status:'SOURCE_DISPLAY_CAPTURE_VERIFIED_TARGET_NOT_RUN',displayRows:cohort,sourceConnections:0,targetConnections:0,targetWrites:0}),
     digestInlineGrowthLog:async()=>inlineLogInvalid?'0'.repeat(64):'f'.repeat(64),
     requiresInvitationCountClosure, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
@@ -726,7 +735,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     fileURLToPath: url => path.normalize(String(url).slice("file:///".length)),
     createRequire: () => Object.assign(() => ({ canonicalize:JSON.stringify, parseDistributionPolicyChange:value=>value, Client: class { async connect() { liveCommands.push("connect"); } async query(sql) {
       liveCommands.push(sql); if (sql.startsWith("SELECT current_database")) return { rows: [{ database: "zzsh_test_regression", ...epoch,
-        ...(resumeCase === "schema-target-drift" ? { oid: "43" } : {}), owner: "zzsh", marker, role: "fixture_m", role_oid: "91", read_only: "on", rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false }] };
+        ...(resumeCase === "schema-target-drift" ? { oid: "43" } : {}), ...(simulateNextResume?{system_identifier:instance.systemIdentifier}:{}), owner: "zzsh", marker, role: "fixture_m", role_oid: "91", read_only: "on", rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false }] };
       if (sql.startsWith("SELECT hash")) return { rows: (resumeCase.startsWith("schema-drift") ? ["3".repeat(64)] : schema).map(hash => ({ hash })) };
       if (sql === "ROLLBACK" && resumeCase.endsWith("rollback-fail")) throw Error("fixture rollback failure");
       return { command: sql }; } async end() { liveCommands.push("end"); if (resumeCase === "schema-close-fail") throw Error("fixture close failure"); } } }), {cache:{}}),
@@ -743,8 +752,9 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
         const scriptName = args[0], outputPath = args[args.indexOf("--out") + 1];
         if (scriptName.endsWith("readback-local-dataset.mjs")) {
           if (!(resumeCase === "final-readback-fail" && outputPath.endsWith("readback-final.json"))) {
-            put(outputPath, { schema: "zzsh.local-dataset-readback.v1", resource: { ...epoch, database: "zzsh_test_regression" }, sourceDatasetSha256: dataset.sha256,
+            put(outputPath, { schema: "zzsh.local-dataset-readback.v1", resource: { ...epoch, database: "zzsh_test_regression", ...(simulateNextResume?{instance,migrationProfile:NEXT_MIGRATION_PROFILE}:{}) }, sourceDatasetSha256: dataset.sha256,
               status: "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED", differenceCount: 0, targetWrites: 0, rollbackConfirmed: true, lockReleased: true, connectionsClosed: true,
+              ...(simulateNextResume?{targetFence:'HELD_UNTIL_ROLLBACK'}:{}),
               domains: { users: { expected: cohort }, accounts: { expected: cohort }, orders: { expected: cohort } },
               display: { expected: cohort, matched: cohort }, openings: { expected: cohort, matched: cohort }, holdings: { expected: cohort, matched: cohort }, paths: { expected: cohort, matched: cohort } });
             if (resumeCase === "checkpoint-drift") files.set(oldCheckpointPath, Buffer.from("{}"));
@@ -785,6 +795,14 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     fsyncSync(fd) { if (fd === 9 && resumeCase === "reservation-fsync-fail") throw Error("fixture marker fsync failure"); },
     closeSync() {}, writeLoadCheckpoint: put, console: { log: value => logs.push(JSON.parse(value)) },
   };
+  if (simulateNextResume || inspectAsNext) {
+    context.assertRoundBootstrap=()=>({});context.assertRoundSourceOrigin=()=>{};
+  }
+  if (simulateNextResume) {
+    // Exercise the later gate as if a future release had opened the separate NEXT write-admission gate.
+    context.assertNextMigrationWriteReady=()=>{};context.expectedContinuationImports=()=>0;
+    context.assertResumeLineage=()=>({status:'ORIGINAL_COMPLETE_CHECKPOINT_BOUND'});
+  }
   let error;
   try { await new AsyncFunction(...Object.keys(context), script("run-local-round.mjs"))(...Object.values(context)); }
   catch (cause) { if (cause !== "EXIT") error = cause; }
@@ -1028,6 +1046,9 @@ test("fresh selected rounds independently check the source before credentials or
   assert.equal(good.logs[0].population.sourceVerification.status, "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN");
   assert.equal(good.logs[0].population.sourceVerification.orders.retained, 1);
   assert.equal(good.logs[0].externalReadiness.status, "NOT_ASSESSED_BY_ROUND");
+  assert.equal(good.logs[0].externalReadiness.legacyListed.status, "SOURCE_REVIEW_REQUIRED");
+  assert.equal(good.logs[0].externalReadiness.legacyListed.readyWithoutSnapshot, 1);
+  assert.equal(good.logs[0].externalReadiness.legacyListed.targetStatus, "NOT_ASSESSED");
   const unresolved = await round({ action: "validate", selectedPopulation: true, refundMismatch: true });
   assert.ifError(unresolved.error);
   assert.equal(unresolved.logs[0].externalReadiness.refundRelationships.status, "REVIEW_REQUIRED");
@@ -1164,9 +1185,12 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   Object.assign(data.receipt.stages.find(stage=>stage.name==='paths').metrics,{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased:true});
   for (const name of ['prepare','readback']) Object.assign(data.growth[name], { readOnlyFence:'HELD_UNTIL_ROLLBACK', readOnlyMaintenanceUnlock:true, readOnlyMaintenanceClosed:true });
   Object.assign(data.growth.apply, { targetFence:'HELD_ACROSS_BATCHES', targetFenceReleased:true });
-  const result = assessRoundEvidence(data); assert.equal(result.status, 'COMPLETE', result.issues.join(','));
+  const result = assessRoundEvidence(data);
+  assert(result.issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const historical=assessRoundEvidence({...data,requireCurrentLegacyListed:false});
+  assert.equal(historical.status,'COMPLETE',historical.issues.join(','));
   const missingBatchProof=structuredClone(data);delete missingBatchProof.readback.emptyFinancialCoverage.batchProof;
-  assert(assessRoundEvidence(missingBatchProof).issues.includes('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED'));
+  assert(assessRoundEvidence({...missingBatchProof,requireCurrentLegacyListed:false}).issues.includes('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED'));
   for (const domain of ['liabilityDuties','completedCommissions']) {
     const isolated=structuredClone(data);isolated.checkpoint.quarantine.push({domain,sourceId:'source-1',code:'REVIEW_REQUIRED'});
     assert(assessRoundEvidence(isolated).issues.includes('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW'));
@@ -1197,6 +1221,49 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   }
   const noPathFence=structuredClone(data);delete noPathFence.receipt.stages.find(stage=>stage.name==='paths').metrics.targetFenceReleased;
   assert(assessRoundEvidence(noPathFence).issues.includes('ROUND_PATH_FENCE_UNCONFIRMED'));
+  const listed=structuredClone(data),empty=sha(''),one=sha('listed-1');
+  listed.input.source={sha256:'a'.repeat(64)};
+  Object.assign(listed.expected.dataset,{sourceReceiptSha256:listed.input.source.sha256,gameBindings:{'1':'delta'}});
+  listed.expected.dataset.files.accounts={sha256:'b'.repeat(64)};
+  listed.expected.source={files:{accounts:{sha256:'c'.repeat(64)},games:{sha256:'d'.repeat(64)}}};
+  const source={schema:'zzsh.legacy-listed-source-scope.v2',scope:'ALL_CAPTURED_GAMES',status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN',
+    sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,
+    sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,
+    binding:{sourceReceiptSha256:listed.input.source.sha256,sourceAccountsSha256:'c'.repeat(64),sourceGamesSha256:'d'.repeat(64),
+      datasetAccountsSha256:'b'.repeat(64),gameBindingsSha256:sha(JSON.stringify(listed.expected.dataset.gameBindings)),gameBindingStatus:'VERIFIED'},
+    delta:{sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,
+      readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'},
+    otherGames:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty},
+    unknownGame:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty}};
+  listed.checkpoint.sourceScopeVerification.legacyListed=source;
+  listed.readback.legacyListedSource=source;listed.readback.legacyListedSourceOrigin='CHECKPOINT_BOUND_V2';
+  listed.readback.legacyListedTarget={status:'MAPPED_HISTORICAL_NOT_PUBLISHED',scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',
+    sourceProofSha256:sha(JSON.stringify(source)),expectedMapped:1,verifiedMapped:1,missingTarget:0,missingSnapshot:0,published:0,
+    expectedMappedIdsSha256:one,verifiedMappedIdsSha256:one,missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
+  assert(!assessRoundEvidence(listed).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const old=structuredClone(listed);old.checkpoint.sourceScopeVerification.legacyListed={scope:'ALL_CAPTURED_GAMES',sourceCount:1};
+  old.readback.legacyListedSourceOrigin='RECOMPUTED_FROM_BOUND_SOURCE';
+  assert(!assessRoundEvidence(old).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const oldest=structuredClone(old);delete oldest.checkpoint.sourceScopeVerification.legacyListed;
+  assert(!assessRoundEvidence(oldest).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const noFresh=structuredClone(old);delete noFresh.readback.legacyListedSource;
+  assert(assessRoundEvidence(noFresh).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const changedHistorical=structuredClone(listed);changedHistorical.readback.legacyListedTarget.verifiedMappedIdsSha256='0'.repeat(64);
+  assert(assessRoundEvidence({...changedHistorical,requireCurrentLegacyListed:false}).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  const other=structuredClone(listed),otherSource=other.readback.legacyListedSource;
+  Object.assign(otherSource,{sourceCount:2,isolated:1,status:'SOURCE_REVIEW_REQUIRED',sourceIdsSha256:sha('listed-1\nother-1'),isolatedIdsSha256:sha('other-1')});
+  Object.assign(otherSource.otherGames,{sourceCount:1,sourceIdsSha256:sha('other-1'),isolated:1,isolatedIdsSha256:sha('other-1')});
+  other.checkpoint.sourceScopeVerification.legacyListed=otherSource;other.readback.legacyListedTarget.sourceProofSha256=sha(JSON.stringify(otherSource));
+  other.expected.dataset.domains.accounts.source=3;other.expected.dataset.domains.accounts.isolated=1;
+  const otherResult=assessRoundEvidence(other);
+  assert(!otherResult.issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  assert(otherResult.issues.includes('ROUND_LEGACY_LISTED_SOURCE_REVIEW_REQUIRED'));
+  for(const change of [d=>{delete d.readback.legacyListedTarget;},d=>{d.readback.legacyListedTarget.published=1;},
+    d=>{d.readback.legacyListedTarget.verifiedMappedIdsSha256='0'.repeat(64);},d=>{d.expected.source.files.accounts.sha256='0'.repeat(64);},
+    d=>{d.checkpoint.sourceScopeVerification.legacyListed.status='SOURCE_REVIEW_REQUIRED';}]){
+    const changed=structuredClone(listed);change(changed);
+    assert(assessRoundEvidence(changed).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
+  }
   for (const [issue, change] of [['ROUND_GROWTH_PREPARE_UNCONFIRMED',d=>{delete d.growth.prepare.readOnlyFence;}],
     ['ROUND_GROWTH_APPLY_UNCONFIRMED',d=>{d.growth.apply.targetFenceReleased=false;}],
     ['ROUND_GROWTH_READBACK_UNCONFIRMED',d=>{d.growth.readback.readOnlyMaintenanceClosed=false;}]]) {
@@ -1392,6 +1459,14 @@ test("receipt inspection is offline, read-only, and reports cross-target bootstr
   assert.ok(!r.reads.includes(credentials));
 });
 
+test('historical NEXT receipt inspection retains its result while current listing status stays unassessed',async()=>{
+  const r=await round({action:'inspect-receipt',inspectAsNext:true,inspectPreflight:true,v2Capture:true,identityProfiles:false,legalInput:false});
+  assert.ifError(r.error);assert.equal(r.logs[0].status,'COMPLETE');
+  assert.equal(r.logs[0].assessmentScope,'HISTORICAL_DATASET_AND_GROWTH');
+  assert.deepEqual(r.logs[0].currentLegacyListed,{status:'NOT_ASSESSED',reason:'HISTORICAL_RECEIPT_ONLY'});
+  assert.deepEqual(r.spawns,[]);assert.deepEqual(r.liveCommands,[]);assert.deepEqual(r.directories,[]);
+});
+
 test("receipt inspection marks the dataset incomplete when the distribution source preflight no longer verifies", async () => {
   const options = { action: "inspect-receipt", reservationStatus: "ROUND06_BOOTSTRAP_RESERVED", instance: { host: "127.0.0.1", port: 55433, systemIdentifier: "123" }, withGrowth: true, packedPreflight: true, inspectPreflight: true };
   const verified = await round(options);
@@ -1485,6 +1560,15 @@ test("growth-only continuation rejects unproven lineage and unknown commits befo
     assert.equal(r.oldCheckpointUnchanged, true);
     assert.deepEqual(r.directories, []); assert.deepEqual(r.spawns, []); assert.deepEqual(r.liveCommands, []);
   }
+});
+
+test('a legacy NEXT growth continuation cannot reach growth without a fresh v2 listing readback',async()=>{
+  const r=await round({action:'resume-growth',resumeCase:'next-legacy-unproven'});
+  assert.ifError(r.error);assert.equal(r.exit,1);assert.equal(r.oldCheckpointUnchanged,true);
+  const receipt=JSON.parse(r.receipt);
+  assert.equal(receipt.failure.stage,'readback');assert.match(receipt.failure.message,/ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED/);
+  assert.equal(r.spawns.some(args=>args[0].endsWith('run-local-growth.mjs')),false);
+  assert.equal(receipt.externalReadiness.legacyListed.targetStatus,'NOT_ASSESSED');
 });
 
 test("growth-only continuation does not write growth when live schema or initial readback is unproven", async () => {
