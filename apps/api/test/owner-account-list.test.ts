@@ -22,13 +22,13 @@ test("B1 query parsing validates rentalState and cursor/after exclusivity", () =
 });
 
 test("B1 rentalState precedence lives in SQL and filters server-side", () => {
-  const order = ["'RENTED'", "'PENDING_PAYMENT'", "'COMPLETED'", "'RESTRICTED'", "'PAUSED'", "'UNKNOWN'", "'REVIEWING'", "'REJECTED'", "'DRAFT'"].map(s => RENTAL_STATE_SQL.indexOf(s));
+  const order = ["'RENTED'", "'PENDING_PAYMENT'", "'UNKNOWN'", "'COMPLETED'", "'RESTRICTED'", "'PAUSED'", "'REVIEWING'", "'REJECTED'", "'DRAFT'"].map(s => RENTAL_STATE_SQL.indexOf(s));
   for (let i = 1; i < order.length; i++) assert.ok(order[i]! > order[i - 1]!, "precedence");
   assert.match(OWNER_ACCOUNT_LIST_SQL, /t\.rental_state=\$3/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /a\.owner_user_id=\$1/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /o\.owner_user_id=a\.owner_user_id/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /l\.owner_user_id=\$1 AND l\.owner_user_id=a\.owner_user_id/);
-  assert.match(OWNER_ACCOUNT_LIST_SQL, /count\(\*\)=1 AND bool_and\(bound\)/);
+  assert.match(OWNER_ACCOUNT_LIST_SQL, /count\(\*\)=1 AND bool_and\(bound AND linkable\)/);
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN LATERAL/);
   // AT TIME ZONE must bind to the timestamp sum, not the interval inside make_interval.
   assert.match(OWNER_ACCOUNT_LIST_SQL, /LEFT JOIN zzsh_order\.rental_opening opening ON opening\.order_id=ao\.id AND opening\.status='CONFIRMED'/);
@@ -72,6 +72,9 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   const retiredInRental=projectOwnerAccount({...base,rental_state:"RENTED",retired_legacy:true,ao_id:"legacy-order",ao_origin:"LEGACY",ao_status:"PAID"} as any);
   assert.equal(retiredInRental.rentalState,"RENTED");assert.equal(retiredInRental.historicalReadOnly,true);
   assert.ok(retiredInRental.blockers.includes("LEGACY_LISTING_RELIST_REQUIRED"));assert.equal(retiredInRental.activeOrder?.id,"legacy-order");
+  const legacyNeedsReview=projectOwnerAccount({...base,rental_state:"UNKNOWN",retired_legacy:true,ao_id:"legacy-review",ao_display_no:"ORIGINAL-REVIEW",ao_origin:"LEGACY",ao_status:"PAID"} as any);
+  assert.equal(legacyNeedsReview.available,false);assert.ok(legacyNeedsReview.blockers.includes("STATE_UNKNOWN"));
+  assert.equal(legacyNeedsReview.activeOrder?.id,"legacy-review");assert.equal(legacyNeedsReview.activeOrder?.origin,"LEGACY");
   assert.equal(projectOwnerAccount({...base,legacy_market:true} as any).available,false);
   const pending = projectOwnerAccount({ ...base, rental_state: "PENDING_PAYMENT", ao_id: "p1", ao_display_no: "P1", ao_status: "PENDING_PAYMENT" } as any) as any;
   assert.equal(pending.available, false);
