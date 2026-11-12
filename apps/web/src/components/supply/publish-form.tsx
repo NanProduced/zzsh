@@ -98,6 +98,7 @@ import {
   isoFromBeijingInput,
   minutesToTimeValue,
   matchedOwnerNetEstimate,
+  usesRentalModes,
   ownerQuoteBreakdown,
   ratioDisplayText,
   ratioRangeText,
@@ -1511,7 +1512,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       setDraftState((previous) => {
         const next = { ...previous, attributes: { ...previous.attributes } };
         if (!next.termOptionCode && nextOptions.termOptions[0]) next.termOptionCode = nextOptions.termOptions[0].code;
-        if (nextOptions.pricingSchema === "haff-ratio-v2") {
+        if (usesRentalModes(nextOptions)) {
           if (!rentalPricingOf(next.attributes)) {
             next.attributes.rentalPricing = { rentalMode: fastLocked ? "fast" : "ordinary" };
           }
@@ -1545,7 +1546,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   // silently rewrites a saved or published version while the form is read-only.
   useEffect(() => {
     if (!fastLocked || !editing || writeIntent) return;
-    if (optionsAvailability !== "ready" || options?.pricingSchema !== "haff-ratio-v2") return;
+    if (optionsAvailability !== "ready" || !usesRentalModes(options)) return;
     if (options.rentalModes?.fast?.enabled !== true) return;
     const saved = rentalPricingOf(draftRef.current.attributes);
     if (saved?.rentalMode === "fast") return;
@@ -1714,7 +1715,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
   const pricingProblem = (): UiProblem | null => {
     if (optionsAvailability !== "ready") return null;
-    if (options?.pricingSchema !== "haff-ratio-v2") {
+    if (!usesRentalModes(options)) {
       if (fastLocked) return { group: "terms", message: "当前规则暂不支持极速出租，请改用普通出租。" };
       return null;
     }
@@ -1786,7 +1787,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const source = draftRef.current;
       const attributes: DraftInput["attributes"] = { ...source.attributes };
       let pricingOptionCode = source.pricingOptionCode;
-      if (options?.pricingSchema === "haff-ratio-v2") {
+      if (usesRentalModes(options)) {
         const selection = pricingSelection();
         if (selection) attributes.rentalPricing = selection;
         pricingOptionCode = "";
@@ -1934,7 +1935,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (!draftRef.current.termOptionCode) return { group: "terms", message: "请选择每日消耗档位。" };
     const pricing = pricingProblem();
     if (pricing) return pricing;
-    if (options?.pricingSchema !== "haff-ratio-v2" && !draftRef.current.pricingOptionCode) return { group: "terms", message: "请选择计价方案。" };
+    if (!usesRentalModes(options) && !draftRef.current.pricingOptionCode) return { group: "terms", message: "请选择计价方案。" };
     return haffProblem() ?? depositProblem() ?? penaltyMediaProblem();
   };
 
@@ -2578,7 +2579,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     safe_box_code: typeof draft.attributes.safe_box_code === "string" ? draft.attributes.safe_box_code : null,
     vit_level: typeof draft.attributes.vit_level === "number" ? draft.attributes.vit_level : null,
     bear_level: typeof draft.attributes.bear_level === "number" ? draft.attributes.bear_level : null,
-    rentalPricing: options?.pricingSchema === "haff-ratio-v2" ? pricingSelection() : null,
+    rentalPricing: usesRentalModes(options) ? pricingSelection() : null,
     owner_deposit_declaration: (draft.attributes.owner_deposit_declaration as OwnerDepositDeclaration | undefined) ?? null,
     full_payout_declaration: (draft.attributes.full_payout_declaration as { schema: "full-payout-declaration-v1"; selected: boolean } | undefined) ?? null,
   };
@@ -2611,7 +2612,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     ...(accountId ? { accountId } : {}),
     attributes: previewAttributes,
     termOptionCode: draft.termOptionCode ?? null,
-    ...(options?.pricingSchema !== "haff-ratio-v2" && draft.pricingOptionCode ? { pricingOptionCode: draft.pricingOptionCode } : {}),
+    ...(!usesRentalModes(options) && draft.pricingOptionCode ? { pricingOptionCode: draft.pricingOptionCode } : {}),
     inventory: previewInventory,
     entitlements: previewEntitlements,
   };
@@ -2919,7 +2920,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const skinOwners = (catalog?.owners ?? []).filter((owner) => !activeSkinKind || owner.kind === activeSkinKind);
   const visibleSkinRows = (catalog?.skins ?? []).filter((skin) => !activeSkinCategory || (catalog?.skinFilters ? skin.ownerKind === activeSkinCategory : skin.categoryId === activeSkinCategory));
   const skinFilters: SkinQuery = { q: skinQuery.trim(), ...(catalog?.skinFilters && isSkinOwnerKind(activeSkinCategory) ? { ownerKind: activeSkinCategory } : { categoryId: activeSkinCategory }), rarityCode: skinRarity, ownerId: skinOwner };
-  const showPricingSelect = options?.pricingSchema !== "haff-ratio-v2";
+  const showPricingSelect = !usesRentalModes(options);
   const disabledPricing = formDisabled || !options;
   const rentalModes = options?.rentalModes;
   const rentalModeEntries: RentalMode[] = (["ordinary", "custom", "fast"] as const).filter((entry) => rentalModes ? rentalModes[entry]?.enabled : true);
@@ -2927,7 +2928,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const selectedRatioRange = ratioDisplayText(ratioRanges?.[rentalMode]);
   const modeRange = ratioRangeText(rentalModes?.[rentalMode]);
   const ratioInlineProblem = ratioInput.trim() === "" ? null : ratioEntryProblem(rentalMode, rentalModes?.[rentalMode], ratioInput);
-  const fastReady = optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled === true;
+  const fastReady = optionsAvailability === "ready" && usesRentalModes(options) && rentalModes?.fast?.enabled === true;
   const visibleBlockers = [...new Set(blockers)].filter((code) => code !== "PUBLICATION_REQUIRED" && code !== "CONFIRMATION_OR_MEDIA_REQUIRED" && !(code === "ACCEPTANCE_REQUIRED" && effectiveQuote));
   /** 门禁前置：进入页面就按「用户能修 / 系统处理中」分组展示，并据此禁用上架按钮。 */
   const userBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "USER");
@@ -3673,8 +3674,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     <small className="publish-calc-note">根据余额、日耗与出租方案自动核算；修改后需重新核对报价。</small>
                   </div>
                 </div>
-                {fastLocked && options && options.pricingSchema !== "haff-ratio-v2" ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则暂不支持极速出租。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
-                {fastLocked && optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled !== true ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>{rentalModes?.fast ? "当前规则未启用极速比例，不能以极速入口上架。" : "当前规则未提供极速比例范围，不能以极速入口上架。"}</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
+                {fastLocked && options && !usesRentalModes(options) ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则暂不支持极速出租。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
+                {fastLocked && optionsAvailability === "ready" && usesRentalModes(options) && rentalModes?.fast?.enabled !== true ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>{rentalModes?.fast ? "当前规则未启用极速比例，不能以极速入口上架。" : "当前规则未提供极速比例范围，不能以极速入口上架。"}</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
                 <details className="publish-rule-disclosure"><summary><span>日耗、租期与比例怎么选？</span></summary><div className="publish-disclosure-panel"><ManagedNoticeSections contentKey="placement:PUBLISH_TERM" compact /><p>预计租期按哈夫币余额除以每日消耗推算，不足一天按一天计。租期结束后按约定办理结算，不是手动承诺的成交时间。</p><p>普通比例由平台按账号配置和日耗核定；自定义比例仅支持10M/天。每收入1元对应的哈夫币越多，租金就越低，租客也更容易比较。</p><p>具体可选档位与比例以当前页面为准，不承诺几小时或几天内租出。核价后修改余额、日耗或账号配置，需要重新核对报价。</p></div></details>
               </section>
 
@@ -3806,6 +3807,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           <p className="publish-rail-note">按库存全部用完预估，押金不计入收入。</p>
           {netEstimate ? <div className="publish-fee-pending" role="status">
             <div><span>扣费前收入</span><strong>{netEstimate.ownerGross.amount} 元</strong></div>
+            {netEstimate.platformFee ? <div><span>平台手续费</span><strong>−{netEstimate.platformFee.amount.amount} 元</strong></div> : null}
             <div><span>全额包赔服务费{netEstimate.selected ? "（8%）" : ""}</span><strong>{netEstimate.selected ? `−${netEstimate.serviceFee.amount.amount} 元` : "未选择，不收取"}</strong></div>
             <p>按全部申报库存用完、正常结束预估；实际按使用情况与结算条款核算。</p>
           </div> : payoutSelected === true ? <div className="publish-fee-pending" role="status"><div><span>全额包赔服务费</span><strong>{ownerIncomePreviewPending || ownerPreviewStale ? "正在重新核算…" : "金额待核定"}</strong></div><p>当前为扣费前收入，费后金额尚未核定。</p></div> : payoutSelected === null ? <p className="publish-rail-note">选择赔付方案后可查看费后预计所得。</p> : null}

@@ -15,6 +15,7 @@ import {
   isoFromBeijingInput,
   minutesToTimeValue,
   matchedOwnerNetEstimate,
+  usesRentalModes,
   normalizeRatioInput,
   ownerQuoteBreakdown,
   ratioDisplayText,
@@ -50,6 +51,18 @@ test('normal-end estimate consumes server net and explicit zero without reusing 
   assert.equal(matchedOwnerNetEstimate(feePreview(), null), null);
   assert.equal(matchedOwnerNetEstimate({ ...feePreview(), normalEndEstimate: undefined }, true), null);
   assert.equal(matchedOwnerNetEstimate({ ...feePreview(), state: 'PARTIAL' }, true), null);
+});
+
+test('fixed-fee options retain rental modes and net income includes both frozen deductions', () => {
+  assert.equal(usesRentalModes({ pricingSchema: 'haff-ratio-v3' }), true);
+  assert.equal(usesRentalModes({ pricingSchema: 'haff-ratio-v2' }), true);
+  assert.equal(usesRentalModes({ pricingSchema: 'unknown' }), false);
+  const preview = feePreview();
+  preview.normalEndEstimate.platformFee = { base: feeMoney('215.67'), rate: '0.1', amount: feeMoney('21.57'), payer: 'OWNER' };
+  preview.normalEndEstimate.ownerNet = feeMoney('176.85');
+  assert.equal(matchedOwnerNetEstimate(preview, true).ownerNet.amount, '176.85');
+  preview.normalEndEstimate.platformFee.amount = null;
+  assert.equal(matchedOwnerNetEstimate(preview, true), null);
 });
 
 test('normal-end estimate rejects incomplete, malformed and mismatched quote facts', () => {

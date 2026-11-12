@@ -270,13 +270,13 @@ test("结果未确认保留同一幂等键，重试不会换键或伪造成功",
   assert.equal(keys[0], keys[1], "an unknown result keeps the original idempotency key");
 });
 
-test("开租后客服取消先核对再确认，未知结果跨页面恢复同一金额和原键",async t=>{
+test("固定手续费取消按原键恢复，同时核对手续费、包赔费和入账",async t=>{
  Object.defineProperty(browser.navigator,"locks",{configurable:true,value:{request:async(_name,_options,run)=>run({})}});
  const requests=[];
- const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true,fullPayoutSelected:true}};
+ const initial={...preview,openingConfirmed:true,poststartEligibility:{allowed:true,reason:null,refundCents:"10000",openingConfirmed:true,fullPayoutSelected:true,fixedFeeRate:"0.105"}};
  const accepted={...initial,orderRevision:"2",orderStatus:"CANCELLED",cancelReason:"SUPPORT_AFTER_START_CANCELLED",
   eligibility:{allowed:false,reason:"ALREADY_CANCELLED",refundCents:"5000",openingConfirmed:true},
-  poststartCancellation:{caseId:"sc_1",refundCents:"5000",ownerCents:"2760",ownerGrossCents:"3000",fullPayoutFeeCents:"240",fullPayoutSelected:true,platformContributionCents:"2240",commissionCents:"0",reason:"双方协商取消"},
+  poststartCancellation:{caseId:"sc_1",refundCents:"5000",ownerCents:"2445",ownerGrossCents:"3000",fullPayoutFeeCents:"240",fullPayoutSelected:true,fixedFeeRate:"0.105",platformServiceFeeCents:"315",platformContributionCents:"2555",commissionCents:"0",reason:"双方协商取消"},
   channel:{result:"NOT_SUBMITTED",bankArrival:"UNKNOWN"}};
  globalThis.fetch=async(input,init={})=>{
   if((init.method??"GET")==="GET")return response(initial);
@@ -294,7 +294,7 @@ test("开租后客服取消先核对再确认，未知结果跨页面恢复同�
  await input("退还租客金额","50");await input("号主收益金额","30");await input("取消原因","双方协商取消");
  await click(button(document.body,"核对并取消"));
  assert.equal(requests.length,0,"opening confirmation never submits");
- assert.match(document.body.textContent,/包赔费 ¥2\.40/);assert.match(document.body.textContent,/号主入账 ¥27\.60/);
+ assert.match(document.body.textContent,/包赔费 ¥2\.40/);assert.match(document.body.textContent,/手续费 ¥3\.15/);assert.match(document.body.textContent,/号主入账 ¥24\.45/);
  await click(button(document.body,"确认取消并退款"));
  await waitFor(()=>document.body.textContent.includes("取消结果未确认"));
  assert.equal(requests.length,1);
