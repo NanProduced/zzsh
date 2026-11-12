@@ -54,15 +54,16 @@ export function prepareAccrualFromFrozenPayment(basis:PaymentDistributionBasis|n
  if(fixed&&eligible.some(r=>!r.beneficiaryUserId||!r.relationDigest||!r.ratio))return{knowledge:'UNKNOWN' as const,reason:'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:null,items:[] as AccruedReferral[]};
  let pair:ReturnType<typeof allocateFrozenReferralPair>;
  try{
-  if(fixed){
-   const renterShare=allocateFrozenReferralPair(base,renter?.ratio??null,null,basis.policyConfig.minimumAccrualCents);
-   const ownerShare=allocateFrozenReferralPair(base,null,ownerRole?.ratio??null,basis.policyConfig.minimumAccrualCents);
-   if(BigInt(renterShare.renterCents??'0')+BigInt(ownerShare.ownerCents??'0')>BigInt(base))throw conflict('Rounded referral pair exceeds source base');
-   pair={renterCents:renterShare.renterCents,ownerCents:ownerShare.ownerCents,skipped:{renter:renterShare.skipped.renter,owner:ownerShare.skipped.owner}};
-  }else pair=allocateFrozenReferralPair(base,renter?.ratio??null,ownerRole?.ratio??null,'0');
+  pair=allocateFrozenReferralPair(base,renter?.ratio??null,ownerRole?.ratio??null,
+   fixed?basis.policyConfig.minimumAccrualCents:'0',fixed?'FIXED_FEE':'LEGACY');
  }
- catch(e){const status=(e as {status?:number}).status;if(!fixed||(status!==400&&status!==409))throw e;return{knowledge:'UNKNOWN' as const,reason:status===409?'ROUNDED_REFERRALS_EXCEED_BASE':'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:null,items:[] as AccruedReferral[]};}
+ catch(e){
+  if(!fixed||(e as {status?:number}).status!==400)throw e;
+  return{knowledge:'UNKNOWN' as const,reason:'ORIGINAL_PAYMENT_BASIS_NOT_CLOSED',baseCents:null,items:[] as AccruedReferral[]};
+ }
  // V1 recorded a final zero for roles admitted at payment; V2 applies the frozen minimum at completion.
+ // Keep the original canonical OWNER then RENTER output, independent of input order.
+ if(fixed&&eligible.length===2&&eligible[0]?.role==='RENTER_REFERRAL')eligible.reverse();
  const items:AccruedReferral[]=eligible.filter(r=>!fixed||(r.role==='RENTER_REFERRAL'?pair.renterCents:pair.ownerCents)!==null).map(r=>{
   if(!r.beneficiaryUserId||!r.relationDigest||!r.ratio)throw conflict('Original eligible role has incomplete frozen source');
   const economicKey=earningEconomicKey({kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:basis.orderId},r.beneficiaryUserId,r.role);

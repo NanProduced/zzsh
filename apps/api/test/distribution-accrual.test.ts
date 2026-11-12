@@ -18,11 +18,11 @@ test('final cumulative referral pair cannot exceed its source after per-role rou
  assert.throws(()=>prepareAccrualFromFrozenPayment(frozen,{...posting,compensationFeeCents:'4999'}),/exceeds source base/);
 });
 
-function fixedBasis(estimate='1',rate='0.1',payableRatio='0.95',mode='ordinary',minimum='1',percent='5'){
- const config=structuredClone(cfg);config.minimumAccrualCents=minimum;config.levels[0]!.renterPercent=percent;config.levels[0]!.ownerPercent=percent;
+function fixedBasis(estimate='1',rate='0.1',payableRatio='0.95',mode='ordinary',minimum='1',percent='5',ownerPercent=percent,roleFacts=facts){
+ const config=structuredClone(cfg);config.minimumAccrualCents=minimum;config.levels[0]!.renterPercent=percent;config.levels[0]!.ownerPercent=ownerPercent;
  return freezePaymentDistributionBasis({orderId:'o1',gameId:'delta',currency:'CNY',confirmationId:'p1',acceptedAt:'2026-10-04T03:00:00.000000Z',paymentDigest:h,
   admissionId:'a1',admissionRevision:'1',origin:'NATIVE',accountMode:mode,estimate:{baseCents:estimate,sourceDigest:h},
-  policy:{versionId:'fixed-policy',config,digest:createHash('sha256').update(canonicalize(config)).digest('hex')},facts,
+  policy:{versionId:'fixed-policy',config,digest:createHash('sha256').update(canonicalize(config)).digest('hex')},facts:roleFacts,
   fixedFeePricing:{fixedFeeRate:rate,payableRatio}});
 }
 function fixedPosting():CompletedDistributionFacts{
@@ -80,12 +80,34 @@ test('fixed-fee roles cannot inherit the legacy estimate-time minimum skip',()=>
  const {digest,...body}=frozen;const changed={...body,digest:createHash('sha256').update(canonicalize(body)).digest('hex')};
  const result=prepareAccrualFromFrozenPayment(changed,fixedPosting());assert.equal(result.knowledge,'UNKNOWN');assert.deepEqual(result.items,[]);
 });
-test('fixed-fee final per-role rounding cannot exceed the source base',()=>{
- const f=fixedPosting();Object.assign(f,{capturedCents:'5',ownerNetCents:'4',renterRefundCents:'0',platformContributionCents:'1'});
- Object.assign(f.fixedFeeEvidence!,{ownerGrossCents:'5',serviceFeeCents:'1',distributionDiscountCents:'0'});
- const result=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.9','ordinary','1','50'),f);
- assert.equal(result.knowledge,'UNKNOWN');assert.equal(result.reason,'ROUNDED_REFERRALS_EXCEED_BASE');assert.deepEqual(result.items,[]);
- const below=prepareAccrualFromFrozenPayment(fixedBasis('1','0.1','0.9','ordinary','2','50'),f);
- assert.equal(below.knowledge,'KNOWN');assert.equal(below.baseCents,'1');assert.deepEqual(below.items,[]);
- if(below.knowledge==='KNOWN')assert.equal(below.skipReason,'NO_PAYABLE_COMMISSION');
+test('fixed-fee rounding keeps the renter share, then applies the frozen minimum by role',()=>{
+ const f=fixedPosting();Object.assign(f,{capturedCents:'1919',ownerNetCents:'1818',platformContributionCents:'101'});
+ Object.assign(f.fixedFeeEvidence!,{ownerGrossCents:'2020',serviceFeeCents:'202',distributionDiscountCents:'101'});
+ const sameParent=structuredClone(facts);
+ sameParent[1]!.beneficiary!.userId=sameParent[0]!.beneficiary!.userId;
+ sameParent[1]!.relation.parentUserId=sameParent[0]!.relation.parentUserId;
+ const missing=structuredClone(sameParent);
+ Object.assign(missing[1]!,{beneficiary:null,relation:{knowledge:'KNOWN_NONE',id:null,childUserId:missing[1]!.partyUserId,parentUserId:null,sourceDigest:null}});
+ const reversed=(input:ReturnType<typeof fixedBasis>)=>{
+  const {digest,...body}=input;
+  const reordered={...body,roles:[...body.roles].reverse()};
+  return {...reordered,digest:createHash('sha256').update(canonicalize(reordered)).digest('hex')};
+ };
+ for(const [renterPercent,ownerPercent,min,source,expected] of [
+  ['50','50','50',sameParent,[['OWNER_REFERRAL','50'],['RENTER_REFERRAL','51']]],
+  ['50','50','51',sameParent,[['RENTER_REFERRAL','51']]],
+  ['50','50','52',sameParent,[]],
+  ['25','75','1',sameParent,[['OWNER_REFERRAL','76'],['RENTER_REFERRAL','25']]],
+  ['50','10','1',sameParent,[['OWNER_REFERRAL','10'],['RENTER_REFERRAL','51']]],
+  ['50','50','1',missing,[['RENTER_REFERRAL','51']]],
+ ] as const){
+  const input=fixedBasis('1','0.1','0.95','ordinary',min,renterPercent,ownerPercent,source);
+  for(const candidate of [input,reversed(input)]){
+   const result=prepareAccrualFromFrozenPayment(candidate,f);
+   assert.equal(result.knowledge,'KNOWN');assert.equal(result.baseCents,'101');
+   assert.deepEqual(result.items.map(i=>[i.role,i.amountCents]),expected);
+   assert.equal(new Set(result.items.map(i=>i.economicKey)).size,result.items.length);
+   assert(result.items.every(i=>i.beneficiaryUserId==='parent0'));
+  }
+ }
 });

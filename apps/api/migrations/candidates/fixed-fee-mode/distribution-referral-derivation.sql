@@ -7,7 +7,7 @@ DECLARE
  doc jsonb;payment_source jsonb;posting_source jsonb;posting_hash text;due_value timestamptz;due_text text;
  pricing jsonb;gross numeric;service numeric;discount numeric;rate numeric;payable numeric;base numeric;
  pair_role jsonb;n numeric;d numeric;commission numeric;pair_total numeric:=0;key_value text;item jsonb;items jsonb:='[]'::jsonb;
- allocation_hash text;
+ allocation_hash text;fixed boolean;renter_n numeric:=0;renter_d numeric:=1;renter_rounded numeric:=0;
 BEGIN
  SELECT * INTO p FROM zzsh_order.settlement_posting WHERE id=posting_value;
  IF p.id IS NULL THEN RAISE EXCEPTION 'original referral posting unavailable' USING ERRCODE='23514'; END IF;
@@ -47,7 +47,8 @@ BEGIN
   OR p.owner_net_cents+p.renter_refund_cents+p.platform_contribution_cents<>p.captured_cents
  THEN RAISE EXCEPTION 'original referral facts are incomplete' USING ERRCODE='23514'; END IF;
 
- IF doc->>'schema'='payment-distribution-basis.v2' THEN
+ fixed:=doc->>'schema'='payment-distribution-basis.v2';
+ IF fixed THEN
   SELECT * INTO ver FROM zzsh_order.settlement_version WHERE id=p.settlement_version_id AND order_id=p.order_id;
   pricing:=doc->'fixedFeePricing';
   IF ord.quote_snapshot->>'schemaVersion' IS DISTINCT FROM '4' OR ord.quote_snapshot#>>'{personal,schema}' IS DISTINCT FROM 'personal-quote-v5'
@@ -102,7 +103,10 @@ BEGIN
  posting_hash:=encode(sha256(convert_to(zzsh_order.canonical_finance_json(posting_source),'UTF8')),'hex');
  due_value:=((p.posted_at AT TIME ZONE 'UTC')+((doc#>>'{policyConfig,settlementDelayDays}')::integer*interval '1 day')) AT TIME ZONE 'UTC';
  due_text:=to_char(due_value AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
- FOR pair_role IN SELECT value FROM jsonb_array_elements(doc->'roles') LOOP
+ -- Compute the renter's rounded share first, but keep canonical output in the original OWNER, RENTER order.
+ FOR pair_role IN SELECT value FROM jsonb_array_elements(doc->'roles') WITH ORDINALITY r(value,ordinal)
+  ORDER BY CASE WHEN fixed THEN (value->>'role'='OWNER_REFERRAL')::integer ELSE 0 END,ordinal
+ LOOP
   IF COALESCE(pair_role->>'status','') NOT IN ('ELIGIBLE','SKIPPED_DISABLED','SKIPPED_FAST','SKIPPED_MODE','SKIPPED_NO_PARENT','SKIPPED_INELIGIBLE','SKIPPED_BELOW_MIN')
    OR doc->>'schema'='payment-distribution-basis.v2' AND (pair_role->>'status'='SKIPPED_BELOW_MIN'
     OR doc->>'accountMode'='fast' AND pair_role->>'status'='ELIGIBLE'
@@ -117,7 +121,15 @@ BEGIN
    IF n<0 OR d<=0 OR n>d THEN RAISE EXCEPTION 'counterpart ratio invalid' USING ERRCODE='23514'; END IF;
    -- Integer division avoids an intermediate numeric rounding before HALF_UP.
    commission:=div(base*n*2+d,2*d);
-   IF doc->>'schema'='payment-distribution-basis.v2' AND (commission=0 OR commission<(doc#>>'{policyConfig,minimumAccrualCents}')::numeric) THEN CONTINUE; END IF;
+   IF fixed THEN
+    IF pair_role->>'role'='RENTER_REFERRAL' THEN
+     renter_n:=n;renter_d:=d;renter_rounded:=commission;
+    ELSE
+     IF renter_n*d+n*renter_d>renter_d*d THEN RAISE EXCEPTION 'counterpart ratios exceed original base' USING ERRCODE='23514'; END IF;
+     commission:=LEAST(commission,base-renter_rounded);
+    END IF;
+    IF commission=0 OR commission<(doc#>>'{policyConfig,minimumAccrualCents}')::numeric THEN CONTINUE; END IF;
+   END IF;
    pair_total:=pair_total+commission;
    key_value:=zzsh_order.canonical_finance_json(jsonb_build_array('NATIVE_RENTAL_REFERRAL','NATIVE','zzsh','rental_order',p.order_id,pair_role->>'beneficiaryUserId',pair_role->>'role'));
    item:=jsonb_build_object('economicKey',key_value,'beneficiaryUserId',pair_role->>'beneficiaryUserId','role',pair_role->>'role',
@@ -127,6 +139,10 @@ BEGIN
   END IF;
  END LOOP;
  IF pair_total>base THEN RAISE EXCEPTION 'rounded referral pair exceeds original base without subsidy' USING ERRCODE='23514'; END IF;
+ IF fixed THEN
+  SELECT COALESCE(jsonb_agg(entry ORDER BY (entry->>'role') COLLATE "C"),'[]'::jsonb)
+   INTO items FROM jsonb_array_elements(items) entry;
+ END IF;
  allocation_hash:=encode(sha256(convert_to(zzsh_order.canonical_finance_json(jsonb_build_object('orderId',p.order_id,
   'confirmationId',p.payment_confirmation_id,'basisDigest',b.basis_digest,'postingId',p.id,'postingDigest',posting_hash,
   'base',base::numeric(24,0)::text,'items',items)),'UTF8')),'hex');
