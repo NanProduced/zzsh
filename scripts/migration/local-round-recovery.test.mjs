@@ -96,7 +96,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
   const fileEntries = {};
-  for (const [name, rows] of Object.entries({ users: userRows, accounts: [], orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
+  for (const [name, rows] of Object.entries({ users: userRows, accounts: failure === "account-batch-changed" ? [{ sourceId: "10" }] : [], orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
     const file = name + ".jsonl", body = rows.map(row => JSON.stringify(row) + "\n").join("");
     files.set(path.join(ds, file), body);
     fileEntries[name] = { file, sha256: sha(body), rows:rows.length };
@@ -195,8 +195,17 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
     async *readRows(file) { for await (const line of readLfLines(context.createReadStream(file))) if (line.trim()) yield JSON.parse(line); },
-    async preflightBoundSourceBatches(file, entry, size) { assert.equal(file, path.join(ds, "users.jsonl")); assert.equal(entry.rows, userRows.length); assert.equal(size, 100); commands.push("USER_SOURCE_PREFLIGHT"); return {}; },
-    readBoundSourceBatches(file) { commands.push("USER_SOURCE_BOUND_READ"); return context.readRows(file); },
+    async preflightBoundSourceBatches(file, entry, size) {
+      const domain = path.basename(file, ".jsonl"); assert(["users", "accounts", "orders"].includes(domain));
+      assert.equal(entry.rows, get(file).split("\n").filter(Boolean).length); assert.equal(size, 100);
+      commands.push(({users:"USER",accounts:"ACCOUNT",orders:"ORDER"})[domain] + "_SOURCE_PREFLIGHT"); return {};
+    },
+    async *readBoundSourceBatches(file) {
+      const domain = path.basename(file, ".jsonl");
+      commands.push(({users:"USER",accounts:"ACCOUNT",orders:"ORDER"})[domain] + "_SOURCE_BOUND_READ");
+      if (domain === "accounts" && failure === "account-batch-changed") throw Error("SOURCE_BATCH_CHANGED");
+      yield* context.readRows(file);
+    },
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
     writeFileSync: (file, value) => files.set(file, value), appendFileSync: (_file, value) => events.push(JSON.parse(value)),
     writeLoadCheckpoint(file, value) {
@@ -277,6 +286,10 @@ test('next-profile core batches acquire the transaction fence before writes and 
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
   assert(applied.commands.indexOf('USER_SOURCE_PREFLIGHT') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('USER_SOURCE_BOUND_READ') < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
+  for (const domain of ['ACCOUNT', 'ORDER']) {
+    const preflight = applied.commands.indexOf(`${domain}_SOURCE_PREFLIGHT`);
+    assert(preflight >= 0 && preflight < applied.commands.indexOf(`${domain}_SOURCE_BOUND_READ`));
+  }
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
   assert(applied.commands.indexOf('SYSTEM_USER_BATCH') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));
@@ -288,6 +301,16 @@ test('next-profile core batches acquire the transaction fence before writes and 
   const rejected = await load({ ...options, failure:'fence-lost' });
   assert.equal(rejected.state.status, 'FAILED_ROLLED_BACK'); assert(rejected.commands.includes('ROLLBACK'));
   assert(!rejected.commands.includes('COMMIT')); assert(!rejected.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
+});
+
+test('NEXT refuses a changed account batch before writing it', async () => {
+  const result = await load({ instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},
+    migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, failure:'account-batch-changed' });
+  assert.ifError(result.error); assert.equal(result.exit, 1);
+  assert.match(result.state.error.message, /SOURCE_BATCH_CHANGED/);
+  assert.equal(result.state.phases.accounts.nextIndex, 0);
+  assert.equal(result.commands.filter(command => command === 'COMMIT').length, 1);
+  assert(!result.commands.includes('ORDER_SOURCE_PREFLIGHT'));
 });
 
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {

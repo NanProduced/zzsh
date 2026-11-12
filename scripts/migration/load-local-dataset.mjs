@@ -390,8 +390,13 @@ async function runItems(domain, items, body, batchSize = 100, beforeBatch, batch
 async function runBatches(domain, items, chunkBody, batchSize = 500) {
     return runItems(domain, items, null, batchSize, undefined, chunkBody);
 }
-async function runPhase(domain, body, batchSize = 100) { const file = domainFile(domain); if (file)
-    return runItems(domain, readRows(file), body, batchSize); }
+async function runPhase(domain, body, batchSize = 100) {
+    const file = domainFile(domain);
+    if (!file) return;
+    const proof = registered.migrationProfile === NEXT_MIGRATION_PROFILE
+        ? await preflightBoundSourceBatches(file, manifest.files[domain], batchSize) : null;
+    return runItems(domain, proof ? readBoundSourceBatches(file, manifest.files[domain], proof) : readRows(file), body, batchSize);
+}
 async function applyUser(row, profiles, batchSubjects, userActor = actor) { const result = await mod("supply/legacy-user-migration").migrateLegacyOwner(client, row.input, userActor);
     if (batchSubjects && result.userId !== row.userId) throw new Error("LEGACY_IDENTITY_SOURCE_BINDING_CONFLICT");
     if (row.trustedIdentityNumber) {
