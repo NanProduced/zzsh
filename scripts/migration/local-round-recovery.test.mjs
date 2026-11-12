@@ -6,7 +6,7 @@ import { win32 as path } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
-import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertCoreSystemMigrationBinding, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertSelectedScopeForWrite, legacyListedProofVersion, legacyListedTargetMatches, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
@@ -14,7 +14,29 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemCoreAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+
+test("readback checks every core system identity against the registered target",()=>{
+  const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
+  const identities={systemUserMigrationId:(sha,t)=>"u:"+sha+":"+t.databaseOid,systemAccountMigrationId:(sha,t)=>"a:"+sha+":"+t.databaseOid,
+    systemOrderMigrationId:(sha,t)=>"o:"+sha+":"+t.databaseOid},datasetSha256="b".repeat(64);
+  const binding={datasetSha256,systemUserId:"u:"+datasetSha256+":42",systemAccountId:"a:"+datasetSha256+":42",systemOrderId:"o:"+datasetSha256+":42"};
+  assert.equal(assertCoreSystemMigrationBinding(target,{},identities),false);
+  assert.equal(assertCoreSystemMigrationBinding(target,binding,identities),true);
+  assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemOrderId:undefined},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
+  assert.throws(()=>assertCoreSystemMigrationBinding({...target,oid:"43"},binding,identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
+});
+
+test("new system-source receipts require complete independent attribution readback",()=>{
+ const checkpoint={binding:{systemUserId:"legacy-user-migration:"+"a".repeat(64),systemAccountId:"legacy-account-migration:"+"b".repeat(64),
+  systemOrderId:"legacy-order-migration:"+"c".repeat(64)}};
+ const proof={status:"VERIFIED",users:{expected:2,matched:2},accounts:{expected:1,matched:1},orders:{expected:1,matched:1}};
+ const readback={systemMigrationAttribution:proof,domains:{users:{expected:2},accounts:{expected:1},orders:{expected:1}}};
+ assert.equal(systemCoreAttributionMatches({},{}),true);assert.equal(systemCoreAttributionMatches(checkpoint,readback),true);
+ assert.equal(systemCoreAttributionMatches({...checkpoint,binding:{...checkpoint.binding,systemOrderId:undefined}},readback),false);
+ assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:{...proof,orders:{expected:1,matched:0}}}),false);
+ assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:undefined}),false);
+});
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
   const hash='a'.repeat(64),receiptSha='b'.repeat(64),dumpSha='c'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='d'.repeat(64),cutoff='2026-11-03T07:01:00Z';

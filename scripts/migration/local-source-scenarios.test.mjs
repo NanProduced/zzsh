@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -10,6 +10,21 @@ import { mkdtempSync, writeFileSync, rmSync, unlinkSync, rmdirSync } from "node:
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { Readable } from "node:stream";
+
+test("system migration readback binds one exact actor, source and payload",async()=>{
+  const manifestSha256="a".repeat(64),run="b".repeat(64),actorId="legacy-account-migration:"+run;
+  const expected={objectId:"account_1",action:"supply.legacy.account_created",actorId,manifestSha256,
+    sourceSystem:"legacy_mysql_restore",sourceEntity:"la_rental_accounts",legacyId:"1",sourceDigest:"c".repeat(64),payloadDigest:"d".repeat(64)};
+  const row={object_id:expected.objectId,action:expected.action,actor_type:"system",actor_id:actorId,session_id:null,source_manifest:manifestSha256,
+    details:{sourceDatasetSha256:manifestSha256,migrationRunDigest:run,sourceSystem:expected.sourceSystem,sourceEntity:expected.sourceEntity,
+      legacyId:expected.legacyId,sourceDigest:expected.sourceDigest,payloadDigest:expected.payloadDigest}};
+  const groups=await readSystemMigrationAudits(async(_sql,args)=>{assert.equal(args[0],"rental_account");assert.deepEqual(args[2],["account_1"]);return {rows:[row]};},"accounts",["account_1"]);
+  assert.equal(matchesSystemMigrationAudit(groups.get("account_1"),expected),true);
+  for(const bad of [{...row,actor_type:"admin"},{...row,session_id:"fake"},{...row,source_manifest:"e".repeat(64)},
+    {...row,details:{...row.details,payloadDigest:"e".repeat(64)}}])assert.equal(matchesSystemMigrationAudit([bad],expected),false);
+  assert.equal(matchesSystemMigrationAudit([row,row],expected),false);
+  await assert.rejects(readSystemMigrationAudits(async()=>({rows:[]}),"other",["account_1"]),/SYSTEM_MIGRATION_AUDIT_QUERY_INVALID/);
+});
 
 test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {
   const dir = mkdtempSync(join(tmpdir(), "zzsh-source-batch-")), file = join(dir, "users.jsonl");

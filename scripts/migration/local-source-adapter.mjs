@@ -331,6 +331,39 @@ function sourceBatchDigest(rows) {
     for (const row of rows) { const encoded = JSON.stringify(row); hash.update(String(Buffer.byteLength(encoded))).update(":").update(encoded); }
     return hash.digest("hex");
 }
+
+const SYSTEM_AUDIT_DOMAINS = Object.freeze({
+    users: {objectType:"user", marker:"legacy_user_migration_manifest_sha256", actions:["user.legacy_owner.migrated"]},
+    accounts: {objectType:"rental_account", marker:"legacy_account_migration_manifest_sha256", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
+    orders: {objectType:"rental_order", marker:"legacy_order_migration_manifest_sha256", actions:["order.legacy.read_imported"]},
+});
+
+/** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
+export async function readSystemMigrationAudits(query,domain,objectIds) {
+    const spec=SYSTEM_AUDIT_DOMAINS[domain];
+    if(typeof query!=="function"||!spec||!Array.isArray(objectIds)||objectIds.length>1000||objectIds.some(id=>typeof id!=="string"||!id))
+        throw new Error("SYSTEM_MIGRATION_AUDIT_QUERY_INVALID");
+    if(!objectIds.length)return new Map();
+    const rows=(await query(`SELECT e.object_id,e.action,e.actor_type,e.actor_id,e.session_id,
+      to_jsonb(e)->>'${spec.marker}' AS source_manifest,e.details FROM zzsh_iam.audit_event e
+      WHERE e.object_type=$1 AND e.outcome='SUCCESS' AND e.action=ANY($2::text[]) AND e.object_id=ANY($3::text[])`,
+      [spec.objectType,spec.actions,[...new Set(objectIds)]])).rows;
+    const grouped=new Map();for(const row of rows){const current=grouped.get(row.object_id)??[];current.push(row);grouped.set(row.object_id,current);}
+    return grouped;
+}
+
+export function matchesSystemMigrationAudit(rows, expected) {
+    if(!Array.isArray(rows)||!expected||typeof expected.actorId!=="string"||!/^[a-f0-9]{64}$/.test(expected.manifestSha256??""))return false;
+    const matching=rows.filter(row=>row.object_id===expected.objectId&&row.action===expected.action);
+    if(matching.length!==1)return false;
+    const row=matching[0],details=row.details,parts=expected.actorId.split(":");
+    if(parts.length!==2||!/^[a-f0-9]{64}$/.test(parts[1])||row.actor_type!=="system"||row.actor_id!==expected.actorId||row.session_id!==null
+      ||row.source_manifest!==expected.manifestSha256||!details||details.sourceDatasetSha256!==expected.manifestSha256
+      ||details.migrationRunDigest!==parts[1]||details.sourceSystem!==expected.sourceSystem||details.sourceEntity!==expected.sourceEntity
+      ||details.legacyId!==expected.legacyId||details.sourceDigest!==expected.sourceDigest)return false;
+    for(const field of ["evidenceDigest","payloadDigest","bindingDigest"])if(expected[field]!==undefined&&details[field]!==expected[field])return false;
+    return expected.observationVersionId===undefined||details.after?.observationVersionId===expected.observationVersionId;
+}
 function assertRegularSourceFile(file) {
     const stat = lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("SOURCE_BATCH_FILE_UNSAFE");

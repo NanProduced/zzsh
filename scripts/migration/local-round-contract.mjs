@@ -371,6 +371,15 @@ export function compactEmptyCoverageReadbackMatches(phase,readback){
   &&batch?.mode==='BATCH_V2'&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
 }
 
+export function systemCoreAttributionMatches(checkpoint,readback){
+ const binding=checkpoint?.binding??{},pairs=[["systemUserId","legacy-user-migration"],["systemAccountId","legacy-account-migration"],["systemOrderId","legacy-order-migration"]];
+ if(pairs.every(([key])=>binding[key]===undefined))return true;
+ if(pairs.some(([key,prefix])=>typeof binding[key]!=="string"||!new RegExp("^"+prefix+":[a-f0-9]{64}$").test(binding[key])))return false;
+ const proof=readback?.systemMigrationAttribution;
+ return proof?.status==="VERIFIED"&&["users","accounts","orders"].every(domain=>Number.isSafeInteger(proof[domain]?.expected)
+  &&proof[domain].expected>=0&&proof[domain].expected===proof[domain].matched&&proof[domain].expected===readback.domains?.[domain]?.expected);
+}
+
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true, requireCurrentLegacyListed = true }) {
   const issues = [], target = input.target;
@@ -517,6 +526,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || target.migrationProfile === NEXT_MIGRATION_PROFILE && readback.targetFence !== "HELD_UNTIL_ROLLBACK"
     || readback.targetWrites !== 0 || !readback.rollbackConfirmed || !readback.lockReleased || !readback.connectionsClosed)) issues.push("ROUND_DATASET_READBACK_UNCONFIRMED");
   else if (requireReadback) {
+    if(!systemCoreAttributionMatches(checkpoint,readback))issues.push("ROUND_SYSTEM_SOURCE_ATTRIBUTION_UNCONFIRMED");
     if (target.migrationProfile === NEXT_MIGRATION_PROFILE && (requireCurrentLegacyListed
       || Object.hasOwn(readback, "legacyListedSource") || Object.hasOwn(readback, "legacyListedSourceOrigin")
       || readback.legacyListedTarget?.sourceProofSha256 !== undefined)) {
