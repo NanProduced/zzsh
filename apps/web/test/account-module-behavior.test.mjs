@@ -594,6 +594,23 @@ test("delisted account with unknown occupancy does not retain stale rentability 
   } finally { await p.close(); }
 });
 
+test("a completed or retired account replaces its stale rented row", async () => {
+  for (const legacy of [false, true]) {
+    const detail = detailOf("acc-completed");
+    detail.account.lifecycle = "ARCHIVED"; detail.occupancyKind = null;
+    detail.blockers = legacy ? ["ACCOUNT_NOT_PUBLISHABLE", "LEGACY_LISTING_RELIST_REQUIRED"] : ["ACCOUNT_NOT_PUBLISHABLE", "RENTAL_COMPLETED"];
+    const row = accountRow("acc-completed", { rentalState: "RENTED", available: false,
+      activeOrder: { id: "order-finished", displayNo: "ORDER-FINISHED", status: "PAID" } });
+    const p = await probe({ rows: [row], detail });
+    try {
+      await p.render("accounts"); await p.render("accounts", "acc-completed"); await p.render("accounts");
+      const result = p.host.querySelector('[data-account-row="acc-completed"]');
+      assert.match(result.textContent, legacy ? /历史记录/ : /已完成/);
+      assert.doesNotMatch(result.textContent, /ORDER-FINISHED|已有订单|可出租/);
+    } finally { await p.close(); }
+  }
+});
+
 test("R03: unknown delist/withdraw survives remount and recovers only the original receipt", async () => {
   for (const action of ["delist", "withdraw"]) {
     const calls = [], supply = detailOf("acc-recover");
