@@ -320,6 +320,8 @@ test("system legacy user import binds each source and checks the batch fence on 
   const audit = fake.audits.find(row => row.action === "user.legacy_owner.migrated")!;
   assert.equal(audit.actorType, "system"); assert.equal(audit.sourceManifest, sourceDatasetSha256);
   assert.equal(audit.details.sourceDatasetSha256, sourceDatasetSha256);
+  assert.equal(fake.audits.some(row => row.action === "profile.avatar.initialized"), false);
+  assert.equal((audit.details.initialAvatar as {presetId:string}).presetId, fake.profileAvatars.get(JSON.stringify(["user",legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId)]))?.defaultPresetId);
   let release!: () => void, firstFence = true;
   const holding = { ...actor, assertMigrationFence: async () => { if (firstFence) { firstFence = false; await new Promise<void>(resolve => { release = resolve; }); } } };
   const pending = withSystemUserMigrationBatch(asClient(fake), holding, async () => {});

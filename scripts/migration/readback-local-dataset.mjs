@@ -247,7 +247,7 @@ try {
         systemAttribution.users.expected++;
         if(matchesSystemMigrationAudit(systemAudits.get(row.userId)??[],{objectId:row.userId,action:"user.legacy_owner.migrated",
           actorId:state.binding.systemUserId,manifestSha256:state.binding.datasetSha256,sourceSystem:e.sourceSystem,sourceEntity:e.sourceEntity,
-          legacyId:e.legacyId,sourceDigest:e.sourceDigest,evidenceDigest:row.input.evidenceDigest})) systemAttribution.users.matched++;
+          legacyId:e.legacyId,sourceDigest:e.sourceDigest,evidenceDigest:row.input.evidenceDigest,initialAvatarPresetId:found?.default_preset_id??null})) systemAttribution.users.matched++;
         else difference("users",row.sourceId,"SYSTEM_SOURCE_AUDIT_DRIFT");
       }
       if (profiles) {

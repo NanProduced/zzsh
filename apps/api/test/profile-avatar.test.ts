@@ -445,6 +445,12 @@ test("automatic defaults are system-attributed and existing custom avatars are n
   assert.equal(calls.filter(call=>call.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')).length,0);
 });
 
+test("legacy migration cannot suppress an administrator avatar audit", async () => {
+  let queries=0;const client={async query(){queries++;return {rows:[]};}} as unknown as PoolClient;
+  await assert.rejects(ensureInitialProfileAvatar(client,"admin","admin_1","req",undefined,"LEGACY_USER_MIGRATION"),/Avatar audit context is invalid/);
+  assert.equal(queries,0);
+});
+
 test("managed profile paths reject traversal, arbitrary URLs and unbound query strings", () => {
   assert.equal(managedProfileImagePath("/api/v1/profile/avatars/user/user_1/2"), "/api/v1/profile/avatars/user/user_1/2");
   assert.equal(managedProfileImagePath("/api/v1/profile/avatars/presets/avatar-night/1/content"), "/api/v1/profile/avatars/presets/avatar-night/1/content");

@@ -362,6 +362,8 @@ export function matchesSystemMigrationAudit(rows, expected) {
       ||details.migrationRunDigest!==parts[1]||details.sourceSystem!==expected.sourceSystem||details.sourceEntity!==expected.sourceEntity
       ||details.legacyId!==expected.legacyId||details.sourceDigest!==expected.sourceDigest)return false;
     for(const field of ["evidenceDigest","payloadDigest","bindingDigest"])if(expected[field]!==undefined&&details[field]!==expected[field])return false;
+    if(expected.initialAvatarPresetId!==undefined&&(details.initialAvatar?.presetId!==expected.initialAvatarPresetId
+      ||details.initialAvatar?.version!=="1"||details.initialAvatar?.created!==true))return false;
     return expected.observationVersionId===undefined||details.after?.observationVersionId===expected.observationVersionId;
 }
 function assertRegularSourceFile(file) {

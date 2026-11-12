@@ -166,7 +166,9 @@ export async function ensureInitialProfileAvatar(
   subjectId: string,
   requestId: string,
   presetId?: ProfileAvatarPresetId,
+  auditInCaller?: "LEGACY_USER_MIGRATION",
 ): Promise<{ created: boolean; presetId: ProfileAvatarPresetId }> {
+  if (auditInCaller && (auditInCaller !== "LEGACY_USER_MIGRATION" || realm !== "user")) throw invalid("Avatar audit context is invalid");
   const selected = presetId ?? randomPresetId();
   const row = await insertProfileAvatar(client, realm, subjectId, selected, selected);
   if (!row) {
@@ -174,7 +176,8 @@ export async function ensureInitialProfileAvatar(
     if (!winner) throw conflict("Profile avatar state is unavailable");
     return { created: false, presetId: winner.defaultPresetId };
   }
-  await recordAudit(client, { actorType: "system", action: "profile.avatar.initialized", objectType: "profile_avatar", objectId: subjectId,
+  // The legacy importer records this preset in its mandatory user-source audit in the same transaction.
+  if (!auditInCaller) await recordAudit(client, { actorType: "system", action: "profile.avatar.initialized", objectType: "profile_avatar", objectId: subjectId,
     outcome: "SUCCESS", requestId, reason: "profile.avatar.initial_default", details: { realm, presetId: selected, result: "CREATED" } });
   return { created: true, presetId: selected };
 }

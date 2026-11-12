@@ -22,6 +22,9 @@ test("system migration readback binds one exact actor, source and payload",async
   assert.equal(matchesSystemMigrationAudit(groups.get("account_1"),expected),true);
   for(const bad of [{...row,actor_type:"admin"},{...row,session_id:"fake"},{...row,source_manifest:"e".repeat(64)},
     {...row,details:{...row.details,payloadDigest:"e".repeat(64)}}])assert.equal(matchesSystemMigrationAudit([bad],expected),false);
+  assert.equal(matchesSystemMigrationAudit([{...row,details:{...row.details,initialAvatar:{presetId:"avatar-night",version:"1",created:true}}}],
+    {...expected,initialAvatarPresetId:"avatar-night"}),true);
+  assert.equal(matchesSystemMigrationAudit([row],{...expected,initialAvatarPresetId:"avatar-night"}),false);
   assert.equal(matchesSystemMigrationAudit([row,row],expected),false);
   await assert.rejects(readSystemMigrationAudits(async()=>({rows:[]}),"other",["account_1"]),/SYSTEM_MIGRATION_AUDIT_QUERY_INVALID/);
 });

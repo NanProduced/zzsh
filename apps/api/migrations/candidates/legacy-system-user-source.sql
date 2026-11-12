@@ -27,7 +27,12 @@ BEGIN
      OR NEW.details->>'sourceSystem' IS DISTINCT FROM 'legacy_mysql_restore' OR NEW.details->>'sourceEntity' IS DISTINCT FROM 'la_user'
      OR COALESCE(NEW.details->>'legacyId','') !~ '^[1-9][0-9]{0,23}$'
      OR COALESCE(NEW.details->>'sourceDigest','') !~ '^[a-f0-9]{64}$'
-     OR COALESCE(NEW.details->>'evidenceDigest','') !~ '^[a-f0-9]{64}$' THEN
+     OR COALESCE(NEW.details->>'evidenceDigest','') !~ '^[a-f0-9]{64}$'
+     OR NEW.details#>>'{initialAvatar,created}' IS DISTINCT FROM 'true'
+     OR NEW.details#>>'{initialAvatar,version}' IS DISTINCT FROM '1'
+     OR NOT EXISTS (SELECT 1 FROM zzsh_supply.profile_avatar p WHERE p.realm='user' AND p.subject_id=NEW.object_id
+       AND p.current_kind='DEFAULT' AND p.current_version=1 AND p.default_preset_id=p.current_preset_id
+       AND p.default_preset_id=NEW.details#>>'{initialAvatar,presetId}') THEN
     RAISE EXCEPTION 'legacy system user source requires the migration owner' USING ERRCODE='42501';
   END IF;
   RETURN NEW;

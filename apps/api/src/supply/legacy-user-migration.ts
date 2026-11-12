@@ -370,7 +370,8 @@ export async function migrateLegacyOwner(
         ? `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended","username","displayUsername") VALUES ($1,$2,$3,false,$4,$4,$5,$7,false,$6,$6)`
         : `INSERT INTO "zzsh_auth_user"."user" ("id","name","email","emailVerified","createdAt","updatedAt","phoneNumber","phoneNumberVerified","suspended") VALUES ($1,$2,$3,false,$4,$4,$5,false,false)`,
         projection ? [userId, evidence.nickname, email, now, phoneNumber, projection.sourceSn, phoneNumberVerified] : [userId, evidence.nickname, email, now, phoneNumber]);
-      await ensureInitialProfileAvatar(client, "user", userId, actor.requestId);
+      const avatar = await ensureInitialProfileAvatar(client, "user", userId, actor.requestId, undefined, systemActor ? "LEGACY_USER_MIGRATION" : undefined);
+      if (systemActor && !avatar.created) throw conflict("The legacy owner unexpectedly has an existing avatar");
       if (evidence.legacyPassword) {
         await client.query(
           `INSERT INTO "zzsh_auth_user"."account" ("id","accountId","providerId","userId","password","legacyPasswordMd5","legacyPasswordSalt","legacyPasswordVersion","createdAt","updatedAt")
@@ -407,6 +408,7 @@ export async function migrateLegacyOwner(
           legacyId: evidence.legacyId,
           sourceDigest: evidence.sourceDigest,
           ...(systemActor ? { sourceDatasetSha256: systemActor.sourceDatasetSha256, migrationRunDigest: systemActor.id.slice("legacy-user-migration:".length) } : {}),
+          ...(systemActor ? { initialAvatar: { presetId: avatar.presetId, version: "1", created: true } } : {}),
           evidenceDigest,
           evidenceRef: evidence.evidenceRef,
           sourceCreatedAt: evidence.sourceCreatedAt,
