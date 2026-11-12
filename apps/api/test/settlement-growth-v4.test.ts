@@ -99,7 +99,7 @@ test('percent quotes freeze exact owner prices, including resources absent at op
  assert.equal(actualBasis.basis.items[0].baseOwnerUnitAmount,'0.0133333267333333');
 });
 
-test('fixed-fee settlement pricing freezes the original price and rate in the signed order basis',()=>{
+test('fixed-fee settlement pricing freezes the original price and rate in the signed order basis',async()=>{
  const {compatibility,...baseRule}=compatRule('2000');
  const base=computeDeltaQuote({priceVersionId:'fixed-price',mode:'PERCENT',fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:'0.10',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',
   haffRule:{...baseRule,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},
@@ -163,9 +163,12 @@ test('fixed-fee settlement pricing freezes the original price and rate in the si
   const actualDigest=createHash('sha256').update(canonicalize({...actualPersonal,quote:actualQuote,settlementPricing:basis})).digest('hex');
   const actualOrder={...existing.order,id:'order',quote:{...actualQuote,personal:actualPersonal,settlementPricing:basis,confirmationDigest:actualDigest}};
   const payment={id:'payment',amountCents:'9',currency:'CNY'},opening=actualQuote.lines.map(line=>({itemId:line.itemId,quantity:line.quantity}));
-  assert.equal(current(actualOrder,payment,opening).reasons[0],'FIXED_FEE_SETTLEMENT_NOT_ENABLED');
-  const frozen=read(actualOrder),buildBasis=load(source,'buildSettlementBasis'),built=buildBasis(actualOrder,payment,opening,frozen);
+  const frozen=read(actualOrder),buildBasis=load(source,'buildSettlementBasis'),built=current(actualOrder,payment,opening);
   assert(built.basis,JSON.stringify(built));assert.equal(built.basis.settlementPricing.schema,'settlement-pricing-v3');
+  const available=load(source,'availableSettlementBasis');let checks=0;
+  const client={query:async()=>{checks++;return {rows:[{ready:false}]};}};
+  assert.equal((await available(client,actualOrder,payment,opening)).reasons[0],'FIXED_FEE_SETTLEMENT_NOT_ENABLED');assert.equal(checks,1);
+  client.query=async()=>{checks++;return {rows:[{ready:true}]};};assert((await available(client,actualOrder,payment,opening)).basis);assert.equal(checks,2);
   const fill=load(source,'withRemaining'),filled=fill(built.basis,[{itemId:'zzz_haff',quantity:'1000000',quantityKind:'CONSUMED'},{itemId:'aaa_item',quantity:'1',quantityKind:'CONSUMED'}]);
   assert(filled.lines,JSON.stringify(filled));
   const fromBasis=probe(actualOrder,'opening',built.basis,filled.lines,'NORMAL','settlement');

@@ -18,6 +18,7 @@ import { assertGameScope, conflict, forbidden, invalid, notFound } from "../supp
 import { centsToYuan, lockOrderPartiesInOrder, yuanToCents } from "./order";
 import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
+import { fixedFeeSettlementSchemaReady } from "../finance/fixed-fee-settlement-schema";
 import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
@@ -302,9 +303,14 @@ function frozenSettlementPricing(order:LockedOrder):ReturnType<typeof freezeSett
 function basisOrReasons(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[]): { basis: Basis } | { reasons: string[] } {
   let settlementPricing:ReturnType<typeof freezeSettlementPricing>|null;
   try{settlementPricing=frozenSettlementPricing(order);}catch{return {reasons:["SETTLEMENT_PRICING_INVALID"]};}
-  // shortcut: fixed-fee posting stays closed until the versioned database funding and ledger guards are installed.
-  if(settlementPricing?.schema==="settlement-pricing-v3")return {reasons:["FIXED_FEE_SETTLEMENT_NOT_ENABLED"]};
   return buildSettlementBasis(order,payment,openingLines,settlementPricing);
+}
+
+async function availableSettlementBasis(client:PoolClient,order:LockedOrder,payment:{id:string;amountCents:string;currency:string},lines:LineQty[]):Promise<{basis:Basis}|{reasons:string[]}> {
+  const result=basisOrReasons(order,payment,lines);
+  if ('basis' in result && result.basis.settlementPricing?.schema==='settlement-pricing-v3' && !await fixedFeeSettlementSchemaReady(client))
+    return {reasons:['FIXED_FEE_SETTLEMENT_NOT_ENABLED']};
+  return result;
 }
 
 function buildSettlementBasis(order: LockedOrder, payment: { id: string; amountCents: string; currency: string }, openingLines: LineQty[], settlementPricing: ReturnType<typeof freezeSettlementPricing>|null): { basis: Basis } | { reasons: string[] } {
@@ -1129,7 +1135,7 @@ export async function recordOpening(client: PoolClient, orderId: string, actor: 
   if (!payment || payment.currency !== "CNY") return blocked(["PAYMENT_BASIS_MISSING"]);
   // 付款接纳后已自动生成唯一清单；客服不再另起一版，只保留历史人工记录入口。
   if ((await client.query(`SELECT 1 FROM zzsh_order.rental_opening WHERE order_id = $1`, [orderId])).rowCount) return blocked(["OPENING_ALREADY_RECORDED"]);
-  const built = basisOrReasons(order, payment, lines);
+  const built = await availableSettlementBasis(client, order, payment, lines);
   if ("reasons" in built) return blocked(built.reasons);
   const id = `opening_${randomUUID().replaceAll("-", "")}`;
   const stored = built.basis.lines.map((line) => ({ itemId: line.itemId, quantity: line.openingQuantity }));
@@ -1210,7 +1216,7 @@ export async function recordAutomaticOpening(
     }
     lines.push({ itemId: line.itemId, quantity: line.quantity });
   }
-  const built = basisOrReasons({ ...order, quote }, payment, lines);
+  const built = await availableSettlementBasis(client, { ...order, quote }, payment, lines);
   if ("reasons" in built) {
     return automaticOpeningReview(client, orderId, paymentConfirmationId, built.reasons[0] ?? "QUOTE_BASIS_INVALID", requestId);
   }
@@ -1412,7 +1418,7 @@ async function loadBill(client: PoolClient, order: LockedOrder, remaining: LineQ
   const payment = await appliedPayment(client, order.id);
   const opening = await confirmedOpening(client, order.id);
   if (!payment || !opening) return blocked([payment ? "OPENING_REQUIRED" : "PAYMENT_BASIS_MISSING"]);
-  const built = basisOrReasons(order, payment, opening.lines);
+  const built = await availableSettlementBasis(client, order, payment, opening.lines);
   if ("reasons" in built) return blocked(built.reasons);
   if (built.basis.quoteDigest !== opening.quoteDigest || built.basis.paymentDigest !== opening.paymentDigest) return blocked(["BASIS_CHANGED"]);
   const filled = withRemaining(built.basis, remaining);
