@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { test } from "node:test";
 
 import type { Pool, PoolClient } from "pg";
@@ -9,7 +12,7 @@ import { closeResource, finishDatabaseTest } from "./database-test-support";
 import { applyRuntimePrivileges, configureFixedFeePersonalPrivileges, configureFixedFeeSupportCancellationPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
 
 test("fixed-fee order privileges reject partially installed guards before any grant",async()=>{
-  const complete={verifier:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};
+  const complete={verifier:true,common:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};
   const keys=Object.keys(complete) as Array<keyof typeof complete>;
   for(const key of keys){
     const writes:string[]=[];
@@ -18,7 +21,7 @@ test("fixed-fee order privileges reject partially installed guards before any gr
     assert.equal(writes.length,1);
   }
   const writes:string[]=[];
-  const empty={...complete,verifier:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false};
+  const empty={...complete,verifier:false,common:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false};
   for(const key of keys.filter(key=>key!=="functions_safe")){
     const pool={query:async()=>({rows:[{...empty,[key]:true}]})} as unknown as Pool;
     await assert.rejects(configureFixedFeePersonalPrivileges(pool,"fixture_runtime"),/partially deployed/);
@@ -27,6 +30,19 @@ test("fixed-fee order privileges reject partially installed guards before any gr
   await configureFixedFeePersonalPrivileges(absent,"fixture_runtime");assert.equal(writes.length,1);
   const ready={query:async(sql:string)=>{writes.push(sql);return {rows:[complete]};}} as unknown as Pool;
   await configureFixedFeePersonalPrivileges(ready,"fixture_runtime");assert.match(writes.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.assert_fixed_fee_personal_order_v5/);
+});
+
+test("fixed-fee identity guard preserves the complete v4 contract except the bound listing price",()=>{
+  const base=readFileSync(resolve(__dirname,"../../migrations/business/0078_personal_quote_v4.sql"),"utf8").replace(/\r\n/g,"\n");
+  const candidate=readFileSync(resolve(__dirname,"../../migrations/candidates/fixed-fee-mode/personal-order-contract.sql"),"utf8").replace(/\r\n/g,"\n");
+  const old=base.match(/CREATE FUNCTION zzsh_order\.assert_personal_growth_order_v4\(n zzsh_order\.rental_order\) RETURNS void LANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/)?.[1];
+  const fixed=candidate.match(/CREATE FUNCTION zzsh_order\.assert_personal_growth_for_fixed_fee_v5\(n zzsh_order\.rental_order, expected_listing_price_id text\)\s+RETURNS void LANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/)?.[1];
+  assert(old&&fixed);
+  const original="v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM n.quote_snapshot->>'priceVersionId'";
+  const changed="v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM expected_listing_price_id";
+  assert.equal(old.split(original).length,2);assert.equal(fixed.split(changed).length,2);
+  assert.equal(fixed.replace(changed,original),old);
+  assert(candidate.includes(createHash('sha256').update(old).digest('hex')));
 });
 
 test("fixed-fee cancellation privileges stay closed for a partial contract",async()=>{

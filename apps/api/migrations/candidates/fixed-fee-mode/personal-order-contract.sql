@@ -1,5 +1,86 @@
 -- Candidate only. Do not enable v5 inserts until the final-funding and posting guards
 -- use this same contract and the complete migration is exercised with runtime ACLs.
+-- This v5-only identity/funding verifier mirrors 0078 exactly except for the separately bound listing price.
+DO $check$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+    WHERE p.oid=to_regprocedure('zzsh_order.assert_personal_growth_order_v4(zzsh_order.rental_order)')
+      AND p.proowner=c.relowner AND NOT p.prosecdef
+      AND encode(sha256(convert_to(replace(p.prosrc,E'\r\n',E'\n'),'UTF8')),'hex')='96c5c3783b5b94db1e3aabf7e7d4a88e74183c06291fc03fe00e550b39f3c8a4')
+  THEN RAISE EXCEPTION 'personal quote v4 base contract changed' USING ERRCODE='40001'; END IF;
+END $check$;
+CREATE FUNCTION zzsh_order.assert_personal_growth_for_fixed_fee_v5(n zzsh_order.rental_order, expected_listing_price_id text)
+RETURNS void LANGUAGE plpgsql AS $$
+DECLARE p jsonb:=n.quote_snapshot->'personal';g jsonb;b jsonb;f jsonb;r jsonb;d jsonb;v zzsh_supply.listing_version;k int;
+BEGIN
+ g:=p->'membershipGrowth';b:=g->'binding';f:=p->'funding';r:=p->'ruleRefs';d:=p->'fullPayoutDeclaration';
+ IF n.confirmation_id IS NULL OR n.quote_snapshot->>'quoteKind' IS DISTINCT FROM 'ORDER_CONFIRMATION' OR n.quote_snapshot->>'confirmationId' IS DISTINCT FROM n.confirmation_id::text
+  OR n.quote_snapshot->>'orderSnapshotSchema' IS DISTINCT FROM '1' OR COALESCE(n.quote_snapshot->>'confirmationDigest','')!~'^[a-f0-9]{64}$'
+  OR p->>'schema' IS DISTINCT FROM 'personal-quote-v4' OR n.quote_snapshot?'confirmationToken' OR n.quote_snapshot?'signature'
+  OR p?'membership' OR p->>'userId' IS DISTINCT FROM n.renter_user_id OR p->>'ownerUserId' IS DISTINCT FROM n.owner_user_id OR p->>'accountId' IS DISTINCT FROM n.account_id
+  OR p->>'listingVersionId' IS DISTINCT FROM n.listing_version_id OR p->>'listingHash' IS DISTINCT FROM n.content_hash OR n.quote_snapshot->>'listingHash' IS DISTINCT FROM n.content_hash
+  OR jsonb_typeof(p) IS DISTINCT FROM 'object' OR jsonb_typeof(g) IS DISTINCT FROM 'object' OR jsonb_typeof(b) IS DISTINCT FROM 'object'
+  OR jsonb_typeof(f) IS DISTINCT FROM 'object' OR jsonb_typeof(r) IS DISTINCT FROM 'object' OR jsonb_typeof(d) IS DISTINCT FROM 'object'
+ THEN RAISE EXCEPTION 'personal quote v4 binding invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(p);
+ IF k<>11 OR EXISTS(SELECT 1 FROM jsonb_object_keys(p) x WHERE NOT(x=ANY(ARRAY['schema','userId','ownerUserId','accountId','listingVersionId','listingHash','fullPayoutDeclaration','ruleRefs','membershipGrowth','guarantee','funding'])))
+  THEN RAISE EXCEPTION 'personal quote v4 shape invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(d);
+ IF k<>2 OR d->>'schema' IS DISTINCT FROM 'full-payout-declaration-v1' OR jsonb_typeof(d->'selected') IS DISTINCT FROM 'boolean'
+  THEN RAISE EXCEPTION 'personal quote v4 declaration invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(r);
+ IF k<>5 OR EXISTS(SELECT 1 FROM jsonb_object_keys(r) x WHERE NOT(x=ANY(ARRAY['releaseId','priceVersionId','termVersionId','agreementVersionId','agreementDigest'])))
+  OR EXISTS(SELECT 1 FROM jsonb_each(r) x WHERE jsonb_typeof(x.value)<>'string' OR length(trim(x.value#>>'{}'))=0)
+  OR r->>'releaseId' IS DISTINCT FROM n.rule_release_id OR r->>'priceVersionId' IS DISTINCT FROM n.quote_snapshot->>'priceVersionId' OR COALESCE(r->>'agreementDigest','')!~'^[a-f0-9]{64}$'
+  THEN RAISE EXCEPTION 'personal quote v4 rules invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(f);
+ IF k<>7 OR EXISTS(SELECT 1 FROM jsonb_object_keys(f) x WHERE NOT(x=ANY(ARRAY['version','sourceRef','baseDepositCents','publisherBailRequirementCents','fullPayoutPolicyRef','fullPayoutPolicyVersion','disclosureVersion'])))
+  OR EXISTS(SELECT 1 FROM jsonb_each(f) x WHERE jsonb_typeof(x.value)<>'string' OR length(trim(x.value#>>'{}'))=0)
+  OR COALESCE(f->>'baseDepositCents','')!~'^(0|[1-9][0-9]{0,17})$' OR COALESCE(f->>'publisherBailRequirementCents','')!~'^(0|[1-9][0-9]{0,17})$'
+  THEN RAISE EXCEPTION 'personal quote v4 funding invalid' USING ERRCODE='40001';END IF;
+ IF jsonb_typeof(p->'guarantee') IS DISTINCT FROM 'object' OR COALESCE(p#>>'{guarantee,status}','') NOT IN('SATISFIED','NOT_REQUIRED') OR COALESCE(p#>>'{guarantee,reference}','')=''
+  THEN RAISE EXCEPTION 'personal quote v4 guarantee invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(p->'guarantee');IF k<>2 THEN RAISE EXCEPTION 'personal quote v4 guarantee shape invalid' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(g);
+ IF k<>16 OR EXISTS(SELECT 1 FROM jsonb_object_keys(g) x WHERE NOT(x=ANY(ARRAY['schema','policyVersion','effectiveTier','policyTier','selectedSource','depositSource','entitlementIds','binding','selectedBenefitVersion','selectedEntitlementId','selectedValidUntil','depositBenefitVersion','depositEntitlementId','depositValidUntil','pricePlanDigest','depositCents'])))
+  OR g->>'schema' IS DISTINCT FROM 'membership-growth-v2' OR COALESCE(g->>'policyVersion','')!~'^[1-9][0-9]{0,18}$'
+  OR COALESCE(g->>'effectiveTier','') NOT IN('STANDARD','SILVER','GOLD','PLATINUM','DIAMOND','BLACK_GOLD')
+  OR g->>'policyTier' IS DISTINCT FROM(CASE WHEN g->>'effectiveTier'='BLACK_GOLD' THEN 'DIAMOND' ELSE g->>'effectiveTier' END)
+  OR COALESCE(g->>'selectedSource','') NOT IN('GROWTH','FRIEND','PRESTIGE') OR COALESCE(g->>'depositSource','') NOT IN('GROWTH','FRIEND','PRESTIGE')
+  OR COALESCE(g->>'selectedBenefitVersion','')='' OR COALESCE(g->>'depositBenefitVersion','')='' OR COALESCE(g->>'pricePlanDigest','')!~'^[a-f0-9]{64}$'
+  OR jsonb_typeof(g->'entitlementIds') IS DISTINCT FROM 'array' OR COALESCE(g->>'depositCents','')!~'^(0|[1-9][0-9]{0,23})$'
+  THEN RAISE EXCEPTION 'personal quote v4 growth invalid' USING ERRCODE='40001';END IF;
+ IF jsonb_typeof(g->'selectedEntitlementId') NOT IN('null','string') OR jsonb_typeof(g->'depositEntitlementId') NOT IN('null','string') OR jsonb_typeof(g->'selectedValidUntil') NOT IN('null','string') OR jsonb_typeof(g->'depositValidUntil') NOT IN('null','string')
+  OR EXISTS(SELECT 1 FROM jsonb_array_elements(g->'entitlementIds') e WHERE jsonb_typeof(e)<>'string' OR COALESCE(e#>>'{}','')='')
+  OR EXISTS(SELECT 1 FROM (SELECT x.source,x.ref,x.until FROM(VALUES(g->>'selectedSource',g->>'selectedEntitlementId',g->>'selectedValidUntil'),(g->>'depositSource',g->>'depositEntitlementId',g->>'depositValidUntil'))x(source,ref,until))z
+    WHERE(z.source='GROWTH' AND(z.ref IS NOT NULL OR z.until IS NOT NULL)) OR(z.source<>'GROWTH' AND(z.ref IS NULL OR z.until IS NULL OR NOT(g->'entitlementIds'?z.ref) OR z.until::timestamptz<=clock_timestamp())))
+  THEN RAISE EXCEPTION 'personal quote v4 entitlement invalid or expired' USING ERRCODE='40001';END IF;
+ SELECT count(*) INTO k FROM jsonb_object_keys(b);
+ IF k<>6 OR b->>'userId' IS DISTINCT FROM n.renter_user_id OR b->>'ownerUserId' IS DISTINCT FROM n.owner_user_id OR b->>'accountId' IS DISTINCT FROM n.account_id
+  OR b->>'listingVersionId' IS DISTINCT FROM n.listing_version_id OR b->>'ruleReleaseId' IS DISTINCT FROM n.rule_release_id OR COALESCE(b->>'quantityDigest','')!~'^[a-f0-9]{64}$'
+  THEN RAISE EXCEPTION 'personal quote v4 offer binding invalid' USING ERRCODE='40001';END IF;
+ IF n.quote_snapshot->>'currency' IS DISTINCT FROM 'CNY' OR n.currency IS DISTINCT FROM 'CNY' OR n.quote_snapshot->>'ruleReleaseId' IS DISTINCT FROM n.rule_release_id OR n.quote_snapshot->>'termSeconds' IS DISTINCT FROM n.term_seconds::text
+  OR n.quote_snapshot#>>'{tenantDeposit,currency}' IS DISTINCT FROM 'CNY' OR n.quote_snapshot#>>'{tenantDeposit,unit}' IS DISTINCT FROM 'yuan' OR n.quote_snapshot#>>'{tenantDeposit,scale}' IS DISTINCT FROM '2'
+  OR COALESCE(n.quote_snapshot#>>'{tenantDeposit,amount}','')!~'^(0|[1-9][0-9]*)\.[0-9]{2}$' OR(n.quote_snapshot#>>'{tenantDeposit,amount}')::numeric*100 IS DISTINCT FROM n.deposit_amount_cents
+  OR n.quote_snapshot#>>'{resourceTotal,currency}' IS DISTINCT FROM 'CNY' OR n.quote_snapshot#>>'{resourceTotal,unit}' IS DISTINCT FROM 'yuan' OR n.quote_snapshot#>>'{resourceTotal,scale}' IS DISTINCT FROM '2'
+  OR COALESCE(n.quote_snapshot#>>'{resourceTotal,amount}','')!~'^(0|[1-9][0-9]*)\.[0-9]{2}$' OR(g->>'depositCents')::numeric IS DISTINCT FROM n.deposit_amount_cents OR(n.quote_snapshot#>>'{resourceTotal,amount}')::numeric*100 IS DISTINCT FROM n.rental_amount_cents
+  THEN RAISE EXCEPTION 'personal quote v4 quote amounts invalid' USING ERRCODE='40001';END IF;
+ SELECT * INTO v FROM zzsh_supply.listing_version WHERE id=n.listing_version_id AND account_id=n.account_id AND content_hash=n.content_hash AND rule_release_id=n.rule_release_id;
+ IF NOT FOUND OR v.payload->>'accountId' IS DISTINCT FROM n.account_id OR v.payload->>'gameId' IS DISTINCT FROM n.game_id
+  OR v.payload#>>'{ruleRefs,releaseId}' IS DISTINCT FROM r->>'releaseId' OR v.payload#>>'{ruleRefs,priceVersionId}' IS DISTINCT FROM r->>'priceVersionId'
+  OR v.payload#>>'{ruleRefs,termVersionId}' IS DISTINCT FROM r->>'termVersionId' OR v.payload#>>'{ruleRefs,agreementVersionId}' IS DISTINCT FROM r->>'agreementVersionId'
+  OR v.payload#>>'{ruleRefs,agreementDigest}' IS DISTINCT FROM r->>'agreementDigest' OR v.payload#>'{declaration,attributes,full_payout_declaration}' IS DISTINCT FROM d
+  OR v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM expected_listing_price_id OR v.payload#>>'{quoteValues,termSeconds}' IS DISTINCT FROM n.term_seconds::text
+  OR b->>'quantityDigest' IS DISTINCT FROM encode(sha256(convert_to(zzsh_order.canonical_finance_json(v.payload#>'{quoteValues,lines}'),'UTF8')),'hex')
+  THEN RAISE EXCEPTION 'personal quote v4 listing reference invalid' USING ERRCODE='40001';END IF;
+ IF COALESCE(n.quote_snapshot->>'confirmationExpiresAt','')!~'^[1-9][0-9]{0,11}$' OR(n.quote_snapshot->>'confirmationExpiresAt')::numeric<=extract(epoch FROM clock_timestamp())
+  THEN RAISE EXCEPTION 'personal confirmation expired' USING ERRCODE='40001';END IF;
+END $$;
+REVOKE ALL ON FUNCTION zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text) FROM PUBLIC;
+COMMENT ON FUNCTION zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)
+  IS '固定手续费复用旧版身份与条款约束，单独核对已验证的上架价格版本。';
+--> statement-breakpoint
+
 CREATE FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(n zzsh_order.rental_order)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE
@@ -121,7 +202,7 @@ BEGIN
   shadow:=n;
   shadow.quote_snapshot:=jsonb_set(jsonb_set(n.quote_snapshot,'{personal}',(p-'pricingPolicy')||jsonb_build_object('schema','personal-quote-v4')),
     '{priceVersionId}',to_jsonb(p#>>'{ruleRefs,priceVersionId}'));
-  PERFORM zzsh_order.assert_personal_growth_order_v4(shadow);
+  PERFORM zzsh_order.assert_personal_growth_for_fixed_fee_v5(shadow,old_policy.price_version_id);
 
   IF jsonb_typeof(quote->'lines') IS DISTINCT FROM 'array' OR jsonb_typeof(basis->'items') IS DISTINCT FROM 'array'
     OR jsonb_array_length(quote->'lines')<1 OR jsonb_array_length(quote->'lines')>64 OR jsonb_array_length(basis->'items')>63

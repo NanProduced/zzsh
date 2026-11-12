@@ -517,6 +517,7 @@ export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query
   const role=quoteIdentifier(runtimeRole);
   const inventory=(await pool.query(`SELECT
     to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)') IS NOT NULL AS verifier,
+    to_regprocedure('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)') IS NOT NULL AS common,
     to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()') IS NOT NULL AS guard,
     EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
       AND t.tgname='rental_order_fixed_fee_personal_guard' AND t.tgfoid=to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()')
@@ -533,14 +534,14 @@ export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query
       WHERE p.oid=to_regprocedure('zzsh_order.guard_supply_final_funding()') AND p.proowner=c.relowner AND NOT p.prosecdef
         AND position('personal-quote-v5' IN p.prosrc)>0) AS funding_guard,
     NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
-      WHERE p.oid IN(to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()'))
+      WHERE p.oid IN(to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)'),to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()'))
         AND (p.proowner<>c.relowner OR p.prosecdef)) AS functions_safe`)).rows[0];
-  const keys=["verifier","guard","fixed_trigger","legacy_trigger","listing_constraint","funding_guard","functions_safe"] as const;
+  const keys=["verifier","common","guard","fixed_trigger","legacy_trigger","listing_constraint","funding_guard","functions_safe"] as const;
   if(!inventory||keys.some(key=>typeof inventory[key]!=="boolean"))throw new Error("Fixed fee order contract inventory unavailable");
-  if(!inventory.verifier&&!inventory.guard&&!inventory.fixed_trigger&&!inventory.legacy_trigger&&!inventory.listing_constraint&&!inventory.funding_guard)return;
+  if(!inventory.verifier&&!inventory.common&&!inventory.guard&&!inventory.fixed_trigger&&!inventory.legacy_trigger&&!inventory.listing_constraint&&!inventory.funding_guard)return;
   if(keys.some(key=>inventory[key]!==true))throw new Error("Fixed fee order contract is partially deployed");
-  await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
-    GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order) TO ${role}`);
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text) TO ${role}`);
 }
 
 /** 只在取消、账本和退款守卫完整时授予读与受控执行权。 */
