@@ -683,16 +683,26 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
   const updateListFromDetail = useCallback((next: MySupply) => {
     // Recovery can refresh another loaded row after its identity and original target were checked.
     if (!next.account) return;
-    setRows((previous) => previous.map((row) => row.id === next.account.id ? {
-      ...row,
-      title: next.version ? next.version.declaration?.title ?? row.title : null,
-      sequence: next.version ? next.version.sequence ?? row.sequence : null,
-      review_state: next.version?.reviewState ?? null,
-      owner_paused: next.account.owner_paused,
-      staff_restricted: next.account.staff_restricted,
-      historicalRead: next.historicalRead === undefined ? row.historicalRead : next.historicalRead,
-      display_no: next.account.display_no ?? null,
-    } : row));
+    const delisted = next.account.lifecycle === "DELISTED";
+    const free = next.occupancyKind === null && Array.isArray(next.blockers)
+      && !next.blockers.some(reason => reason === "OCCUPIED" || reason === "OCCUPANCY_UNKNOWN");
+    const filter = stateFilterRef.current;
+    setRows((previous) => previous.flatMap((row) => {
+      if (row.id !== next.account.id) return [row];
+      if (delisted && free && filter !== "ALL" && filter !== "DELISTED") return [];
+      return [{
+        ...row,
+        title: next.version ? next.version.declaration?.title ?? row.title : null,
+        sequence: next.version ? next.version.sequence ?? row.sequence : null,
+        review_state: next.version?.reviewState ?? null,
+        owner_paused: next.account.owner_paused,
+        staff_restricted: next.account.staff_restricted,
+        historicalRead: next.historicalRead === undefined ? row.historicalRead : next.historicalRead,
+        display_no: next.account.display_no ?? null,
+        ...(delisted ? { rentalState: (free ? "DELISTED" : "UNKNOWN") as RentalState, available: false,
+          activeOrder: free ? null : undefined, blockers: next.blockers ?? ["OCCUPANCY_UNKNOWN"] } : {}),
+      }];
+    }));
   }, []);
   const revokeList = useCallback(() => {
     setRows([]);
@@ -883,6 +893,7 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
     if (next.account?.id !== record.accountId || next.account.game_id !== record.gameId) throw new SupplyRequestError(502, null, record.key);
     if (record.receipt?.revision && (!/^[1-9]\d*$/.test(next.account.revision) || BigInt(next.account.revision) < BigInt(record.receipt.revision))) throw new SupplyRequestError(502, null, record.key);
     if (!currentContext(context) || !sameSupplyIntent(storedIntentRef.current, record)) return;
+    if (record.action === "delist" && next.account.lifecycle !== "DELISTED") throw new SupplyRequestError(502, null, record.key);
     if (!clearSupplyIntent(record)) throw new SupplyIntentStorageError();
     storedIntentRef.current = null; setStoredIntent(null); setIntentStorageIssue("");
     if (accountRef.current === record.accountId) { setDetail(next); setLatest(null); }

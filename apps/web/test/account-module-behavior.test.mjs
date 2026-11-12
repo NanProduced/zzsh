@@ -517,6 +517,83 @@ test("delisting allows a pending payment but blocks a paid or uncertain order", 
   }
 });
 
+test("confirmed delisting updates the cached account row and respects the current filter", async () => {
+  for (const filter of [undefined, "LISTED"]) {
+    let current = detailOf("acc-delist");
+    current.account.game_id = "game-delist"; current.account.lifecycle = "ACTIVE";
+    current.version.id = "version-delist"; current.version.publication = { source: "OWNER_DIRECT" };
+    current.blockers = filter ? [] : ["OCCUPIED"]; current.occupancyKind = filter ? null : "PENDING_PAYMENT";
+    const row = accountRow("acc-delist", { rentalState: filter ? "LISTED" : "PENDING_PAYMENT", available: Boolean(filter),
+      activeOrder: filter ? null : { id: "order-pending", displayNo: "ORDER-PENDING", status: "PENDING_PAYMENT" } });
+    let posts = 0;
+    const p = await probe({ viaFetch: async (url, init = {}) => {
+      if (url.includes("/me/accounts")) return Response.json({ items: [row], nextCursor: null });
+      if (url.includes("/accounts/acc-delist/delist") && init.method === "POST") {
+        posts++;
+        current = { ...current, account: { ...current.account, lifecycle: "DELISTED", revision: "2" },
+          available: false, blockers: ["ACCOUNT_DELISTED"], occupancyKind: null,
+          delisting: { cancelledOrderId: filter ? null : "order-pending", guaranteeRefund: { state: "NONE" } } };
+        return Response.json(current);
+      }
+      if (url.includes("/accounts/acc-delist")) return Response.json(current);
+      return Response.json({ error: { message: "not found" } }, { status: 404 });
+    } });
+    try {
+      await p.render("accounts", undefined, filter);
+      await p.render("accounts", "acc-delist", filter);
+      await p.clickDocButton("下架账号"); await p.clickDocButton("确认下架");
+      await p.waitFor(() => p.host.textContent.includes("账号已下架"));
+      await p.render("accounts", undefined, filter);
+      const result = p.host.querySelector('[data-account-row="acc-delist"]');
+      if (filter) assert.equal(result, null, "已下架账号不留在可出租筛选中");
+      else {
+        assert.ok(result); assert.match(result.textContent, /已下架/);
+        assert.doesNotMatch(result.textContent, /可出租|ORDER-PENDING/, "不能保留过期的可租状态或待付款订单");
+      }
+      assert.equal(posts, 1);
+    } finally { await p.close(); }
+  }
+});
+
+test("a delist response without the final lifecycle preserves the original request for recovery", async () => {
+  const supply = detailOf("acc-inconsistent");
+  supply.account.game_id = "game-inconsistent"; supply.account.lifecycle = "ACTIVE";
+  supply.version.id = "version-inconsistent"; supply.version.publication = { source: "OWNER_DIRECT" };
+  let posts = 0;
+  const p = await probe({ viaFetch: async (url, init = {}) => {
+    if (url.includes("/me/accounts")) return Response.json({ items: [accountRow("acc-inconsistent")], nextCursor: null });
+    if (url.includes("/accounts/acc-inconsistent/delist") && init.method === "POST") {
+      posts++;
+      return Response.json({ ...supply, account: { ...supply.account, revision: "2" } });
+    }
+    if (url.includes("/accounts/acc-inconsistent")) return Response.json(supply);
+    return Response.json({ error: { message: "not found" } }, { status: 404 });
+  } });
+  try {
+    await p.render("accounts", "acc-inconsistent");
+    await p.clickDocButton("下架账号"); await p.clickDocButton("确认下架");
+    const slot = "zzsh.supply-write.v1:user_A";
+    await p.waitFor(() => JSON.parse(p.window.sessionStorage.getItem(slot) ?? "null")?.phase === "accepted");
+    assert.doesNotMatch(p.host.textContent, /账号已下架/);
+    assert.equal(posts, 1, "未核实原结果时不得自动重发");
+  } finally { await p.close(); }
+});
+
+test("delisted account with unknown occupancy does not retain stale rentability or an old order", async () => {
+  const detail = detailOf("acc-unknown");
+  detail.account.lifecycle = "DELISTED"; detail.occupancyKind = null;
+  detail.blockers = ["ACCOUNT_DELISTED", "OCCUPANCY_UNKNOWN"];
+  const row = accountRow("acc-unknown", { rentalState: "LISTED", available: true,
+    activeOrder: { id: "order-old", displayNo: "ORDER-OLD", status: "PENDING_PAYMENT" } });
+  const p = await probe({ rows: [row], detail });
+  try {
+    await p.render("accounts"); await p.render("accounts", "acc-unknown"); await p.render("accounts");
+    const result = p.host.querySelector('[data-account-row="acc-unknown"]');
+    assert.match(result.textContent, /待核实/);
+    assert.doesNotMatch(result.textContent, /可出租|ORDER-OLD/);
+  } finally { await p.close(); }
+});
+
 test("R03: unknown delist/withdraw survives remount and recovers only the original receipt", async () => {
   for (const action of ["delist", "withdraw"]) {
     const calls = [], supply = detailOf("acc-recover");
@@ -559,6 +636,7 @@ test("R03: unknown delist/withdraw survives remount and recovers only the origin
       assert.equal(JSON.parse(second.window.sessionStorage.getItem(slot)).phase,"accepted","failed current readback preserves the successful original receipt");
       readbackFails=false;
       supply.account.revision="3";
+      if (action === "delist") { supply.account.lifecycle = "DELISTED"; supply.occupancyKind = null; supply.blockers = ["ACCOUNT_DELISTED"]; }
       await second.clickDocButton("查询原操作结果");
       await second.waitFor(() => second.host.textContent.includes("已核实原操作成功"));
       assert.equal(second.window.sessionStorage.getItem(slot),null);
