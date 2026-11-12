@@ -392,7 +392,7 @@ export async function handlePublishingRoute(
         const items: PublicListingProjection[] = [];
         let last = cursor;
         let hasMore = false;
-        const page = listingCandidatePage(client);
+        const page = listingCandidatePage(client, market);
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
           // The page is full and candidates remain unscanned: the caller still
@@ -417,7 +417,7 @@ export async function handlePublishingRoute(
                 undefined,
                 false,
                 "RENTABLE",
-                { version: page.version(row.id), shared: page.shared, ...(filter.gameId ? { marketPricing: market } : {}) },
+                { version: page.version(row.id), shared: page.shared, marketPricing: market, marketPrice: page.marketPrice(row.version_id) },
               ),
             );
           } catch (error) {

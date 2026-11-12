@@ -1,4 +1,5 @@
-import type { MarketPricing } from "./market-pricing";
+import type { PoolClient } from "pg";
+import type { MarketPrice, MarketPricing } from "./market-pricing";
 import { effectivePublicationStateSql, listingSearchPattern } from "./listing-query";
 import type { ListingFilters, ListingQueryV2, ServiceWindow } from "./listing-filter-contract";
 import { PUBLIC_ACCOUNT_NUMBER_PATTERN } from "./account-number";
@@ -61,17 +62,31 @@ export function candidateMarketPrice(pricing: MarketPricing | undefined, bind: (
   const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
   const frozen=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
   if (!pricing) return { from: "", key: frozen, projected: false };
-  const spread=pricing.spread ? `v.schema_version=2 AND v.payload#>>'{quoteValues,mode}'='SPREAD' AND pub.source='OWNER_DIRECT'` : "false";
-  const fixedId=pricing.ready && pricing.fixed ? bind(pricing.fixed) : "NULL::text";
-  const spreadId=pricing.ready && pricing.spread ? bind(pricing.spread) : "NULL::text";
-  const from=pricing.ready && (pricing.fixed || pricing.spread) ? `LEFT JOIN LATERAL (
+  const gamePlans=pricing.ready&&pricing.byGame ? bind(JSON.stringify(pricing.byGame)) : null;
+  const fixedId=gamePlans ? `(${gamePlans}::jsonb #>> ARRAY[a.game_id,'fixed'])`
+    : pricing.ready&&pricing.fixed ? `${bind(pricing.fixed)}::text` : "NULL::text";
+  const spreadId=gamePlans ? `(${gamePlans}::jsonb #>> ARRAY[a.game_id,'spread'])`
+    : pricing.ready&&pricing.spread ? `${bind(pricing.spread)}::text` : "NULL::text";
+  const spread=pricing.spread || gamePlans ? `v.schema_version=2 AND v.payload#>>'{quoteValues,mode}'='SPREAD' AND pub.source='OWNER_DIRECT'` : "false";
+  const from=pricing.ready && (pricing.fixed || pricing.spread || gamePlans) ? `LEFT JOIN LATERAL (
     SELECT zzsh_supply.public_market_price(v.payload,a.game_id,CASE
-      WHEN v.schema_version=4 AND pub.source='OWNER_DIRECT' THEN ${fixedId}::text
-      WHEN ${spread} THEN ${spreadId}::text END) AS market_price OFFSET 0
+      WHEN v.schema_version=4 AND pub.source='OWNER_DIRECT' THEN ${fixedId}
+      WHEN ${spread} THEN ${spreadId} END) AS market_price OFFSET 0
   ) market ON true` : "";
   return { from, projected: !!from,
     key: `CASE WHEN v.schema_version=4 OR (v.payload ? 'pricingPolicy') OR (${spread})
       THEN ${from ? "(market.market_price->>'amount')::numeric" : "NULL::numeric"} ELSE (${frozen}) END` };
+}
+
+/** Non-price sorts first select their candidate window. Price sorts already carry this projection. */
+export async function readCandidateMarketPrices(client: PoolClient, versionIds: readonly string[], pricing: MarketPricing) {
+  const values: unknown[] = [versionIds];
+  const market = candidateMarketPrice(pricing, value => { values.push(value); return "$" + values.length; });
+  if (!versionIds.length || !market.projected) return new Map<string, MarketPrice | null>();
+  const rows = (await client.query<{ id: string; price: MarketPrice | null }>(
+    `SELECT v.id,market.market_price AS price ${PUBLIC_CANDIDATE_FROM} ${market.from} WHERE v.id=ANY($1::text[])`, values,
+  )).rows;
+  return new Map(rows.map(row => [row.id, row.price]));
 }
 
 export type ListingPosition={id:string;key:string|null;isNull:boolean};

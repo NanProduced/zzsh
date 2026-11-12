@@ -1,3 +1,4 @@
+import { readCandidateMarketPrices } from "./listing-candidates";
 import { applyMarketPrice, marketPriceTarget, readMarketPrice, readMarketPricing, type MarketPrice, type MarketPricing } from "./market-pricing";
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
@@ -372,16 +373,18 @@ export type ListingDetailPrefetch = {
  *  probe are read a window at a time instead of one round trip per candidate.
  *  The window is the caller's own page size, so a small limit never loads rows it
  *  will not project, and a rejected candidate just moves the window forward. */
-export function listingCandidatePage(client: PoolClient) {
+export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing) {
   const shared = listingPageShared(client);
   const accounts = new Map<string, PublishingAccount | undefined>();
   const versions = new Map<string, ListingVersion | null>();
   const published = new Set<string>();
+  const prices = new Map<string, MarketPrice | null>();
   return {
     shared,
     has: (id: string) => accounts.has(id),
     account: (id: string) => accounts.get(id),
     version: (id: string) => versions.get(id) ?? null,
+    marketPrice: (versionId: string) => prices.get(versionId) ?? null,
     /** Only meaningful for ids covered by a load() that asked for publications. */
     hasPublication: (id: string) => published.has(id),
     async load(ids: readonly string[], withPublications = false): Promise<void> {
@@ -393,6 +396,10 @@ export function listingCandidatePage(client: PoolClient) {
         const account = found.get(id);
         accounts.set(id, account);
         versions.set(id, account ? byAccount.get(id) ?? null : null);
+      }
+      if (pricing) {
+        const versionIds = [...byAccount.values()].filter(v => v.schema_version === 2 || v.schema_version === 4).map(v => v.id);
+        for (const [versionId, price] of await readCandidateMarketPrices(client, versionIds, pricing)) prices.set(versionId, price);
       }
       await shared.primeRetiredLegacy(pending);
       if (!withPublications) return;

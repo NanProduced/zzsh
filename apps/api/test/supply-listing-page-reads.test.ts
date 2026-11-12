@@ -1,3 +1,4 @@
+import { compatRule } from "./pricing-compat-fixture";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
@@ -114,19 +115,37 @@ function candidateRows(fixtures: Fixture[]) {
   return fixtures.map((f, index) => ({ id: f.account.id, version_id: f.version.id, key: `2026-10-0${index + 1}T00:00:00.000000Z` }));
 }
 
-async function marketPage(t: { mock: { method: (object: object, key: string, value: unknown) => () => void } }, fixtures: Fixture[], search: URLSearchParams, mode: "native" | "mixed" = "native") {
+async function marketPage(t: { mock: { method: (object: object, key: string, value: unknown) => () => void } }, fixtures: Fixture[], search: URLSearchParams, mode: "native" | "mixed" = "native", currentPrices?: Record<string, string | null>) {
   const rows = mode === "native"
     ? candidateRows(fixtures)
     : [{ id: "legacy-1", version_id: "legacy-version", key: "2026-10-09T00:00:00.000000Z", source: "legacy" },
        ...candidateRows(fixtures).map((row, index) => ({ ...row, key: `2026-10-0${8 - index}T00:00:00.000000Z`, source: "native" }))];
   const { client, gate, queries, windows } = clientFor(fixtures);
   const real = client.query;
-  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) =>
-    sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS") ? { rows, rowCount: rows.length } : real(sql, args)) as never;
+  const priceReads: string[][] = [];
+  let scheduleReads = 0;
+  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS")) return { rows, rowCount: rows.length };
+    if (currentPrices && sql.includes("market-pricing-schema")) return { rows: [{ schedules: true, ready: true }] };
+    if (currentPrices && sql.includes("DISTINCT ON (game_id,pricing_model)")) {
+      scheduleReads++;
+      return { rows: [{ gameId: GAME, model: "SPREAD", price: "current-price", id: "current-plan" }] };
+    }
+    if (currentPrices && sql.includes("public_market_price(")) {
+      assert(Array.isArray(args[0]), "the page must never issue a single-account price query");
+      const versionIds = args[0] as string[];
+      priceReads.push(versionIds);
+      return { rows: versionIds.map(id => {
+        const amount = currentPrices[id];
+        return { id, price: amount == null ? null : { amount, ratio: "40", lines: [{ itemId: "haff-a", amount, unitAmount: "2.50000000" }] } };
+      }) };
+    }
+    return real(sql, args);
+  }) as never;
   const options = { pool: { connect: async () => client }, supplyGateReader: gate, listingCursorKey: CURSOR_KEY, mediaStorage: { accountImageCdn: cdn },
     legacyPublicAdmission: { schema: "legacy-public-admission-v2", records: [] } };
   const undo = [
-    t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: false, mixed: mode === "mixed", config: { sorts: [{ key: "latest", label: "最新发布" }] },
+    t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: false, mixed: mode === "mixed", config: { sorts: [{ key: "latest", label: "最新发布" }, { key: "coreQuantity", label: "哈夫币数量" }] },
       filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
     t.mock.method(filterConfig, "validateListingQuery", async () => {}),
     t.mock.method(legacyRead, "mixedListingBinding", () => ({ queryVersion: 2, gameId: GAME, queryHash: "x", sort: "latest", direction: "DESC", coreItemId: null, filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
@@ -134,7 +153,7 @@ async function marketPage(t: { mock: { method: (object: object, key: string, val
   ];
   try {
     const page = await listV2({ url: "/listings?" + search } as never, options as never, search);
-    return { page, queries, windows };
+    return { page, queries, windows, priceReads, scheduleReads };
   } finally { for (const restore of undo) restore(); }
 }
 
@@ -158,6 +177,34 @@ test("a native market page reads each shared dimension once, not once per candid
   assert.equal(countOf(queries, "funding_policy AS policy"), 1, "one release policy per page");
   // The two reads of one candidate's media collapsed into one.
   assert.equal(countOf(queries, "SELECT a.* FROM zzsh_supply.listing_media"), 5, "one media read per candidate, not two");
+});
+
+test("latest and core quantity batch scheduled prices for the same native or mixed candidate window", async t => {
+  for (const [sort, mode] of [["latest", "native"], ["coreQuantity", "native"], ["latest", "mixed"], ["coreQuantity", "mixed"]] as const) {
+    const fixtures = ["a", "b", "c"].map(id => {
+      const fixture = accountFixture(id, "owner");
+      const payload = fixture.version.payload!;
+      const result = computeQuote({ priceVersionId: "price-a", mode: "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1",
+        haffRule: { ...compatRule(), dailyDeltaByTermOption: { daily: "0" } },
+        conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily", rentalPricing: { rentalMode: "ordinary" } },
+        termOption: { code: "daily", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+        lines: [{ itemId: "haff-a", quantity: "1000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" }] });
+      assert(result.quotable);
+      fixture.version.schema_version = 2;
+      fixture.version.payload = normalizeContentPayload({ ...payload, schemaVersion: 2,
+        declaration: { ...payload.declaration, pricingOptionCode: "", attributes: { ...payload.declaration.attributes, rentalPricing: { rentalMode: "ordinary" } } },
+        quoteValues: { ...result.quote, ruleReleaseId: "release-a" } });
+      fixture.version.content_hash = computeContentHash(fixture.version.payload);
+      return fixture;
+    });
+    const search = new URLSearchParams({ queryVersion: "2", gameId: GAME, sort, limit: "4", ...(sort === "coreQuantity" ? { coreItemId: "haff-a" } : {}) });
+    const { page, priceReads, scheduleReads } = await marketPage(t, fixtures, search, mode, { "version-a": "2.50", "version-b": "2.50", "version-c": null });
+    assert.deepEqual(priceReads, [["version-a", "version-b", "version-c"]]);
+    assert.equal(scheduleReads, 1);
+    const items = page.items.filter(item => item.id !== "legacy-1");
+    assert.deepEqual(items.map(item => (item.quote as { resourceTotal: { amount: string } } | null)?.resourceTotal.amount ?? null), ["2.50", "2.50", null]);
+    assert(items.every(item => item.canCreateOrder === false));
+  }
 });
 
 test("batched page projection is the same DTO the single reader returns for each account", async t => {

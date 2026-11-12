@@ -3,7 +3,7 @@ import type { ContentPayloadInput } from "./content-hash";
 import { formatDecimalAtScale, parseNonNegativeDecimal, yuanAmountObject } from "./decimal";
 import type { TenantPriceQuote } from "./tenant-price-projection";
 
-export type MarketPricing = { fixed: string | null; spread: string | null; ready: boolean; revision: string | null };
+export type MarketPricing = { fixed: string | null; spread: string | null; ready: boolean; revision: string | null; byGame?: Record<string, { fixed?: string; spread?: string }> };
 const signature = "zzsh_supply.public_market_price(jsonb,text,text)";
 const unconfigured: MarketPricing = { fixed: null, spread: null, ready: false, revision: null };
 
@@ -12,21 +12,29 @@ export async function readMarketPricing(client: PoolClient, gameId: string | nul
     to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS schedules,
     COALESCE(has_function_privilege(current_user,to_regprocedure($1),'EXECUTE'),false) AS ready`, [signature])).rows[0];
   if (!shape?.schedules) return unconfigured;
-  const plans = (await client.query<{ model: string; price: string; id: string }>(`SELECT DISTINCT ON (game_id,pricing_model)
-    pricing_model AS model,price_version_id AS price,id
+  const plans = (await client.query<{ gameId: string; model: string; price: string; id: string }>(`SELECT DISTINCT ON (game_id,pricing_model)
+    game_id AS "gameId",pricing_model AS model,price_version_id AS price,id
     FROM zzsh_supply.pricing_policy_schedule WHERE ($1::text IS NULL OR game_id=$1) AND effective_at<=transaction_timestamp()
     ORDER BY game_id,pricing_model,effective_at DESC,generation DESC`, [gameId])).rows;
   if (!plans.length) return unconfigured;
-  return { fixed: plans.find(p => p.model === "FIXED_FEE")?.price ?? null, spread: plans.find(p => p.model === "SPREAD")?.price ?? null,
+  const byGame: NonNullable<MarketPricing["byGame"]> = Object.create(null);
+  if (gameId === null) for (const plan of plans) {
+    const prices = byGame[plan.gameId] ??= {};
+    if (plan.model === "FIXED_FEE") prices.fixed = plan.price;
+    if (plan.model === "SPREAD") prices.spread = plan.price;
+  }
+  return { ...(gameId === null ? { byGame } : {}), fixed: plans.find(p => p.gameId === gameId && p.model === "FIXED_FEE")?.price ?? null,
+    spread: plans.find(p => p.gameId === gameId && p.model === "SPREAD")?.price ?? null,
     ready: shape.ready === true, revision: JSON.stringify([shape.ready === true, plans.map(plan => plan.id)]) };
 }
 
 export type MarketPrice = { amount: string; ratio: string; lines: { itemId: string; amount: string; unitAmount: string }[] };
 
 export function marketPriceTarget(payload: ContentPayloadInput, pricing: MarketPricing, ownerDirect: boolean) {
-  if (payload.schemaVersion === 4) return { scheduled: true, priceId: ownerDirect ? pricing.fixed : null };
-  if (payload.schemaVersion === 2 && payload.quoteValues.mode === "SPREAD" && ownerDirect && pricing.spread)
-    return { scheduled: true, priceId: pricing.spread };
+  const prices = pricing.byGame ? pricing.byGame[payload.gameId] : pricing;
+  if (payload.schemaVersion === 4) return { scheduled: true, priceId: ownerDirect ? prices?.fixed ?? null : null };
+  if (payload.schemaVersion === 2 && payload.quoteValues.mode === "SPREAD" && ownerDirect && prices?.spread)
+    return { scheduled: true, priceId: prices.spread };
   return { scheduled: !!payload.pricingPolicy, priceId: null };
 }
 
