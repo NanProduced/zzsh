@@ -190,6 +190,8 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
     async *readRows(file) { for await (const line of readLfLines(context.createReadStream(file))) if (line.trim()) yield JSON.parse(line); },
+    async preflightBoundSourceBatches(file, entry, size) { assert.equal(file, path.join(ds, "users.jsonl")); assert.equal(entry.rows, userRows.length); assert.equal(size, 100); commands.push("USER_SOURCE_PREFLIGHT"); return {}; },
+    readBoundSourceBatches(file) { commands.push("USER_SOURCE_BOUND_READ"); return context.readRows(file); },
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
     writeFileSync: (file, value) => files.set(file, value), appendFileSync: (_file, value) => events.push(JSON.parse(value)),
     writeLoadCheckpoint(file, value) {
@@ -230,6 +232,11 @@ test('NEXT strict identity import refuses an old build before connection',async(
  assert.match(nonStrict.error?.message??'',/NEXT_MIGRATION_ADMISSION_INCOMPLETE/);assert(!nonStrict.commands.includes('LOCK'));
 });
 
+test('NEXT source batches require the strict checkpoint even after admission opens', async () => {
+ const result = await load({ strict:false, fenceFixture:true, instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE });
+ assert.match(result.error?.message??'',/NEXT_USER_STRICT_BATCH_REQUIRED/); assert(!result.commands.includes('LOCK')); assert(!result.commands.includes('BEGIN'));
+});
+
 test('NEXT refuses an old finance build before acquiring the target lock or writing',async()=>{
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'compact-build-old'});
  assert.match(result.error?.message??'',/NEXT_COMPACT_COVERAGE_BUILD_REQUIRED/);
@@ -263,6 +270,8 @@ test('next-profile core batches acquire the transaction fence before writes and 
   const options = { instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:'LOCAL_MIGRATION_NEXT_V1', fenceFixture:true, verifiedFirst:true };
   const applied = await load(options); assert.ifError(applied.error);
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
+  assert(applied.commands.indexOf('USER_SOURCE_PREFLIGHT') < applied.commands.indexOf('BEGIN'));
+  assert(applied.commands.indexOf('USER_SOURCE_BOUND_READ') < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
   assert(applied.commands.indexOf('BATCH_ACTOR_LOCK') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));

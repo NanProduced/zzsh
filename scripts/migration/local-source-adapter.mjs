@@ -326,6 +326,61 @@ export async function readVerifiedSourceRows(file, entry, visit) {
     return count;
 }
 
+function sourceBatchDigest(rows) {
+    const hash = createHash("sha256");
+    for (const row of rows) { const encoded = JSON.stringify(row); hash.update(String(Buffer.byteLength(encoded))).update(":").update(encoded); }
+    return hash.digest("hex");
+}
+function assertRegularSourceFile(file) {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("SOURCE_BATCH_FILE_UNSAFE");
+}
+const verifiedSourceBatchProofs = new WeakSet();
+
+/** Hash each bounded batch while validating the complete source; retain no row contents. */
+export async function preflightBoundSourceBatches(file, entry, batchSize = 100) {
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1000) throw new Error("SOURCE_BATCH_SIZE_INVALID");
+    if (!entry || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "") || !Number.isSafeInteger(entry.rows) || entry.rows < 0) throw new Error("SOURCE_STREAM_META_INVALID");
+    assertRegularSourceFile(file);
+    const hashes = [], consumed = createHash("sha256"); let batch = [], count = 0;
+    for await (const row of readSourceRows(file, bytes => consumed.update(bytes))) {
+        batch.push(row); count++;
+        if (batch.length === batchSize) { hashes.push(sourceBatchDigest(batch)); batch = []; }
+    }
+    if (count !== entry.rows || consumed.digest("hex") !== entry.sha256) throw new Error("SOURCE_STREAM_CHANGED");
+    if (batch.length) hashes.push(sourceBatchDigest(batch));
+    assertRegularSourceFile(file);
+    const proof = Object.freeze({ sourceSha256: entry.sha256, rows: count, batchSize, hashes: Object.freeze(hashes) });
+    verifiedSourceBatchProofs.add(proof);
+    return proof;
+}
+
+/** No batch is yielded until its content matches preflight; the last waits for full-file verification. */
+export async function* readBoundSourceBatches(file, entry, proof) {
+    if (!proof || !verifiedSourceBatchProofs.has(proof) || proof.sourceSha256 !== entry?.sha256 || proof.rows !== entry?.rows
+        || !Number.isSafeInteger(proof.batchSize) || proof.batchSize < 1 || proof.batchSize > 1000
+        || !Array.isArray(proof.hashes) || proof.hashes.length !== Math.ceil(proof.rows / proof.batchSize)
+        || proof.hashes.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error("SOURCE_BATCH_PROOF_INVALID");
+    assertRegularSourceFile(file);
+    let batch = [], count = 0, index = 0;
+    const checked = () => {
+        if (sourceBatchDigest(batch) !== proof.hashes[index++]) throw new Error("SOURCE_BATCH_CHANGED");
+        return batch;
+    };
+    for await (const row of readBoundSourceRows(file, entry)) {
+        batch.push(row); count++;
+        if (count > proof.rows) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+        if (batch.length === proof.batchSize && count < proof.rows) {
+            for (const item of checked()) yield item;
+            batch = [];
+        }
+    }
+    assertRegularSourceFile(file);
+    if (count !== proof.rows) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+    if (batch.length) for (const item of checked()) yield item;
+    if (index !== proof.hashes.length) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+}
+
 /** Check the entire display package against the frozen source before any target write. */
 export async function verifyDisplayCaptureInputs({sourceDir,sourceEntry,accountsDir,accountsEntry,displayDir,display,canonicalize}) {
     assertDisplayCaptureCoverage(display);

@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, writeLoadCheckpoint } from "./local-load-checkpoint.mjs";
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertSelectedScopeForWrite, legacyListedProofVersion } from "./selected-business-scope.mjs";
-import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readSourceRows as readRows } from "./local-source-adapter.mjs";
+import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readSourceRows as readRows, preflightBoundSourceBatches, readBoundSourceBatches } from "./local-source-adapter.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
@@ -142,6 +142,7 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
         throw new Error("NEXT_COMPACT_COVERAGE_BUILD_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
+if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
 
 let state = existsSync(statePath) ? JSON.parse(readFileSync(statePath)) : null;
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
@@ -400,9 +401,12 @@ async function applyUser(row, profiles, batchSubjects) { const result = await mo
     throw new Error("LEGACY_IDENTITY_SUBJECT_SOURCE_MISSING");
 } return result; }
 async function applyUsers() {
+    const nextProfile = registered.migrationProfile === NEXT_MIGRATION_PROFILE;
     if (!strictBatch) return runPhase("users", row => applyUser(row));
     const file = domainFile("users"); if (!file) return;
-    return runBatches("users", readRows(file), async (batch, start) => {
+    const proof = nextProfile ? await preflightBoundSourceBatches(file, manifest.files.users, 100) : null;
+    const rows = proof ? readBoundSourceBatches(file, manifest.files.users, proof) : readRows(file);
+    return runBatches("users", rows, async (batch, start) => {
         const results = [], profiles = [], batchSubjects = registered.migrationProfile === NEXT_MIGRATION_PROFILE && hasIdentityProfiles ? [] : null;
         if (batchSubjects) {
             assertRoundWindow();

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -10,6 +10,31 @@ import { mkdtempSync, writeFileSync, rmSync, unlinkSync, rmdirSync } from "node:
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { Readable } from "node:stream";
+
+test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "zzsh-source-batch-")), file = join(dir, "users.jsonl");
+  const rows = Array.from({ length: 5 }, (_, id) => ({ id: String(id + 1), label: `合成${id}` }));
+  const bytes = Buffer.from(rows.map(row => JSON.stringify(row)).join("\n") + "\n");
+  const entry = { rows: rows.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  try {
+    writeFileSync(file, bytes);
+    const proof = await preflightBoundSourceBatches(file, entry, 2), recovered = [];
+    for await (const row of readBoundSourceBatches(file, entry, proof)) recovered.push(row);
+    assert.deepEqual(recovered, rows); assert.equal(proof.hashes.length, 3);
+    await assert.rejects(async () => { for await (const _ of readBoundSourceBatches(file, entry, { ...proof })) {} }, /SOURCE_BATCH_PROOF_INVALID/);
+
+    const changed = rows.map(row => ({ ...row })); changed[2].label = "改变";
+    writeFileSync(file, changed.map(row => JSON.stringify(row)).join("\n") + "\n");
+    const stream = readBoundSourceBatches(file, entry, proof);
+    assert.deepEqual((await stream.next()).value, rows[0]); assert.deepEqual((await stream.next()).value, rows[1]);
+    await assert.rejects(stream.next(), /SOURCE_BATCH_CHANGED/);
+
+    writeFileSync(file, Buffer.concat([bytes, Buffer.from("\n")]));
+    const changedBytes = readBoundSourceBatches(file, entry, proof);
+    for (let index = 0; index < 4; index++) assert.deepEqual((await changedBytes.next()).value, rows[index]);
+    await assert.rejects(changedBytes.next(), /SOURCE_STREAM_CHANGED/);
+  } finally { unlinkSync(file); rmdirSync(dir); }
+});
 
 test('new source captures bind the restored server and pre/post read-only proof without changing old receipts',()=>{
   const sha='a'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='b'.repeat(64);
