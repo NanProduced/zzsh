@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HardDrive, RefreshCw, ShieldCheck } from "lucide-react";
-import { adminRequest, AdminApiError, friendlyError, type SessionSnapshot } from "../api";
+import { adminRequest, AdminApiError, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { StatusMessage } from "../components/ui-elements";
@@ -94,7 +94,8 @@ export function SystemConfigurationView({ snapshot, refreshNonce = 0 }: {
       </div>
     </section>
     <SystemSmsConfigurationPanel key={owner} refreshNonce={refreshNonce}/>
-    <AccountImageWatermarkPanel key={`watermark:${owner}`} />
+    <AccountImageWatermarkPanel key={`watermark:${owner}`} canReadMedia={hasPermission(snapshot, "content.platform.read")}
+      canUploadMedia={hasPermission(snapshot, "content.platform.edit")} canReviewMedia={hasPermission(snapshot, "content.platform.publish")} />
     <div className="mt-5"><StatusMessage error={current.error} /></div>
     {current.busy ? <p className="mt-4 text-sm text-muted-foreground" role="status">正在读取存储配置…</p> : null}
     {data ? <div className="mt-6 max-w-5xl space-y-8">

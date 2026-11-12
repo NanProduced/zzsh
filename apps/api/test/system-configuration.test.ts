@@ -23,6 +23,7 @@ class PoolFixture {
   locked = false;
   sessionExists = true;
   sample = true;
+  defaultAccountSample: string | null = "asset_fixture";
   accountSample: Record<string, unknown> | null = null;
   activeClients = 0;
   queries: string[] = [];
@@ -36,6 +37,7 @@ class PoolFixture {
     else if (sql.includes('FROM "zzsh_auth_admin"."session"')) rows = this.sessionExists ? [{ locked: this.locked, twoFactorEnabled: true, suspended: false }] : [];
     else if (sql.includes('FROM "zzsh_iam"."admin_security"')) rows = [{ status: this.status, isBoss: this.isBoss, passwordChangeRequired: false }];
     else if (sql.startsWith("WITH role_permissions")) rows = [{ permissionCode: "content.platform.read" }];
+    else if (sql.startsWith("SELECT id FROM zzsh_supply.media_asset")) rows = this.defaultAccountSample ? [{ id: this.defaultAccountSample }] : [];
     else if (sql.includes('FROM "zzsh_supply"."media_asset"') && sql.includes('WHERE "id" = $1')) rows = this.accountSample ? [this.accountSample] : [];
     else if (sql.includes('FROM "zzsh_supply"."media_asset"')) rows = this.sample ? [{ publicStorageKey: KEY }] : [];
     else if (sql.includes("to_regclass('zzsh_order.settlement_refund_policy')")) rows = [{ available: true }];
@@ -99,9 +101,9 @@ test("system configuration returns only allowlisted instance metadata, no creden
 
 test("watermark preview only signs a valid display sample for a Boss and rechecks access before delivery", async () => {
   const f = setup();
-  f.pool.accountSample = { accountId: "account_fixture", ownershipKind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", publicStorageKey: KEY,
+  f.pool.accountSample = { id: "asset_fixture", accountId: "account_fixture", ownershipKind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", publicStorageKey: KEY,
     technicalState: "READY", accessClass: "PUBLIC_DISPLAY", reviewState: "APPROVED", width: 1280, height: 720 };
-  let previewCount = 0, revoke = false;
+  let previewCount = 0, revoke = false, revokeSample = false;
   f.options.mediaStorage = { ...f.storage, accountMedia: {
     createUpload() { throw new Error("preview does not create a grant"); },
     async readUpload() { throw new Error("preview does not read an upload"); },
@@ -112,10 +114,11 @@ test("watermark preview only signs a valid display sample for a Boss and recheck
       assert.equal(f.pool.activeClients, 0);
       assert.equal(key, KEY); assert.equal(source.width, 1280); assert.equal(watermark.enabled, false);
       if (revoke) f.pool.isBoss = false;
+      if (revokeSample && f.pool.accountSample) f.pool.accountSample.accessClass = "PRIVATE_REVIEW";
       return [{ maxEdge: 640, url: "https://images.example.com/preview?fixture=640" }, { maxEdge: 1920, url: "https://images.example.com/preview?fixture=1920" }];
     },
   } };
-  const request = { ...f.request("/account-image-watermark/preview", "POST"), body: { assetId: "asset_fixture", enabled: false, logoAssetId: null, position: "se", sizePercent: 12, opacityPercent: 55, marginPercent: 2 } };
+  const request = { ...f.request("/account-image-watermark/preview", "POST"), body: { assetId: "asset_fixture" as string | null, enabled: false, logoAssetId: null, position: "se", sizePercent: 12, opacityPercent: 55, marginPercent: 2 } };
   const invoke = async () => {
     const response = new ResponseFixture();
     await handleSystemConfiguration(request, response as SupplyResponse, f.options);
@@ -133,6 +136,25 @@ test("watermark preview only signs a valid display sample for a Boss and recheck
   assert.equal(allowed.code, 200);
   assert.equal(allowed.headers["cache-control"], "no-store");
   assert.deepEqual(allowed.body.images.map((image: { maxEdge: number }) => image.maxEdge), [640, 1920]);
+  request.body.assetId = null;
+  f.pool.defaultAccountSample = null;
+  const missingSample = await invoke();
+  assert.equal(missingSample.code, 200);
+  assert.deepEqual(missingSample.body, { images: [], state: "NO_SAMPLE" }, "no default sample must not invent an image");
+  f.pool.defaultAccountSample = "asset_fixture";
+  assert.equal((await invoke()).code, 200, "an eligible account image can be selected automatically");
+  request.body.assetId = "asset_fixture";
+  f.pool.accountSample = { ...f.pool.accountSample, ownershipKind: "PLATFORM_CONTENT", accountId: null, purpose: "CONTENT_MEDIA" };
+  assert.equal((await invoke()).code, 200, "approved public platform media can be a custom sample");
+  f.pool.accountSample.accessClass = "PRIVATE_REVIEW";
+  assert.equal((await invoke()).code, 404, "private content must not be used as a preview sample");
+  f.pool.accountSample.accessClass = "PUBLIC_DISPLAY";
+  revokeSample = true;
+  const revokedSample = await invoke();
+  assert.equal(revokedSample.code, 404, "a sample revoked during preview must not be returned");
+  assert.doesNotMatch(JSON.stringify(revokedSample.body), /images\.example/);
+  revokeSample = false;
+  f.pool.accountSample.accessClass = "PUBLIC_DISPLAY";
   revoke = true;
   const rejected = await invoke();
   assert.equal(rejected.code, 403);

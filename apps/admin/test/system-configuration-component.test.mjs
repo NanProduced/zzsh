@@ -93,7 +93,8 @@ test("Boss opens the account watermark rule on demand and saves with its current
   assert.equal(h.requests.some(request => request.url.pathname === path), false);
   await h.click("设置水印");
   assert.match(h.text(), /当前无法生成预览/);
-  assert.equal(h.container.querySelector('input[placeholder="已审核公开的 PNG 素材"]').value, policy.logoAssetId);
+  assert.match(h.container.querySelector('img[alt="水印 Logo预览"]').getAttribute("src"), /asset_logo/);
+  assert.doesNotMatch(h.text(), /Logo 素材编号|预览用账号展示图编号/);
   await h.click("保存水印设置");
   const requests = h.requests.filter(request => request.url.pathname === path);
   assert.deepEqual(requests.map(request => request.init.method), ["GET", "PUT"]);
@@ -101,6 +102,39 @@ test("Boss opens the account watermark rule on demand and saves with its current
   assert.deepEqual(JSON.parse(requests[1].init.body), { ...settings, expectedRevision: revision });
   assert.match(new Headers(requests[1].init.headers).get("idempotency-key"), /^account-image-watermark-/);
   assert.match(h.text(), /水印规则已保存/);
+});
+
+test("watermark chooses a PNG and previews with an automatic or selected sample", async t => {
+  const path = "/api/bff/admin/system/account-image-watermark";
+  const policy = { revision: "1", enabled: true, logoAssetId: null, position: "se", sizePercent: 12, opacityPercent: 55, marginPercent: 2 };
+  const options = { items: [
+    { id: "logo_png", mime: "image/png", width: 300, height: 100, byteSize: "1000" },
+    { id: "sample_jpeg", mime: "image/jpeg", width: 1280, height: 720, byteSize: "2000" },
+  ], nextCursor: null, limit: 20 };
+  const h = await harness(t, (url, init) => {
+    if (url.pathname === path) return response({ policy, previewAvailable: true });
+    if (url.pathname === path + "/preview") return response(JSON.parse(init.body).assetId === null
+      ? { images: [], state: "NO_SAMPLE" } : { images: [{ maxEdge: 640, url: "https://example.invalid/640" }] });
+    if (url.pathname.endsWith("/content/media-options")) return response(options);
+    if (url.pathname.endsWith("/storage")) return response(storage());
+    return response({});
+  });
+  await h.click("设置水印");
+  await h.click("选择图片");
+  assert.equal(h.container.querySelectorAll('img[alt="可选图片"]').length, 1, "Logo picker only offers PNG");
+  const logo = h.container.querySelector('img[src*="logo_png"]').closest("button");
+  await act(async () => logo.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
+  await h.click("预览封面和详情");
+  const previews = () => h.requests.filter(request => request.url.pathname === path + "/preview");
+  assert.equal(JSON.parse(previews()[0].init.body).assetId, null);
+  assert.equal(JSON.parse(previews()[0].init.body).logoAssetId, "logo_png");
+  assert.match(h.text(), /暂无可用的账号图片，请选择或上传预览底图/);
+  const chooseSample = [...h.container.querySelectorAll("button")].find(button => button.textContent.trim() === "选择图片" && button.closest(".content-media-field")?.textContent.includes("更换预览底图"));
+  await act(async () => chooseSample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
+  const sample = h.container.querySelector('img[src*="sample_jpeg"]').closest("button");
+  await act(async () => sample.dispatchEvent(new h.browser.MouseEvent("click", { bubbles: true }))); await h.settle();
+  await h.click("预览封面和详情");
+  assert.equal(JSON.parse(previews()[1].init.body).assetId, "sample_jpeg");
 });
 
 test("Boss can inspect SMS scene configuration without exposing credentials",async t=>{

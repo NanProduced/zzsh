@@ -24,6 +24,12 @@ type StorageCheck = {
   integrity: "NOT_RUN" | "PASS" | "FAILED";
 };
 
+function isWatermarkPreviewSample(asset: NonNullable<Awaited<ReturnType<typeof loadMediaAsset>>>): boolean {
+  return asset.ownershipKind === "USER_SUPPLY" && Boolean(asset.accountId) && isAccountDisplayPubliclyEligible(asset)
+    || asset.ownershipKind === "PLATFORM_CONTENT" && asset.purpose === "CONTENT_MEDIA"
+      && asset.reviewState === "APPROVED" && asset.technicalState === "READY" && asset.accessClass === "PUBLIC_DISPLAY";
+}
+
 export async function handleSystemConfiguration(
   request: SupplyNodeRequest,
   response: SupplyResponse,
@@ -58,19 +64,31 @@ export async function handleSystemConfiguration(
     if (watermarkPreview) {
       const body = bodyOf(request);
       ensureOnlyFields(body, ["assetId", "enabled", "logoAssetId", "position", "sizePercent", "opacityPercent", "marginPercent"]);
-      if (typeof body.assetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.assetId)) throw invalid("样本图片编号无效", "assetId");
-      const sampleId = body.assetId;
+      if (body.assetId !== null && (typeof body.assetId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.assetId))) throw invalid("样本图片编号无效", "assetId");
+      const requestedSampleId = typeof body.assetId === "string" ? body.assetId : null;
       const settings = parseAccountWatermarkSettings(body);
       const sample = await withTransaction(options.pool, async client => {
         await authorize(client);
         if (!accountMedia) throw conflict("OSS 图片处理尚未启用");
+        const sampleId = requestedSampleId ?? (await client.query<{ id: string }>(`SELECT id FROM zzsh_supply.media_asset
+          WHERE purpose='ACCOUNT_DISPLAY' AND ownership_kind='USER_SUPPLY' AND account_id IS NOT NULL
+            AND review_state IN ('PENDING','APPROVED') AND technical_state='READY'
+            AND access_class='PUBLIC_DISPLAY' AND public_storage_key IS NOT NULL ORDER BY id LIMIT 1`)).rows[0]?.id;
+        if (!sampleId) return null;
         const asset = await loadMediaAsset(client, sampleId);
-        if (!asset || !asset.accountId || asset.ownershipKind !== "USER_SUPPLY" || !asset.publicStorageKey || !isAccountDisplayPubliclyEligible(asset)) throw notFound();
+        if (!asset || !asset.publicStorageKey || !isWatermarkPreviewSample(asset)) throw notFound();
         const policy = await resolveAccountImageWatermark(client, { ...settings, revision: "1" });
         return { asset, storageKey: asset.publicStorageKey, policy, accountMedia };
       });
+      if (!sample) { sendJson(response, 200, { images: [], state: "NO_SAMPLE" }, requestId); return; }
       const images = await sample.accountMedia.previewVariants(sample.storageKey, sample.asset, sample.policy);
-      await withTransaction(options.pool, authorize);
+      await withTransaction(options.pool, async client => {
+        await authorize(client);
+        const current = await loadMediaAsset(client, sample.asset.id);
+        if (!current || current.publicStorageKey !== sample.storageKey || !isWatermarkPreviewSample(current)) throw notFound();
+        const watermark = await resolveAccountImageWatermark(client, { ...settings, revision: "1" });
+        if (watermark.logoStorageKey !== sample.policy.logoStorageKey) throw conflict("Logo 素材已变化，请重新选择");
+      });
       sendJson(response, 200, { images }, requestId);
       return;
     }
