@@ -10,8 +10,10 @@ import {fixedFeePaymentPricing} from './distribution-fixed-fee-evidence';
 import {createControlledRegressionResource,assertControlledRegressionResource,type ControlledRegressionBinding,type ControlledRegressionResource} from './controlled-regression-resource';
 import {assertLocalFinancialSandboxResource,assertLocalSandboxOrderAdmission,localFinancialSandboxRegistration,type LocalFinancialSandbox} from './local-financial-sandbox-resource';
 import {assertEcsTestDemoResource,assertEcsTestDemoOrderAdmission,readEcsTestDemoRegistration,type DemoFinanceResource} from './ecs-test-demo-resource';
+import {assertFixedFeeTestConfiguration,assertFixedFeeTestResource,fixedFeeTestResource} from './controlled-fixed-fee-resource';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 export type DistributionOrderScope={resourceSet:string;resourceOid:number;approvalDigest:string;allowedOrderIds:readonly string[]};
+const fixedFeeTestScopes = new WeakSet<DistributionOrderScope>();
 const regressionScopes=new WeakMap<DistributionOrderScope,ControlledRegressionResource>();
 const sandboxScopes=new WeakMap<DistributionOrderScope,LocalFinancialSandbox>();
 const demoScopes=new WeakMap<DistributionOrderScope,DemoFinanceResource>();
@@ -34,13 +36,21 @@ export function createControlledRegressionDistributionScope(input:{config:AppCon
   ||input.allowedOrderIds.some(id=>!ID.test(id))||new Set(input.allowedOrderIds).size!==input.allowedOrderIds.length)throw invalid('Exact controlled distribution order allowlist required');
  const scope=Object.freeze({resourceSet:'regression',resourceOid:input.binding.resourceOid,approvalDigest:input.approvalDigest,allowedOrderIds:Object.freeze([...input.allowedOrderIds])});regressionScopes.set(scope,resource);return scope;
 }
+export function createFixedFeeTestDistributionScope(config: AppConfig, approvalDigest: string, allowedOrderIds: readonly string[]): DistributionOrderScope {
+ assertFixedFeeTestConfiguration(config, allowedOrderIds);
+ if(!/^[a-f0-9]{64}$/.test(approvalDigest))throw invalid('Exact controlled distribution approval digest required');
+ const scope=Object.freeze({resourceSet:'fixed_fee',resourceOid:fixedFeeTestResource.oid,approvalDigest,allowedOrderIds:Object.freeze([...allowedOrderIds])});
+ fixedFeeTestScopes.add(scope);return scope;
+}
 export function distributionOrderScopeIdentity(scope:DistributionOrderScope){
+ if(scope.resourceSet==='fixed_fee'){if(!fixedFeeTestScopes.has(scope))throw invalid('Fixed-fee distribution scope is not bound');return fixedFeeTestResource;}
  if(scope.resourceSet==='registered_daily'){const sandbox=sandboxScopes.get(scope);if(!sandbox)throw invalid('Registered distribution scope is not bound');const resource=localFinancialSandboxRegistration(sandbox).registration.resource;return{name:resource.database,role:resource.runtimeRole,marker:resource.marker};}
  if(scope.resourceSet==='registered_ecs_demo'){const demo=demoScopes.get(scope);if(!demo)throw invalid('Registered distribution scope is not bound');const resource=readEcsTestDemoRegistration(demo).registration.resource;return{name:resource.database,role:resource.runtimeRole,marker:resource.marker};}
  if(scope.resourceSet==='regression'){if(!regressionScopes.has(scope))throw invalid('Controlled distribution scope is not bound');return{name:REGRESSION_DATABASE,role:REGRESSION_RUNTIME_USER,marker:REGRESSION_MARKER};}
  return{name:'zzsh_test_order_'+scope.resourceSet,role:'zzsh_order_'+scope.resourceSet+'_r',marker:'zzsh:order-reservation-test:v1'};
 }
 export async function assertDistributionOrderScopeResource(c:PoolClient,scope:DistributionOrderScope,mode:'WRITE'|'READ_ORIGINAL'='WRITE'){
+ if(fixedFeeTestScopes.has(scope)){await assertFixedFeeTestResource(c);return;}
  const sandbox=sandboxScopes.get(scope);if(sandbox){await assertLocalFinancialSandboxResource(c,sandbox,mode);return;}
  const demo=demoScopes.get(scope);if(demo){await assertEcsTestDemoResource(c,demo,mode);return;}
  const identity=distributionOrderScopeIdentity(scope),regression=regressionScopes.get(scope);
@@ -53,7 +63,16 @@ type Prepared={orderId:string};
  * No route or default scope. Null means no admission; explicit composition must reject it.
  * Old payment callers that do not install this store retain their original behavior. */
 const nativeStores=new WeakMap<object,string>();
-export function createPaymentDistributionStore(scope:DistributionOrderScope){return paymentStore(scope);}
+const fixedFeeTestPaymentStores = new WeakMap<PaymentDistributionStore, DistributionOrderScope>();
+export function createPaymentDistributionStore(scope:DistributionOrderScope): PaymentDistributionStore {
+ const store = paymentStore(scope);
+ if (fixedFeeTestScopes.has(scope)) fixedFeeTestPaymentStores.set(store, scope);
+ return store;
+}
+export function assertFixedFeeTestPaymentDistributionStore(store: PaymentDistributionStore | undefined, orderId: string) {
+ if (!store || !fixedFeeTestPaymentStores.get(store)?.allowedOrderIds.includes(orderId))
+  throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Fixed-fee test payment requires its bound distribution store');
+}
 /** 原生来源不是local scope别名；必须持正式商户服务端准入，默认本地factory不变。 */
 export function createNativePaymentDistributionStore(admission:FormalCollectionAdmission){
  const view=readFormalCollectionAdmission(admission),store=Object.freeze(paymentStore(null,admission));nativeStores.set(store,view.sha256);return store;
@@ -117,10 +136,10 @@ function paymentStore(scope:DistributionOrderScope|null,formal?:FormalCollection
  async function record(c:PoolClient,value:Prepared,confirmationId:string,requestId:string){const proof=prepared.get(value);if(!proof||proof.client!==c)throw conflict('Payment basis was not prepared on this transaction');if((await c.query('SELECT pg_current_xact_id()::text AS id')).rows[0]?.id!==proof.transactionId)throw conflict('Payment basis belongs to a previous transaction');const p=await payment(c,value.orderId,confirmationId),existing=(await c.query('SELECT canonical_basis,basis_digest FROM zzsh_order.payment_distribution_basis WHERE order_id=$1 AND payment_confirmation_id=$2',[value.orderId,confirmationId])).rows[0];if(existing)return readOriginalPaymentDistributionBasis({...JSON.parse(existing.canonical_basis),digest:existing.basis_digest},{orderId:value.orderId,confirmationId,paymentDigest:p.digest});
   const basis=freezePaymentDistributionBasis({...proof.input,confirmationId,acceptedAt:p.row.accepted_at,paymentDigest:p.digest}),{digest:_,...body}=basis,canonical=canonicalize(body);await c.query(`INSERT INTO zzsh_order.payment_distribution_basis(id,order_id,payment_confirmation_id,admission_id,admission_revision,canonical_basis,basis_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`,['distribution_basis_'+sha(value.orderId).slice(0,40),value.orderId,confirmationId,basis.admissionId,basis.admissionRevision,canonical,basis.digest]);await recordAudit(c,{actorType:'system',actorId:'payment-distribution-basis',action:'distribution.payment.basis.frozen',objectType:'payment_distribution_basis',objectId:value.orderId,requestId,outcome:'SUCCESS',details:{confirmationId,basisDigest:basis.digest,policyVersion:basis.policyVersion,roles:basis.roles.map(r=>({role:r.role,status:r.status}))}});return{knowledge:'KNOWN' as const,basis};
  }
- async function readOriginal(c:PoolClient,orderId:string,confirmationId:string,mode:'WRITE'|'READ_ORIGINAL'='WRITE'){const p=await payment(c,orderId,confirmationId,mode),row=(await c.query('SELECT canonical_basis,basis_digest FROM zzsh_order.payment_distribution_basis WHERE order_id=$1 AND payment_confirmation_id=$2',[orderId,confirmationId])).rows[0];return readOriginalPaymentDistributionBasis(row?{...JSON.parse(row.canonical_basis),digest:row.basis_digest} as PaymentDistributionBasis:null,{orderId,confirmationId,paymentDigest:p.digest});}
+ async function readOriginal(c:PoolClient,orderId:string,confirmationId:string,mode:'WRITE'|'READ_ORIGINAL'='WRITE'){if(scope && fixedFeeTestScopes.has(scope) && !allowed.has(orderId))throw notFound();const p=await payment(c,orderId,confirmationId,mode),row=(await c.query('SELECT canonical_basis,basis_digest FROM zzsh_order.payment_distribution_basis WHERE order_id=$1 AND payment_confirmation_id=$2',[orderId,confirmationId])).rows[0];return readOriginalPaymentDistributionBasis(row?{...JSON.parse(row.canonical_basis),digest:row.basis_digest} as PaymentDistributionBasis:null,{orderId,confirmationId,paymentDigest:p.digest});}
  return{prepare,record,readOriginal};
 }
-export type PaymentDistributionStore=ReturnType<typeof createPaymentDistributionStore>;
+export type PaymentDistributionStore=ReturnType<typeof paymentStore>;
 
 /** 仅在首次正式请求已持订单锁的原事务调用，付款prepare不临时写FK而逆转用户/订单锁序。 */
 export async function createNativePaymentDistributionAdmission(c:PoolClient,formal:FormalCollectionAdmission,orderId:string){

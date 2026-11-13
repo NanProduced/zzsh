@@ -79,7 +79,7 @@ function earningStore(resource:Resource):DistributionEarningStore{
    const r=(await c.query(`SELECT current_database() AS name,current_user AS role,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_reversal_source') IS NOT NULL AS complete`)).rows[0];
    if(!r||r.name!==name||r.role!==role||r.complete!==true)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');return;
   }
-  if(local!.resourceSet==='regression'||sandbox)await assertDistributionOrderScopeResource(c,local!,mode);
+  if(local!.resourceSet==='regression'||local!.resourceSet==='fixed_fee'||sandbox)await assertDistributionOrderScopeResource(c,local!,mode);
   const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
   if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!==distributionOrderScopeIdentity(local!).marker||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
  }
