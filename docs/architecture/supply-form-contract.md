@@ -4,7 +4,7 @@
 
 `login_qq_qr` 表示 QQ扫码，`legacy_login_qq` 仍为 QQ账密。发布选项、公开属性与筛选使用同一编码，不涉及平台 QQ 登录或自动上号。
 
-`attributes.grading_code` 保留既有大段位，新增可选整数 `grading_division`：青铜/白银为3、2、1，黄金/铂金为4、3、2、1，钻石/黑鹰为5、4、3、2、1，巅峰无小等级。草稿可未填，新核价与发布须补齐；旧快照缺字段不补0或最低级，也不向原规范化声明注入null。编辑已有小等级时须保留该字段；切换巅峰可显式传null清除，旧客户端省略会返回冲突。已核旧号接管仅由服务端验证原来源后保留小段位未知，普通请求无豁免开关。
+`attributes.grading_code` 保留既有大段位，新增可选整数 `grading_division`：青铜/白银为3、2、1，黄金/铂金为4、3、2、1，钻石/黑鹰为5、4、3、2、1，巅峰无小等级。草稿可未填，新核价与发布须补齐；旧快照缺字段不补0或最低级，也不向原规范化声明注入null。编辑未发布草稿的小等级时须保留该字段；切换巅峰可显式传null清除，旧客户端省略会返回冲突。旧三角洲账号仅保留历史，不接管发布。
 
 当前保险资源名称为“九格保险体验卡”，沿用 `df_billable_top_insure_card` 及原itemId、DAY/scale0/unitQuantity1；历史快照保留当时名称。`df_billable_turtle_backpack_45` 为“45格乌龟包”，PIECE/scale0/FIXED_UNIT/unitQuantity1，中文单位“个”；45不是计价份量。物资沿原全量预付、双方期初/期末确认与实耗结算，不计入哈夫币净消耗、不自动扣押金。新增目录不向旧账号补0库存，未申报保持未知；实际经营价格须经既有价目封存与发布生效，不以代码常量代替。
 
@@ -124,7 +124,7 @@ Web需精确白名单接该叶路径；沿原身份/输入代际、AbortControll
 
 ### 补充申报与自定义日耗
 
-`attributes.next_season_pass` 是下赛季购买通行证/续费6格保险箱的计划，`demulan_unlocked` 是德穆兰解锁声明；均为 boolean/null。草稿可缺省或未知，新核价、规则接受、发布及原生审核批准须明确是或否。缺省键不注入null，不改变旧内容hash；新值沿原hash和接受失效保护。服务端已验证的旧号接管可保留来源未知，客户端不能申请豁免。旧isSayyid不等价德穆兰。公开只读投影缺值为null，不据当前安全箱推断未来计划；它们不作为计价参数。
+`attributes.next_season_pass` 是下赛季购买通行证/续费6格保险箱的计划，`demulan_unlocked` 是德穆兰解锁声明；均为 boolean/null。草稿可缺省或未知，新核价、规则接受、发布及原生审核批准须明确是或否。缺省键不注入null，不改变旧内容hash；新值沿原hash和接受失效保护。历史来源未知保持未知，客户端不能申请豁免。旧isSayyid不等价德穆兰。公开只读投影缺值为null，不据当前安全箱推断未来计划；它们不作为计价参数。
 
 `info_source` 继续是可选私有归因文本，仅号主/受权运营读取，不在公开账号attributes返回，不建邀请或奖励。publishing-options提供declarationOptions，标明新布尔必填、归因可选；本版已接纳info_source的4项name/value快照（抖音、朋友介绍、马叉虫、苏醒），publishing-options返回optionsState=CONFIGURED及sourceSnapshot观察时间/摘要，源服务无revision则为null。旧归因字符串仍可回显/保存，不将未知旧文本自动改成空或新选项。
 
