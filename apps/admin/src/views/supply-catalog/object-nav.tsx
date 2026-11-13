@@ -43,7 +43,6 @@ export function CatalogObjectNav({
           <span className="size-1.5 rounded-full bg-primary" />
           <span>目录大类切换</span>
         </div>
-        <span className="text-[11px] text-muted-foreground">选择不同大类维护对应的报价资源、外观与属性</span>
       </div>
       <TabsList
         aria-label="目录对象（当前已加载范围）"
@@ -67,21 +66,20 @@ export function CatalogObjectNav({
                 <span className="tracking-tight">{OBJECT_LABEL[entry]}</span>
               </div>
               <span className="flex items-center gap-1.5 ml-1">
-                {entry === "skins" && loaded && pending > 0 ? (
-                  <Badge
-                    variant="warning"
-                    className="px-1.5 py-0 text-[10px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
-                  >
-                    待核 {pending}
-                  </Badge>
-                ) : null}
                 {loaded ? (
                   <span
-                    className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-[11px] font-mono tabular-nums bg-muted group-data-[active]:bg-primary/10 group-data-[active]:text-primary text-muted-foreground transition-colors"
-                    title="当前已加载条目数"
+                    className="inline-flex items-center justify-center min-w-5 h-5 px-1.5 rounded-full text-xs font-mono tabular-nums bg-muted group-data-[active]:bg-primary/10 group-data-[active]:text-primary text-muted-foreground transition-colors"
                   >
                     {counts[entry]}
                   </span>
+                ) : null}
+                {entry === "skins" && loaded && pending > 0 ? (
+                  <Badge
+                    variant="warning"
+                    className="px-1.5 py-0 text-xs font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                  >
+                    待核 {pending}
+                  </Badge>
                 ) : null}
               </span>
             </TabsTrigger>

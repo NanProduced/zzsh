@@ -3,14 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { SupplySelect } from "@/components/supply/supply-select";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
-import { ChevronDownIcon, ImageIcon, XIcon } from "lucide-react";
+import { ImageIcon, XIcon } from "lucide-react";
 import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lock";
 
 import { adminRequest, AdminApiError, friendlyError, hasPermission, type AdminCatalogResponse, type CatalogSkin, type CatalogSkinOwner, type CatalogMediaOption, type MediaOptionsResponse, type SessionSnapshot, type SupplyGame } from "../api";
@@ -37,10 +36,8 @@ import {
   IDENTITY_FILTER_ITEMS,
   IDENTITY_LABEL,
   matchesQuery,
-  OBJECT_DISABLE_NOTE,
   OBJECT_LABEL,
   OBJECT_ORDER,
-  OBJECT_PURPOSE,
   objectRows,
   ownerText,
   skinOwnerKind,
@@ -66,7 +63,7 @@ function Field({ label, children, hint }: { label: string; children: React.React
     <label className="space-y-1 text-xs block">
       <span className="text-muted-foreground">{label}</span>
       {children}
-      {hint ? <span className="block text-[11px] text-muted-foreground/80">{hint}</span> : null}
+      {hint ? <span className="block text-xs text-muted-foreground/80">{hint}</span> : null}
     </label>
   );
 }
@@ -759,7 +756,7 @@ export function SupplyCatalogView({
               event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden");
             }}
           />
-          <span data-fallback className="hidden absolute inset-0 grid place-items-center bg-muted text-[10px] text-muted-foreground">图失效</span>
+          <span data-fallback className="hidden absolute inset-0 grid place-items-center bg-muted text-xs text-muted-foreground">图失效</span>
         </Button>
       );
     }
@@ -845,7 +842,7 @@ export function SupplyCatalogView({
             <LabeledSelect label="游戏" value={gameId} disabled={!gamesReady} items={gameItems.length ? gameItems : [{ value: "", label: gamesReady ? "暂无可维护游戏" : "正在读取游戏…" }]} onValueChange={(value) => requestSwitch("game", value)} />
           </div>
           {catalog ? (
-            <span className="text-[11px] text-muted-foreground pb-2">
+            <span className="text-xs text-muted-foreground pb-2">
               目录版本 {catalog.game.catalogRevision}
               {catalog.game.enabled ? "" : " · 游戏已停用"}
               {catalog.game.currentReleaseId ? "" : " · 尚无生效发布"}
@@ -867,7 +864,7 @@ export function SupplyCatalogView({
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {loading && !catalog ? <p role="status" className="mt-3 text-sm text-muted-foreground">正在读取当前游戏目录…</p> : null}
         {writeIntent.current && writeIntent.current.kind !== "games" && writeIntent.current.gameId !== gameId && ["saving", "unknown", "readback"].includes(writePhase) ? <div className="mt-2 flex flex-wrap items-center gap-2"><p className="text-xs text-muted-foreground">另一游戏有待核提交：{games.find(game => game.id === writeIntent.current!.gameId)?.name ?? "原游戏不在当前可读范围"} · {OBJECT_LABEL[writeIntent.current.kind]}。本页新写已锁定。</p><Button type="button" size="sm" variant="outline" disabled={!games.some(game => game.id === writeIntent.current?.gameId)} onClick={() => requestSwitch("game", writeIntent.current!.gameId)}>返回原游戏核对</Button></div> : null}
-        {writePhase === "unknown" ? <div className="mt-2 space-y-1"><Button type="button" size="sm" variant="outline" disabled={storageBlocked || (writeIntent.current?.kind !== "games" && writeIntent.current?.gameId !== gameId)} onClick={() => void recoverOriginal()}>核对原提交</Button><p className="text-[11px] text-muted-foreground">结果尚未确认；关闭或刷新不会消除该状态，列表未找到也不能证明未执行。</p></div> : null}
+        {writePhase === "unknown" ? <div className="mt-2 space-y-1"><Button type="button" size="sm" variant="outline" disabled={storageBlocked || (writeIntent.current?.kind !== "games" && writeIntent.current?.gameId !== gameId)} onClick={() => void recoverOriginal()}>核对原提交</Button><p className="text-xs text-muted-foreground">结果尚未确认；关闭或刷新不会消除该状态，列表未找到也不能证明未执行。</p></div> : null}
         {writePhase === "readback" ? <Button type="button" size="sm" variant="outline" className="mt-2" disabled={storageBlocked || (writeIntent.current?.kind !== "games" && writeIntent.current?.gameId !== gameId)} onClick={() => void recoverOriginal()}>重新读取目录</Button> : null}
         {writePhase === "conflict" ? <div className="flex flex-wrap gap-2 mt-2"><Button type="button" size="sm" variant="outline" onClick={() => void reloadConflict()}>读取最新目录</Button><Button type="button" size="sm" variant="outline" disabled={!conflictLoaded} onClick={adoptRevision}>采用当前版本并保留输入</Button></div> : null}
       </section>
@@ -886,20 +883,7 @@ export function SupplyCatalogView({
           <div className="space-y-4 min-w-0">
             {visibleCatalogKinds.map((kind) => (
               <TabsContent key={kind} value={kind} className="space-y-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-2">
-                  <div>
-                    <h4 data-catalog-list-title={kind} tabIndex={-1} className="rounded-sm text-sm font-semibold tracking-tight focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{OBJECT_LABEL[kind]}</h4>
-                    <p className="text-xs text-muted-foreground">{OBJECT_PURPOSE[kind]}</p>
-                  </div>
-                  <Collapsible>
-                    <CollapsibleTrigger render={<Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" />}>
-                      维护说明<ChevronDownIcon className="size-3.5" />
-                    </CollapsibleTrigger>
-                    <CollapsibleContent>
-                      <p className="max-w-2xl py-1 text-xs text-muted-foreground">稳定编号创建后不变。{OBJECT_DISABLE_NOTE[kind]}</p>
-                    </CollapsibleContent>
-                  </Collapsible>
-                </div>
+                <h4 data-catalog-list-title={kind} tabIndex={-1} className="sr-only">{OBJECT_LABEL[kind]}</h4>
                 {(kind === "skins" || kind === "skin-owners") && !contractReady && visibleRows.length > 0 ? (
                   <p className="text-xs text-destructive">皮肤目录资料暂时无法确认，维护暂不可用；请稍后重试或联系管理员。</p>
                 ) : null}
@@ -938,7 +922,7 @@ export function SupplyCatalogView({
                     </Button>
                   </div>
                 </div>
-                {query.trim() ? <p className="text-[11px] text-muted-foreground">当前仅在已加载列表中过滤；若全库未找到请确认是否已加载完毕。</p> : null}
+                {query.trim() ? <p className="text-xs text-muted-foreground">当前仅在已加载列表中过滤；若全库未找到请确认是否已加载完毕。</p> : null}
                 <CatalogObjectTable
                   editingId={kind !== "skins" && editor && editor.id && editor.kind === kind ? editor.id : undefined}
                   editingIsNew={Boolean(editor && !editor.id && editor.kind === kind)}
@@ -1072,16 +1056,16 @@ export function SupplyCatalogView({
                   <h4 className="text-xs font-semibold">{editor.kind === "skins" ? "皮肤图片" : "物品图片"}</h4>
                   {editor.values.mediaId ? <Button type="button" size="sm" variant="outline" onClick={unbindMedia}>解除绑定</Button> : null}
                 </div>
-                <p className="text-[11px] text-muted-foreground">目录页只绑定本平台已审核且允许公开的衍生图，不上传字节；上传在素材审核。</p>
+                <p className="text-xs text-muted-foreground">目录页只绑定本平台已审核且允许公开的衍生图，不上传字节；上传在素材审核。</p>
                 {editor.values.mediaId ? (
                   <div className="flex items-center gap-3">
                     <span className="relative">
                       <img src={`/api/v1/supply/media/${editor.values.mediaId}/content`} alt="当前绑定图片" className={editor.kind === "skins" && editor.values.ownerKind === "AGENT" ? "h-56 w-36 rounded border border-border object-contain" : "h-28 w-48 rounded border border-border object-contain"} loading="lazy"
                         onLoad={(event) => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
                         onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }} />
-                      <span data-fallback className="hidden text-[11px] text-muted-foreground">图片加载失败或已不可公开展示。</span>
+                      <span data-fallback className="hidden text-xs text-muted-foreground">图片加载失败或已不可公开展示。</span>
                     </span>
-                    <span className="font-mono text-[11px] text-muted-foreground truncate">{editor.values.mediaId}</span>
+                    <span className="font-mono text-xs text-muted-foreground truncate">{editor.values.mediaId}</span>
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground">当前未绑定图片；公开目录将不投影任何图片。</p>
@@ -1089,7 +1073,7 @@ export function SupplyCatalogView({
                 {mediaPickerOpen ? (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-[11px] text-muted-foreground">候选已按游戏与用途过滤：{mediaPickerPurpose}、已审核且允许公开。</span>
+                      <span className="text-xs text-muted-foreground">候选已按游戏与用途过滤：{mediaPickerPurpose}、已审核且允许公开。</span>
                       <Button type="button" size="sm" variant="ghost" onClick={dismissMediaPicker}>关闭</Button>
                     </div>
                     <StatusMessage themeAware error={mediaOptionsError} />
@@ -1106,9 +1090,9 @@ export function SupplyCatalogView({
                                 <img src={`/api/v1/supply/media/${option.id}/content`} alt={`候选 ${option.id}`} className="h-24 w-full object-contain" loading="lazy"
                                   onLoad={(event) => { event.currentTarget.style.display = ""; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.add("hidden"); }}
                                   onError={(event) => { event.currentTarget.style.display = "none"; event.currentTarget.parentElement?.querySelector("[data-fallback]")?.classList.remove("hidden"); }} />
-                                <span data-fallback className="absolute inset-0 hidden grid place-items-center bg-surface text-[10px] text-muted-foreground">预览不可用</span>
+                                <span data-fallback className="absolute inset-0 hidden grid place-items-center bg-surface text-xs text-muted-foreground">预览不可用</span>
                               </span>
-                              <span className="block truncate px-1.5 py-1 font-mono text-[10px] text-muted-foreground">{option.id.slice(0, 18)}… · {option.width}×{option.height}</span>
+                              <span className="block truncate px-1.5 py-1 font-mono text-xs text-muted-foreground">{option.id.slice(0, 18)}… · {option.width}×{option.height}</span>
                             </Button>
                           ))}
                         </div>
@@ -1173,7 +1157,7 @@ function GameCreateForm({ draft, setDraft, onSubmit, loading, className }: { dra
       <Field label="描述（可选）"><Input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} className="h-9 text-xs" /></Field>
       <div className="flex flex-wrap items-center gap-2 md:col-span-3">
         <Button type="submit" size="sm" disabled={loading}>{loading ? "创建中…" : "创建游戏"}</Button>
-        <span className="text-[11px] text-muted-foreground">创建后下一步：维护六类词条，再到规则与价目、素材审核。</span>
+        <span className="text-xs text-muted-foreground">创建后下一步：维护六类词条，再到规则与价目、素材审核。</span>
       </div>
     </form>
   );

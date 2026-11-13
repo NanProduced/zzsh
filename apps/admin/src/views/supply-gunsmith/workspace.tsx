@@ -278,7 +278,7 @@ export function GunsmithWorkspace({
                 <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
                   {g.classification?.name ?? "未分类"}
                 </p>
-                <span className="text-[10px] text-muted-foreground/60 font-mono">{g.firearms.length}</span>
+                <span className="text-[11px] text-muted-foreground font-mono">{g.firearms.length}</span>
               </div>
               <ul className="space-y-1">
                 {g.firearms.map(f => {
@@ -299,15 +299,15 @@ export function GunsmithWorkspace({
                       >
                         <span className="flex min-w-0 flex-1 items-center gap-1.5">
                           <span className="truncate text-xs">{f.name}</span>
-                          {!f.enabled ? <span className="shrink-0 text-[10px] text-muted-foreground/70">（停用）</span> : null}
+                          {!f.enabled ? <span className="shrink-0 text-[11px] text-muted-foreground">（停用）</span> : null}
                         </span>
                         <span className="shrink-0">
                           {count > 0 ? (
-                            <Badge variant="secondary" className="px-1.5 py-0 text-[10px] font-mono font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20">
+                            <Badge variant="secondary" className="px-1.5 py-0 text-[11px] font-mono font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20">
                               {count} 套
                             </Badge>
                           ) : (
-                            <span className="text-[10px] text-muted-foreground/40 font-mono px-1">0</span>
+                            <span className="text-[11px] text-muted-foreground font-mono px-1">0 套</span>
                           )}
                         </span>
                       </Button>
@@ -356,11 +356,6 @@ export function GunsmithWorkspace({
                     <Badge variant="outline" className="text-xs">
                       {classifications.find(c => c.id === firearm.classificationId)?.name ?? "未分类"}
                     </Badge>
-                    {firearm.code ? (
-                      <span className="font-mono text-[10px] text-muted-foreground/60 select-all" title={`内部目录标识：${firearm.code}`}>
-                        #{firearm.code}
-                      </span>
-                    ) : null}
                   </div>
                   <p className="text-xs text-muted-foreground">
                     一把枪可维护多套方案；复制代码原文，在游戏内导入。
@@ -482,17 +477,6 @@ export function GunsmithWorkspace({
                       {codeQuery || mode !== "all" || status !== "all" ? "调整模式、状态或查找条件；不代表全库没有方案。" : "录入代码原文，并填写适用模式与方案说明。"}
                     </p>
                   </div>
-                  {!codeQuery && mode === "all" && status === "all" && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={busy || editing || Boolean(newCodeDisabledReason(firearm))}
-                      onClick={onNew}
-                      className="mt-2"
-                    >
-                      立即录入首套方案
-                    </Button>
-                  )}
                 </div>
               )}
 
@@ -545,11 +529,11 @@ export function GunsmithWorkspace({
           /* 未选择枪械时的引导工作台（保留所有断言文本，并增加快捷选择卡片） */
           <div className="p-6 sm:p-10 space-y-6">
             <div className="text-center max-w-md mx-auto space-y-3">
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                <Crosshair className="size-7" />
-              </div>
               <div className="space-y-1.5">
-                <h2 className="text-lg font-semibold tracking-tight text-foreground">先选择一把枪械</h2>
+                <h2 className="flex items-center justify-center gap-2 text-lg font-semibold tracking-tight text-foreground">
+                  <Crosshair className="size-5 text-primary" aria-hidden />
+                  先选择一把枪械
+                </h2>
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   选择左侧枪械后，查看和维护它的多套改枪方案。基础目录建档与改枪码录入分开，所有方案保留明确的所属枪械。
                 </p>
@@ -562,24 +546,24 @@ export function GunsmithWorkspace({
             </div>
 
             {/* 结构化操作流程引导 */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 max-w-xl mx-auto pt-1 pb-1 text-left">
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-xl mx-auto pt-1 pb-1 text-left">
+              <div className="space-y-1">
                 <span className="text-xs font-semibold text-primary">① 选择枪械</span>
-                <p className="text-[11px] text-muted-foreground leading-snug">从左侧列表或下方快捷卡片挑选目标武器</p>
+                <p className="text-xs text-muted-foreground leading-snug">从左侧列表或下方快捷卡片挑选目标武器</p>
               </div>
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+              <div className="space-y-1">
                 <span className="text-xs font-semibold text-primary">② 录入改枪码</span>
-                <p className="text-[11px] text-muted-foreground leading-snug">粘贴游戏内生成的导出码并设置方案名称</p>
+                <p className="text-xs text-muted-foreground leading-snug">粘贴游戏内生成的导出码并设置方案名称</p>
               </div>
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-1">
+              <div className="space-y-1">
                 <span className="text-xs font-semibold text-primary">③ 标注与实测</span>
-                <p className="text-[11px] text-muted-foreground leading-snug">标注推荐模式并在游戏内实测生效后上线</p>
+                <p className="text-xs text-muted-foreground leading-snug">标注推荐模式并在游戏内实测生效后上线</p>
               </div>
             </div>
 
             {/* 快速开始卡片：展示前几个枪械，点击直接切换 */}
             {quickStartFirearms.length > 0 ? (
-              <div className="border-t border-border/60 pt-5 space-y-3">
+              <div className="border-t border-border/60 pt-5 space-y-3 xl:hidden">
                 <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                   <Sparkles className="size-3.5 text-amber-500" />
                   <span>快捷开始 · 点击直接进入该枪维护</span>
@@ -604,7 +588,7 @@ export function GunsmithWorkspace({
                         </div>
                         <Badge
                           variant="secondary"
-                          className="shrink-0 font-mono text-[10px] tabular-nums"
+                          className={`shrink-0 font-mono text-[11px] tabular-nums ${count > 0 ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}
                         >
                           {count > 0 ? `${count} 套` : "待录入"}
                         </Badge>

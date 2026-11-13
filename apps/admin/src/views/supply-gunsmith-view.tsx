@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CircleAlert } from "lucide-react";
 
-import { Badge, InlineStatus } from "@/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field } from "@/components/ui/field";
@@ -53,7 +53,6 @@ type Editor = { entity: GunsmithEntity; id?: string; firearmId?: string; values:
 type UnknownWrite = PendingGunsmithWrite | null;
 
 const CODE_PATTERN = /^[a-z][a-z0-9_:-]{1,63}$/;
-const EMPTY_GAMES: SupplyGame[] = [];
 const EMPTY_LIST: never[] = [];
 const enableItems = [{ value: "true", label: "启用" }, { value: "false", label: "停用" }];
 
@@ -68,7 +67,6 @@ export function SupplyGunsmithView({
 }) {
   const canManage = hasPermission(snapshot, "supply.gunsmith.manage");
   const actorScope = `${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.permissions.slice().sort().join(",")}:${canManage}`;
-  const [loadedGames, setGames] = useState<SupplyGame[]>([]);
   const [gameId, setGameId] = useState("");
   const [loadedData, setLoadedData] = useState<AdminGunsmithResponse | null>(null);
   const [firearmId, setFirearmId] = useState("");
@@ -102,15 +100,12 @@ export function SupplyGunsmithView({
   const scopeRef = useRef(scope), actorRef = useRef(actorScope);
   scopeRef.current = scope; actorRef.current = actorScope;
   const gamesScope = useRef(""), dataScope = useRef("");
-  const games = gamesScope.current === actorScope ? loadedGames : EMPTY_GAMES;
   const data = dataScope.current === scope ? loadedData : null;
 
   const classifications = data?.classifications ?? EMPTY_LIST;
   const firearms = data?.firearms ?? EMPTY_LIST;
   const aliases = data?.aliases ?? EMPTY_LIST;
   const codes = data?.codes ?? EMPTY_LIST;
-  const game = games.find((entry) => entry.id === gameId);
-  const service = game?.services?.find((entry) => entry.serviceCode === "GUNSMITH");
   const firearm = firearms.find((entry) => entry.id === firearmId) ?? null;
   const groups = useMemo(() => groupFirearms(classifications, firearms.filter((entry) => firearmMatchesQuery(entry, aliases, firearmQuery))), [classifications, firearms, aliases, firearmQuery]);
   const firearmAliases = useMemo(() => aliases.filter((entry) => entry.firearmId === firearm?.id), [aliases, firearm?.id]);
@@ -147,7 +142,6 @@ export function SupplyGunsmithView({
     if (token !== gamesSeq.current || actor !== actorRef.current) return;
     if (!Array.isArray(result?.games)) throw new Error("游戏目录响应不完整。");
     gamesScope.current = actor;
-    setGames(result.games);
     setGameId((current) => (current && result.games.some((entry) => entry.id === current) ? current : result.games.find((entry) => entry.code === "delta")?.id ?? result.games[0]?.id ?? ""));
   }, []);
 
@@ -164,7 +158,7 @@ export function SupplyGunsmithView({
   }, []);
 
   useEffect(() => {
-    setGameId(""); setGames([]); gamesScope.current = "";
+    setGameId(""); gamesScope.current = "";
     if (!canManage) return;
     const actor = actorScope;
     void loadGames().catch((failure) => { if (actorRef.current === actor) setError(friendlyError(failure)); });
@@ -489,21 +483,9 @@ export function SupplyGunsmithView({
         <div className="panel-heading">
           <div>
             <h1 className="text-2xl leading-9 font-semibold">改枪码目录</h1>
-            <p>按枪械维护多套改装方案，管理代码原文、适用模式和方案说明。</p>
+            <p>按枪械维护《三角洲行动》的多套改装方案，管理代码原文、适用模式和方案说明。</p>
           </div>
-        </div>
-        <div className="mt-4 flex flex-wrap items-end gap-3">
-          <div className="w-full max-w-xs">
-            <Field label="游戏" composite>
-              <SupplySelect label="游戏" value={gameId} options={games.map((entry) => ({ value: entry.id, label: `${entry.name}（${entry.code}）` }))} onValueChange={next => requestSwitch("game", next)} />
-            </Field>
-          </div>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1">
-            {service
-              ? <><InlineStatus tone={service.enabled && service.supported ? "info" : "neutral"}>{!service.supported ? "该游戏未完成适配" : service.enabled ? "玩家端服务已启用" : "玩家端服务未启用"}</InlineStatus><span className="text-xs text-muted-foreground">服务开关不在本页操作。</span></>
-              : <InlineStatus tone="unknown">服务状态未提供（接口未返回该游戏的服务事实）。</InlineStatus>}
-          </div>
-          <Button type="button" size="sm" variant="outline" className="ml-auto" disabled={busy || Boolean(editor)} onClick={() => { setEditor(null); setTermsOpen(true); }}>管理基础目录</Button>
+          <Button type="button" size="sm" variant="outline" disabled={busy || Boolean(editor)} onClick={() => { setEditor(null); setTermsOpen(true); }}>管理基础目录</Button>
         </div>
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {unknownWrite ? (

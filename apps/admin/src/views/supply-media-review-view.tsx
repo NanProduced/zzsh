@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AlertTriangle, RefreshCw, ShieldAlert, Upload } from "lucide-react";
+import { AlertTriangle, ChevronRight, RefreshCw, ShieldAlert, Upload } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,8 @@ import { Lightbox } from "./supply-review/lightbox";
 import { mediaContentUrl, type ZoomTarget } from "./supply-review/model";
 import { MediaDetailPanel } from "./supply-media/detail-panel";
 import {
+  actionsFor,
+  isExemptReview,
   objectName,
   OWNERSHIP_LABELS,
   PURPOSE_LABELS,
@@ -27,7 +29,6 @@ import {
   REVIEWED_STATES,
   reviewReasonError,
   STATE_LABELS,
-  timeFull,
   timeShort,
   visibilityReasonError,
   VISIBILITY_LABELS,
@@ -102,6 +103,8 @@ const lockNotice = (failure: unknown): string =>
       ? "本地无法保存操作意图，操作未发送；请检查浏览器存储后重试。"
     : "写入锁异常，操作未发送；请稍后重试。";
 
+type ReviewScope = "all" | "reviewable" | "exempt";
+
 export function SupplyMediaReviewView({
   snapshot,
   refreshNonce = 0,
@@ -157,6 +160,14 @@ export function SupplyMediaReviewView({
   filterKeyRef.current = filterKey;
   const gameNames = useMemo(() => new Map(games.map((game) => [game.id, game.name])), [games]);
   const page = pageView && pageView.key === filterKey ? pageView.data : null;
+  const [reviewScope, setReviewScope] = useState<ReviewScope>("all");
+  const pageItems = page?.items ?? [];
+  const reviewableCount = pageItems.filter((asset) => actionsFor(asset, { canDecide, canUpload }).actions.length > 0).length;
+  const exemptCount = pageItems.filter(isExemptReview).length;
+  const visibleItems = reviewScope === "all"
+    ? pageItems
+    : pageItems.filter((asset) => reviewScope === "exempt" ? isExemptReview(asset) : actionsFor(asset, { canDecide, canUpload }).actions.length > 0);
+  const scopeLabel = reviewScope === "reviewable" ? "可审核" : reviewScope === "exempt" ? "免审核对" : "全部";
   const [pageIndex, setPageIndex] = useState(0);
   const pageIndexRef = useRef(0);
   const reasonFor = (asset: MediaAssetReview) => reasons[asset.id] ?? "";
@@ -242,6 +253,7 @@ export function SupplyMediaReviewView({
     if (!canRead) return;
     setSelected(null);
     setPageView(null);
+    setReviewScope("all");
     cursorStack.current = [""];
     pageIndexRef.current = 0;
     setPageIndex(0);
@@ -660,7 +672,7 @@ export function SupplyMediaReviewView({
   }
 
   const writeLocked = Boolean(writeRecord) || writeBusy || Boolean(storedProblem) || (Boolean(writeRecord) && !recoveryChecked);
-  const nextAsset = tab === "pending" && selected && page ? page.items.find((item) => item.id !== selected.id && item.reviewState === "PENDING") ?? null : null;
+  const nextAsset = tab === "pending" && selected && page ? visibleItems.find((item) => item.id !== selected.id && item.reviewState === "PENDING") ?? null : null;
   const filterSummary = tab === "reviewed" ? `${STATE_LABELS[queueState]} · ${OWNERSHIP_LABELS[ownershipKind]}` : `待审核 · ${OWNERSHIP_LABELS[ownershipKind]}`;
   const confirmReasonError =
     confirm && confirm.action.kind === "review"
@@ -669,8 +681,7 @@ export function SupplyMediaReviewView({
         ? visibilityReasonError(reasonFor(confirm.asset))
         : null;
 
-  const hasItems = Boolean(page && page.items.length > 0);
-  const showAside = wide && (Boolean(selected) || hasItems);
+  const showAside = wide && Boolean(selected);
 
   const detail = selected ? (
     <MediaDetailPanel
@@ -684,10 +695,51 @@ export function SupplyMediaReviewView({
       hideHeading={!wide}
       onAction={(action) => setConfirm({ asset: selected, action })}
       onNext={nextAsset ? () => setSelected(nextAsset) : undefined}
-      onClose={() => setSelected(null)}
+      onClose={wide ? () => setSelected(null) : undefined}
       hasNext={Boolean(nextAsset)}
     />
   ) : null;
+
+  const reviewBadge = (asset: MediaAssetReview) => {
+    if (isExemptReview(asset)) {
+      return <Badge variant="outline" className="gap-1 font-medium"><span className="size-1.5 rounded-full bg-sky-500" />免审核对</Badge>;
+    }
+    const variant = asset.reviewState === "APPROVED" ? "success" as const : asset.reviewState === "PENDING" ? "warning" as const : "destructive" as const;
+    const dot = asset.reviewState === "APPROVED" ? "bg-emerald-500" : asset.reviewState === "PENDING" ? "bg-amber-500 motion-safe:animate-pulse" : "bg-rose-500";
+    return <Badge variant={variant} className="gap-1 font-medium"><span className={`size-1.5 rounded-full ${dot}`} />{STATE_LABELS[asset.reviewState] ?? asset.reviewState}</Badge>;
+  };
+  const visibilityBadge = (asset: MediaAssetReview) => (
+    <Badge variant={asset.accessClass === "PUBLIC_DISPLAY" ? "info" : "secondary"} className="gap-1 font-medium">
+      <span className={`size-1.5 rounded-full ${asset.accessClass === "PUBLIC_DISPLAY" ? "bg-sky-500" : "bg-muted-foreground/50"}`} />
+      {VISIBILITY_LABELS[asset.accessClass] ?? asset.accessClass}
+    </Badge>
+  );
+  const queueEmptyState = (
+    <div className="mx-auto my-6 mt-4 max-w-2xl space-y-3 p-8 text-center">
+      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
+        <ShieldAlert className="size-6 text-primary" />
+      </div>
+      <p className="text-sm font-semibold">
+        {filterSummary}：当前筛选下没有{reviewScope === "reviewable" ? "可审核素材" : reviewScope === "exempt" ? "免审核对素材" : "素材"}。
+      </p>
+      <p className="mx-auto max-w-md text-xs leading-relaxed text-muted-foreground">
+        {tab === "pending"
+          ? reviewScope === "exempt"
+            ? "账号展示图免发布前预审，请在来源账号核对。"
+            : "可切换处理范围、状态或刷新队列。"
+          : "可切换状态或刷新队列。"}
+      </p>
+      <div className="flex flex-wrap justify-center gap-2 pt-1">
+        {reviewScope === "reviewable" && exemptCount > 0 ? <Button type="button" size="sm" variant="secondary" onClick={() => { setReviewScope("exempt"); setSelected(null); }}>查看免审核对</Button> : null}
+        {reviewScope === "exempt" && reviewableCount > 0 ? <Button type="button" size="sm" variant="secondary" onClick={() => { setReviewScope("reviewable"); setSelected(null); }}>查看可审核</Button> : null}
+        {tab === "pending" ? (
+          <Button type="button" size="sm" variant="secondary" onClick={() => { setTab("reviewed"); setReviewedState("APPROVED"); }}>查看已通过</Button>
+        ) : (
+          <Button type="button" size="sm" variant="secondary" onClick={() => setTab("pending")}>查看待审核</Button>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -695,12 +747,12 @@ export function SupplyMediaReviewView({
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/60">
           <div className="space-y-1">
             <div className="flex items-center gap-2.5">
-              <h3 className="text-base font-semibold tracking-tight">素材审核</h3>
+              <h1 className="text-xl leading-8 font-semibold tracking-tight">素材审核</h1>
             </div>
             <p className="text-xs text-muted-foreground">审核决定与公开范围分开记录；公开需显式授权。</p>
           </div>
           {canUpload ? (
-            <Button type="button" size="sm" className="h-9 gap-1.5 shadow-sm" onClick={() => setUploadState({ ...emptyUploadDialog(), open: true })} disabled={writeLocked}>
+            <Button type="button" size="sm" variant={pageItems.length > 0 ? "outline" : "default"} className="h-9 gap-1.5 shadow-sm" onClick={() => setUploadState({ ...emptyUploadDialog(), open: true })} disabled={writeLocked}>
               <Upload className="size-4" /> 上传平台素材
             </Button>
           ) : null}
@@ -709,7 +761,7 @@ export function SupplyMediaReviewView({
         {writeRecord ? (
           <div className="mt-3 space-y-2 rounded border border-amber-500/40 bg-amber-500/5 p-3">
             <p className="flex items-center gap-2 text-xs font-medium"><AlertTriangle className="size-3.5 text-amber-500" />{recordPhaseText(writeRecord)}：{writeRecord.targetLabel}</p>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               原命令与原幂等键已保留；本地记录不是授权依据，恢复仍由服务端校验。不能把当前状态恰好相同当作该命令成功，也不能把未查到记录解释为未执行。
             </p>
             <div className="flex flex-wrap gap-2">
@@ -726,15 +778,15 @@ export function SupplyMediaReviewView({
               ) : null}
               <Button type="button" size="sm" variant="ghost" disabled={writeBusy} onClick={() => setAbandonOpen(true)}>放弃恢复</Button>
             </div>
-            {writeRecord.phase === "unknown" && !recoveryChecked ? <p className="text-[11px] text-muted-foreground">恢复检查中，完成前不允许发起新命令。</p> : null}
-            {!isUploadRecord(writeRecord) && !writeRecord.recoverable ? <p className="text-[11px] text-muted-foreground">{writeRecord.recoverNote}</p> : null}
-            {isUploadRecord(writeRecord) && !uploadMemory.current?.file.size ? <p className="text-[11px] text-muted-foreground">上传凭据或文件已失效（刷新后不保留），无法继续字节上传；上传未完成，不生成新上传冒充恢复。</p> : null}
+            {writeRecord.phase === "unknown" && !recoveryChecked ? <p className="text-xs text-muted-foreground">恢复检查中，完成前不允许发起新命令。</p> : null}
+            {!isUploadRecord(writeRecord) && !writeRecord.recoverable ? <p className="text-xs text-muted-foreground">{writeRecord.recoverNote}</p> : null}
+            {isUploadRecord(writeRecord) && !uploadMemory.current?.file.size ? <p className="text-xs text-muted-foreground">上传凭据或文件已失效（刷新后不保留），无法继续字节上传；上传未完成，不生成新上传冒充恢复。</p> : null}
           </div>
         ) : null}
         {storedProblem ? (
           <div className="mt-3 space-y-2 rounded border border-destructive/40 bg-destructive/5 p-3">
             <p className="text-xs font-medium">本地恢复记录{storedProblem === "corrupt" ? "已损坏，无法解析或摘要不符" : "不属于当前身份"}，已阻止所有新命令。</p>
-            <p className="text-[11px] text-muted-foreground">不能直接删除后重新提交；请先在列表核对相关对象当前状态，再显式确认清除。</p>
+            <p className="text-xs text-muted-foreground">不能直接删除后重新提交；请先在列表核对相关对象当前状态，再显式确认清除。</p>
             <Button type="button" size="sm" variant="secondary" onClick={acknowledgeStoredProblem}>我已在列表核对，清除该记录</Button>
           </div>
         ) : null}
@@ -769,15 +821,33 @@ export function SupplyMediaReviewView({
               </SelectContent>
             </Select>
           </label>
-          <span className="text-[11px] text-muted-foreground">仅显示当前授权范围</span>
+          <span className="text-xs text-muted-foreground">仅显示当前授权范围</span>
         </div>
       </section>
 
-      <div className={cn("grid grid-cols-1 gap-5", showAside ? "xl:grid-cols-[minmax(0,1fr)_460px] 2xl:grid-cols-[minmax(0,1fr)_480px]" : "w-full")}>
+      <div className={cn("grid grid-cols-1 gap-5", showAside ? "xl:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_420px]" : "w-full")}>
         <section className="section-panel min-w-0">
-          <div className="flex items-center justify-between gap-3 pb-2 border-b border-border/40">
-            <h3 className="text-sm font-semibold tracking-tight">审核队列</h3>
-            <span className="text-[11px] text-muted-foreground">{filterSummary}</span>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold tracking-tight">审核队列</h2>
+              <span className="text-xs text-muted-foreground">{filterSummary}{page ? ` · 本页 ${pageItems.length} 条` : ""}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {page && pageItems.length > 0 ? (
+                <div role="group" aria-label="处理范围" className="flex items-center gap-0.5 rounded-md border border-border/70 p-0.5">
+                  {([
+                    ["all", `全部 ${pageItems.length}`],
+                    ["reviewable", `可审核 ${reviewableCount}`],
+                    ["exempt", `免审 ${exemptCount}`],
+                  ] as const).map(([value, label]) => (
+                    <Button key={value} type="button" size="sm" variant={reviewScope === value ? "secondary" : "ghost"} aria-pressed={reviewScope === value} className="h-7 px-2 text-xs" onClick={() => { setReviewScope(value); setSelected(null); }}>{label}</Button>
+                  ))}
+                </div>
+              ) : null}
+              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs" disabled={loading} onClick={() => void loadQueue(cursorNow(), true)}>
+                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />刷新
+              </Button>
+            </div>
           </div>
           {listError ? (
             <div className="mt-3 space-y-2">
@@ -788,156 +858,115 @@ export function SupplyMediaReviewView({
             <div className="mt-3 space-y-2">
               {[0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
             </div>
-          ) : page && page.items.length > 0 ? (
+          ) : page && page.items.length > 0 && visibleItems.length > 0 ? (
             <>
-              <p className="mt-2 text-[11px] text-muted-foreground md:hidden">表格可横向滚动；点素材列可直接打开详情。</p>
-              <div className="mt-2 overflow-x-auto rounded-lg border border-border/70 bg-card/40">
-                <Table className="min-w-[680px]">
-                  <TableHeader>
-                    <TableRow className="bg-muted/30">
-                      <TableHead className="min-w-[240px]">素材</TableHead>
-                      <TableHead className="w-28 whitespace-nowrap">游戏</TableHead>
-                      <TableHead className="w-24 whitespace-nowrap">审核状态</TableHead>
-                      <TableHead className="w-28 whitespace-nowrap">当前可见性</TableHead>
-                      <TableHead className="w-28 whitespace-nowrap">上传时间</TableHead>
-                      <TableHead className="w-20 whitespace-nowrap">查看</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {page.items.map((asset) => (
-                      <TableRow
-                        key={asset.id}
-                        aria-selected={selected?.id === asset.id}
-                        data-selected={selected?.id === asset.id ? "true" : undefined}
-                        className={`group transition-colors ${selected?.id === asset.id ? "bg-primary/5 ring-1 ring-inset ring-primary/20" : "hover:bg-muted/40"}`}
-                      >
-                        <TableCell>
-                          <div className="flex items-center gap-2.5">
-                            <Thumb asset={asset} />
+              {wide ? (
+                <div className="mt-2 overflow-x-auto">
+                  <Table className="min-w-[680px]">
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="min-w-[260px]">素材</TableHead>
+                        <TableHead className="w-20 whitespace-nowrap">游戏</TableHead>
+                        <TableHead className="w-28 whitespace-nowrap">审核状态</TableHead>
+                        <TableHead className="w-28 whitespace-nowrap">当前可见性</TableHead>
+                        <TableHead className="w-28 whitespace-nowrap">上传时间</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleItems.map((asset) => (
+                        <TableRow
+                          key={asset.id}
+                          data-selected={selected?.id === asset.id ? "true" : undefined}
+                          className={`group transition-colors ${selected?.id === asset.id ? "bg-primary/5 ring-1 ring-inset ring-primary/20" : "hover:bg-muted/40"}`}
+                        >
+                          <TableCell>
                             <Button
                               type="button"
                               variant="ghost"
-                              className="h-auto p-0 min-w-0 text-left font-normal justify-start hover:bg-transparent"
-                              aria-label={`素材 ${asset.id} 详情`}
+                              className="h-auto w-full min-w-0 justify-start gap-2.5 p-0 text-left font-normal hover:bg-transparent"
+                              aria-label={`查看素材 ${PURPOSE_LABELS[asset.purpose] ?? asset.purpose} ${timeShort(asset.createdAt)}`}
                               onClick={() => setSelected(asset)}
                             >
-                              <span className="block truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
-                              <span className="block truncate text-[11px] text-muted-foreground">{objectName(asset, gameNames)}</span>
-                              <span className="block truncate font-mono text-[10px] text-muted-foreground/70">{asset.id.slice(0, 8)}…</span>
+                              <Thumb asset={asset} />
+                              <span className="min-w-0">
+                                <span className="block truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
+                                <span className="block truncate text-xs text-muted-foreground">{objectName(asset, gameNames)}</span>
+                              </span>
                             </Button>
-                          </div>
-                        </TableCell>
-                        <TableCell className="whitespace-nowrap text-xs font-medium">{gameNames.get(asset.gameId) ?? asset.gameId.slice(0, 8) + "…"}</TableCell>
-                        <TableCell>
-                          <Badge variant={asset.reviewState === "APPROVED" ? "success" : asset.reviewState === "PENDING" ? "warning" : "destructive"} className="gap-1 font-medium">
-                            <span className={`size-1.5 rounded-full ${asset.reviewState === "APPROVED" ? "bg-emerald-500" : asset.reviewState === "PENDING" ? "bg-amber-500 animate-pulse" : "bg-rose-500"}`} />
-                            {STATE_LABELS[asset.reviewState] ?? asset.reviewState}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={asset.accessClass === "PUBLIC_DISPLAY" ? "info" : "secondary"} className="gap-1 font-medium">
-                            <span className={`size-1.5 rounded-full ${asset.accessClass === "PUBLIC_DISPLAY" ? "bg-sky-500" : "bg-muted-foreground/50"}`} />
-                            {VISIBILITY_LABELS[asset.accessClass] ?? asset.accessClass}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          <span title={timeFull(asset.createdAt)} className="cursor-default whitespace-nowrap text-xs text-muted-foreground">{timeShort(asset.createdAt)}</span>
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={selected?.id === asset.id ? "default" : "secondary"}
-                            className="h-7.5 px-3 text-xs shadow-2xs font-medium"
-                            onClick={() => setSelected(asset)}
-                            aria-label={`查看素材 ${asset.id}`}
-                          >
-                            查看
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-xs font-medium">{gameNames.get(asset.gameId) ?? "游戏名未提供"}</TableCell>
+                          <TableCell>{reviewBadge(asset)}</TableCell>
+                          <TableCell>{visibilityBadge(asset)}</TableCell>
+                          <TableCell>
+                            <span className="whitespace-nowrap text-xs text-muted-foreground">{timeShort(asset.createdAt)}</span>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="mt-3 space-y-2">
+                  {visibleItems.map((asset) => (
+                    <button
+                      key={asset.id}
+                      type="button"
+                      className="flex w-full items-start gap-3 rounded-lg border border-border/70 bg-card/40 p-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={`查看素材 ${PURPOSE_LABELS[asset.purpose] ?? asset.purpose} ${timeShort(asset.createdAt)}`}
+                      onClick={() => setSelected(asset)}
+                    >
+                      <Thumb asset={asset} />
+                      <span className="min-w-0 flex-1 space-y-1">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-sm font-semibold text-foreground">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
+                          {reviewBadge(asset)}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">{objectName(asset, gameNames)}</span>
+                        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                          <span>{gameNames.get(asset.gameId) ?? "游戏名未提供"}</span>
+                          <span>·</span>
+                          <span>{timeShort(asset.createdAt)}</span>
+                          <span>·</span>
+                          {visibilityBadge(asset)}
+                        </span>
+                      </span>
+                      <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground/60" aria-hidden />
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">本页 {page.items.length} 条 · 游标翻页，无总量口径</span>
+                <span className="text-xs text-muted-foreground">本页 {pageItems.length} 条{reviewScope !== "all" ? ` · ${scopeLabel} ${visibleItems.length} 条` : ""}</span>
                 <div className="flex gap-2">
                   <Button type="button" size="sm" variant="secondary" disabled={pageIndex === 0 || loading} onClick={goPrev}>上一页</Button>
                   <Button type="button" size="sm" variant="secondary" disabled={!page.nextCursor || loading} onClick={goNext}>下一页</Button>
                 </div>
               </div>
             </>
-          ) : (
-            <div className="mt-4 space-y-3 rounded-xl border border-border/70 bg-muted/20 p-8 text-center max-w-2xl mx-auto my-6">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
-                <ShieldAlert className="size-6 text-primary" />
-              </div>
-              <p className="text-sm font-semibold">{filterSummary}：当前筛选下没有素材。</p>
-              <p className="text-xs text-muted-foreground max-w-md mx-auto leading-relaxed">
-                当前队列暂无待审核内容（空队列不代表账号没有图片，也不代表媒体系统无数据）。可切换上方状态或点击刷新查看。
-              </p>
-              <div className="flex flex-wrap justify-center gap-2 pt-1">
-                {tab === "pending" ? (
-                  <Button type="button" size="sm" variant="secondary" onClick={() => { setTab("reviewed"); setReviewedState("APPROVED"); }}>查看已通过</Button>
-                ) : (
-                  <Button type="button" size="sm" variant="secondary" onClick={() => setTab("pending")}>查看待审核</Button>
-                )}
-                {canUpload ? (
-                  <Button type="button" size="sm" variant="secondary" onClick={() => setUploadState({ ...emptyUploadDialog(), open: true })} disabled={writeLocked}>准备平台图片</Button>
-                ) : null}
-              </div>
-            </div>
-          )}
+          ) : queueEmptyState}
         </section>
 
-        {wide ? (
+        {wide && showAside ? (
           <aside
             ref={asideRef}
-            className={cn(
-              "section-panel hidden self-start overflow-hidden xl:min-h-0 xl:flex-col xl:sticky xl:top-2",
-              showAside ? "xl:flex" : "xl:hidden",
-            )}
+            className="section-panel hidden self-start overflow-hidden xl:min-h-0 xl:flex-col xl:sticky xl:top-2 xl:flex"
             style={selected && asideHeight !== undefined ? { height: asideHeight } : undefined}
             aria-label="素材详情"
           >
-            {detail ?? (
-              <div className="flex min-h-72 flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
-                <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
-                  <ShieldAlert className="size-6 text-primary" />
-                </div>
-                <div className="space-y-1">
-                  <strong className="text-base font-semibold text-foreground">选择左侧素材</strong>
-                  <p className="max-w-[32ch] text-xs leading-relaxed text-muted-foreground">
-                    审核与公开是两个独立动作；审核通过保持私有，公开需另行授权。
-                  </p>
-                </div>
-                {page && page.items.length > 0 ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="mt-2 h-9 gap-1.5 font-medium shadow-2xs"
-                    onClick={() => {
-                      if (page.items[0]) setSelected(page.items[0]);
-                    }}
-                  >
-                    开始审核队列（第 1 条）
-                  </Button>
-                ) : null}
-              </div>
-            )}
+            {detail}
           </aside>
-        ) : (
-          <Sheet open={Boolean(selected) && !confirm} onOpenChange={(open) => { if (!open && !confirm) setSelected(null); }}>
-            <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[420px]" closeLabel="关闭素材详情">
-              <SheetHeader className="shrink-0 border-b border-border">
-                <SheetTitle>素材详情</SheetTitle>
-                <SheetDescription>审核与公开是两个独立动作；技术与绑定未返回的事实显示未提供。</SheetDescription>
-              </SheetHeader>
-              <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">{detail}</div>
-            </SheetContent>
-          </Sheet>
-        )}
+        ) : null}
+        {!wide ? (
+          <Dialog open={Boolean(selected) && !confirm} onOpenChange={(open) => { if (!open && !confirm) setSelected(null); }}>
+            <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] flex-col overflow-hidden sm:max-w-2xl" closeLabel="关闭素材详情">
+              <DialogHeader className="shrink-0 border-b border-border pb-3">
+                <DialogTitle>素材详情</DialogTitle>
+                <DialogDescription>审核与公开是两个独立动作；技术与绑定未返回的事实显示未提供。</DialogDescription>
+              </DialogHeader>
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{detail}</div>
+            </DialogContent>
+          </Dialog>
+        ) : null}
       </div>
 
       {canUpload ? (

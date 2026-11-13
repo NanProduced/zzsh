@@ -22,7 +22,7 @@ export const OWNERSHIP_LABELS: Record<MediaAssetReview["ownershipKind"], string>
 };
 
 export const VISIBILITY_LABELS: Record<MediaAssetReview["accessClass"], string> = {
-  PUBLIC_DISPLAY: "公开配置",
+  PUBLIC_DISPLAY: "公开可见",
   PRIVATE_REVIEW: "私有",
 };
 
@@ -178,10 +178,15 @@ export function visibilityReasonError(reason: string): string | null {
   return null;
 }
 
+/** ACCOUNT_DISPLAY 免发布前预审：本页只核对来源，不做审核、隔离或公开处置。 */
+export function isExemptReview(asset: MediaAssetReview): boolean {
+  return asset.purpose === "ACCOUNT_DISPLAY";
+}
+
 /** 人类名称/用途主显；对象名合同未返回时显示真实缺失态。 */
 export function objectName(asset: MediaAssetReview, gameNames: Map<string, string>): string {
   if (asset.purpose === "ACCOUNT_DISPLAY" || asset.purpose === "ACCOUNT_EVIDENCE") {
-    return asset.accountId ? `账号 ${asset.accountId}` : "来源账号未提供";
+    return asset.accountId ? "来源账号" : "来源账号未提供";
   }
   if (asset.purpose === "GAME_COVER") {
     return gameNames.get(asset.gameId) ?? "游戏名未提供";

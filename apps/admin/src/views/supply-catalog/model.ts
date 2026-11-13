@@ -190,7 +190,6 @@ export function skinNextSteps(skin: CatalogSkin): string[] {
 
 export const COLUMN_SETS: Record<CatalogKind, Array<{ key: string; label: string }>> = {
   items: [
-    { key: "media", label: "图片" },
     { key: "unit", label: "单位" },
     { key: "quantityScale", label: "数量精度" },
     { key: "required", label: "必填配置" },
@@ -204,7 +203,6 @@ export const COLUMN_SETS: Record<CatalogKind, Array<{ key: string; label: string
     { key: "formVisible", label: "表单展示" },
   ],
   skins: [
-    { key: "media", label: "图片" },
     { key: "ownerRef", label: "类型与所属" },
     { key: "namingState", label: "身份状态" },
     { key: "categoryPath", label: "分类" },
