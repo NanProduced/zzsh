@@ -102,10 +102,10 @@ test("gunsmith row editor: parent gating, verbatim codes and unknown writes", as
 
   try {
     ({ SupplyGunsmithView: View } = await vite.ssrLoadModule("/src/views/supply-gunsmith-view.tsx"));
-    await t.test("service state is read-only and no write control exists", async () => {
+    await t.test("game is fixed to Delta and the removed service status leaves no write control", async () => {
       await mount();
-      assert.match(document.body.textContent, /玩家端服务未启用/);
-      assert.match(document.body.textContent, /服务开关不在本页操作/);
+      assert.doesNotMatch(document.body.textContent, /玩家端服务未启用/);
+      assert.doesNotMatch(document.body.textContent, /服务开关不在本页操作/);
       assert.ok(!byText("启用服务") && !byText("停用服务"), "no service write button");
       assert.equal(writes.length, 0);
     });

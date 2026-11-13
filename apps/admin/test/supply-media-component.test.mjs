@@ -189,7 +189,7 @@ test("待审核队列渲染四轴事实；详情区分审核与可见性；缺�
   assert.ok(h.textOf().includes("本页 2 条"), "显示本页条数不造总量");
   assert.ok(h.textOf().includes("游戏封面"));
   assert.ok(h.textOf().includes("三角洲行动"));
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   const aside = h.el.querySelector("aside");
   assert.ok(aside.textContent.includes("技术状态"));
   assert.ok(aside.textContent.includes("未提供"), "技术/绑定事实未返回必须显示未提供");
@@ -210,7 +210,7 @@ test("ACCOUNT_DISPLAY 只跳来源账号；缺 accountId 禁用跳转并说明�
       },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   let aside = h.el.querySelector("aside");
   assert.ok(aside.textContent.includes("免发布前预审"));
   const jump = h.btn("进入来源账号核对本图", aside);
@@ -231,6 +231,40 @@ test("ACCOUNT_DISPLAY 只跳来源账号；缺 accountId 禁用跳转并说明�
   assert.equal(h.writes.length, 0, "只读场景无写请求");
 });
 
+test("素材队列按可审核/免审分流，免审行不再承诺审核动作", async (t) => {
+  const h = await mountHarness(t, {
+    fetchImpl: router([
+      { match: "/api/bff/admin/supply/games", response: () => json({ games: [{ id: "game_1", name: "三角洲行动" }] }) },
+      { match: "/api/bff/admin/supply/media/reviews", response: () => json(page([display(), platform({ id: "asset_platform_2" })])) },
+    ]),
+  });
+  assert.ok(h.btn("全部 2"));
+  assert.ok(h.btn("可审核 1"));
+  assert.ok(h.btn("免审 1"));
+  await h.click(h.btn("免审 1"));
+  assert.equal(h.rowViews().length, 1);
+  assert.ok(h.el.querySelector("tbody tr")?.textContent.includes("免审核对"));
+  await h.click(h.btn("可审核 1"));
+  assert.equal(h.rowViews().length, 1);
+  assert.ok(h.rowViews()[0].textContent.includes("游戏封面"));
+});
+
+test("窄屏素材队列用卡片而不是横向表格，详情用 Dialog", async (t) => {
+  const h = await mountHarness(t, {
+    wide: false,
+    fetchImpl: router([
+      { match: "/api/bff/admin/supply/games", response: () => json({ games: [{ id: "game_1", name: "三角洲行动" }] }) },
+      { match: "/api/bff/admin/supply/media/reviews", response: () => json(page([display()])) },
+    ]),
+  });
+  assert.equal(h.el.querySelector("table"), null);
+  const card = h.rowViews()[0];
+  assert.ok(card && card.textContent.includes("免审核对"));
+  await h.click(card);
+  assert.ok(h.browser.document.querySelector('[data-slot="dialog-content"]'));
+  assert.equal(h.browser.document.querySelector('[data-slot="sheet-content"]'), null);
+});
+
 test("用户凭证可审但无公开选项；无决定权只读", async (t) => {
   const h = await mountHarness(t, {
     fetchImpl: router([
@@ -238,7 +272,7 @@ test("用户凭证可审但无公开选项；无决定权只读", async (t) => {
       { match: "/api/bff/admin/supply/media/reviews", response: () => json(page([evidence()])) },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   let aside = h.el.querySelector("aside");
   const labels = [...aside.querySelectorAll("button")].map((b) => b.textContent.trim());
   assert.ok(labels.includes("通过（保持私有）"));
@@ -254,7 +288,7 @@ test("用户凭证可审但无公开选项；无决定权只读", async (t) => {
     ]),
     perms: ["supply.review.read"],
   });
-  await readonly.click(readonly.btn("查看"));
+  await readonly.click(readonly.rowViews()[0]);
   const aside2 = readonly.el.querySelector("aside");
   assert.ok(aside2.textContent.includes("不能决定审核"));
   assert.equal(readonly.writes.length, 0);
@@ -275,7 +309,7 @@ test("审核写：确认框含对象事实，理由必填，原 key 提交；驳
       { match: /^\/api\/bff\/admin\/supply\/media\/asset_platform_1\/review$/, method: "POST", response: () => json({ id: "asset_platform_1", reviewState: "REJECTED" }) },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   await h.click(h.btn("驳回"));
   const dialog = h.el.querySelector('[role="dialog"]') ?? h.el.querySelector(".workspace-root > div:last-child");
   assert.ok(h.textOf().includes("确认驳回"), "确认框含效果说明");
@@ -309,7 +343,7 @@ test("写结果 UNKNOWN：保留原 key、锁新命令、原请求重放同 key�
       },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   await h.click(h.btn("驳回"));
   await h.fillTextarea("图片模糊，无法辨认内容");
   await h.click(h.btn("确认驳回"));
@@ -325,7 +359,7 @@ test("写结果 UNKNOWN：保留原 key、锁新命令、原请求重放同 key�
   assert.ok(h.textOf().includes("已成功"));
 
   // 再造一次 UNKNOWN 并走放弃恢复（须确认）。
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   await h.click(h.btn("隔离"));
   await h.fillTextarea("疑似违规内容待核");
   await h.click(h.btn("确认隔离"));
@@ -359,7 +393,7 @@ test("双击防重复、迟到响应不污染新对象、accepted 后回读失�
       },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   await h.click(h.btn("驳回"));
   await h.fillTextarea("图片模糊，无法辨认内容");
   const confirm = h.btn("确认驳回");
@@ -399,7 +433,7 @@ test("accepted 后回读失败→重新读取解决；翻页用真实游标", as
   assert.ok(h.textOf().includes("游戏封面"));
 });
 
-test("空态复述筛选并给两条路径；无读权显示无权限", async (t) => {
+test("空态复述筛选并给刷新与状态路径；无读权显示无权限", async (t) => {
   const h = await mountHarness(t, {
     fetchImpl: router([
       { match: "/api/bff/admin/supply/games", response: () => json({ games: [{ id: "game_1", name: "三角洲行动" }] }) },
@@ -409,8 +443,9 @@ test("空态复述筛选并给两条路径；无读权显示无权限", async (t
   assert.ok(h.textOf().includes("当前筛选下没有素材"));
   assert.ok(h.textOf().includes("待审核"), "复述生效筛选");
   assert.ok(h.btn("查看已通过"), "路径一：查看已通过");
-  assert.ok(h.btn("准备平台图片"), "路径二：准备平台图片");
-  assert.ok(h.textOf().includes("空队列不代表账号没有图片"));
+  assert.ok(h.btn("刷新"), "路径二：刷新队列");
+  assert.ok(!h.textOf().includes("空队列不代表账号没有图片"));
+  assert.ok(!h.textOf().includes("准备平台图片"), "空态不重复页首上传动作");
 
   const denied = await mountHarness(t, {
     fetchImpl: router([{ match: "/api/bff/admin/supply/games", response: () => json({ games: [] }) }]),
@@ -620,7 +655,7 @@ test("反例M-F2：原体篡改记录 fail closed，锁写且不发请求", asyn
   await h.settle(60);
   assert.ok(h.textOf().includes("已损坏"), "摘要不符按损坏处理");
   assert.ok(h.btn("上传平台素材").disabled, "损坏记录锁住所有新命令");
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   const approve = h.btn("通过（保持私有）");
   assert.ok(approve, "动作仍在渲染");
   assert.ok(approve.disabled, "损坏记录期间动作禁用");
@@ -661,7 +696,7 @@ test("反例M-F3：UNKNOWN 重放403不改写成原命令被拒，记录保留",
       },
     ]),
   });
-  await h.click(h.btn("查看"));
+  await h.click(h.rowViews()[0]);
   await h.click(h.btn("驳回"));
   await h.fillTextarea("图片模糊，无法辨认内容");
   await h.click(h.btn("确认驳回"));

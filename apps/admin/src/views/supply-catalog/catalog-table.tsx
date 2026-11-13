@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,8 +28,8 @@ export function CopyCode({ code }: { code: string }) {
     window.setTimeout(() => setCopied("idle"), 1600);
   };
   return (
-    <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/80 hover:text-foreground transition-colors group">
-      <span className="font-mono text-[10px] truncate max-w-40" title={code}>{code}</span>
+    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground/80 hover:text-foreground transition-colors group">
+      <span className="font-mono text-xs truncate max-w-40">{code}</span>
       <Button
         type="button"
         variant="ghost"
@@ -40,8 +40,8 @@ export function CopyCode({ code }: { code: string }) {
       >
         {copied === "done" ? <CheckIcon className="size-3 text-emerald-600 dark:text-emerald-400" /> : <CopyIcon className="size-3" />}
       </Button>
-      {copied === "done" ? <span className="text-[10px] text-emerald-600 dark:text-emerald-400">已复制</span> : null}
-      {copied === "failed" ? <span className="text-[10px] text-destructive">复制失败</span> : null}
+      {copied === "done" ? <span className="text-xs text-emerald-600 dark:text-emerald-400">已复制</span> : null}
+      {copied === "failed" ? <span className="text-xs text-destructive">复制失败</span> : null}
     </span>
   );
 }
@@ -200,6 +200,17 @@ export function CatalogObjectTable({
   const columns = retiredCategories && kind === "skins" ? COLUMN_SETS[kind].filter(column => column.key !== "categoryPath") : COLUMN_SETS[kind];
   const searching = query.trim().length > 0 || filterActive;
   const editing = Boolean(editValues);
+  const columnsForDisplay = editing ? columns : columns.filter(column => {
+    if (column.key !== "required" && column.key !== "sortOrder") return true;
+    return new Set(rows.map(row => String(row[column.key] ?? ""))).size > 1;
+  });
+  const pageSize = 50;
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageRows = rows.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  useEffect(() => { setPage(0); }, [kind, query, filterActive]);
+  useEffect(() => { if (editingIsNew) setPage(0); }, [editingIsNew]);
 
   const editControl = (key: string): React.ReactNode => {
     const values = editValues!;
@@ -250,7 +261,7 @@ export function CatalogObjectTable({
       <div className="space-y-0.5">
         <p className="text-sm font-medium text-foreground break-words">{String(row.name ?? "未提供名称")}</p>
         {Array.isArray(row.aliases) && row.aliases.length > 0 ? (
-          <p className="text-[11px] text-muted-foreground break-words">别名：{row.aliases.map((alias) => String(alias)).join("；")}</p>
+          <p className="text-xs text-muted-foreground break-words">别名：{row.aliases.map((alias) => String(alias)).join("；")}</p>
         ) : null}
         <CopyCode code={String(row.code ?? row.id)} />
         <div className="flex flex-wrap items-center gap-1.5 md:hidden">
@@ -322,19 +333,19 @@ export function CatalogObjectTable({
       <Fragment>
         <TableRow data-editing="new" data-catalog-row-id="" className="bg-primary/[0.06] border-l-4 border-l-primary ring-1 ring-primary/30 shadow-xs">
           <TableCell className={editCellClass(null)}>{nameCell(null)}</TableCell>
-          {columns.map((column) => (
+          {columnsForDisplay.map((column) => (
             <TableCell key={column.key} className={editCellClass(null)}>
-              {editControl(column.key) ?? <span className="text-[11px] text-muted-foreground">保存后生成</span>}
+              {editControl(column.key) ?? <span className="text-xs text-muted-foreground">保存后生成</span>}
             </TableCell>
           ))}
           <TableCell className={`${editCellClass(null)} text-right`}>{actionsCell(null)}</TableCell>
         </TableRow>
         {showReason ? (
           <TableRow>
-            <TableCell colSpan={columns.length + 2} className="bg-muted/40 whitespace-normal">
+            <TableCell colSpan={columnsForDisplay.length + 2} className="bg-muted/40 whitespace-normal">
               <div className="flex flex-wrap items-center gap-2">
                 <CellInput label="操作原因" value={editValues.reason ?? ""} disabled={busy} onValueChange={(value) => onEditValue?.("reason", value)} />
-                <span className="text-[11px] text-muted-foreground">皮肤与所属对象的每次写操作都需要原因，随本次提交记录。</span>
+                <span className="text-xs text-muted-foreground">皮肤与所属对象的每次写操作都需要原因，随本次提交记录。</span>
               </div>
             </TableCell>
           </TableRow>
@@ -344,7 +355,7 @@ export function CatalogObjectTable({
 
   const emptyBody = (
     <TableRow>
-      <TableCell colSpan={columns.length + 2} className="py-8">
+      <TableCell colSpan={columnsForDisplay.length + 2} className="py-8">
         <div className="space-y-2 text-xs text-muted-foreground">
           <p className="text-sm font-medium text-foreground">{!contractReady ? "目录资料暂不可用" : searching ? "没有匹配的条目" : `暂无${OBJECT_LABEL[kind]}`}</p>
           {contractReady ? <p>{searching ? query.trim() ? `已加载内容中无匹配：${query.trim()}。搜索只覆盖当前已加载目录，不代表全库不存在。` : "当前身份筛选下没有匹配条目；筛选仅覆盖已加载目录。" : retiredCategories && kind === "skins" ? "新词条不再选择旧分类；保存草稿后核实实际皮肤类型与身份。" : OBJECT_EMPTY_HINT[kind]}</p> : null}
@@ -369,7 +380,7 @@ export function CatalogObjectTable({
         <TableHeader>
           <TableRow>
             <TableHead className="min-w-44">名称</TableHead>
-            {columns.map((column) => (
+            {columnsForDisplay.map((column) => (
               <TableHead key={column.key}>{column.label}</TableHead>
             ))}
             <TableHead className="text-right">操作</TableHead>
@@ -381,14 +392,14 @@ export function CatalogObjectTable({
           ) : (
             <>
               {phantomRow}
-              {rows.map((row) => (
+              {pageRows.map((row) => (
                 <Fragment key={row.id}>
                 <TableRow data-catalog-row-id={row.id} data-editing={row.id === editingId ? "true" : undefined}>
                   <TableCell className={editCellClass(row)}>{nameCell(row)}</TableCell>
-                  {columns.map((column) => (
+                  {columnsForDisplay.map((column) => (
                     <TableCell key={column.key} className={editCellClass(row)}>
                       {row.id === editingId && editValues && column.key !== "media" ? (
-                        editControl(column.key) ?? (column.key === "appearance" ? <Button type="button" variant="link" size="sm" disabled={busy} onClick={() => onDetailRow?.()}>详情维护</Button> : <span className="text-[11px] text-muted-foreground">创建后不可改</span>)
+                        editControl(column.key) ?? (column.key === "appearance" ? <Button type="button" variant="link" size="sm" disabled={busy} onClick={() => onDetailRow?.()}>详情维护</Button> : <span className="text-xs text-muted-foreground">创建后不可改</span>)
                       ) : column.key === "enabled" || column.key === "formVisible" ? (
                         <StateBadge on={Boolean(row[column.key])} onLabel={column.key === "enabled" ? "启用" : "展示"} offLabel={column.key === "enabled" ? "停用" : "隐藏"} field={column.key} />
                       ) : column.key === "namingState" ? (
@@ -402,10 +413,10 @@ export function CatalogObjectTable({
                 </TableRow>
                 {row.id === editingId && showReason && editValues ? (
                   <TableRow>
-                    <TableCell colSpan={columns.length + 2} className="bg-muted/40 whitespace-normal">
+                    <TableCell colSpan={columnsForDisplay.length + 2} className="bg-muted/40 whitespace-normal">
                       <div className="flex flex-wrap items-center gap-2">
                         <CellInput label="操作原因" value={editValues.reason ?? ""} disabled={busy} onValueChange={(value) => onEditValue?.("reason", value)} />
-                        <span className="text-[11px] text-muted-foreground">皮肤与所属对象的每次写操作都需要原因，随本次提交记录。</span>
+                        <span className="text-xs text-muted-foreground">皮肤与所属对象的每次写操作都需要原因，随本次提交记录。</span>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -416,6 +427,15 @@ export function CatalogObjectTable({
           )}
         </TableBody>
       </Table>
+      {rows.length > pageSize ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground">
+          <span>第 {currentPage + 1}/{pageCount} 页 · 每页 {pageSize} 条 · 共 {rows.length} 条</span>
+          <div className="flex gap-2">
+            <Button type="button" size="sm" variant="secondary" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button>
+            <Button type="button" size="sm" variant="secondary" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)}>下一页</Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -143,7 +143,7 @@ test("列表对象名：游戏名可用、账号显示来源、缺字段显示�
   const names = new Map([["game_1", "三角洲行动"]]);
   assert.equal(objectName(platform(), names), "三角洲行动");
   assert.equal(objectName(platform({ gameId: "game_x" }), names), "游戏名未提供");
-  assert.equal(objectName(display(), names), "账号 account_1");
+  assert.equal(objectName(display(), names), "来源账号");
   assert.equal(objectName(display({ accountId: null }), names), "来源账号未提供");
   assert.equal(objectName(platform({ purpose: "SKIN_MEDIA" }), names), "对象名未提供");
 });
@@ -176,7 +176,7 @@ test("公开素材的审核决定必须告知解除绑定影响（F9）；可见
   assert.ok(quarantineOnPublic.effect.includes("撤销公开访问"));
   const rejectOnPrivate = actionsFor(platform({ reviewState: "APPROVED" }), ctx).actions.find((a) => a.kind === "review" && a.decision === "REJECT");
   assert.ok(!rejectOnPrivate.effect.includes("解除目录绑定"), "私有素材不虚构解绑影响");
-  assert.equal(VISIBILITY_LABELS.PUBLIC_DISPLAY, "公开配置");
+  assert.equal(VISIBILITY_LABELS.PUBLIC_DISPLAY, "公开可见");
 });
 
 test("显示工具：大小与短 ID", () => {

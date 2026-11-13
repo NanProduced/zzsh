@@ -11,6 +11,7 @@ import { formatBytes, mediaContentUrl, type ZoomTarget } from "../supply-review/
 import {
   actionsFor,
   bindingFact,
+  isExemptReview,
   objectName,
   OWNERSHIP_LABELS,
   PURPOSE_LABELS,
@@ -164,13 +165,13 @@ export function MediaDetailPanel({
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground border border-border/60">
           <div className="flex items-center gap-1.5 min-w-0">
             <span className="shrink-0 text-muted-foreground/70">素材ID:</span>
-            <code className="truncate font-mono text-[10px] text-foreground font-medium">{asset.id}</code>
+            <code className="truncate font-mono text-[11px] text-foreground font-medium">{asset.id}</code>
             <Button type="button" variant="ghost" size="icon-xs" className="h-5 w-5 shrink-0" aria-label="复制素材ID" onClick={() => copy(asset.id)}>
               {copied === "ok" ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
             </Button>
-            {copied === "ok" ? <span className="text-[10px] text-emerald-500 font-medium">已复制</span> : copied === "fail" ? <span className="text-[10px] text-destructive">复制失败</span> : null}
+            {copied === "ok" ? <span className="text-[11px] text-emerald-500 font-medium">已复制</span> : copied === "fail" ? <span className="text-[11px] text-destructive">复制失败</span> : null}
           </div>
-          <div className="flex items-center gap-2 text-[10px] shrink-0 font-mono text-muted-foreground">
+          <div className="flex items-center gap-2 text-[11px] shrink-0 font-mono text-muted-foreground">
             <span>hash {asset.contentHash.slice(0, 8)}…</span>
             <span>·</span>
             <span>{formatBytes(asset.byteSize)}</span>
@@ -179,7 +180,7 @@ export function MediaDetailPanel({
 
         {/* 状态与事实 dl */}
         <dl className="divide-y divide-border/60 rounded-xl border border-border/80 bg-card/60 px-3.5 py-1">
-          <StatusRow label="审核状态" value={STATE_LABELS[asset.reviewState] ?? asset.reviewState} badge={asset.reviewState === "APPROVED" ? "ok" : asset.reviewState === "PENDING" ? "warn" : "danger"} />
+          <StatusRow label="审核状态" value={isExemptReview(asset) ? "免审核对" : STATE_LABELS[asset.reviewState] ?? asset.reviewState} badge={isExemptReview(asset) ? "neutral" : asset.reviewState === "APPROVED" ? "ok" : asset.reviewState === "PENDING" ? "warn" : "danger"} />
           <StatusRow label="当前可见性" value={VISIBILITY_LABELS[asset.accessClass] ?? asset.accessClass} badge={asset.accessClass === "PUBLIC_DISPLAY" ? "ok" : "neutral"} />
           <StatusRow label="技术状态" value={technicalFact(asset)} />
           <StatusRow label="对象绑定" value={bindingFact(asset)} />
@@ -187,7 +188,7 @@ export function MediaDetailPanel({
         </dl>
         {!asset.technicalState || !asset.binding ? (
           <p className="text-[11px] text-muted-foreground/80 leading-relaxed px-1">
-            技术与绑定事实未随队列返回，不推定已完成；能加载图片不代表技术处理通过，公开配置也不单独证明匿名可读。素材版本冲突保护（expectedRevision/409）合同尚未统一，本页不承诺并发覆盖会被拒绝。
+            技术与绑定事实未随队列返回，不推定已完成；能加载图片不代表技术处理通过，公开设置也不单独证明匿名可读。素材版本冲突保护（expectedRevision/409）合同尚未统一，本页不承诺并发覆盖会被拒绝。
           </p>
         ) : null}
 
