@@ -45,12 +45,14 @@ import {
   LogIn,
   LockKeyhole,
   MapPin,
+  Plus,
   Search,
   ShieldCheck,
   Trash2,
   Upload,
   UserRound,
   X,
+  ZoomIn,
 } from "lucide-react";
 import { ServiceShell } from "../layout/service-shell";
 import { useUserSessionStore } from "../session/user-session-provider";
@@ -942,6 +944,21 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     window.addEventListener("hashchange", open);
     return () => window.removeEventListener("hashchange", open);
   }, []);
+  const scrollPositionRef = useRef(0);
+  useEffect(() => {
+    const onVisibility = () => {
+      if (typeof document === "undefined" || typeof window === "undefined") return;
+      if (document.hidden) {
+        scrollPositionRef.current = window.scrollY;
+      } else if (scrollPositionRef.current > 0) {
+        window.requestAnimationFrame(() => {
+          window.scrollTo({ top: scrollPositionRef.current, behavior: "instant" as ScrollBehavior });
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
   const pasteGuardRef = useRef<{ blocked: boolean; hasBanRecord: boolean; acceptFiles: ((category: MediaCategory, files: File[]) => void) | null }>({
     blocked: true,
     hasBanRecord: false,
@@ -1077,6 +1094,23 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const [payoutTerms, setPayoutTerms] = useState<{ target: string; terms: FullPayoutTerms | null; status: "loading" | "ready" | "unavailable" } | null>(null);
   const [payoutAccepted, setPayoutAccepted] = useState(false);
   const [rulesAccepted, setRulesAccepted] = useState(false);
+  const [publishSuccessOpen, setPublishSuccessOpen] = useState(false);
+  const [successCountdown, setSuccessCountdown] = useState(5);
+  useEffect(() => {
+    if (!publishSuccessOpen) return;
+    setSuccessCountdown(5);
+    const interval = window.setInterval(() => {
+      setSuccessCountdown((prev) => {
+        if (prev <= 1) {
+          window.clearInterval(interval);
+          router.push("/account?view=accounts");
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [publishSuccessOpen, router]);
   const [quoteStale, setQuoteStale] = useState(false);
   const [depositInput, setDepositInput] = useState("");
   const [haffInput, setHaffInput] = useState("");
@@ -1488,9 +1522,13 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const syncIdentity = useCallback(async (): Promise<boolean> => {
     const snapshot = sharedSession.getSnapshot();
     if (snapshot.status === "loading" || snapshot.status === "error") {
-      if (snapshot.status === "error") identityPauseGate.current.markFailed();
-      else identityPauseGate.current.startCheck();
-      setIdentityPhase(snapshot.status === "loading" ? "checking" : "failed");
+      if (snapshot.status === "error") {
+        identityPauseGate.current.markFailed();
+        setIdentityPhase("failed");
+      } else {
+        identityPauseGate.current.startCheck();
+        setIdentityPhase("checking");
+      }
       return false;
     }
     if (!snapshot.userId) {
@@ -1559,6 +1597,29 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     navigationIntent?.cancel?.();
     setNavigationIntent(null);
   };
+  const saveAndLeave = async () => {
+    if (!navigationIntent || writeIntentRef.current || busy) return;
+    const intent = navigationIntent;
+    const context = captureContext();
+    setBusy("save");
+    setError(null);
+    try {
+      const request = await prepareDraftRequest(context, "save", () => saveAndLeave());
+      if (request) {
+        const saved = await sendDraftRequest(request, "save");
+        if (saved && currentContext(context)) {
+          leavingRef.current = true;
+          setNavigationIntent(null);
+          intent.run();
+          window.setTimeout(() => { leavingRef.current = false; }, 500);
+        }
+      }
+    } catch (failure) {
+      reportWriteFailure(failure, context);
+    } finally {
+      if (currentContext(context)) setBusy("");
+    }
+  };
   useEffect(() => {
     if (!navigationProtected) return;
     const guardNavigation = (event: MouseEvent) => {
@@ -1625,11 +1686,17 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       }
     }
     if (routeAccountRef.current !== accountIdProp) {
+      const isInternalAccountPromotion = Boolean(accountIdProp && accountRef.current === accountIdProp);
       routeAccountRef.current = accountIdProp;
-      invalidateContext(accountIdProp ? "正在读取新的发布资料。" : "正在准备新的发布资料。", false);
-      accountRef.current = accountIdProp;
-      setAccountId(accountIdProp);
-      setEditing(!accountIdProp);
+      if (!isInternalAccountPromotion) {
+        invalidateContext(accountIdProp ? "正在读取新的发布资料。" : "正在准备新的发布资料。", false);
+        accountRef.current = accountIdProp;
+        setAccountId(accountIdProp);
+        setEditing(!accountIdProp);
+      } else {
+        loadedAccountRef.current = accountIdProp;
+        setEditing(true);
+      }
     }
     if (identityStatusRef.current !== "confirmed") return;
     const epoch = epochRef.current;
@@ -1973,7 +2040,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       id = created.accountId;
       accountRef.current = id;
       loadedAccountRef.current = id;
+      routeAccountRef.current = id;
       setAccountId(id);
+      setEditing(true);
       const params = new URLSearchParams();
       if (mode === "fast") params.set("mode", "fast");
       const canonicalGame = games.find((game) => game.id === context.gameId)?.code ?? gameCodeProp;
@@ -2044,8 +2113,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     }
   };
 
-  const pricingSelection = (): { rentalMode: RentalMode; ownerRatioB?: string } | null => {
-    const saved = rentalPricingOf(draftRef.current.attributes);
+  const pricingSelection = (sourceAttributes?: DraftInput["attributes"]): { rentalMode: RentalMode; ownerRatioB?: string } | null => {
+    const saved = rentalPricingOf(sourceAttributes ?? draftRef.current.attributes);
     const selectedMode = fastLocked ? "fast" : (saved?.rentalMode ?? "ordinary");
     return buildRentalPricing(selectedMode, String(saved?.ownerRatioB ?? ""));
   };
@@ -2125,7 +2194,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const attributes: DraftInput["attributes"] = { ...source.attributes };
       let pricingOptionCode = source.pricingOptionCode;
       if (usesRentalModes(options)) {
-        const selection = pricingSelection();
+        const selection = pricingSelection(source.attributes);
         if (selection) attributes.rentalPricing = selection;
         pricingOptionCode = "";
       }
@@ -2414,6 +2483,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         setDraftDirty(false);
         setEditing(false);
         setNotice("账号已成功上架！");
+        setPublishSuccessOpen(true);
       });
     } catch (failure) {
       reportWriteFailure(failure, context);
@@ -3145,7 +3215,45 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const game = games.find((item) => item.id === gameId) ?? null;
   const gameCrumb = game ? { label: game.name, href: game.code === "delta" ? "/#delta-section" : undefined } : null;
   const breadcrumbs = [{ label: "首页", href: "/" }, ...(gameCrumb ? [gameCrumb] : []), { label: "上架出租" }];
-  const navigationDialog = (
+  const navigationDialog = !busy && !writePending && hasUnsaved ? (
+    <AlertDialog.Root open={navigationIntent !== null} onOpenChange={(next) => { if (!next) cancelNavigation(); }}>
+      <AlertDialog.Portal>
+        <AlertDialog.Backdrop className="modal-overlay ui-alert-dialog-backdrop" />
+        <AlertDialog.Popup className="ui-alert-dialog publish-leave-dialog" data-slot="alert-dialog-content">
+          <AlertDialog.Title className="ui-alert-dialog-title">保存当前上架资料？</AlertDialog.Title>
+          <AlertDialog.Description className="ui-alert-dialog-description">
+            你正在编辑的账号资料尚未保存为草稿。离开前是否需要保存？
+          </AlertDialog.Description>
+          <div className="ui-alert-dialog-actions publish-leave-actions">
+            <button
+              type="button"
+              className="button primary"
+              disabled={Boolean(busy)}
+              onClick={() => void saveAndLeave()}
+            >
+              {busy === "save" ? "保存中…" : "保存草稿并离开"}
+            </button>
+            <button
+              type="button"
+              className="button secondary"
+              disabled={Boolean(busy)}
+              onClick={leaveConfirmed}
+            >
+              放弃修改并离开
+            </button>
+            <button
+              type="button"
+              className="button quiet"
+              disabled={Boolean(busy)}
+              onClick={cancelNavigation}
+            >
+              继续填写
+            </button>
+          </div>
+        </AlertDialog.Popup>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  ) : (
     <ConfirmAlertDialog
       open={navigationIntent !== null}
       onOpenChange={(next) => { if (!next) cancelNavigation(); }}
@@ -3383,10 +3491,14 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const primaryDisabled = readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue) || identityState !== "confirmed" || !identityRef.current || visibleBlockers.length > 0 || (effectiveQuote ? !quoteConsistent || (payoutSelected === true && !payoutAcceptance) : false);
   const primaryAction = async () => {
     if (primaryDisabled) return;
-    if (effectiveQuote) {
+    const hasUnsavedMedia = media.some((item) => !item.bindingSaved);
+    const needsSaveAndQuote = draftDirty || hasUnsavedMedia || !effectiveQuote || !quoteConsistent;
+
+    if (!needsSaveAndQuote && effectiveQuote) {
       await confirmPublish();
       return;
     }
+
     const problem = quoteProblem();
     if (problem) {
       locate(problem.group, problem.message, problem.target);
@@ -3422,9 +3534,12 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       }
 
       const authoritativeCents = centsOfMoney(quoted.version?.quote?.ownerTotal);
-      const previewCents = ownerIncomePreviewSnapshot?.value?.state === "READY" && ownerIncomePreviewSnapshot.value.totalExpectedIncome
-        ? centsOfMoney(ownerIncomePreviewSnapshot.value.totalExpectedIncome)
-        : null;
+      const snapshotVal = ownerIncomePreviewSnapshot?.value;
+      const previewCents = snapshotVal?.totalExpectedIncome
+        ? centsOfMoney(snapshotVal.totalExpectedIncome)
+        : (snapshotVal?.ownerHaffIncome && snapshotVal?.knownResourceSubtotal)
+          ? (centsOfMoney(snapshotVal.ownerHaffIncome) ?? 0n) + (centsOfMoney(snapshotVal.knownResourceSubtotal) ?? 0n)
+          : null;
 
       if (previewCents !== null && authoritativeCents !== null && previewCents !== authoritativeCents) {
         setNotice(`预估收入已更新为 ${moneyText(quoted.version?.quote?.ownerTotal)}，请核对后再次点击确认上架。`);
@@ -3437,49 +3552,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         return;
       }
 
-      const currentToken = token();
-      if (!currentToken) {
-        setNotice("信息已更新，请再次点击确认上架。");
-        return;
-      }
-
-      setBusy("accept");
-      const confirmContext = { ...context, accountId: currentToken.id };
-      const confirmBody = {
-        expectedRevision: currentToken.expectedRevision,
-        versionId: currentToken.versionId,
-        releaseId: currentToken.releaseId,
-        contentHash: currentToken.contentHash,
-        ...(payoutAcceptance ? { fullPayoutTermsAcceptance: payoutAcceptance } : {}),
-      };
-      const keyBody = { accountId: currentToken.id, ...confirmBody };
-      const frozenConfirm = freezeRequest(confirmBody, keyFor("accept-rules", keyBody));
-      await sendConfirmRequest("accept-rules", confirmContext, frozenConfirm.body, frozenConfirm.key, "accept", (accepted) => {
-        applySupply(accepted, true);
-        setDraftDirty(false);
-        setRulesAccepted(true);
-      });
-
-      if (!currentContext(confirmContext)) return;
-      setBusy("submit");
-      const submitToken = token();
-      if (!submitToken) {
-        setNotice("条款已确认，但资料已更新；请再次点击确认上架。");
-        return;
-      }
-      const submitBody = {
-        expectedRevision: submitToken.expectedRevision,
-        versionId: submitToken.versionId,
-        releaseId: submitToken.releaseId,
-        contentHash: submitToken.contentHash,
-      };
-      const submitFrozen = freezeRequest(submitBody, keyFor("submit", { accountId: submitToken.id, ...submitBody }));
-      await sendConfirmRequest("submit", { ...context, accountId: submitToken.id }, submitFrozen.body, submitFrozen.key, "submit", (submitted) => {
-        applySupply(submitted, false);
-        setDraftDirty(false);
-        setEditing(false);
-        setNotice("账号已成功上架！");
-      });
+      await confirmPublish();
     } catch (failure) {
       reportWriteFailure(failure, context);
     } finally {
@@ -3573,15 +3646,18 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   : !draft.termOptionCode
                     ? "待选日耗"
                     : "待核算";
+  const previewGrossAmount = (ownerPreview?.state === "READY" && ownerPreview.totalExpectedIncome?.amount)
+    ? ownerPreview.totalExpectedIncome.amount
+    : (ownerPreview?.ownerHaffIncome && ownerPreview?.knownResourceSubtotal)
+      ? centsText((centsOfMoney(ownerPreview.ownerHaffIncome) ?? 0n) + (centsOfMoney(ownerPreview.knownResourceSubtotal) ?? 0n))
+      : ownerPreview?.totalExpectedIncome?.amount ?? null;
   const railSummary = netEstimate
     ? { label: "预计所得", value: `${netEstimate.ownerNet.amount} 元`, pending: false }
     : effectiveQuote
       ? { label: "预计总收入", value: breakdown ? `${centsText(breakdown.totalCents)} 元` : "金额待核对", pending: !breakdown }
-      : ownerPreview?.state === "READY" && ownerPreview.totalExpectedIncome
-        ? { label: "预计总收入", value: `${ownerPreview.totalExpectedIncome.amount} 元`, pending: false }
-        : ownerPreview?.state === "PARTIAL" && ownerPreview.totalExpectedIncome
-          ? { label: "预计总收入（部分）", value: `${ownerPreview.totalExpectedIncome.amount} 元`, pending: false }
-          : { label: "预计总收入", value: "待核算", pending: true };
+      : previewGrossAmount
+        ? { label: payoutSelected === true ? "预计收入（扣费前）" : ownerPreview?.state === "PARTIAL" ? "预计总收入（部分）" : "预计总收入", value: `${previewGrossAmount} 元`, pending: false }
+        : { label: "预计总收入", value: "待核算", pending: true };
   const groupDone: Record<PublishGroupId, boolean> = {
     account: Boolean(
       currentSafeBox &&
@@ -3791,7 +3867,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     {loadingAccount ? <p className="supply-muted" role="status">正在读取账号资料…</p> : null}
     <PublishVisualBanner />
     <div className="publish-header-bar">
-      <p className="publish-form-guidance"><Info size={15} aria-hidden="true" />可先保存草稿；核对报价前会检查必填项，其余上架条件以本次规则和服务端检查为准。</p>
+      <p className="publish-form-guidance"><Info size={15} aria-hidden="true" />可先保存草稿；确认上架前系统会自动核验必填项与出租要求。</p>
       <button ref={noticeTriggerRef} type="button" className="button quiet publish-header-notice-btn" onClick={() => { noticeManualRef.current = true; setReadingNotice(true); }}><FileText size={16} aria-hidden="true" />上架须知</button>
     </div>
 
@@ -3824,7 +3900,6 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 </span>
                 <span className="publish-timeline-copy">
                   <span className="publish-timeline-title">{groupMeta[id].title}</span>
-                  <small className="publish-timeline-hint">{groupMeta[id].hint}</small>
                 </span>
                 {isError ? <span className="publish-timeline-badge-err" title="有待完善项" /> : null}
               </a>
@@ -4397,7 +4472,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       </form>
 
       {railExpanded ? <div className="publish-rail-backdrop" aria-hidden="true" onClick={() => setRailExpanded(false)} /> : null}
-      <aside ref={railRef} id="publish-quote" tabIndex={-1} className="publish-rail" data-quoted={effectiveQuote ? "true" : "false"} data-expanded={railExpanded ? "true" : "false"} data-stale={ownerPreviewStale ? "true" : "false"} aria-label="出租报价">
+      <aside ref={railRef} id="publish-quote" tabIndex={-1} className="publish-rail" data-quoted={effectiveQuote ? "true" : "false"} data-expanded={railExpanded ? "true" : "false"} data-stale={ownerPreviewStale ? "true" : "false"} data-pending={ownerIncomePreviewPending ? "true" : undefined} aria-label="出租报价">
         <div className="publish-rail-head">
           <div className="publish-rail-heading-group">
             <h2>预计出租收入</h2>
@@ -4419,15 +4494,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               <span>预计收入（扣费前）</span>
               <output aria-label="预计收入合计">{breakdown ? `${centsText(breakdown.totalCents)} 元` : "金额待核对"}</output>
             </div>
-          ) : ownerPreview?.state === "READY" && ownerPreview.totalExpectedIncome ? (
+          ) : previewGrossAmount ? (
             <div className="publish-income-total">
-              <span>{payoutSelected === true ? "预计收入（扣费前）" : "预计总收入"}{ownerPreviewStale ? <small className="publish-stale-tag">（上次预估）</small> : null}</span>
-              <output aria-label="实时预估总收入">{`${ownerPreview.totalExpectedIncome.amount} 元`}</output>
-            </div>
-          ) : ownerPreview?.state === "PARTIAL" && ownerPreview.totalExpectedIncome ? (
-            <div className="publish-income-total">
-              <span>预计总收入（部分）</span>
-              <output aria-label="部分预估总收入">{`${ownerPreview.totalExpectedIncome.amount} 元`}</output>
+              <span>{payoutSelected === true ? "预计收入（扣费前）" : ownerPreview?.state === "PARTIAL" ? "预计总收入（部分）" : "预计总收入"}{ownerPreviewStale ? <small className="publish-stale-tag">（上次预估）</small> : null}</span>
+              <output aria-label="实时预估总收入">{`${previewGrossAmount} 元`}</output>
             </div>
           ) : (
             <div className="publish-income-total publish-income-total--pending">
@@ -4505,13 +4575,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         {!published ? <div className="publish-rail-footer">
           {readOnly ? <div className="publish-rail-readonly"><p>{mustCreateAccount ? "此账号不能修改或再次上架；如需出租，请重新填写上架资料。" : reviewState === "SUBMITTED" ? "当前资料正在审核中，不能直接编辑。" : "当前资料不是可编辑草稿。"}</p>{mustCreateAccount ? <Link className="button primary" href="/publish">重新填写上架资料</Link> : reviewState === "SUBMITTED" ? <Link href="/account?view=accounts" className="button secondary">返回账号管理</Link> : <button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "继续填写草稿"}</button>}</div> : <>
             {effectiveQuote ? <div className="publish-confirm">
-              {quoteConsistent ? <>
-                <div className="publish-consent-card">
-                  {agreementConsent}
-                  {payoutConsent}
-                </div>
-                <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void confirmPublish()}>{primaryLabel}</button>
-              </> : null}
+              <div className="publish-consent-card">
+                {agreementConsent}
+                {payoutConsent}
+              </div>
+              <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void confirmPublish()}>{primaryLabel}</button>
               <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
               {rulesAccepted ? <p className="supply-muted">条款已按当前资料确认；资料变化后需重新确认。</p> : null}
             </div> : <div className="publish-rail-actions">
@@ -4586,6 +4654,53 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
               <img src={previewMedia.url} alt={previewMedia.title} />
             </div>
           ) : null}
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+
+    <Dialog.Root open={publishSuccessOpen} onOpenChange={setPublishSuccessOpen}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-success-backdrop" />
+        <Dialog.Popup className="publish-dialog publish-success-dialog" data-slot="dialog-content">
+          <div className="publish-success-fireworks" aria-hidden="true">
+            <span className="firework-particle particle-1">🎆</span>
+            <span className="firework-particle particle-2">✨</span>
+            <span className="firework-particle particle-3">🎉</span>
+            <span className="firework-particle particle-4">✨</span>
+            <span className="firework-particle particle-5">🥳</span>
+            <span className="firework-particle particle-6">🎆</span>
+          </div>
+          <div className="publish-success-icon-badge">
+            <Check size={32} aria-hidden="true" />
+          </div>
+          <header className="publish-success-header">
+            <Dialog.Title>账号已成功上架！</Dialog.Title>
+            <Dialog.Description>
+              你的账号已发布至平台，租客可在游戏专区浏览并下单。
+            </Dialog.Description>
+          </header>
+          <div className="publish-success-timer">
+            <strong>{successCountdown}</strong> 秒后将自动前往我的账号…
+          </div>
+          <div className="publish-success-actions">
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => {
+                setPublishSuccessOpen(false);
+                router.push("/account?view=accounts");
+              }}
+            >
+              立即前往我的账号
+            </button>
+            <button
+              type="button"
+              className="button secondary"
+              onClick={() => setPublishSuccessOpen(false)}
+            >
+              留在本页
+            </button>
+          </div>
         </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>

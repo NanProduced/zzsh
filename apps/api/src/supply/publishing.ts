@@ -1556,6 +1556,8 @@ export async function acceptListingRules(
   await assertCurrentRelease(client, a, v);
   if (v.review_state !== "DRAFT" || v.origin !== "NATIVE")
     throw conflict("仅可确认新申报草稿");
+  if (!v.payload || !v.content_hash || !v.rule_release_id || !v.payload.ruleRefs)
+    throw conflict("请先核对并生成本次资料的报价");
   await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);
   const selected=v.payload?.declaration.attributes.full_payout_declaration as {selected?:boolean}|undefined;
@@ -1707,6 +1709,8 @@ export async function submitListing(
   }
   if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
   await assertCurrentRelease(client, a, v);
+  if (!v.payload || !v.content_hash || !v.rule_release_id || !v.payload.ruleRefs)
+    throw conflict("请先核对并生成本次资料的报价");
   await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
   await assertPublicationRentalTerm(client, v);
   const blockers = await publicationBlockers(client, a, v, gate);
