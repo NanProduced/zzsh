@@ -15,6 +15,7 @@ import {planLegacyTradeIntakeBatch,assembleLegacyTradeIntakeBatch,assembleLegacy
 import {legacyDisplayDigest} from "../src/supply/legacy-display-snapshot";
 import {computeDeltaQuote} from "../src/supply/pricing";
 import {compatRule} from "./pricing-compat-fixture";
+import {syntheticPublicationCreditGate} from "./funding-authority-fixtures";
 
 function bindSource(input: LegacyTradeIntake) {
   const { source } = input;
@@ -200,6 +201,7 @@ test("takeover submits an empty submitted_at through the real review, while wron
         Object.assign(f.version, { review_state: "SUBMITTED", submitted_at: submittedAt }); return result([], 1);
       }
       if (sql.includes("SELECT u.suspended")) return result([{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]);
+      if (sql.includes("SELECT a.owner_user_id AS owner")) return result([{owner:f.account.owner_user_id,game:f.account.game_id,version:f.version.id,state:f.version.review_state,release:f.version.rule_release_id,price:f.version.payload?.ruleRefs.priceVersionId}]);
       if (sql.includes("SELECT id,code,name,enabled,current_release_id")) return result([{ enabled: true, current_release_id: f.version.rule_release_id, catalog_revision: "1" }]);
       if (sql.includes("game_service_operation")) return result([{ id: "fixture_service", gameCode: "delta", gameEnabled: true, enabled: true }]);
       if (sql.includes("current-trade-resources")) return result(catalog().filter(item => (values[1] as string[]).includes(item.id)).map(item => ({ ...item, enabled: true })));
@@ -214,13 +216,15 @@ test("takeover submits an empty submitted_at through the real review, while wron
       if (sql.startsWith("UPDATE zzsh_supply.rental_account SET revision")) return result([{ revision: String(Number(f.account.revision) + 1) }]);
       return query(sql, values);
     }) as any;
+    const gate: import("../src/supply/publishing").SupplyGateReader = async (client, account, purpose) =>
+      syntheticPublicationCreditGate(client, account.id, await f.gate(client, account, purpose));
     if (mode === "wrong-media") f.asset.contentHash = "c".repeat(64);
     if (mode === "valid") {
-      const result = await takeoverLegacyTrade(f.client, f.actor, final, f.gate);
+      const result = await takeoverLegacyTrade(f.client, f.actor, final, gate);
       assert.equal((result.body as any).state, "PUBLISHED"); assert.equal(f.version.review_state, "APPROVED");
       assert(f.version.submitted_at instanceof Date); assert.equal(publications, 1);
     } else {
-      await assert.rejects(() => takeoverLegacyTrade(f.client, f.actor, final, f.gate));
+      await assert.rejects(() => takeoverLegacyTrade(f.client, f.actor, final, gate));
       assert.equal(f.version.review_state, "DRAFT"); assert.equal(f.version.submitted_at, null); assert.equal(publications, 0);
     }
   });
