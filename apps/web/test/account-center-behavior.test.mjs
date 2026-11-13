@@ -898,7 +898,7 @@ test("F3: credit guarantee mapping handles UNKNOWN, REQUIRED, PAYMENT_PENDING, R
 
     guaranteeList = [makeGuarantee("REFUNDED")];
     await probe.render(React.createElement(AccountOverview, { scope: "user_A:8" }));
-    assert.match(probe.host.querySelector(".account-credit-preview").textContent, /号主保证金已原路退还/);
+    assert.match(probe.host.querySelector(".account-credit-preview").textContent, /号主保证金退还已记录/);
     assert.doesNotMatch(probe.host.querySelector(".account-credit-preview").textContent, /已覆盖/);
 
     guaranteeList = [makeGuarantee("SATISFIED"), { ...makeGuarantee("REFUNDED"), accountId: "acc_2" }];
