@@ -36,6 +36,7 @@ import {
   requireSupportAuditTakeover,
   requireSupportManagementRead,
 } from "../src/im/support-management";
+import { readConsultationSource } from "./im-source";
 
 const APP_ID = "provider-test";
 
@@ -602,7 +603,7 @@ test("takeover is idempotent for the current owner and rejects non-active consul
   assert.throws(() => takeoverDecision({ state: "CLOSED", assignedAdminId: "admin_b" }, "admin_a"), (error: { status?: number }) => error.status === 409);
   assert.throws(() => takeoverDecision({ state: "WAITING", assignedAdminId: null }, "admin_a"), (error: { status?: number }) => error.status === 409);
   // Takeover reuses the transfer scope-version fence instead of a second write path.
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   const transfer = source.slice(source.indexOf("async function beginTransfer"), source.indexOf("async function transferWithScope"));
   assert.match(transfer, /state" IN \('PENDING', 'RUNNING', 'UNKNOWN'\)/);
   assert.match(transfer, /WHERE "app_id" = \$1 AND "id" = \$2 AND "message_scope_state" = 'READY'/);

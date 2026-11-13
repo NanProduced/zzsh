@@ -309,52 +309,81 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       return { available: false, reason: "FUNDING_POLICY_UNCONFIGURED", releaseId: "release_1" };
     },
   };
-  const module = new Module(path.join(tree, "publish-form-probe.cjs"));
-  module.filename = path.join(tree, "publish-form-probe.cjs");
+  const supplyDir = path.join(tree, "apps/web/src/components/supply");
+  const module = new Module(path.join(supplyDir, "publish-form-probe.cjs"));
+  module.filename = path.join(supplyDir, "publish-form-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
-  module.require = (name) => {
-    const contentDependency=contentFixtureDependency(name); if(contentDependency)return contentDependency;
-    if (name.endsWith(".css")) return {};
-    if (name === "../ui/information" || name === "../auth/session-loading") {
-      const loadPresentation = (relative) => {
-        const isInfo = relative === "ui/information";
-        const filename = path.join(tree, "apps/web/src/components", relative + ".tsx");
-        const view = new Module(filename);
-        view.filename = filename; view.paths = Module._nodeModulePaths(tree);
-        view.require = dependency => dependency.endsWith(".css") ? {} : dependency === "../ui/information" ? loadPresentation("ui/information") : require(dependency);
-        view._compile(isInfo ? compiledInfo : compiledLoading, filename);
-        return view.exports;
-      };
-      return loadPresentation(name === "../ui/information" ? "ui/information" : "auth/session-loading");
-    }
-    if (name === "../ui/form-controls") {
-      const controlPath = path.join(tree, "apps/web/src/components/ui/form-controls.tsx");
-      const controlModule = new Module(controlPath);
-      controlModule.filename = controlPath; controlModule.paths = Module._nodeModulePaths(tree);
-      controlModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
-      controlModule._compile(compiledControls, controlPath);
-      return controlModule.exports;
-    }
-    if (name === "../ui/alert-dialog") {
-      const dialogPath = path.join(tree, "apps/web/src/components/ui/alert-dialog.tsx");
-      const dialogModule = new Module(dialogPath);
-      dialogModule.filename = dialogPath; dialogModule.paths = Module._nodeModulePaths(tree);
-      dialogModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
-      dialogModule._compile(compiledDialog, dialogPath);
-      return dialogModule.exports;
-    }
-    if (name === "./skin-media-thumb") {
-      const media = loadThumbModule();
-      return { ...media, SkinMediaPreview: (props) => { skinPreviewObserver?.(props.skin); return React.createElement(media.SkinMediaPreview, props); } };
-    }
-    if (name === "next/link") return ({ children, href, ...props }) => React.createElement("a", { href, ...props }, children);
-    if (name === "next/navigation") return { useRouter: () => router };
-    if (name === "../session/user-session-provider") return { useUserSessionStore: () => store, useUserSession: () => session };
-    if (name === "../layout/service-shell") return { ServiceShell: ({ children, topContent }) => React.createElement("main", null, topContent, children) };
-    if (name === "../../lib/supply-client") return { ...actualSupply, supplyApi: api, uploadSupplyMedia: uploadMedia ?? (async () => null) };
-    if (name.startsWith("../../lib/")) return require(path.join(tree, "apps/web/src/lib", `${name.slice(10)}.ts`));
-    return require(name);
+  const moduleCache = new Map();
+  const createSandboxedRequire = (dir = supplyDir) => {
+    const sandboxedRequire = (name) => {
+      const contentDependency=contentFixtureDependency(name); if(contentDependency)return contentDependency;
+      if (name.endsWith(".css")) return {};
+      if (name === "../ui/information" || name === "../auth/session-loading") {
+        const loadPresentation = (relative) => {
+          const isInfo = relative === "ui/information";
+          const filename = path.join(tree, "apps/web/src/components", relative + ".tsx");
+          const view = new Module(filename);
+          view.filename = filename; view.paths = Module._nodeModulePaths(tree);
+          view.require = dependency => dependency.endsWith(".css") ? {} : dependency === "../ui/information" ? loadPresentation("ui/information") : sandboxedRequire(dependency);
+          view._compile(isInfo ? compiledInfo : compiledLoading, filename);
+          return view.exports;
+        };
+        return loadPresentation(name === "../ui/information" ? "ui/information" : "auth/session-loading");
+      }
+      if (name === "../ui/form-controls") {
+        const controlPath = path.join(tree, "apps/web/src/components/ui/form-controls.tsx");
+        const controlModule = new Module(controlPath);
+        controlModule.filename = controlPath; controlModule.paths = Module._nodeModulePaths(tree);
+        controlModule.require = dependency => dependency.endsWith(".css") ? {} : sandboxedRequire(dependency);
+        controlModule._compile(compiledControls, controlPath);
+        return controlModule.exports;
+      }
+      if (name === "../ui/alert-dialog") {
+        const dialogPath = path.join(tree, "apps/web/src/components/ui/alert-dialog.tsx");
+        const dialogModule = new Module(dialogPath);
+        dialogModule.filename = dialogPath; dialogModule.paths = Module._nodeModulePaths(tree);
+        dialogModule.require = dependency => dependency.endsWith(".css") ? {} : sandboxedRequire(dependency);
+        dialogModule._compile(compiledDialog, dialogPath);
+        return dialogModule.exports;
+      }
+      if (name === "./skin-media-thumb") {
+        const media = loadThumbModule();
+        return { ...media, SkinMediaPreview: (props) => { skinPreviewObserver?.(props.skin); return React.createElement(media.SkinMediaPreview, props); } };
+      }
+      if (name === "next/link") return ({ children, href, ...props }) => React.createElement("a", { href, ...props }, children);
+      if (name === "next/navigation") return { useRouter: () => router };
+      if (name === "../session/user-session-provider") return { useUserSessionStore: () => store, useUserSession: () => session };
+      if (name === "../layout/service-shell") return { ServiceShell: ({ children, topContent }) => React.createElement("main", null, topContent, children) };
+      if (name === "../../lib/supply-client") return { ...actualSupply, supplyApi: api, uploadSupplyMedia: uploadMedia ?? (async () => null) };
+      if (name.startsWith("../../lib/")) return require(path.join(tree, "apps/web/src/lib", `${name.slice(10)}.ts`));
+      if (name.startsWith("./") || name.startsWith("../")) {
+        const targetPathWithoutExt = path.resolve(dir, name);
+        let targetFile = null;
+        for (const ext of [".tsx", ".ts", ""]) {
+          if (fs.existsSync(targetPathWithoutExt + ext) && !fs.statSync(targetPathWithoutExt + ext).isDirectory()) {
+            targetFile = targetPathWithoutExt + ext;
+            break;
+          }
+        }
+        if (targetFile) {
+          const cached = moduleCache.get(targetFile);
+          if (cached) return cached.exports;
+          const subModule = new Module(targetFile);
+          subModule.filename = targetFile;
+          subModule.paths = Module._nodeModulePaths(path.dirname(targetFile));
+          subModule.require = createSandboxedRequire(path.dirname(targetFile));
+          moduleCache.set(targetFile, subModule);
+          const rawCode = fs.readFileSync(targetFile, "utf8");
+          const compiledSub = ts.transpileModule(rawCode, transpileOpts).outputText;
+          subModule._compile(compiledSub, targetFile);
+          return subModule.exports;
+        }
+      }
+      return require(name);
+    };
+    return sandboxedRequire;
   };
+  module.require = createSandboxedRequire(supplyDir);
   module._compile(compiled, module.filename);
   const host = window.document.createElement("div");
   window.document.body.append(host);
@@ -724,7 +753,7 @@ test('all real directory resources can be edited and saved while their missing p
     await p.render();
     for(const code of codes.slice(1))assert.ok(p.host.querySelector(`[data-resource-code="${code}"]`),code);
     assert.equal(p.host.querySelectorAll('.publish-resource-state').length>0,true);
-    assert.match(p.text(),/可保存草稿，暂不能核价/);
+    assert.match(p.text(),/未进入当前可用价目，不可报价/);
     assert.doesNotMatch(p.text(),/这份历史资源未进入当前价目/);
     await p.type('#quantity-catalog_6','9');
     await p.clickButton('保存草稿');
@@ -1602,7 +1631,7 @@ test("editing a published account explains that new orders pause", async () => {
   });
   try {
     await p.render();
-    assert.match(p.text(), /修改期间.*暂停接单|开始编辑后.*暂停接单/);
+    assert.match(p.text(), /已上架或历史账号不能修改/);
     assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
   } finally { await p.close(); }
 });
@@ -1744,7 +1773,7 @@ test('v2 recommendation verifies every selected skin across catalog pages, reche
   });
   try {
     await p.render(); await p.clickButton('查看推荐押金');
-    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前版本资料）')), true);
+    assert.equal(await p.waitFor(() => p.text().includes('推荐押金 312.34 元')), true);
     assert.equal(reads.length, 2, 'selected facts outside the visible picker page are read as metadata');
     await p.clickButton('采用推荐');
     assert.equal(await p.waitFor(() => p.host.querySelector('#publish-deposit').value === '312.34'), true);

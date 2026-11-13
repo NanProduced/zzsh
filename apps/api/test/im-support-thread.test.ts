@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { claimConsultation, readAdminMessageAccess, readUserMessageAccess, supportManagerIdentityKey, toView } from "../src/im/consultation";
 import { FakeSupportScopeProvider } from "./im-test-fixtures";
+import { readConsultationSource } from "./im-source";
 
 const APP_ID = "provider-test";
 
@@ -239,7 +240,7 @@ test("0130 adds the persistent thread, round link and round-close operation with
 });
 
 test("round close ends the round only and never dismisses the thread Team", () => {
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   const shared = source.slice(source.indexOf("async function beginRoundClose"), source.indexOf("async function beginClose"));
   assert.ok(shared.length > 0);
   assert.match(shared, /'ROUND_CLOSE'/);

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 
 import { parseSupportRatingBody, toView } from "../src/im/consultation";
+import { readConsultationSource, readSupportManagementSource, readYunxinRoutesSource } from "./im-source";
 
 const APP_ID = "provider-test";
 
@@ -59,7 +60,7 @@ test("views expose the platform read marker and default to an unavailable rating
   assert.deepEqual(view.rating, { available: false, submitted: false, dismissed: false, score: null });
   assert.equal(toView(contextRow({ adminReadAt: null }), "user_im_1").adminReadAt, null);
 
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /adminReadAt: iso\(row\.adminReadAt\)/);
   assert.match(source, /rating: \{ available: false, submitted: false, dismissed: false, score: null \}/);
   // 只有用户列表按 CLOSED 轮次计算可用性；已有评价行（提交或暂不评价）一律不可再评。
@@ -68,7 +69,7 @@ test("views expose the platform read marker and default to an unavailable rating
 });
 
 test("read marking and rating writes stay server-authorized and transactional", () => {
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /export async function markConsultationRead/);
   assert.match(source, /SET "admin_read_at" = clock_timestamp\(\)/);
   assert.match(source, /"state" = 'ACTIVE' AND "assigned_admin_id" = \$3/);
@@ -83,7 +84,7 @@ test("read marking and rating writes stay server-authorized and transactional", 
 });
 
 test("rating and admin-read routes stay POST-only and the BFF/proxy forward them", () => {
-  const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
+  const routes = readYunxinRoutesSource();
   assert.ok(routes.includes("(claim|transfer|close|reconcile|read)"));
   assert.ok(routes.includes("\\/rating$"));
   assert.ok(routes.includes("\\/rating\\/dismiss$"));
@@ -103,7 +104,7 @@ test("rating and admin-read routes stay POST-only and the BFF/proxy forward them
 });
 
 test("support overview adds submitted ratings on the Beijing date range without fake zeros", () => {
-  const source = readFileSync(resolve("src/im/support-management.ts"), "utf8");
+  const source = readSupportManagementSource();
   assert.match(source, /ratings: SupportRatingOverview;/);
   assert.match(source, /"submitted_at" IS NOT NULL/);
   const ratingQueries = source.slice(source.indexOf("const SUPPORT_OVERVIEW_RATING_SQL"), source.indexOf("/** 首响事实的唯一读取入口"));

@@ -17,6 +17,7 @@ import {
   transferNoticeText,
 } from "../src/im/consultation";
 import { FakeSupportScopeProvider } from "./im-test-fixtures";
+import { readConsultationSource } from "./im-source";
 
 const APP_ID = "provider-test";
 const MANAGER_KEY = supportManagerIdentityKey(APP_ID);
@@ -383,7 +384,7 @@ test("CS-04: a successful close wakes auto-assign; a rejected close does not", a
 });
 
 test("CS-04: transfer and takeover wake auto-assign only after their successful writeback", () => {
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
   const transfer = between("async function transferWithScope", "export async function listTransferTargets");
   assert.match(transfer, /await runScopeOperationNow\([^;]+\);\s*const result = await readAdminConsultationView\([^;]+\);[\s\S]*?void wakeAutoAssign\(options\);/);
