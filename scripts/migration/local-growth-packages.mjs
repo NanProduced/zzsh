@@ -47,6 +47,18 @@ export async function executeGrowthEntry({ pending, recovery, writeIntent, execu
   return reply;
 }
 
+/** Every pending subject must remain UNKNOWN through the official batch reader. */
+export async function verifyPendingGrowthReadback(client, userIds, asOf, readBatch) {
+  assert(Array.isArray(userIds) && userIds.length > 0 && userIds.length <= 500 && new Set(userIds).size === userIds.length
+    && userIds.every(id => typeof id === "string" && id) && typeof readBatch === "function", "GROWTH_PENDING_BATCH_INVALID");
+  const responses = await readBatch(client, userIds, asOf);
+  assert(responses instanceof Map && responses.size === userIds.length, "GROWTH_PENDING_READER_INCOMPLETE");
+  for (const id of userIds) {
+    const response = responses.get(id);
+    assert(response?.subjectId === id && response.growth?.knowledge === "UNKNOWN" && response.growth.rollingPoints === null, "GROWTH_PENDING_READER_MISMATCH");
+  }
+}
+
 /** The original approval bytes live in the same flushed intent as their execution key. */
 export function inlineGrowthIntent(pending, approvalBytes) {
   assert(Buffer.isBuffer(approvalBytes) && sha(approvalBytes) === pending?.approvalSha256, 'GROWTH_INLINE_APPROVAL_CHANGED');
