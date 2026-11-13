@@ -14,6 +14,7 @@ export default defineConfig({
     include: [
       "@zzsh/content",
       "@zzsh/content/updates",
+      "@zzsh/content/legal-diff",
     ],
   },
   ssr: { external: ["@zzsh/content"] },
