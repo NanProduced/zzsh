@@ -3416,8 +3416,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
       const quoted = await sendQuoteRequest(context, saved, "quote");
       if (!quoted) return;
 
-      if (quoted.blockers?.some((code) => !FORM_ENTRY_BLOCKER_CODES.has(code))) {
-        setNotice("报价已生成，请先处理上架限制，再确认上架。");
+      if (!Array.isArray(quoted.blockers) || quoted.blockers.some((code) => !FORM_ENTRY_BLOCKER_CODES.has(code))) {
+        setNotice("报价已生成，请先核对上架条件，再确认上架。");
         return;
       }
 

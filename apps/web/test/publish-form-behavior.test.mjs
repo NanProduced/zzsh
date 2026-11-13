@@ -2960,6 +2960,19 @@ test("an unquoted draft can be priced before checking its guarantee, but an unre
     assert.equal(p.host.querySelector('.publish-confirm button.button.primary').disabled, true);
     assert.match(p.host.querySelector('[data-blocker-group="system"]')?.textContent ?? '', /暂时无法确认保证金状态/);
   } finally { await p.close(); }
+
+  const incomplete = await probe({
+    accountId: "account_1", mine: () => ({ ...supplyOf(declared), blockers }),
+    saveDraft: body => ({ ...supplyOf(body), blockers }),
+    quote: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: undefined }),
+  });
+  try {
+    await incomplete.render();
+    await incomplete.click('.publish-agreement-acceptance input');
+    await incomplete.clickButton('确认上架');
+    assert.ok(await incomplete.waitFor(() => incomplete.calls.some(call => call.op === 'quote')));
+    assert.equal(incomplete.calls.some(call => call.op === 'confirm'), false, 'a missing blocker list cannot authorize publication');
+  } finally { await incomplete.close(); }
 });
 
 test("an unavailable pricing policy preserves unknown draft quantities and prevents quoting", async () => {
