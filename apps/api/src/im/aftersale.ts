@@ -93,9 +93,11 @@ export async function createAftersale(options:ConsultationRouteOptions,context:U
   return withTransaction(options.pool,async client=>{
     await lockSupportMutation(client,options.appId,[context.userId]);
     await assertUserContextInTransaction(client,context);
-    const owned=(await client.query<{party:"RENTER"|"OWNER"}>(`SELECT CASE WHEN renter_user_id=$2 THEN 'RENTER' ELSE 'OWNER' END AS party
+    const owned=(await client.query<{party:"RENTER"|"OWNER";accountId:string}>(`SELECT CASE WHEN renter_user_id=$2 THEN 'RENTER' ELSE 'OWNER' END AS party,account_id AS "accountId"
       FROM zzsh_order.rental_order WHERE id=$1 AND (renter_user_id=$2 OR owner_user_id=$2)`,[input.orderId,context.userId])).rows[0];
     if(!owned)throw new SecurityApiError(404,"NOT_FOUND","Order not found");
+    // Serialize a newly reported issue with the account's automatic guarantee refund.
+    if(!(await client.query(`SELECT id FROM zzsh_supply.rental_account WHERE id=$1 FOR SHARE`,[owned.accountId])).rowCount)throw notFound();
     const replay=(await client.query<{id:string;order_id:string;description:string}>(`SELECT id,order_id,description FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND requester_user_id=$2 AND operation_id=$3`,[options.appId,context.userId,input.operationId])).rows[0];
     if(replay){if(replay.order_id!==input.orderId||replay.description!==input.description)throw conflict("Operation identity was reused with different input");return {record:view(await rowById(client,options.appId,replay.id)),created:false,replayed:true};}
     const pending=(await client.query<{id:string}>(`SELECT id FROM zzsh_iam.im_aftersale_record WHERE app_id=$1 AND requester_user_id=$2 AND order_id=$3 AND order_source='NATIVE' AND state='PENDING'`,[options.appId,context.userId,input.orderId])).rows[0];

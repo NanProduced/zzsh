@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { createGuaranteePaymentIntent, enqueueDelistedGuaranteeRefund, isGuaranteeRequirementFact, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
+import { createGuaranteePaymentIntent, enqueueCompletedGuaranteeRefund, enqueueDelistedGuaranteeRefund, isGuaranteeRequirementFact, readGuaranteeTransactions, requiredGuaranteeCents } from "../src/credit/credit-guarantee";
 
 test("demo guarantee confirmation stays bound to the owner, original intent and result", async t => {
   const resource = require("../src/finance/ecs-test-demo-resource");
@@ -53,6 +54,34 @@ test("demo guarantee refund never resubmits an unknown original result", async t
   t.mock.method(security, "withTransaction", async (_: unknown, fn: (value: unknown) => unknown) => fn(client));
   const result = await runDemoGuaranteeRefundBatch({}, { kind: "LOCAL_DEMO_CLONE_FINANCE" });
   assert.equal(result.completed, 0); assert.equal(record.mock.callCount(), 0);
+});
+
+test("demo completed-account guarantee rechecks pending issues before recording the refund", async t => {
+  const resource = require("../src/finance/ecs-test-demo-resource");
+  const security = require("../src/auth/security-core");
+  const credit = require("../src/credit/credit-guarantee");
+  const { runDemoGuaranteeRefundBatch } = require("../src/credit/demo-guarantee");
+  const digest = "a".repeat(64), paymentId = "payment-a";
+  const transactionId = `demo_g_pay_${createHash("sha256").update(`${digest}:${paymentId}`).digest("hex").slice(0, 40)}`;
+  t.mock.method(resource, "assertEcsTestDemoResource", async () => ({ reference: "demo" }));
+  t.mock.method(resource, "readEcsTestDemoRegistration", () => ({ digest }));
+  t.mock.method(resource, "demoFinanceScope", () => "LOCAL_DEMO_SIMULATED");
+  t.mock.method(credit, "lockGuaranteeSubject", async () => ({ lifecycle: "ARCHIVED", accountId: "account-a", ownerUserId: "owner-a" }));
+  const record = t.mock.method(credit, "recordGuaranteeRefundResult", async () => ({}));
+  t.mock.method(security, "recordAudit", async () => {});
+  let eligible = false;
+  const client = { query: async (sql: string) => sql.includes("ORDER BY f.created_at") ? { rows: [{ id: "refund-a" }] }
+    : sql.startsWith("SELECT user_id FROM zzsh_credit.user_credit_state") ? { rows: [{ user_id: "owner-a" }], rowCount: 1 }
+    : sql.includes("completed_guarantee_refund_eligible") ? { rows: [{ eligible }] }
+    : { rows: [{ status: "REQUESTED", providerState: "NOT_AUTHORIZED", paymentId, amount: "500", paidAmount: "500", transactionId,
+      merchant: "merchant-a", receipt: { source: "ECS_DEMO_GUARANTEE", scope: "LOCAL_DEMO_SIMULATED", registrationDigest: digest, paymentId, merchantOrderNo: "merchant-a" } }] } };
+  t.mock.method(security, "withTransaction", async (_: unknown, fn: (value: unknown) => unknown) => fn(client));
+  assert.equal((await runDemoGuaranteeRefundBatch({}, { kind: "LOCAL_DEMO_CLONE_FINANCE" })).completed, 0);
+  assert.equal(record.mock.callCount(), 0);
+  eligible = true;
+  assert.equal((await runDemoGuaranteeRefundBatch({}, { kind: "LOCAL_DEMO_CLONE_FINANCE" })).completed, 1);
+  assert.equal(record.mock.callCount(), 1);
+  assert.equal(record.mock.calls[0].arguments[1].refundedAmountCents, "500");
 });
 
 test("only accounts with a guarantee fact become page rows", () => {
@@ -299,13 +328,15 @@ test("published waiver and paid guarantee retain their original eligibility when
 
 test("delisting creates one original-payment guarantee refund and does not pretend channel success", async () => {
   let existing: Record<string, unknown> | undefined;
-  let paymentState = "CONFIRMED", providerState = "CONFIRMED", evidenceComplete = true, unresolved = false, accountState = "DELISTED", inserts = 0, review = false;
+  let paymentState = "CONFIRMED", providerState = "CONFIRMED", evidenceComplete = true, unresolved = false, accountState = "DELISTED", requirementState = "COVERED", inserts = 0, review = false;
   const client = { query: async (sql: string, args: unknown[] = []) => {
     if (sql.startsWith("SELECT lifecycle FROM zzsh_supply.rental_account")) {
       assert.deepEqual(args, ["account-a", "user-a"]);
       return { rows: [{ lifecycle: accountState }] };
     }
-    if (sql.startsWith("SELECT id FROM zzsh_order.owner_guarantee_requirement")) return { rows: [{ id: "requirement-a" }] };
+    if (sql.startsWith("SELECT id,status FROM zzsh_order.owner_guarantee_requirement")) return { rows: [{ id: "requirement-a", status: requirementState }] };
+    if (sql.startsWith("SELECT user_id FROM zzsh_credit.user_credit_state")) return { rows: [{ user_id: "user-a" }], rowCount: 1 };
+    if (sql.includes("completed_guarantee_refund_eligible")) return { rows: [{ eligible: !unresolved }] };
     if (sql.startsWith("SELECT\n    EXISTS")) return { rows: [{ unresolved }] };
     if (sql.includes("FROM zzsh_order.owner_guarantee_payment p WHERE p.requirement_id")) return { rows: [{ id: "payment-a", status: paymentState, providerState, amountCents: "300", evidenceComplete }] };
     if (sql.includes("FROM zzsh_order.owner_guarantee_refund WHERE requirement_id")) return { rows: existing ? [existing] : [] };
@@ -334,6 +365,17 @@ test("delisting creates one original-payment guarantee refund and does not prete
   assert.equal((await enqueueDelistedGuaranteeRefund(client, input)).reason, "ACCOUNT_ORDER_REVIEW_REQUIRED"); assert.equal(review, true);
   accountState = "ACTIVE";
   await assert.rejects(enqueueDelistedGuaranteeRefund(client, input), /permanently delisted/);
+  accountState = "ARCHIVED"; unresolved = false; existing = undefined; review = false;
+  const completed = await enqueueCompletedGuaranteeRefund(client, input);
+  assert.equal(completed.state, "REQUESTED"); assert.equal(completed.refunds[0]?.providerState, "NOT_AUTHORIZED");
+  assert.equal((await enqueueCompletedGuaranteeRefund(client, input)).refunds[0]?.refundId, completed.refunds[0]?.refundId);
+  assert.equal(inserts, 2, "a repeated completed-account refund keeps the original request");
+  existing = undefined; unresolved = true;
+  assert.equal((await enqueueCompletedGuaranteeRefund(client, input)).reason, "ACCOUNT_ORDER_REVIEW_REQUIRED");
+  assert.equal(review, true); assert.equal(inserts, 2);
+  unresolved = false; requirementState = "RESTRICTED";
+  assert.equal((await enqueueCompletedGuaranteeRefund(client, input)).reason, "GUARANTEE_REVIEW_REQUIRED");
+  assert.equal(inserts, 2, "restricted funds must not be automatically released");
 });
 
 test("delisting without a guarantee requirement needs the publication's explicit waiver", async () => {
@@ -341,7 +383,7 @@ test("delisting without a guarantee requirement needs the publication's explicit
   const client = { query: async (sql: string, args: unknown[]) => {
     assert.deepEqual(args, ["account-a", "user-a"]);
     if (sql.startsWith("SELECT lifecycle FROM zzsh_supply.rental_account")) return { rows: [{ lifecycle: "DELISTED" }] };
-    if (sql.startsWith("SELECT id FROM zzsh_order.owner_guarantee_requirement")) return { rows: [] };
+    if (sql.startsWith("SELECT id,status FROM zzsh_order.owner_guarantee_requirement")) return { rows: [] };
     if (sql.includes("p.credit_guarantee_waived IS TRUE")) return { rows: [{ waived }] };
     throw new Error(`unexpected query: ${sql}`);
   } } as any;

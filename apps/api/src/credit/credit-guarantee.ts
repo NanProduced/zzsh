@@ -992,19 +992,19 @@ export type DelistedGuaranteeRefund = {
   reason?: string;
 };
 
-/** Called in the same transaction as the owner's permanent delisting. No channel request is made here. */
-export async function enqueueDelistedGuaranteeRefund(client: PoolClient, input: {
+/** Called after permanent delisting or settlement. No channel request is made here. */
+async function enqueueAutomaticGuaranteeRefund(client: PoolClient, input: {
   accountId: string; ownerUserId: string; requestId: string;
-}): Promise<DelistedGuaranteeRefund> {
+}, reason: "ACCOUNT_DELISTED" | "ORDER_COMPLETED"): Promise<DelistedGuaranteeRefund> {
   if (![input.accountId, input.ownerUserId, input.requestId].every(value => typeof value === "string" && ID.test(value))) throw invalid("Guarantee refund subject is invalid");
   const account = (await client.query<{ lifecycle: string }>(
     `SELECT lifecycle FROM zzsh_supply.rental_account WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`,
     [input.accountId, input.ownerUserId],
   )).rows[0];
   if (!account) throw notFound();
-  if (account.lifecycle !== "DELISTED") throw conflict("Only a permanently delisted account can request automatic guarantee return");
-  const requirements = (await client.query<{ id: string }>(
-    `SELECT id FROM zzsh_order.owner_guarantee_requirement WHERE account_id=$1 AND owner_user_id=$2 ORDER BY id FOR UPDATE`,
+  if (account.lifecycle !== (reason === "ACCOUNT_DELISTED" ? "DELISTED" : "ARCHIVED")) throw conflict("Only a permanently delisted or completed account can request automatic guarantee return");
+  const requirements = (await client.query<{ id: string; status: string }>(
+    `SELECT id,status FROM zzsh_order.owner_guarantee_requirement WHERE account_id=$1 AND owner_user_id=$2 ORDER BY id FOR UPDATE`,
     [input.accountId, input.ownerUserId],
   )).rows;
   if (!requirements.length) {
@@ -1026,13 +1026,26 @@ export async function enqueueDelistedGuaranteeRefund(client: PoolClient, input: 
       WHERE account_id=$1 AND owner_user_id=$2 AND status IN ('OPEN','COVERED')`, [input.accountId, input.ownerUserId]);
     return { state: "REVIEW_REQUIRED", refunds: [], reason };
   };
-  const obligations = (await client.query<{ unresolved: boolean }>(`SELECT
+  if (requirements.some(requirement => requirement.status === "RESTRICTED")) return review("GUARANTEE_REVIEW_REQUIRED");
+  let unresolved: boolean;
+  if (reason === "ORDER_COMPLETED") {
+    const credit = await client.query(`SELECT user_id FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR SHARE`, [input.ownerUserId]);
+    if (credit.rowCount !== 1) return review("CREDIT_BASIS_UNAVAILABLE");
+    const result = (await client.query<{ eligible: boolean }>(
+      `SELECT zzsh_order.completed_guarantee_refund_eligible($1,$2) AS eligible`, [input.accountId, input.ownerUserId],
+    )).rows[0];
+    if (typeof result?.eligible !== "boolean") throw conflict("Completed account refund basis is unavailable");
+    unresolved = !result.eligible;
+  } else {
+    const obligations = (await client.query<{ unresolved: boolean }>(`SELECT
     EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=$1 AND
       (o.status IN ('PENDING_PAYMENT','PAID','COMPLETED') OR EXISTS(SELECT 1 FROM zzsh_order.rental_opening op WHERE op.order_id=o.id AND op.status='CONFIRMED')))
     OR EXISTS(SELECT 1 FROM zzsh_order.legacy_order_read_snapshot l WHERE l.account_id=$1 AND l.source_pay_status IS DISTINCT FROM 0)
     OR EXISTS(SELECT 1 FROM zzsh_order.legacy_inflight_register l WHERE l.account_id=$1) AS unresolved`, [input.accountId])).rows[0];
-  if (!obligations || typeof obligations.unresolved !== "boolean") throw conflict("Account rental history is unavailable");
-  if (obligations.unresolved) return review("ACCOUNT_ORDER_REVIEW_REQUIRED");
+    if (!obligations || typeof obligations.unresolved !== "boolean") throw conflict("Account rental history is unavailable");
+    unresolved = obligations.unresolved;
+  }
+  if (unresolved) return review("ACCOUNT_ORDER_REVIEW_REQUIRED");
 
   type Payment = { id: string; status: string; providerState: string; amountCents: string; evidenceComplete: boolean };
   type ExistingRefund = { id: string; paymentId: string; amountCents: string; status: string; providerState: string; releasePolicyState: string };
@@ -1073,16 +1086,24 @@ export async function enqueueDelistedGuaranteeRefund(client: PoolClient, input: 
       continue;
     }
     const refundId = `guarantee_refund_${randomUUID().replaceAll("-", "")}`;
-    const requestKey = `delist-${createHash("sha256").update(item.requirementId).digest("hex")}`;
-    const fingerprint = hash(["GUARANTEE_DELIST_V1", input.ownerUserId, input.accountId, item.requirementId, item.payment.id, item.payment.amountCents]);
+    const requestKey = `${reason === "ACCOUNT_DELISTED" ? "delist" : "complete"}-${createHash("sha256").update(item.requirementId).digest("hex")}`;
+    const fingerprint = hash([reason === "ACCOUNT_DELISTED" ? "GUARANTEE_DELIST_V1" : "GUARANTEE_COMPLETED_V1", input.ownerUserId, input.accountId, item.requirementId, item.payment.id, item.payment.amountCents]);
     await client.query(`INSERT INTO zzsh_order.owner_guarantee_refund(id,requirement_id,payment_id,owner_user_id,request_key,request_fingerprint,
       amount_cents,status,provider,provider_request_state,release_policy_state,release_decision_reason,release_decision_fingerprint,release_decided_at)
-      VALUES($1,$2,$3,$4,$5,$6,$7,'REQUESTED','HUIJU','NOT_AUTHORIZED','AUTO_APPROVED','ACCOUNT_DELISTED',$6,clock_timestamp())`,
-      [refundId, item.requirementId, item.payment.id, input.ownerUserId, requestKey, fingerprint, item.payment.amountCents]);
+      VALUES($1,$2,$3,$4,$5,$6,$7,'REQUESTED','HUIJU','NOT_AUTHORIZED','AUTO_APPROVED',$8,$6,clock_timestamp())`,
+      [refundId, item.requirementId, item.payment.id, input.ownerUserId, requestKey, fingerprint, item.payment.amountCents, reason]);
     await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status='REFUND_REQUESTED',updated_at=clock_timestamp() WHERE id=$1`, [item.requirementId]);
     refunds.push({ refundId, amountCents: item.payment.amountCents, status: "REQUESTED", providerState: "NOT_AUTHORIZED", providerAction: "NOT_AUTHORIZED" });
   }
   return { state: refunds.length ? "REQUESTED" : "NONE", refunds };
+}
+
+export function enqueueDelistedGuaranteeRefund(client: PoolClient, input: { accountId: string; ownerUserId: string; requestId: string }) {
+  return enqueueAutomaticGuaranteeRefund(client, input, "ACCOUNT_DELISTED");
+}
+
+export function enqueueCompletedGuaranteeRefund(client: PoolClient, input: { accountId: string; ownerUserId: string; requestId: string }) {
+  return enqueueAutomaticGuaranteeRefund(client, input, "ORDER_COMPLETED");
 }
 
 export async function requestGuaranteeRefund(client: PoolClient, input: { userId: string; requirementId: string; requestKey: string; requestFingerprint: string; obligationReader: UserObligationReader }): Promise<Record<string, unknown>> {
@@ -1197,10 +1218,10 @@ export async function lockGuaranteeSubject(client: PoolClient, kind: "payment" |
   return { ...subject, lifecycle: account.lifecycle };
 }
 
-export async function safelyEnqueueDelistedGuaranteeRefund(client: PoolClient, subject: { accountId: string; ownerUserId: string; requestId: string }): Promise<DelistedGuaranteeRefund> {
+async function safelyEnqueueAutomaticGuaranteeRefund(client: PoolClient, subject: { accountId: string; ownerUserId: string; requestId: string }, reason: "ACCOUNT_DELISTED" | "ORDER_COMPLETED"): Promise<DelistedGuaranteeRefund> {
   await client.query("SAVEPOINT guarantee_auto_refund");
   try {
-    const result = await enqueueDelistedGuaranteeRefund(client, subject);
+    const result = await enqueueAutomaticGuaranteeRefund(client, subject, reason);
     await client.query("RELEASE SAVEPOINT guarantee_auto_refund");
     return result;
   } catch (error) {
@@ -1225,6 +1246,14 @@ export async function safelyEnqueueDelistedGuaranteeRefund(client: PoolClient, s
   }
 }
 
+export function safelyEnqueueDelistedGuaranteeRefund(client: PoolClient, subject: { accountId: string; ownerUserId: string; requestId: string }) {
+  return safelyEnqueueAutomaticGuaranteeRefund(client, subject, "ACCOUNT_DELISTED");
+}
+
+export function safelyEnqueueCompletedGuaranteeRefund(client: PoolClient, subject: { accountId: string; ownerUserId: string; requestId: string }) {
+  return safelyEnqueueAutomaticGuaranteeRefund(client, subject, "ORDER_COMPLETED");
+}
+
 export type GuaranteePaymentOutcome = "ACCEPTED" | "PROCESSING" | "CONFIRMED" | "FAILED" | "UNKNOWN";
 export async function recordGuaranteePaymentResult(client: PoolClient, input: { paymentId: string; outcome: GuaranteePaymentOutcome; receivedAmountCents?: string; providerTransactionId?: string; receipt: unknown; requestId?: string }): Promise<Record<string, unknown>> {
   const paymentId = id(input.paymentId, "paymentId");
@@ -1245,8 +1274,8 @@ export async function recordGuaranteePaymentResult(client: PoolClient, input: { 
   if (row.status === "CONFIRMED" && (input.outcome !== "CONFIRMED" || row.providerTransactionId !== input.providerTransactionId || row.observedAmountCents !== observedAmount || row.sourceDigest !== observationDigest)) throw conflict("Confirmed payment receipt differs from the original transaction");
   const observationInserted = await recordGuaranteeObservation(client, { paymentId, state: input.outcome, amountCents: observedAmount, providerReference: input.providerTransactionId ?? null, receipt: observationReceipt, digest: observationDigest });
   if (!observationInserted && (input.outcome !== "CONFIRMED" || row.financeEventId || row.ledgerEntryRef)) {
-    const automaticRefund = subject.lifecycle === "DELISTED" && input.outcome === "CONFIRMED" && row.financeEventId && row.ledgerEntryRef
-      ? await safelyEnqueueDelistedGuaranteeRefund(client, { accountId: subject.accountId, ownerUserId: subject.ownerUserId, requestId: input.requestId ?? `guarantee_capture_${hash(paymentId).slice(0, 40)}` }) : undefined;
+    const automaticRefund = ["DELISTED", "ARCHIVED"].includes(subject.lifecycle) && input.outcome === "CONFIRMED" && row.financeEventId && row.ledgerEntryRef
+      ? await safelyEnqueueAutomaticGuaranteeRefund(client, { accountId: subject.accountId, ownerUserId: subject.ownerUserId, requestId: input.requestId ?? `guarantee_capture_${hash(paymentId).slice(0, 40)}` }, subject.lifecycle === "DELISTED" ? "ACCOUNT_DELISTED" : "ORDER_COMPLETED") : undefined;
     return { paymentId, status: row.status, duplicate: true, providerAction: "LOCAL_CONTROLLED", ...(automaticRefund ? { automaticRefund } : {}) };
   }
   if (row.status === "CONFIRMED" && input.outcome !== "CONFIRMED") throw conflict("Confirmed payment cannot move backwards");
@@ -1261,8 +1290,8 @@ export async function recordGuaranteePaymentResult(client: PoolClient, input: { 
     await client.query(`UPDATE zzsh_order.owner_guarantee_payment SET finance_event_id=$2,ledger_entry_ref=$3,source_digest=$4,updated_at=clock_timestamp() WHERE id=$1`, [paymentId, ledger.financeEventId, ledger.ledgerEntryRef, observationDigest]);
     await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status=CASE WHEN $2::numeric >= required_cents THEN 'COVERED' ELSE 'OPEN' END,updated_at=clock_timestamp() WHERE id=$1`, [row.requirementId, observedAmount]);
   }
-  const automaticRefund = subject.lifecycle === "DELISTED" && input.outcome === "CONFIRMED"
-    ? await safelyEnqueueDelistedGuaranteeRefund(client, { accountId: subject.accountId, ownerUserId: subject.ownerUserId, requestId: input.requestId ?? `guarantee_capture_${hash(paymentId).slice(0, 40)}` }) : undefined;
+  const automaticRefund = ["DELISTED", "ARCHIVED"].includes(subject.lifecycle) && input.outcome === "CONFIRMED"
+    ? await safelyEnqueueAutomaticGuaranteeRefund(client, { accountId: subject.accountId, ownerUserId: subject.ownerUserId, requestId: input.requestId ?? `guarantee_capture_${hash(paymentId).slice(0, 40)}` }, subject.lifecycle === "DELISTED" ? "ACCOUNT_DELISTED" : "ORDER_COMPLETED") : undefined;
   return { paymentId, requirementId: row.requirementId, status: input.outcome, providerTransactionId: input.providerTransactionId ?? null, observedAmountCents: observedAmount, financeEventId: ledger?.financeEventId ?? null, ledgerEntryRef: ledger?.ledgerEntryRef ?? null, duplicate: false, providerAction: "LOCAL_CONTROLLED", ...(automaticRefund ? { automaticRefund } : {}) };
 }
 
@@ -1294,7 +1323,7 @@ export async function recordGuaranteeRefundResult(client: PoolClient, input: { r
     await client.query(`UPDATE zzsh_order.owner_guarantee_refund SET finance_event_id=$2,ledger_entry_ref=$3,source_digest=$4,updated_at=clock_timestamp() WHERE id=$1`, [refundId, ledger.financeEventId, ledger.ledgerEntryRef, observationDigest]);
     await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status='REFUNDED',updated_at=clock_timestamp() WHERE id=$1`, [row.requirementId]);
   } else if (input.outcome === "FAILED") {
-    await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status=$2,updated_at=clock_timestamp() WHERE id=$1`, [row.requirementId, subject.lifecycle === "DELISTED" ? "RESTRICTED" : "COVERED"]);
+    await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status=$2,updated_at=clock_timestamp() WHERE id=$1`, [row.requirementId, ["DELISTED", "ARCHIVED"].includes(subject.lifecycle) ? "RESTRICTED" : "COVERED"]);
   } else {
     await client.query(`UPDATE zzsh_order.owner_guarantee_requirement SET status='REFUND_PROCESSING',updated_at=clock_timestamp() WHERE id=$1`, [row.requirementId]);
   }

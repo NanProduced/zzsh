@@ -27,6 +27,7 @@ import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
 import { readFormalCollectionAdmission, type FormalCollectionAdmission } from "./joinpay-collection-profile";
 import { assertControlledSettlementResource, type PaymentAcceptanceOptions } from "./payment-confirmation";
 import { assertBusinessRuntimeIdentity } from "../database/business";
+import { safelyEnqueueCompletedGuaranteeRefund } from "../credit/credit-guarantee";
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import {
@@ -2071,6 +2072,7 @@ async function postReadySettlement(
   );
   if (completed.rowCount !== 1) throw conflict("ORDER_NOT_SETTLEABLE");
   await archiveCompletedSupply(client, order, actor, requestId, postingId, version.id, snapshot.endReason);
+  const guaranteeRefund = await safelyEnqueueCompletedGuaranteeRefund(client, { accountId: order.accountId, ownerUserId: order.ownerUserId, requestId });
   order.status = "COMPLETED";
   order.revision = (BigInt(order.revision) + 1n).toString();
   await audit(client, actor, "order.settlement.posted", order.id, requestId, {
@@ -2078,6 +2080,7 @@ async function postReadySettlement(
     paymentConfirmationId: bill.basis.paymentConfirmationId, postedAt: header.postedAt, refundDueAt: header.refundDueAt,
     capturedCents: captured.toString(), ownerNetCents: ownerNet.toString(), renterRefundCents: renterRefund.toString(),
     platformContributionCents: platformContribution.toString(), compensationFeeCents: fee.toString(),
+    guaranteeRefund: { state: guaranteeRefund.state, ...(guaranteeRefund.reason ? { reason: guaranteeRefund.reason } : {}) },
   });
 }
 

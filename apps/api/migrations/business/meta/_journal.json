@@ -1520,6 +1520,13 @@
       "when": 1794456000018,
       "tag": "0216_legacy_system_migration",
       "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1794456000019,
+      "tag": "0217_completed_guarantee_refund",
+      "breakpoints": true
     }
   ]
 }

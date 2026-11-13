@@ -17,7 +17,8 @@ function fixture(){
     if(sql.includes('FROM "zzsh_iam"."user_identity_state"'))return result([{accountStatus:"ACTIVE"}]);
     if(sql.includes('FROM "zzsh_auth_user"."session"'))return result([{}]);
     if(sql.includes("user-settlement-stage-batch"))return result([{id:"order",orderStatus:state.status,posted:state.posted,currentVersionNo:1,viewerParty:v[1]==="renter"?"RENTER":"OWNER",intakeOpen:false,renterAction:null,ownerAction:null}]);
-    if(sql.includes("FROM zzsh_order.rental_order WHERE id=$1"))return result(v[0]==="order"&&["renter","owner"].includes(v[1])?[{party:v[1]==="renter"?"RENTER":"OWNER"}]:[]);
+    if(sql.includes("FROM zzsh_order.rental_order WHERE id=$1"))return result(v[0]==="order"&&["renter","owner"].includes(v[1])?[{party:v[1]==="renter"?"RENTER":"OWNER",accountId:"account"}]:[]);
+    if(sql.startsWith("SELECT id FROM zzsh_supply.rental_account"))return result(v[0]==="account"?[{id:"account"}]:[]);
     if(sql.includes("SELECT id,order_id,description FROM"))return result([...records.values()].filter(r=>r.app_id===v[0]&&r.requester_user_id===v[1]&&r.operation_id===v[2]));
     if(sql.includes("SELECT id FROM zzsh_iam.im_aftersale_record"))return result([...records.values()].filter(r=>r.app_id===v[0]&&r.requester_user_id===v[1]&&r.order_id===v[2]&&r.state==="PENDING"));
     if(sql.startsWith("INSERT INTO zzsh_iam.im_aftersale_record")){
