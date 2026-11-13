@@ -1,3 +1,5 @@
+import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
+import { compatRule } from "./pricing-compat-fixture";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
@@ -61,6 +63,29 @@ function accountFixture(id: string, owner: string, facts: Partial<Facts> = {}) {
   return { id, owner, state, account, version, publication };
 }
 
+function scheduledFixture(id: string, model: "FIXED_FEE" | "SPREAD" = "SPREAD", gameId = GAME, facts: Partial<Facts> = {}) {
+  const fixture = accountFixture(id, "owner", facts);
+  const payload = fixture.version.payload!;
+  const { compatibility, ...rule } = compatRule();
+  const fixed = model === "FIXED_FEE";
+  const result = computeQuote({ priceVersionId: "price-a", mode: fixed ? "PERCENT" : "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1",
+    ...(fixed ? { fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, commissionRate: "0.1" } : {}),
+    haffRule: { ...rule, dailyDeltaByTermOption: { daily: "0" }, ...(fixed ? { schema: "haff-ratio-v3", fixedModes: compatibility!.modes } : { compatibility }) },
+    conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily", rentalPricing: { rentalMode: "ordinary" } },
+    termOption: { code: "daily", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+    lines: [{ itemId: "haff-a", quantity: "1000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" }] });
+  assert(result.quotable);
+  fixture.account.game_id = gameId;
+  fixture.version.schema_version = fixed ? 4 : 2;
+  fixture.version.payload = normalizeContentPayload({ ...payload, gameId, schemaVersion: fixed ? 4 : 2,
+    declaration: { ...payload.declaration, pricingOptionCode: "", attributes: { ...payload.declaration.attributes, rentalPricing: { rentalMode: "ordinary" } } },
+    quoteValues: { ...result.quote, ruleReleaseId: "release-a" },
+    pricingPolicy: { schema: "pricing-policy-v1", pricingModel: model, scheduleId: "initial-plan",
+      generation: "1", effectiveAt: id === "unknown" ? "2026-10-02T00:00:00Z" : "2026-10-01T00:00:00Z", priceVersionId: "price-a" } });
+  fixture.version.content_hash = computeContentHash(fixture.version.payload);
+  return fixture;
+}
+
 type Fixture = ReturnType<typeof accountFixture>;
 
 function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ account_id: string; savedAt: string }>) {
@@ -85,7 +110,7 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
     else if (sql.includes("zzsh_supply.listing_publication")) rows = pick(versions).map((v) => byAccount.get(v.account_id)!.publication());
     else if (sql.includes('SELECT u.suspended')) { const f = fixtures.find((x) => x.owner === args[0])!; rows = [{ suspended: f.state.suspended, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]; }
     else if (sql.includes("game_service_operation")) rows = [{ id: "service-a", gameId: GAME, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
+    else if (sql.includes("FROM zzsh_supply.game g WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-new", catalog_revision: "1" }];
     else if (sql.includes("funding_policy AS policy")) rows = [{ policy: null }];
     else if (sql.includes("rule_acceptance")) rows = pick(accounts).some((a) => byAccount.get(a.id)!.state.accepted) ? [{}] : [];
     else if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = media.filter((m) => pick(versions).some((v) => `media-${v.account_id}` === m.id));
@@ -121,12 +146,14 @@ async function marketPage(t: { mock: { method: (object: object, key: string, val
        ...candidateRows(fixtures).map((row, index) => ({ ...row, key: `2026-10-0${8 - index}T00:00:00.000000Z`, source: "native" }))];
   const { client, gate, queries, windows } = clientFor(fixtures);
   const real = client.query;
-  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) =>
-    sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS") ? { rows, rowCount: rows.length } : real(sql, args)) as never;
+  (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) => {
+    if (sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS")) return { rows, rowCount: rows.length };
+    return real(sql, args);
+  }) as never;
   const options = { pool: { connect: async () => client }, supplyGateReader: gate, listingCursorKey: CURSOR_KEY, mediaStorage: { accountImageCdn: cdn },
     legacyPublicAdmission: { schema: "legacy-public-admission-v2", records: [] } };
   const undo = [
-    t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: false, mixed: mode === "mixed", config: { sorts: [{ key: "latest", label: "最新发布" }] },
+    t.mock.method(filterConfig, "readListingState", async () => ({ legacyReadOnly: false, mixed: mode === "mixed", config: { sorts: [{ key: "latest", label: "最新发布" }, { key: "coreQuantity", label: "哈夫币数量" }] },
       filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
     t.mock.method(filterConfig, "validateListingQuery", async () => {}),
     t.mock.method(legacyRead, "mixedListingBinding", () => ({ queryVersion: 2, gameId: GAME, queryHash: "x", sort: "latest", direction: "DESC", coreItemId: null, filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release-a" })),
@@ -153,11 +180,24 @@ test("a native market page reads each shared dimension once, not once per candid
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.rental_account WHERE id=$1"), 0, "no per-candidate account read");
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2"), 0, "no per-candidate version read");
   // Request-invariant dimensions are memoized for the whole page.
-  assert.equal(countOf(queries, "FROM zzsh_supply.game WHERE id="), 1, "one game row per page");
+  assert.equal(countOf(queries, "FROM zzsh_supply.game g WHERE id="), 1, "one game row per page");
   assert.equal(countOf(queries, "game_service_operation"), 1, "one rental service row per page");
   assert.equal(countOf(queries, "funding_policy AS policy"), 1, "one release policy per page");
   // The two reads of one candidate's media collapsed into one.
   assert.equal(countOf(queries, "SELECT a.* FROM zzsh_supply.listing_media"), 5, "one media read per candidate, not two");
+});
+
+test("latest and quantity markets project publication quotes without reading current prices", async t => {
+  for (const [sort, mode] of [["latest", "native"], ["coreQuantity", "native"], ["latest", "mixed"], ["coreQuantity", "mixed"]] as const) {
+    const fixtures = ["a", "b", "c"].map(id => scheduledFixture(id));
+    const search = new URLSearchParams({ queryVersion: "2", gameId: GAME, sort, limit: "4", ...(sort === "coreQuantity" ? { coreItemId: "haff-a" } : {}) });
+    const { page, queries } = await marketPage(t, fixtures, search, mode);
+    assert.equal(queries.some(sql => /pricing_policy_schedule|public_market_price/.test(sql)), false);
+    const items = page.items.filter(item => item.id !== "legacy-1");
+    assert.deepEqual(items.map(item => (item.quote as { resourceTotal: { amount: string } } | null)?.resourceTotal.amount ?? null),
+      fixtures.map(fixture => (fixture.version.payload!.quoteValues.resourceTotal as {amount:string}).amount));
+    assert(items.every(item => item.canCreateOrder === false));
+  }
 });
 
 test("batched page projection is the same DTO the single reader returns for each account", async t => {
@@ -301,6 +341,42 @@ test("favorites read the private set once per page and hide objects that lost pu
   (options.userAuth.api.getSession as unknown as () => Promise<{ user: { id: string }; session: { id: string } }>) = (async () => ({ user: { id: "reader-b" }, session: { id: "session-b" } })) as never;
   await handleFavorites({ method: "GET", headers: {} } as never, other.response as never, options as never, "req_fixture", "/me/favorites", new URLSearchParams());
   assert.deepEqual(other.result.body.items, [], "another reader never sees this set");
+});
+
+test("favorites keep publication prices across games and keep missing and private listings separate", async () => {
+  const fixtures = [
+    scheduledFixture("fixed", "FIXED_FEE"),
+    scheduledFixture("spread", "SPREAD", "game-b"),
+    scheduledFixture("unknown", "SPREAD", "game-b"),
+    scheduledFixture("hidden", "FIXED_FEE", GAME, { restricted: true }),
+    scheduledFixture("outside", "FIXED_FEE"),
+  ];
+  const favoriteRows = fixtures.map((f, i) => ({ account_id: f.id, savedAt: "2026-10-0" + (5 - i) + "T00:00:00.000000Z" }));
+  const { client, gate, queries } = clientFor(fixtures, userId => userId === "reader-a" ? favoriteRows : []);
+  const original = client.query;
+  const spread = fixtures[1]!;
+  spread.account.current_version_id = "unreviewed-draft";
+  client.query = (async (sql: string, args: unknown[] = []) => {
+    if (sql.includes("SELECT v.* FROM zzsh_supply.listing_version") && args[0] === spread.id) return { rows: [spread.version] };
+    if (sql.includes("AS \"publishedAtExact\" FROM zzsh_supply.listing_publication") && args[1] === spread.id)
+      return { rows: [{ ...spread.publication(), game_id: spread.account.game_id }] };
+    return original(sql, args);
+  }) as never;
+  const options = { pool: { query: client.query, connect: async () => client }, supplyGateReader: gate,
+    userAuth: { api: { getSession: async () => ({ user: { id: "reader-a" }, session: { id: "session-fixture" } }) } } };
+  const capture = responseCapture();
+  await handleFavorites({ method: "GET", headers: {} } as never, capture.response as never, options as never,
+    "req_fixture", "/me/favorites", new URLSearchParams("limit=4"));
+  assert.equal(capture.result.status, 200);
+  assert.equal(queries.some(sql => /pricing_policy_schedule|public_market_price/.test(sql)), false);
+  const { items, nextCursor } = capture.result.body;
+  assert.deepEqual(items.map((row: any) => [row.accountId, row.state, row.listing?.quote?.resourceTotal?.amount ?? null]), [
+    ["fixed", "AVAILABLE", (fixtures[0]!.version.payload!.quoteValues.resourceTotal as {amount:string}).amount], ["spread", "AVAILABLE", (spread.version.payload!.quoteValues.resourceTotal as {amount:string}).amount], ["unknown", "AVAILABLE", null], ["hidden", "UNAVAILABLE", null],
+  ]);
+  assert.equal(items[1].listing.versionId, "version-spread", "prior publication uses its own price");
+  assert.equal(items[3].listing, null);
+  assert(!JSON.stringify(items).includes("9.99"));
+  assert.equal(JSON.parse(Buffer.from(nextCursor, "base64url").toString()).user, "reader-a");
 });
 
 // The v1 public list is the same reader chain as the market page but keeps its own

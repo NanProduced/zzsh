@@ -294,7 +294,7 @@ export type PublishingCatalog = {
   inputScale: 0;
   ready: boolean;
   blockers: Array<{
-    code: "RULE_UNCONFIGURED" | "REQUIRED_ITEM_UNPRICED";
+    code: "RULE_UNCONFIGURED" | "PRICING_POLICY_UNAVAILABLE" | "REQUIRED_ITEM_UNPRICED";
     path: string;
     itemId?: string;
     name?: string;
@@ -355,7 +355,7 @@ export type PublishingOptions = {
   bearLevels: number[];
   diveLevels?: number[];
   pricingOptionCodes: string[];
-  pricingSchema?: "haff-ratio-v2";
+  pricingSchema?: "haff-ratio-v2" | "haff-ratio-v3";
   rentalModes?: Record<
     RentalMode,
     {
@@ -446,6 +446,7 @@ export type OwnerNormalEndEstimate = {
   selected: boolean | null;
   ownerGross: Money | null;
   serviceFee: { base: Money | null; rate: string | null; amount: Money | null; payer: "OWNER" | "NONE" | null };
+  platformFee?: { base: Money | null; rate: string | null; amount: Money | null; payer: "OWNER" };
   ownerNet: Money | null;
   policy: { fullPayoutPolicyRef: string; fullPayoutPolicyVersion: string; disclosureVersion: string } | null;
   roundingPolicy: string;

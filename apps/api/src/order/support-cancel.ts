@@ -8,7 +8,8 @@ import { lockSettlement } from "./settlement-record";
 import { readPrestartRefundProgress } from "./prestart-refund-store";
 import { assertEcsTestDemoOrderAdmission, assertEcsTestDemoResource, demoFinanceScope } from "../finance/ecs-test-demo-resource";
 import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
-import { supportPoststartExecutorSafeSql, supportPoststartTriggersSql } from "../finance/support-poststart-schema";
+import { fixedFeeSupportCancelContractSql, supportPoststartExecutorSafeSql, supportPoststartTriggersSql } from "../finance/support-poststart-schema";
+import { allocateFixedOwnerIncome } from "./settlement";
 import type { PrestartPaymentBasis } from "./prestart-termination";
 import {
   supportCancelEligibility, supportCancelConflict,supportPoststartCancellationAllocation,supportPoststartCancellationEligibility,
@@ -30,6 +31,7 @@ type SupportFactsRow = {
   merchant_order_no: string | null; channel_trx_no: string | null; order_cents: string | null;
   opening_confirmed: boolean; has_posting: boolean; pending_settlement: boolean; pending_adjustment: boolean;
   earning_count: string; active_refund_count: string; other_termination: boolean;
+  fixed_pricing: boolean;
 };
 type SupportTerminationRow = {
   id: string; order_id: string; state: string; requested_by_party: string; requested_by_admin_user_id: string | null;
@@ -53,7 +55,7 @@ export async function assertSupportCancelSchema(client: PoolClient) {
 }
 
 /** Do not cancel a paid order if the corresponding refund executor is only partially installed. */
-export async function supportPoststartSchemaReady(client:PoolClient,controlled:boolean):Promise<boolean> {
+export async function supportPoststartSchemaReady(client:PoolClient,controlled:boolean,fixedFee=false):Promise<boolean> {
  const row=(await client.query(`SELECT COALESCE(
   to_regclass('zzsh_order.support_poststart_cancellation') IS NOT NULL
   AND has_table_privilege(current_user,to_regclass('zzsh_order.support_poststart_cancellation'),'SELECT')
@@ -70,7 +72,10 @@ export async function supportPoststartSchemaReady(client:PoolClient,controlled:b
   AND (NOT $1::boolean OR (to_regclass('zzsh_order.local_controlled_refund_operation') IS NOT NULL
    AND to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL
    AND to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)') IS NOT NULL
-   AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL)),false) AS ready`,[controlled])).rows[0];
+   AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL))
+  AND (NOT $2::boolean OR ((${fixedFeeSupportCancelContractSql})
+   AND has_function_privilege(current_user,to_regprocedure('zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text)'),'EXECUTE')
+   AND has_function_privilege(current_user,to_regprocedure('zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text)'),'EXECUTE'))),false) AS ready`,[controlled,fixedFee])).rows[0];
  return row?.ready===true;
 }
 
@@ -79,6 +84,9 @@ async function factsOf(client: PoolClient, orderId: string): Promise<SupportFact
     o.cancel_reason,${utc("o.cancelled_at")} AS cancelled_at,c.id AS confirmation_id,c.source AS payment_source,c.disposition,
     c.currency,c.amount_cents::text,c.merchant_scope_id AS merchant_identity_id,c.merchant_order_no,
     c.provider_transaction_id AS channel_trx_no,(o.rental_amount_cents+o.deposit_amount_cents)::text AS order_cents,
+    (COALESCE(o.quote_snapshot#>>'{personal,schema}'='personal-quote-v5',false)
+      OR COALESCE(o.quote_snapshot#>>'{settlementPricing,schema}'='settlement-pricing-v3',false)
+      OR COALESCE(o.quote_snapshot->>'schemaVersion'='4',false)) AS fixed_pricing,
     EXISTS(SELECT 1 FROM zzsh_order.rental_opening x WHERE x.order_id=o.id AND (x.status='CONFIRMED'
       OR (SELECT count(DISTINCT party) FROM zzsh_order.rental_opening_ack a WHERE a.opening_id=x.id AND a.version_no=x.version_no)=2)) AS opening_confirmed,
     EXISTS(SELECT 1 FROM zzsh_order.settlement_posting p WHERE p.order_id=o.id) AS has_posting,
@@ -94,9 +102,19 @@ async function factsOf(client: PoolClient, orderId: string): Promise<SupportFact
     WHERE o.id=$1`, [orderId])).rows[0];
   if (!row) throw missing();
   if (![row.opening_confirmed,row.has_posting,row.pending_settlement,row.pending_adjustment,row.other_termination]
-    .every(v => typeof v === "boolean") || typeof row.earning_count !== "string" || typeof row.active_refund_count !== "string")
+    .every(v => typeof v === "boolean") || typeof row.fixed_pricing !== "boolean" || typeof row.earning_count !== "string" || typeof row.active_refund_count !== "string")
     throw unavailable("Support cancellation facts are incomplete");
   return row;
+}
+
+async function readPoststartFixedFeeBasis(client:PoolClient,orderId:string):Promise<{selected:boolean;rate:string}> {
+ const row=(await client.query<{selected:boolean|null;rate:string|null}>(`SELECT
+  zzsh_order.poststart_full_payout_selected(jsonb_set(o.quote_snapshot,'{personal,schema}',to_jsonb('personal-quote-v4'::text)),
+    o.renter_user_id,o.owner_user_id,o.account_id,o.listing_version_id,o.content_hash,o.rule_release_id) AS selected,
+  zzsh_order.fixed_fee_poststart_rate(o.quote_snapshot,o.renter_user_id,o.owner_user_id,o.account_id,o.listing_version_id,o.content_hash,o.rule_release_id) AS rate
+  FROM zzsh_order.rental_order o WHERE o.id=$1`,[orderId])).rows[0];
+ if(!row||typeof row.selected!=='boolean'||typeof row.rate!=='string')throw unavailable('Fixed fee cancellation basis is unavailable');
+ return {selected:row.selected,rate:row.rate};
 }
 
 async function readPoststartFullPayoutSelection(client:PoolClient,orderId:string):Promise<boolean|null> {
@@ -258,16 +276,24 @@ export async function supportCancelAfterOpening(client:PoolClient,actor:ManualCl
  if(!eligibility.allowed)return supportCancelConflict(input.orderId,eligibility.reason!);
  const amount=supportPoststartCancellationAllocation({paidCents:facts.amount_cents,previouslyAllocatedCents:'0',
   refundCents:input.refundCents,ownerCents:input.ownerCents});
- if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))throw unavailable("Poststart cancellation or refund schema is not deployed");
- const selection=await readPoststartFullPayoutSelection(client,input.orderId);
+ if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED',facts.fixed_pricing))throw unavailable("Poststart cancellation or refund schema is not deployed");
+ const fixed=facts.fixed_pricing?await readPoststartFixedFeeBasis(client,input.orderId):null;
+ const selection=fixed?.selected??await readPoststartFullPayoutSelection(client,input.orderId);
  if(selection===null && amount.ownerCents!=='0')throw conflict("FULL_PAYOUT_UNKNOWN");
- const value=(await client.query<{value:any}>(`SELECT zzsh_order.cancel_order_after_start_v2($1,$2::bigint,$3::numeric,$4::numeric,$5) AS value`,
+ let serviceFee=0n,fee=selection===true?fullPayoutServiceFeeCents(BigInt(amount.ownerCents)):0n;
+ if(fixed){
+  try{const allocated=allocateFixedOwnerIncome(BigInt(amount.ownerCents),fixed.rate,fixed.selected);serviceFee=allocated.serviceFeeCents;fee=allocated.fullPayoutFeeCents;}
+  catch{throw conflict("OWNER_INCOME_INSUFFICIENT");}
+ }
+ const executor=fixed?'cancel_order_after_start_v3':'cancel_order_after_start_v2';
+ const value=(await client.query<{value:any}>(`SELECT zzsh_order.${executor}($1,$2::bigint,$3::numeric,$4::numeric,$5) AS value`,
   [input.orderId,input.expectedOrderRevision,amount.refundCents,amount.ownerCents,input.reason])).rows[0]?.value;
- const selected=value?.fullPayoutSelected,fee=selected===true?fullPayoutServiceFeeCents(BigInt(amount.ownerCents)):0n;
- const ownerNet=BigInt(amount.ownerCents)-fee,platform=BigInt(amount.paidCents)-BigInt(amount.refundCents)-ownerNet;
+ const selected=value?.fullPayoutSelected;
+ const ownerNet=BigInt(amount.ownerCents)-fee-serviceFee,platform=BigInt(amount.paidCents)-BigInt(amount.refundCents)-ownerNet;
  if(!value||value.orderId!==input.orderId||value.status!=='CANCELLED'||value.paidCents!==amount.paidCents
   ||value.refundCents!==amount.refundCents||value.ownerGrossCents!==amount.ownerCents||value.ownerCents!==ownerNet.toString()
   ||selected!==selection||(selected!==true&&selected!==false&&!(selected===null&&amount.ownerCents==='0'))||value.fullPayoutFeeCents!==fee.toString()
+  ||(fixed&&(value.fixedFeeRate!==fixed.rate||value.platformServiceFeeCents!==serviceFee.toString()))
   ||value.platformContributionCents!==platform.toString()||value.commissionCents!=='0'||value.channelResult!=='NOT_SUBMITTED')
   throw unavailable("Poststart cancellation receipt differs");
  const recorded=(await client.query<{revision:string;cancelled_at:string|null}>(`SELECT revision::text,${utc('cancelled_at')} AS cancelled_at
@@ -279,7 +305,8 @@ export async function supportCancelAfterOpening(client:PoolClient,actor:ManualCl
   eligibility:{allowed:false,reason:'ALREADY_CANCELLED',refundCents:amount.refundCents,openingConfirmed:true},
   openingConfirmed:true,supportCancellation:null,refund:null,existing:false,channel:{result:'NOT_SUBMITTED',bankArrival:'UNKNOWN'},
   poststartCancellation:{caseId:value.caseId,refundCents:amount.refundCents,ownerCents:ownerNet.toString(),ownerGrossCents:amount.ownerCents,
-   fullPayoutSelected:selected,fullPayoutFeeCents:fee.toString(),platformContributionCents:platform.toString(),commissionCents:'0',reason:input.reason},
+   fullPayoutSelected:selected,fullPayoutFeeCents:fee.toString(),...(fixed?{fixedFeeRate:fixed.rate,platformServiceFeeCents:serviceFee.toString()}:{}),
+   platformContributionCents:platform.toString(),commissionCents:'0',reason:input.reason},
   ...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{})}};
 }
 
@@ -290,10 +317,12 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
   await assertSupportCancelSchema(client);
   const facts = await factsOf(client, orderId);
   const demo=await demoForFacts(client,actor,facts,'READ_ORIGINAL');
-  let poststartEligibility:SupportCancelEligibility & {fullPayoutSelected?:boolean|null}=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
+  let poststartEligibility:SupportCancelEligibility & {fullPayoutSelected?:boolean|null;fixedFeeRate?:string}=supportPoststartCancellationEligibility(modelFacts(facts),demo?.active===true);
   if(poststartEligibility.allowed) {
-    if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED'))
+    if(!await supportPoststartSchemaReady(client,facts.payment_source==='CONTROLLED',facts.fixed_pricing))
       poststartEligibility={allowed:false,reason:'PAYMENT_BASIS_UNAVAILABLE',refundCents:null,openingConfirmed:true};
+    else if(facts.fixed_pricing){const fixed=await readPoststartFixedFeeBasis(client,orderId);
+      poststartEligibility={...poststartEligibility,fullPayoutSelected:fixed.selected,fixedFeeRate:fixed.rate};}
     else poststartEligibility={...poststartEligibility,fullPayoutSelected:await readPoststartFullPayoutSelection(client,orderId)};
   }
   if(facts.status==='CANCELLED'&&facts.cancel_reason==='SUPPORT_AFTER_START_CANCELLED'){
@@ -301,6 +330,7 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
     const liabilityFn=facts.payment_source==='CONTROLLED'?'local_controlled_refund_liability_complete':'support_cancellation_refund_liability_complete';
     const row=(await client.query(`SELECT p.id,p.reason,p.refund_cents::text,p.owner_cents::text,p.platform_cents::text,
       to_jsonb(p)->>'owner_gross_cents' AS owner_gross_cents,to_jsonb(p)->>'full_payout_fee_cents' AS full_payout_fee_cents,
+      to_jsonb(p)->>'fixed_fee_rate' AS fixed_fee_rate,to_jsonb(p)->>'platform_service_fee_cents' AS platform_service_fee_cents,
       CASE WHEN jsonb_typeof(to_jsonb(p)->'full_payout_selected')='boolean' THEN (to_jsonb(p)->>'full_payout_selected')::boolean ELSE NULL END AS full_payout_selected,
       zzsh_order.support_poststart_cancellation_complete(p.id) AS complete,
       (SELECT CASE WHEN i.payment_source=$2 AND CASE WHEN i.state IN('SUCCEEDED','FAILED') THEN zzsh_order.${terminalFn}(i.id)
@@ -314,6 +344,7 @@ export async function readSupportCancellation(client: PoolClient, actor: ManualC
       poststartEligibility,openingConfirmed:true,supportCancellation:null,refund:null,existing:true,
       poststartCancellation:{caseId:row.id,reason:row.reason,refundCents:row.refund_cents,ownerCents:row.owner_cents,
         ownerGrossCents:row.owner_gross_cents,fullPayoutFeeCents:row.full_payout_fee_cents,fullPayoutSelected:row.full_payout_selected,
+        ...(typeof row.fixed_fee_rate==='string'&&typeof row.platform_service_fee_cents==='string'?{fixedFeeRate:row.fixed_fee_rate,platformServiceFeeCents:row.platform_service_fee_cents}:{}),
         platformContributionCents:row.platform_cents,commissionCents:'0',refundState:row.refund_state??'NOT_SUBMITTED'},
       channel:{result:row.refund_state??'NOT_SUBMITTED',bankArrival:'UNKNOWN'},...(demo?{simulationScope:demoFinanceScope(demo.resource)}:{})};
   }

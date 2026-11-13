@@ -6,7 +6,8 @@ type CandidateFilters=Omit<ListingFilters,"skinGroups">&{skinGroups?:{ids:string
 export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id JOIN zzsh_supply.game g ON g.id=a.game_id`;
 export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE'
  AND NOT (g.code='delta' AND EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map legacy WHERE legacy.account_id=a.id AND legacy.source_system='legacy_mysql_restore' AND legacy.source_entity='la_rental_accounts'))
- AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
+ AND ${effectivePublicationStateSql("v","pub")} AND pub.rule_release_id=v.rule_release_id AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id
+ AND pub.content_hash=v.content_hash`;
 // LEGACY_OBSERVATION versions keep the same declaration attributes in the
 // immutable `attributes` column instead of a payload, so callers may pass the
 // column as the attribute source while sharing one predicate implementation.
@@ -55,15 +56,37 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
   }
   return where;
 }
+/** Both native-only and mixed markets consume the same public price and use it for seek. */
+export function candidateMarketPrice() {
+  const amount = `v.payload#>>'{quoteValues,resourceTotal,amount}'`;
+  const policy = `v.payload->'pricingPolicy'`;
+  const bound = `(${policy}->>'schema'='pricing-policy-v1'
+    AND ${policy}->>'priceVersionId'=v.payload#>>'{quoteValues,priceVersionId}'
+    AND ${policy}->>'effectiveAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$'
+    AND ${policy}->>'scheduleId' ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    AND ${policy}->>'effectiveAt' <= to_char(pub.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    AND ${policy}->>'generation' ~ '^[1-9][0-9]{0,18}$'
+    AND CASE WHEN v.schema_version=4 THEN ${policy}->>'pricingModel'='FIXED_FEE'
+      WHEN v.schema_version=2 THEN ${policy}->>'pricingModel'='SPREAD' ELSE false END)`;
+  return `CASE WHEN (CASE WHEN v.schema_version=4 OR v.payload ? 'pricingPolicy'
+       THEN pub.source='OWNER_DIRECT' AND ${bound} ELSE true END)
+    AND v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan'
+    AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$'
+    THEN (${amount})::numeric END`;
+}
+
 export type ListingPosition={id:string;key:string|null;isNull:boolean};
 export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${p(query.gameId)}`,...candidatePredicates(query.filters,query.q,p)];
   const publication=`pub.published_at`;
-  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
-  const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
-  const ratio=`CASE WHEN ${price}>0 THEN ((SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})::numeric / ${price}) END`;
-  const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:query.sort==="ratio"?ratio:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  const price=candidateMarketPrice();
+  let key=publication;
+  if(query.sort==="resourceTotal")key=price;
+  else if(query.sort==="ratio"||query.sort==="coreQuantity"){
+    const quantity=`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+    key=query.sort==="ratio"?`CASE WHEN ${price}>0 THEN (${quantity}::numeric / ${price}) END`:quantity;
+  }
   where.push(PUBLIC_STANDARD_TIER_GUARD);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;

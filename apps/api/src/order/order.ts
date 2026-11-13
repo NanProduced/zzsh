@@ -226,6 +226,7 @@ export function projectOrder(
     renterName: row.renterName,
     gameId: row.gameId,
     releaseId: row.releaseId,
+    ...(typeof row.quoteSnapshot.priceVersionId === "string" ? { priceVersionId: row.quoteSnapshot.priceVersionId } : {}),
     contentHash: row.contentHash,
     revision: row.revision,
     quote: projectSnapshot(options?.internalQuote ? "admin" : "support"),
@@ -392,8 +393,7 @@ export async function createReservation(
   }
   if (
     !version.rule_release_id ||
-    version.rule_release_id !== input.releaseId ||
-    game.currentReleaseId !== version.rule_release_id
+    version.rule_release_id !== input.releaseId
   ) {
     throw orderConflict("RULE_CHANGED", "规则已更新，请刷新后重新确认");
   }

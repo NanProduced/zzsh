@@ -46,7 +46,7 @@ test('public catalog has no old category query and rejects categoryId',async()=>
  assert(!queries.some(sql=>/FROM\s+"?zzsh_supply"?\."?skin_category/i.test(sql)));
  await assert.rejects(readPublicCatalog(client,'game',{categoryId:'old_cat'},20),retired);
 });
-const context={game:{id:'game',code:'delta',catalogRevision:'10',ruleReleaseId:'release',rule:null},items:[],categories:[]} as Awaited<ReturnType<typeof listingCatalogContext>>;
+const context={game:{id:'game',code:'delta',catalogRevision:'10',ruleReleaseId:'release',rule:null},items:[],categories:[],safeBoxes:[],levels:{vitality:[],bear:[]},pricingAvailable:false} as Awaited<ReturnType<typeof listingCatalogContext>>;
 const config=(legacy=false)=>parseFilterConfig({schemaVersion:1,fields:[{key:'skinGroups',operator:'GROUPS',label:'皮肤',enabled:true,order:0,...(legacy?{categoryIds:['old_cat']}:{ownerKinds:['AGENT','MELEE_TYPE','FIREARM']})}],sorts:[{key:'latest',label:'最新发布',enabled:true,order:0}]});
 test('new filtering requires the explicit type contract and does not infer old category membership',async()=>{
  assert.throws(()=>validateConfigCatalog(config(true),context,false,'READ'),retired);validateConfigCatalog(config(),context,false,'WRITE');

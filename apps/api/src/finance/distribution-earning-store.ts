@@ -3,7 +3,9 @@ import {Logger} from '@nestjs/common';
 import {withTransaction,recordAudit,SecurityApiError} from '../auth/security-core';import {canonicalize} from '../supply/content-hash';import {conflict,invalid,notFound} from '../supply/supply-util';
 import {createPaymentDistributionStore,createNativePaymentDistributionStore,distributionOrderScopeIdentity,assertDistributionOrderScopeResource,isSandboxDistributionOrderScope,assertSandboxDistributionOrder,type DistributionOrderScope} from './distribution-payment-store';import {prepareAccrualFromFrozenPayment,type CompletedDistributionFacts} from './distribution-accrual';import {transitionRentalEarning,earningEconomicKey,type RentalEarning,type EarningLedgerPlan} from './distribution-mechanism';
 import {assertFormalInitialAdmission,readFormalCollectionAdmission,type FormalCollectionAdmission} from '../order/joinpay-collection-profile';
-import {createMaintenanceBatchRunner} from './distribution-maintenance-batch';
+import {FIXED_FEE_EVIDENCE_JOINS,FIXED_FEE_EVIDENCE_SELECT,fixedFeeAccrualFacts} from './distribution-fixed-fee-evidence';
+import {createMaintenanceBatchRunner,unreservedDueEarningSql} from './distribution-maintenance-batch';
+import {distributionAccrualTaskSchema} from './distribution-accrual-tasks';
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');
 const ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 type LocalResource={kind:'LOCAL_CONTROLLED';scope:DistributionOrderScope};
@@ -19,16 +21,17 @@ export type MaintenanceBatch={schema:'distribution-maintenance-batch.v1';operati
 export type DistributionEarningStore={
  accrue(pool:Pool,orderId:string,requestId:string,operator?:MaintenanceOperator):Promise<{knowledge:'KNOWN';items:{root:RentalEarning;replayed:boolean}[]}|{knowledge:'UNKNOWN';reason:string;baseCents:string|null;items:import('./distribution-accrual').AccruedReferral[]}>;
  accrueOn(client:PoolClient,orderId:string,requestId:string,operator?:MaintenanceOperator):Promise<any>;
+ pendingAccrualTasks(client:PoolClient,limit:number):Promise<{available:boolean;items:{postingId:string;orderId:string}[]}>;
  transition(pool:Pool,earningId:string,action:'SETTLE'|'REVOKE'|'RECOVER',expectedVersion:string,requestId:string,reversalSourceId?:string,operator?:MaintenanceOperator):Promise<{root:RentalEarning;replayed:boolean;receipt?:Record<string,any>;originalResult?:Record<string,any>}>;
  transitionOn(client:PoolClient,earningId:string,action:'SETTLE'|'REVOKE'|'RECOVER',expectedVersion:string,requestId:string,reversalSourceId?:string,operator?:MaintenanceOperator):Promise<any>;
  settleDue(pool:Pool,limit:number,requestId:string,gameIds?:readonly string[]|null):Promise<{scope:'LOCAL_CONTROLLED'|'NATIVE';selected:number;notAttempted:number;recoveryRequired:boolean;results:({earningId:string;status:'SETTLED';currentState:RentalEarning['state'];replayed:boolean}|{earningId:string;status:'UNKNOWN';errorCode:string})[]}>;
- readOrder(pool:Pool,orderId:string):Promise<{scope:'LOCAL_CONTROLLED'|'NATIVE';orderId:string;items:{root:RentalEarning;transitions:Record<string,any>[]}[]}>;
+ readOrder(pool:Pool,orderId:string):Promise<{scope:'LOCAL_CONTROLLED'|'NATIVE';orderId:string;items:{root:RentalEarning;transitions:Record<string,any>[]}[];accrualTask:{state:string;reasonCode:string|null}|null}>;
  discover(pool:Pool,input:{limit:number;gameIds?:readonly string[]|null;cursor?:string|null}):Promise<{scope:'LOCAL_CONTROLLED'|'NATIVE';examined:number;orders:MissingAccrualOrder[];nextCursor:string|null}>;
  runReplayBatch(pool:Pool,input:{orderIds:readonly string[];requestId:string;operator:MaintenanceOperator;gameIds?:readonly string[]|null;client?:PoolClient}):Promise<{httpStatus:number;batch:MaintenanceBatch;replayed:boolean}>;
  runDueBatch(pool:Pool,input:{limit:number;requestId:string;operator:MaintenanceOperator;gameIds?:readonly string[]|null;client?:PoolClient}):Promise<{httpStatus:number;batch:MaintenanceBatch;replayed:boolean}>;
  readBatch(pool:Pool,input:{requestId:string;operator:MaintenanceOperator;client?:PoolClient}):Promise<{httpStatus:number;batch:MaintenanceBatch}|null>;
  resumeBatch(pool:Pool,input:{requestId:string;operator:MaintenanceOperator;client?:PoolClient}):Promise<{httpStatus:number;batch:MaintenanceBatch;replayed:boolean}>;
- findUnfinishedBatch(pool:Pool,input:{operator:MaintenanceOperator;client?:PoolClient}):Promise<{requestId:string;status:number;operation:string}|null>;
+ findUnfinishedBatch(pool:Pool,input:{operator:MaintenanceOperator;client?:PoolClient;allSystemWorkers?:boolean}):Promise<{requestId:string;status:number;operation:string;operatorUserId?:string}|null>;
  replay(pool:Pool,orderIds:readonly string[],requestId:string,operator?:MaintenanceOperator):Promise<{scope:'LOCAL_CONTROLLED'|'NATIVE';requested:number;attempted:number;notAttempted:number;results:({orderId:string;status:'ACCRUED'|'REPLAYED';earningIds:string[]}|{orderId:string;status:'UNKNOWN';reason:string})[]}>;
  admitsOrder(orderId:string):boolean;
 };
@@ -80,24 +83,52 @@ function earningStore(resource:Resource):DistributionEarningStore{
   const r=(await c.query("SELECT d.oid,current_database() AS name,current_user AS role,shobj_description(d.oid,'pg_database') AS marker,to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AND to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS complete FROM pg_database d WHERE d.datname=current_database()")).rows[0];
   if(!r||Number(r.oid)!==local!.resourceOid||r.name!==name||r.role!==role||r.marker!==distributionOrderScopeIdentity(local!).marker||!r.complete)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Typed earning schema/resource not installed');
  }
+ async function accrualTasksReady(c:PoolClient){
+  const schema=await distributionAccrualTaskSchema(c);
+  if(schema==='PARTIAL')throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Distribution accrual task contract is unavailable');
+  return schema==='READY';
+ }
+ async function pendingAccrualTasks(c:PoolClient,limit:number){
+  if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw invalid('Bounded accrual task page required');
+  await ready(c,'READ_ORIGINAL');
+  const available=await accrualTasksReady(c);
+  if(!available)return{available:false,items:[]};
+  const rows=(await c.query(`SELECT t.posting_id AS "postingId",p.order_id AS "orderId"
+   FROM zzsh_order.distribution_accrual_task t JOIN zzsh_order.settlement_posting p ON p.id=t.posting_id
+   JOIN zzsh_order.payment_confirmation pc ON pc.id=p.payment_confirmation_id AND pc.order_id=p.order_id
+   WHERE t.state='PENDING' AND t.next_attempt_at<=clock_timestamp() AND pc.source=$1
+    AND ($3::text[] IS NULL OR p.order_id=ANY($3))
+    ${sandbox?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=p.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$4 AND a.approval_digest=$5 AND a.active)":""}
+   ORDER BY t.next_attempt_at,t.posting_id LIMIT $2`,[local?'CONTROLLED':'JOINPAY',limit,local&&!sandbox?[...allowed]:null,...(sandbox?[local!.resourceOid,local!.approvalDigest]:[])])).rows;
+  return{available:true,items:rows.map((row:any)=>({postingId:String(row.postingId),orderId:String(row.orderId)}))};
+ }
  async function orderLock(c:PoolClient,orderId:string){if(sandbox)await assertSandboxDistributionOrder(c,local!,orderId);else if(local&&!allowed.has(orderId))throw notFound();await c.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['zzsh:earning-order:'+orderId]);}
  async function wallet(c:PoolClient,userId:string){const covered=(await c.query('SELECT 1 FROM zzsh_order.wallet_coverage WHERE user_id=$1',[userId])).rowCount;if(!covered)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet origin coverage not closed');const r=(await c.query(`SELECT ledger_revision::text AS revision,COALESCE((SELECT sum(credit_cents-debit_cents) FROM zzsh_order.settlement_ledger_entry WHERE counterparty_user_id=$1 AND account_code IN('OWNER_AVAILABLE','WALLET_AVAILABLE')),0)::text AS available FROM zzsh_order.wallet_revision WHERE user_id=$1`,[userId])).rows[0];if(!r||BigInt(r.available)<0n)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Wallet requires reconciliation');return r;}
  async function append(c:PoolClient,root:RentalEarning,plan:EarningLedgerPlan,revision:string){const eventId='earning_event_'+sha(canonicalize([root.economicKey,plan.kind])).slice(0,40);await c.query('INSERT INTO zzsh_order.finance_event(id,economic_root_id,kind,subject_user_id,expected_ledger_revision) VALUES($1,$2,$3,$4,$5)',[eventId,root.id,plan.kind,root.beneficiaryUserId,revision]);for(const[n,line]of plan.lines.entries())await c.query(`INSERT INTO zzsh_order.settlement_ledger_entry(id,finance_event_id,line_no,account_code,debit_cents,credit_cents,counterparty_user_id,source_payment_confirmation_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,['earning_line_'+sha(canonicalize([eventId,n+1])).slice(0,40),eventId,n+1,line.accountCode,line.debitCents,line.creditCents,line.counterpartyUserId,null,JSON.stringify({earningId:root.id,earningRole:root.role,scope:scopeLabel})]);return eventId;}
- async function posting(c:PoolClient,orderId:string){const row=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at FROM zzsh_order.settlement_posting p WHERE order_id=$1`,[orderId])).rows[0];if(!row)return null;return{row,facts:completedFacts(row,orderId)};}
+ async function posting(c:PoolClient,orderId:string){const found=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at,${FIXED_FEE_EVIDENCE_SELECT} FROM zzsh_order.settlement_posting p LEFT JOIN zzsh_order.rental_order o ON o.id=p.order_id ${FIXED_FEE_EVIDENCE_JOINS} WHERE p.order_id=$1`,[orderId])).rows[0];if(!found)return null;const{fixed_evidence,...row}=found;return{row,fixedEvidence:fixed_evidence,facts:completedFacts(row,orderId)};}
  async function accrueOn(c:PoolClient,orderId:string,requestId:string,operator?:MaintenanceOperator){
-  await ready(c);if(operator)await operator.authorize(c,orderId);await orderLock(c,orderId);const completed=await posting(c,orderId);if(!completed)return{knowledge:'UNKNOWN' as const,reason:'ORDER_NOT_COMPLETED',baseCents:null,items:[]};const original=await payment.readOriginal(c,orderId,completed.facts.confirmationId),allocation=prepareAccrualFromFrozenPayment(original.basis,completed.facts);if(allocation.knowledge==='UNKNOWN')return allocation;
+  await ready(c);if(operator)await operator.authorize(c,orderId);await orderLock(c,orderId);const completed=await posting(c,orderId);if(!completed)return{knowledge:'UNKNOWN' as const,reason:'ORDER_NOT_COMPLETED',baseCents:null,items:[]};const original=await payment.readOriginal(c,orderId,completed.facts.confirmationId),facts=fixedFeeAccrualFacts(original.basis,{...completed.facts,settlementVersionHash:completed.row.version_hash},completed.fixedEvidence),allocation=prepareAccrualFromFrozenPayment(original.basis,facts);if(allocation.knowledge==='UNKNOWN')return allocation;
   await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[[...new Set(allocation.items.map(i=>i.beneficiaryUserId))]]);const results=[];
   for(const item of allocation.items){const found=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact FROM zzsh_order.rental_referral_earning e WHERE economic_key=$1 FOR UPDATE`,[item.economicKey])).rows[0];if(found){if(found.basis_digest!==item.basisDigest||found.posting_digest!==item.postingDigest||String(found.amount_cents)!==item.amountCents||found.due_exact!==item.dueAt)throw conflict('Original economic event has different frozen earning facts');results.push({root:seed(found),replayed:true});continue;}
    const w=await wallet(c,item.beneficiaryUserId),root:RentalEarning={id:'earning_'+sha(item.economicKey),economicKey:item.economicKey,source:{kind:'NATIVE_RENTAL_REFERRAL',type:'NATIVE',system:'zzsh',entity:'rental_order',id:orderId,digest:item.postingDigest,eventAt:completed.facts.postedAt},beneficiaryUserId:item.beneficiaryUserId,role:item.role,policyVersion:item.policyVersion,policyDigest:original.basis!.policyDigest!,baseDigest:allocation.digest,relationDigest:item.relationDigest,amountCents:item.amountCents,dueAt:item.dueAt,fingerprint:sha(canonicalize(item)),state:'PENDING',fundsDisposition:'PENDING',recoveryRequiredCents:null,version:'1'},canonical=canonicalize(root);
    await c.query(`INSERT INTO zzsh_order.finance_economic_root(id,basis_id,source_kind,source_type,source_system,source_entity,source_id,subject_user_id,beneficiary_role,policy_version,source_digest) VALUES($1,NULL,'NATIVE_RENTAL_REFERRAL','NATIVE','zzsh','rental_order',$2,$3,$4,$5,$6)`,[root.id,orderId,root.beneficiaryUserId,root.role,root.policyVersion,item.postingDigest]);
    await c.query(`INSERT INTO zzsh_order.rental_referral_earning(id,economic_root_id,economic_key,order_id,payment_confirmation_id,posting_id,beneficiary_user_id,beneficiary_role,amount_cents,due_at,basis_digest,posting_digest,canonical_seed,seed_digest,state,funds_disposition,version) VALUES($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING','PENDING',1)`,[root.id,root.economicKey,orderId,completed.facts.confirmationId,completed.facts.postingId,root.beneficiaryUserId,root.role,root.amountCents,root.dueAt,item.basisDigest,item.postingDigest,canonical,sha(canonical)]);
    const n=root.amountCents,lines=BigInt(n)===0n?[]:[{accountCode:'DISTRIBUTION_EXPENSE',debitCents:n,creditCents:'0',counterpartyUserId:null},{accountCode:'WALLET_PENDING_EARNINGS',debitCents:'0',creditCents:n,counterpartyUserId:root.beneficiaryUserId}],eventId=await append(c,root,{kind:'EARNING_PENDING',rootId:root.id,subjectUserId:root.beneficiaryUserId,lines},w.revision);await c.query(`INSERT INTO zzsh_order.rental_referral_transition(id,earning_id,action,expected_version,result_version,finance_event_id,source_digest) VALUES($1,$2,'ACCRUE',0,1,$3,$4)`,['earning_transition_'+sha(root.id+':ACCRUE').slice(0,40),root.id,eventId,item.postingDigest]);await recordAudit(c,{actorType:operator&&!operator.system?'admin':'system',...(operator?{actorId:operator.userId,...(operator.system?{}:{sessionId:operator.sessionId})}:{actorId:'distribution-accrual'}),action:'distribution.earning.pending',objectType:'rental_referral_earning',objectId:root.id,requestId,outcome:'SUCCESS',details:{orderId,role:root.role,basisDigest:item.basisDigest,postingDigest:item.postingDigest}});results.push({root,replayed:false});
-  }await c.query('SET CONSTRAINTS ALL IMMEDIATE');return{knowledge:'KNOWN' as const,items:results};
+  }await c.query('SET CONSTRAINTS ALL IMMEDIATE');
+  if(operator&&!operator.system&&await accrualTasksReady(c)){const reason='skipReason' in allocation&&typeof allocation.skipReason==='string'?allocation.skipReason:'NO_ELIGIBLE_REFERRAL';
+   await c.query(`UPDATE zzsh_order.distribution_accrual_task SET state=$2,reason_code=$3,updated_at=clock_timestamp()
+    WHERE posting_id=$1 AND state='REVIEW_REQUIRED'`,[completed.row.id,results.length?'DONE':'SKIPPED',results.length?null:reason]);}
+  return{knowledge:'KNOWN' as const,items:results,...('skipReason' in allocation?{skipReason:allocation.skipReason}:{})};
  }
  async function accrue(pool:Pool,orderId:string,requestId:string,operator?:MaintenanceOperator){return withTransaction(pool,c=>accrueOn(c,orderId,requestId,operator));}
  async function transitionOn(c:PoolClient,earningId:string,action:'SETTLE'|'REVOKE'|'RECOVER',expectedVersion:string,requestId:string,reversalSourceId?:string,operator?:MaintenanceOperator){if(!['SETTLE','REVOKE','RECOVER'].includes(action)||!/^[1-9]\d{0,18}$/.test(expectedVersion))throw invalid('Original earning action/version required');
   await ready(c);const hint=(await c.query('SELECT order_id,beneficiary_user_id FROM zzsh_order.rental_referral_earning WHERE id=$1',[earningId])).rows[0];if(!hint)throw notFound();if(operator)await operator.authorize(c,hint.order_id);await orderLock(c,hint.order_id);await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[hint.beneficiary_user_id]);const row=(await c.query(`SELECT e.*,to_char(e.due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_exact FROM zzsh_order.rental_referral_earning e WHERE id=$1 FOR UPDATE`,[earningId])).rows[0],root=seed(row),receipt=(await c.query('SELECT * FROM zzsh_order.rental_referral_transition WHERE earning_id=$1 AND action=$2',[earningId,action])).rows[0];
-  if(receipt){if(action!=='SETTLE'&&receipt.reversal_source_id!==reversalSourceId)throw conflict('Original reversal source changed');return{root,replayed:true,receipt,originalResult:originalOutcome(receipt,root,action)};}if(root.version!==expectedVersion)throw conflict('Earning version changed');let reversal=null;if(action!=='SETTLE'){if(!reversalSourceId)throw invalid('Original reversal source required');reversal=(await c.query('SELECT * FROM zzsh_order.rental_referral_reversal_source WHERE id=$1 AND earning_id=$2',[reversalSourceId,earningId])).rows[0];if(!reversal)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original reversal source unavailable');let originalApprovalDigest=approvalDigest;
+  if(receipt){if(action!=='SETTLE'&&receipt.reversal_source_id!==reversalSourceId)throw conflict('Original reversal source changed');return{root,replayed:true,receipt,originalResult:originalOutcome(receipt,root,action)};}if(root.version!==expectedVersion)throw conflict('Earning version changed');
+  if(action==='SETTLE'&&await accrualTasksReady(c)){
+   const task=(await c.query('SELECT state FROM zzsh_order.distribution_accrual_task WHERE posting_id=$1',[row.posting_id])).rows[0];
+   if(task?.state!=='DONE')throw conflict('Original accrual task requires review');
+  }
+  let reversal=null;if(action!=='SETTLE'){if(!reversalSourceId)throw invalid('Original reversal source required');reversal=(await c.query('SELECT * FROM zzsh_order.rental_referral_reversal_source WHERE id=$1 AND earning_id=$2',[reversalSourceId,earningId])).rows[0];if(!reversal)throw new SecurityApiError(503,'EVIDENCE_UNAVAILABLE','Original reversal source unavailable');let originalApprovalDigest=approvalDigest;
   if(resource.kind==='NATIVE'){
    const original=(await c.query(`SELECT a.source_admission_ref,a.approval_digest FROM zzsh_order.distribution_order_admission a
     JOIN zzsh_order.payment_distribution_basis b ON b.admission_id=a.id AND b.admission_revision=a.revision AND b.order_id=a.order_id
@@ -124,11 +155,17 @@ function earningStore(resource:Resource):DistributionEarningStore{
   if(local&&allowed.size>100||!Number.isSafeInteger(limit)||limit<1||limit>100||typeof requestId!=='string'||!ID.test(requestId))throw invalid('Bounded due batch and request required');const games=scopeIds(gameIds);
   const due=await withTransaction(pool,async c=>{
    await ready(c);
-   if(local&&!sandbox)return(await c.query(`SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning
-    WHERE order_id=ANY($1::text[]) AND state='PENDING' AND due_at<=clock_timestamp() ORDER BY due_at,id LIMIT $2`,
+   const tasksAvailable=await accrualTasksReady(c);
+   if(local&&!sandbox)return(await c.query(`SELECT id,version::text AS version FROM zzsh_order.rental_referral_earning e
+    WHERE order_id=ANY($1::text[]) AND state='PENDING' AND due_at<=clock_timestamp()
+    ${tasksAvailable?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_accrual_task t JOIN zzsh_order.settlement_posting p ON p.id=t.posting_id JOIN zzsh_order.rental_order o ON o.id=p.order_id WHERE t.posting_id=e.posting_id AND t.state='DONE' AND o.status='COMPLETED')":""}
+    AND ${unreservedDueEarningSql}
+    ORDER BY due_at,id LIMIT $2`,
     [[...allowed],limit])).rows as {id:string;version:string}[];
    return(await c.query(`SELECT e.id,e.version::text AS version FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id
     WHERE e.state='PENDING' AND e.due_at<=clock_timestamp() AND ($1::text[] IS NULL OR o.game_id=ANY($1))
+    ${tasksAvailable?"AND o.status='COMPLETED' AND EXISTS(SELECT 1 FROM zzsh_order.distribution_accrual_task t WHERE t.posting_id=e.posting_id AND t.state='DONE')":""}
+    AND ${unreservedDueEarningSql}
     ${sandbox?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=e.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$3 AND a.approval_digest=$4 AND a.active)":""}
     ORDER BY e.due_at,e.id LIMIT $2`,
     sandbox?[games,limit,local!.resourceOid,local!.approvalDigest]:[games,limit])).rows as {id:string;version:string}[];
@@ -152,10 +189,13 @@ function earningStore(resource:Resource):DistributionEarningStore{
   if(!Number.isSafeInteger(input.limit)||input.limit<1||input.limit>100)throw invalid('Bounded accrual discovery required');const games=scopeIds(input.gameIds);const before=input.cursor?decodeScanCursor(input.cursor):null;
   return withTransaction(pool,async c=>{
    await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');await ready(c,'READ_ORIGINAL');
+   const tasksAvailable=await accrualTasksReady(c);
    const rows=(await c.query(`SELECT p.id,p.order_id,p.payment_confirmation_id,p.version_hash,p.early,p.manual_reason,p.captured_cents::text,p.owner_net_cents::text,
     p.renter_refund_cents::text,p.platform_contribution_cents::text,p.compensation_fee_cents::text,
-    to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at,o.game_id
-    FROM zzsh_order.settlement_posting p JOIN zzsh_order.rental_order o ON o.id=p.order_id
+    to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS posted_at,o.game_id,${FIXED_FEE_EVIDENCE_SELECT},
+    ${tasksAvailable?'task.state AS task_state,task.reason_code AS task_reason':'NULL::text AS task_state,NULL::text AS task_reason'}
+    FROM zzsh_order.settlement_posting p JOIN zzsh_order.rental_order o ON o.id=p.order_id ${FIXED_FEE_EVIDENCE_JOINS}
+    ${tasksAvailable?'LEFT JOIN zzsh_order.distribution_accrual_task task ON task.posting_id=p.id':''}
     WHERE ($1::text[] IS NULL OR p.order_id=ANY($1)) AND ($2::text[] IS NULL OR o.game_id=ANY($2))
      AND ($4::timestamptz IS NULL OR (p.posted_at,p.id)<($4::timestamptz,$5))
      ${sandbox?"AND EXISTS(SELECT 1 FROM zzsh_order.distribution_order_admission a WHERE a.order_id=p.order_id AND a.mode='LOCAL_CONTROLLED' AND a.resource_oid=$6 AND a.approval_digest=$7 AND a.active)":""}
@@ -163,12 +203,13 @@ function earningStore(resource:Resource):DistributionEarningStore{
    const orders:MissingAccrualOrder[]=[];
    for(const row of rows){
     // game_id is only for admin scope; the immutable posting digest must use the same columns as accrual.
-    const {game_id,...postingRow}=row;
+    const {game_id,fixed_evidence,task_state,task_reason,...postingRow}=row;
     const facts=completedFacts(postingRow,row.order_id),base={orderId:row.order_id,postingId:row.id,paymentConfirmationId:row.payment_confirmation_id,postedAt:row.posted_at,gameId:row.game_id};
     try{
-     const original=await payment.readOriginal(c,row.order_id,row.payment_confirmation_id,'READ_ORIGINAL'),allocation=prepareAccrualFromFrozenPayment(original.basis,facts);
+     if(task_state==='REVIEW_REQUIRED'){orders.push({...base,status:'UNKNOWN',reason:typeof task_reason==='string'?task_reason:'ACCRUAL_REVIEW_REQUIRED',baseCents:null,items:[]});continue;}
+     const original=await payment.readOriginal(c,row.order_id,row.payment_confirmation_id,'READ_ORIGINAL'),allocation=prepareAccrualFromFrozenPayment(original.basis,fixedFeeAccrualFacts(original.basis,{...facts,settlementVersionHash:postingRow.version_hash},fixed_evidence));
      if(allocation.knowledge==='UNKNOWN'){orders.push({...base,status:'UNKNOWN',reason:allocation.reason,baseCents:allocation.baseCents,items:[]});continue;}
-     if(!allocation.items.length){orders.push({...base,status:'SKIPPED',reason:'NO_ELIGIBLE_REFERRAL',baseCents:allocation.baseCents,items:[]});continue;}
+     if(!allocation.items.length){orders.push({...base,status:'SKIPPED',reason:allocation.skipReason??'NO_ELIGIBLE_REFERRAL',baseCents:allocation.baseCents,items:[]});continue;}
      const items:MissingAccrualItem[]=[];for(const item of allocation.items){
       const found=(await c.query('SELECT amount_cents::text,basis_digest,posting_digest FROM zzsh_order.rental_referral_earning WHERE economic_key=$1',[item.economicKey])).rows[0];
       items.push({economicKey:item.economicKey,beneficiaryUserId:item.beneficiaryUserId,role:item.role,amountCents:item.amountCents,dueAt:item.dueAt,
@@ -204,10 +245,13 @@ function earningStore(resource:Resource):DistributionEarningStore{
    const root=seed(row),receipts=(await c.query('SELECT * FROM zzsh_order.rental_referral_transition WHERE earning_id=$1 ORDER BY result_version',[row.id])).rows;
    items.push({root,transitions:receipts.filter(r=>['SETTLE','REVOKE','RECOVER'].includes(r.action)).map(r=>originalOutcome(r,root,r.action))});
   }
-  return{scope:scopeLabel,orderId,items};
+  const tasksAvailable=await accrualTasksReady(c);
+  const task=tasksAvailable?(await c.query(`SELECT t.state,t.reason_code FROM zzsh_order.distribution_accrual_task t
+   JOIN zzsh_order.settlement_posting p ON p.id=t.posting_id WHERE p.order_id=$1`,[orderId])).rows[0]:null;
+  return{scope:scopeLabel,orderId,items,accrualTask:task?{state:String(task.state),reasonCode:task.reason_code===null?null:String(task.reason_code)}:null};
  });}
  const batchRunner=createMaintenanceBatchRunner({local:Boolean(local),allowedOrderIds:[...allowed],...(sandbox?{registeredAdmission:{resourceOid:local!.resourceOid,approvalDigest:local!.approvalDigest}}:{}),accrue:accrueOn,transition:transitionOn});
- return{accrue,accrueOn,transition,transitionOn,settleDue,readOrder,discover,replay,...batchRunner,admitsOrder:(orderId:string)=>sandbox?ID.test(orderId):!local||allowed.has(orderId)};
+ return{accrue,accrueOn,pendingAccrualTasks,transition,transitionOn,settleDue,readOrder,discover,replay,...batchRunner,admitsOrder:(orderId:string)=>sandbox?ID.test(orderId):!local||allowed.has(orderId)};
 }
 export function distributionFailureCode(error:unknown){
  const code=(error as {code?:unknown}|null)?.code;

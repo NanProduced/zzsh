@@ -12,6 +12,8 @@ const FIELDS: Record<string, string> = {
   agreement_version: "id game_id title digest status revision",
   full_payout_terms_version: "id game_id policy_ref policy_version disclosure_version title digest status revision",
   rule_release: "id game_id price_version_id term_version_id agreement_version_id generation",
+  pricing_policy_schedule: "id game_id pricing_model price_version_id generation effective_at source created_by_admin_id created_at",
+  pricing_mode_schedule: "id game_id pricing_model generation effective_at source created_by_admin_id created_at",
   media_upload_intent: "id game_id account_id purpose ownership_kind owner_user_id uploaded_by_realm uploaded_by_user_id uploaded_by_admin_id declared_mime declared_size consumed_asset_id",
   media_asset: "id game_id purpose ownership_kind owner_user_id content_hash mime byte_size width height review_state access_class revision review_reason",
   game_service_operation: "id game_id service_code enabled revision",
@@ -60,8 +62,9 @@ export async function auditSnapshot(client: PoolClient, table: string, id: strin
   // Proofs are append-only: the writer already locks the account before the
   // append, and the runtime role intentionally has no UPDATE privilege on the
   // proof table. Keep row locking for mutable audit objects.
-  const lock = table === "account_guarantee_proof" || table === "rule_release" ? "" : " FOR UPDATE";
-  const stored = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")} FROM zzsh_supply."${table}" WHERE id = $1${lock}`, [id])).rows[0];
+  const lock = table === "account_guarantee_proof" || table === "rule_release" || table === "pricing_policy_schedule" || table === "pricing_mode_schedule" ? "" : " FOR UPDATE";
+  const fixedRates = table === "price_version" ? ", to_jsonb(audit_row)->'fixed_fee_rates' AS fixed_fee_rates" : "";
+  const stored = (await client.query<Record<string, unknown>>(`SELECT ${fields.split(" ").map((f) => `"${f}"`).join(", ")}${fixedRates} FROM zzsh_supply."${table}" audit_row WHERE id = $1${lock}`, [id])).rows[0];
   if (!stored) return null;
   const row = table === "skin" ? { ...stored } : stored;
   if (table === "skin") {

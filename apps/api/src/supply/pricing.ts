@@ -1,7 +1,9 @@
-import { normalizeQuote, type LegacyQuoteProvenance } from "./content-hash";
+import { computeContentHash, normalizeContentPayload, normalizeQuote, type ContentPayloadInput, type LegacyQuoteProvenance } from "./content-hash";
 import { legacyPriceInteger, quoteLegacyHaff } from "./legacy-listed-pricing";
+import { calculateFixedFee, FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import {
   DecimalError,
+  decimalToBigInt,
   divideToScale,
   formatDecimalExact,
   formatScaledInteger,
@@ -14,9 +16,11 @@ import {
 import {
   calculateDeltaTermSeconds,
   DELTA_HAFF_BASE_PER_MILLION,
+  DELTA_HAFF_FIXED_SCHEMA,
   DELTA_HAFF_RATIO_SCHEMA,
   DELTA_QUOTE_SCHEMA_VERSION,
   DELTA_ROUNDING_POLICY,
+  normalizeRentalPricing,
   projectDeltaQuote,
   resolveDeltaHaffContext,
   type DeltaHaffRule,
@@ -58,6 +62,7 @@ export type QuoteInput = {
   mode: "SPREAD" | "PERCENT";
   roundingPolicy: string;
   commissionRate?: string;
+  fixedFeeAlgorithm?: typeof FIXED_FEE_ALGORITHM;
   haffRule?: HaffRatioRule;
   lines: readonly PricingLineInput[];
   conditions: DeltaHaffConditions;
@@ -100,7 +105,7 @@ export type QuoteExactRatio = {
 };
 
 export type InternalQuote = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   quoteSource?: "LEGACY_QUOTED";
   legacyQuote?: LegacyQuoteProvenance;
   currency: "CNY";
@@ -124,6 +129,8 @@ export type InternalQuote = {
     denominators: { owner: string; buyer: string } | null;
     spreadDelta: string | null;
     commissionRate: string | null;
+    fixedFeeAlgorithm?: typeof FIXED_FEE_ALGORITHM;
+    fixedFeeGrossCents?: string;
     exactRatios: QuoteExactRatio[];
     roundingPolicy: string;
     depositPolicy: "CONFIGURED" | "UNCONFIGURED";
@@ -165,10 +172,18 @@ export function computeFixedUnitAmounts(line: PricingLineInput, mode: "SPREAD" |
 }
 
 export function computeDeltaQuote(input: QuoteInput): QuoteResult {
+  return computeDeltaQuoteInternal(input);
+}
+
+function computeDeltaQuoteInternal(input: QuoteInput, retainedPublishedSelection?: ReturnType<typeof normalizeRentalPricing>): QuoteResult {
   const reasons = new Set<QuoteReasonCode>();
   const fail = (code: QuoteReasonCode): void => {
     reasons.add(code);
   };
+  const fixedFee = input.fixedFeeAlgorithm === FIXED_FEE_ALGORITHM;
+  if ((input.fixedFeeAlgorithm !== undefined && !fixedFee)
+      || (fixedFee && (input.mode !== "PERCENT" || input.haffRule?.schema !== DELTA_HAFF_FIXED_SCHEMA))
+      || (!fixedFee && input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA)) fail("RULE_INPUT_MISSING");
 
   if (input.roundingPolicy !== ROUNDING_POLICY) {
     return { quotable: false, reasonCodes: ["ROUNDING_POLICY_UNSUPPORTED"] };
@@ -189,7 +204,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   }
 
   const hasHaffLines = input.lines.some((line) => line.pricingKind === "HAFF_RATIO");
-  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier });
+  const deltaHaff = resolveDeltaHaffContext({ mode: input.mode, haffRule: input.haffRule, hasHaffLines, conditions: input.conditions, customerTier: input.customerTier }, retainedPublishedSelection);
   for (const reason of deltaHaff.reasonCodes) fail(reason);
   const { haffSchema, ownerDenominator, buyerDenominator, spreadDelta, conditions } = deltaHaff;
 
@@ -296,6 +311,32 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
     return { quotable: false, reasonCodes: [...reasons].sort() };
   }
 
+  if (fixedFee) {
+    try {
+      const allocated = calculateFixedFee(quoteLines.map((line) => ({
+        itemId: line.itemId, grossCents: decimalToBigInt(parseNonNegativeDecimal(line.buyerAmount.amount, 2, "buyer amount"), 2),
+      })), input.commissionRate!);
+      const byItem = new Map(allocated.lines.map((line) => [line.itemId, line]));
+      for (let i = 0; i < quoteLines.length; i++) {
+        const line = quoteLines[i]!, part = byItem.get(line.itemId)!;
+        quoteLines[i] = { ...line, ownerUnitAmount: { ...line.buyerUnitAmount },
+          ownerAmount: yuanAmountObject(part.ownerCents), platformAmount: yuanAmountObject(part.feeCents) };
+      }
+      for (const ratio of exactRatios) {
+        const owner = byItem.get(ratio.itemId)!.ownerCents;
+        const numerator = parseNonNegativeDecimal(ratio.buyerNumerator, 18, "buyer numerator");
+        const denominator = parseNonNegativeDecimal(ratio.buyerDenominator, 18, "buyer denominator");
+        const buyerBelowRoundedOwner = numerator.value * 10n ** BigInt(denominator.scale) * 100n
+          < owner * denominator.value * 10n ** BigInt(numerator.scale);
+        ratio.ownerNumerator = buyerBelowRoundedOwner ? ratio.buyerNumerator : owner.toString();
+        ratio.ownerDenominator = buyerBelowRoundedOwner ? ratio.buyerDenominator : "100";
+      }
+      ownerTotalCents = allocated.grossCents - allocated.feeCents;
+    } catch {
+      return { quotable: false, reasonCodes: ["DEPENDENCY_UNAVAILABLE"] };
+    }
+  }
+
   const tenantDepositCents = centsOrNull(input.deposits?.tenantDepositCents, "tenant deposit");
   const publisherBailCents = centsOrNull(input.deposits?.publisherBailRequirementCents, "publisher bail");
   const depositConfigured = tenantDepositCents !== null && publisherBailCents !== null;
@@ -303,7 +344,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
   return {
     quotable: true,
     quote: normalizeQuote({
-      schemaVersion: deltaHaff.compatibility ? 2 : QUOTE_SCHEMA_VERSION,
+      schemaVersion: fixedFee ? 4 : deltaHaff.compatibility ? 2 : QUOTE_SCHEMA_VERSION,
       currency: "CNY",
       priceVersionId: input.priceVersionId,
       ruleReleaseId: null,
@@ -316,7 +357,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
       publisherBailRequirement: publisherBailCents === null ? null : yuanAmountObject(publisherBailCents),
       termSeconds,
       expiryDisclosures,
-      unitAmountsInformational: hasHaffLines,
+      unitAmountsInformational: hasHaffLines || fixedFee,
       roundingPolicy: ROUNDING_POLICY,
       pricingInputs: {
         ...(deltaHaff.compatibility ? { compatibility: deltaHaff.compatibility } : {}),
@@ -328,6 +369,7 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
             : null,
         spreadDelta: spreadDelta === null ? null : formatDecimalExact(spreadDelta),
         commissionRate: commissionRate === null ? null : formatDecimalExact(commissionRate),
+        ...(fixedFee ? { fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, fixedFeeGrossCents: resourceTotalCents.toString() } : {}),
         exactRatios,
         roundingPolicy: ROUNDING_POLICY,
         depositPolicy: depositConfigured ? "CONFIGURED" : "UNCONFIGURED",
@@ -335,6 +377,56 @@ export function computeDeltaQuote(input: QuoteInput): QuoteResult {
       },
     }),
   };
+}
+
+export type PublishedQuoteProof = { accountId: string; gameId: string; contentHash: string; payload: ContentPayloadInput };
+
+/** The caller must supply the authenticated, published listing read from the database. */
+function computePublishedQuote(input: QuoteInput, proof: PublishedQuoteProof, model: "FIXED_FEE" | "SPREAD"): QuoteResult {
+  const failed: QuoteResult = { quotable: false, reasonCodes: ["RULE_INPUT_MISSING"] };
+  try {
+    if (!proof || !/^[a-f0-9]{64}$/.test(proof.contentHash)
+      || (model === "FIXED_FEE" ? input.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM : input.mode !== "SPREAD" || input.haffRule?.schema !== "haff-ratio-v2" || input.fixedFeeAlgorithm !== undefined)) return failed;
+    const payload = normalizeContentPayload(proof.payload);
+    if (payload.schemaVersion !== (model === "FIXED_FEE" ? 4 : 2) || payload.accountId !== proof.accountId || payload.gameId !== proof.gameId
+      || computeContentHash(payload) !== proof.contentHash) return failed;
+    const original = normalizeQuote(payload.quoteValues);
+    if (model === "FIXED_FEE" && (!payload.pricingPolicy || payload.pricingPolicy.pricingModel !== "FIXED_FEE")
+      || model === "SPREAD" && (original.mode !== "SPREAD" || payload.pricingPolicy && payload.pricingPolicy.pricingModel !== "SPREAD")
+      || original.priceVersionId !== (payload.pricingPolicy?.priceVersionId ?? payload.ruleRefs.priceVersionId)
+      || original.ruleReleaseId !== payload.ruleRefs.releaseId) return failed;
+    const accepted = normalizeRentalPricing(payload.declaration.attributes.rentalPricing);
+    const selected = normalizeRentalPricing(input.conditions.rentalPricing);
+    if (accepted.rentalMode !== selected.rentalMode || accepted.ownerRatioB !== selected.ownerRatioB) return failed;
+    const conditions = original.pricingInputs.conditions;
+    if (!conditions || conditions.safeBoxCode !== input.conditions.safeBoxCode || conditions.vitLevel !== String(input.conditions.vitLevel)
+      || conditions.bearLevel !== String(input.conditions.bearLevel) || conditions.termOptionCode !== input.conditions.termOptionCode
+      || input.conditions.termOptionCode !== payload.declaration.termOptionCode) return failed;
+    const attrs = payload.declaration.attributes;
+    if (attrs.safe_box_code !== conditions.safeBoxCode || String(attrs.vit_level ?? attrs.vitLevel) !== conditions.vitLevel
+      || String(attrs.bear_level ?? attrs.bearLevel) !== conditions.bearLevel) return failed;
+    const originalLines = new Map(original.lines.map(line => [line.itemId, line]));
+    const inventory = new Map(payload.declaration.inventory.map(line => [line.itemId, line.quantity]));
+    if (originalLines.size !== original.lines.length || inventory.size !== original.lines.length || input.lines.length !== original.lines.length
+      || new Set(input.lines.map(line => line.itemId)).size !== input.lines.length
+      || input.lines.some(line => {
+        const frozen = originalLines.get(line.itemId);
+        return !frozen || inventory.get(line.itemId) !== frozen.quantity || line.quantity !== frozen.quantity
+          || line.unit !== frozen.unit || line.pricingKind !== frozen.pricingKind
+          || (line.pricingKind === "FIXED_UNIT" && line.unitQuantity !== frozen.unitQuantity);
+      })) return failed;
+    const result = computeDeltaQuoteInternal(input, accepted);
+    return result.quotable && (result.quote.termSeconds !== original.termSeconds
+      || JSON.stringify(result.quote.expiryDisclosures) !== JSON.stringify(original.expiryDisclosures)) ? failed : result;
+  } catch { return failed; }
+}
+
+export function computePublishedFixedFeeQuote(input: QuoteInput, proof: PublishedQuoteProof): QuoteResult {
+  return computePublishedQuote(input, proof, "FIXED_FEE");
+}
+
+export function computePublishedSpreadQuote(input: QuoteInput, proof: PublishedQuoteProof): QuoteResult {
+  return computePublishedQuote(input, proof, "SPREAD");
 }
 
 export const computeQuote = computeDeltaQuote;

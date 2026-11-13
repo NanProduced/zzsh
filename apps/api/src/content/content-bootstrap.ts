@@ -1,3 +1,4 @@
+import { setSystemInitialSource } from "../database/system-initial-source";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -177,13 +178,14 @@ export async function bootstrapDefaultContent(
   }
 
   // Empty targets: write everything in this transaction.
+  await setSystemInitialSource(client, manifestDigest);
   let created = 0;
   const sortKey = (index: number): string => String((index + 1) * 1_000_000).padStart(16, "0");
   for (const [index, folder] of CATEGORY_FOLDERS.entries()) {
     await client.query(
-      `INSERT INTO "zzsh_content"."help_tree_node" ("id", "parent_id", "kind", "title", "sort_key", "created_by_admin_id", "updated_by_admin_id")
-       VALUES ($1, NULL, 'FOLDER', $2, $3, $4, $4)`,
-      [folder.id, folder.title, sortKey(index), actorAdminId],
+      `INSERT INTO "zzsh_content"."help_tree_node" ("id", "parent_id", "kind", "title", "sort_key", "created_by_admin_id", "updated_by_admin_id", "system_initial_sha256")
+       VALUES ($1, NULL, 'FOLDER', $2, $3, $4, $4, $5)`,
+      [folder.id, folder.title, sortKey(index), actorAdminId, manifestDigest],
     );
   }
   const articleSort = new Map<string, number>();
@@ -199,9 +201,9 @@ export async function bootstrapDefaultContent(
     const order = articleSort.get(meta.category) ?? 0;
     articleSort.set(meta.category, order + 1);
     await client.query(
-      `INSERT INTO "zzsh_content"."help_tree_node" ("id", "parent_id", "kind", "resource_key", "sort_key", "created_by_admin_id", "updated_by_admin_id")
-       VALUES ($1, $2, 'ARTICLE', $3, $4, $5, $5)`,
-      [newHelpId("htn"), meta.category, `guide:${meta.slug}`, sortKey(order), actorAdminId],
+      `INSERT INTO "zzsh_content"."help_tree_node" ("id", "parent_id", "kind", "resource_key", "sort_key", "created_by_admin_id", "updated_by_admin_id", "system_initial_sha256")
+       VALUES ($1, $2, 'ARTICLE', $3, $4, $5, $5, $6)`,
+      [newHelpId("htn"), meta.category, `guide:${meta.slug}`, sortKey(order), actorAdminId, manifestDigest],
     );
     created += 1;
   }
@@ -229,11 +231,12 @@ export async function bootstrapDefaultContent(
     created += 1;
   }
 
+  await setSystemInitialSource(client, null);
   await recordAudit(client, {
-    actorType: "system", actorId: actorAdminId, action: "CONTENT_BOOTSTRAPPED",
+    actorType: "system", action: "CONTENT_BOOTSTRAPPED",
     objectType: "content_bootstrap", objectId: manifestDigest, outcome: "SUCCESS", requestId: input.requestId,
     reason: "first-deploy default content",
-    details: { manifestDigest, confirmationSource: manifest.confirmationSource, created, help: helpItems.length, notice: noticeItems.length, update: 1 },
+    details: { manifestDigest, confirmationSource: manifest.confirmationSource, compatibilityBossRef: actorAdminId, created, help: helpItems.length, notice: noticeItems.length, update: 1 },
   });
   return { status: "CREATED", created, manifestDigest };
 }

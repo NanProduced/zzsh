@@ -1,3 +1,5 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
+import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { formatDecimalExact, parseSignedDecimal } from "./decimal";
@@ -28,6 +30,7 @@ import {
 } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { OWNER_INCOME_PREVIEW_MAX_BYTES, parseOwnerIncomePreviewInput, readOwnerIncomePreview } from "./owner-income-preview";
+import { parseFixedFeeRates } from "./fixed-fee";
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
 import { loadMediaAsset } from "./media";
@@ -70,6 +73,7 @@ import {
   readCurrentVersion,
   readDepositRecommendation,
   readResourceIncomePreview,
+  resolveIncomePreviewRelease,
   withPublicListingSnapshot,
   quoteListing,
   readDeclaration,
@@ -80,6 +84,7 @@ import {
   unknownSupplyGate,
   withdrawListing,
   type PublishingAccount,
+  type IncomePreviewRelease,
 } from "./publishing";
 const ACCOUNT_ROUTE =
   /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|delist|restriction|deposit-recommendation))?$/;
@@ -144,15 +149,20 @@ export async function handlePublishingRoute(
   }
   const resourcePreviewMatch = /^\/games\/([A-Za-z0-9._:-]+)\/resource-income-preview$/.exec(path);
   if(!admin&&method==="GET"&&resourcePreviewMatch){
-    for(const key of query.keys())if(!["inventory","catalogRevision","releaseId"].includes(key)||query.getAll(key).length!==1)throw invalid("资源预估参数错误",key);
+    for(const key of query.keys())if(!["inventory","catalogRevision","releaseId","accountId"].includes(key)||query.getAll(key).length!==1)throw invalid("资源预估参数错误",key);
     let inventory:unknown;try{inventory=JSON.parse(query.get("inventory")??"[]");}catch{throw invalid("库存格式错误","inventory");}
-    const catalogRevision=query.get("catalogRevision"),releaseId=query.get("releaseId");
+    const catalogRevision=query.get("catalogRevision"),releaseId=query.get("releaseId"),accountId=query.get("accountId");
     if(!catalogRevision||!/^\d+$/.test(catalogRevision)||!releaseId||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(releaseId))throw invalid("资源预估须绑定当前目录和规则");
+    if(accountId!==null&&!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(accountId))throw invalid("账号标识错误","accountId");
     const context=await readUserContext(request,options);
     const result=await withPublicListingSnapshot(options.pool,async client=>{
       await assertUserContextInTransaction(client,context,"READ");
       await requirePublicGameService(client,resourcePreviewMatch[1]!,GAME_SERVICE.ACCOUNT_RENTAL);
-      return readResourceIncomePreview(client,resourcePreviewMatch[1]!,inventory,{catalogRevision,releaseId});
+      if(accountId){
+        const account=await readPublishingAccount(client,accountId);
+        if(account.owner_user_id!==context.userId||account.game_id!==resourcePreviewMatch[1])throw notFound();
+      }
+      return readResourceIncomePreview(client,resourcePreviewMatch[1]!,inventory,{catalogRevision,releaseId},accountId?{accountId,ownerUserId:context.userId}:undefined);
     });
     sendJson(response,200,result,requestId,"no-store");return true;
   }
@@ -160,23 +170,41 @@ export async function handlePublishingRoute(
     path,
   );
   if (!admin && method === "GET" && optionsMatch) {
-    await requirePublicGameService(options.pool, optionsMatch[1]!, GAME_SERVICE.ACCOUNT_RENTAL);
-    const release = (
-      await options.pool.query(
-        `SELECT r.id,r.generation::text,r.term_version_id,p.haff_rule,ag.id AS agreement_id,ag.title,ag.body,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,
-        [optionsMatch[1]],
-      )
-    ).rows[0];
-    if (!release) throw notFound();
-    const terms = (
-      await options.pool.query(
-        `SELECT code,name,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 ORDER BY code`,
-        [release.term_version_id],
-      )
-    ).rows;
-    const rule = release.haff_rule as {
+    for(const key of query.keys())if(key!=="accountId"||query.getAll(key).length!==1)throw invalid("上架选项参数错误",key);
+    const accountId=query.get("accountId"),gameId=optionsMatch[1]!;
+    if(accountId!==null&&!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(accountId))throw invalid("账号标识错误","accountId");
+    const context=accountId?await readUserContext(request,options):null;
+    const result=await withPublicListingSnapshot(options.pool,async client=>{
+      await requirePublicGameService(client,gameId,GAME_SERVICE.ACCOUNT_RENTAL);
+      if(context&&accountId){
+        await assertUserContextInTransaction(client,context,"READ");
+        const account=await readPublishingAccount(client,accountId);
+        if(account.owner_user_id!==context.userId||account.game_id!==gameId)throw notFound();
+      }
+      const release=(await client.query<IncomePreviewRelease&{agreement_id:string;title:string;body:string;digest:string}>(
+        `SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",
+          g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",
+          p.status AS "priceStatus",p.haff_rule AS "haffRule",ag.id AS agreement_id,ag.title,ag.body,ag.digest
+         FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+         JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,[gameId])).rows[0];
+      if(!release)throw notFound();
+      const asOf=(await client.query<{at:string}>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+      if(!asOf)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架规则暂不可用");
+      const resolved=await resolveIncomePreviewRelease(client,gameId,release,{asOf,...(context&&accountId?{accountId,ownerUserId:context.userId}:{})});
+      if(!resolved.available)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架计价规则暂不可用");
+      const terms=(await client.query(`SELECT code,name,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 ORDER BY code`,[release.termVersionId])).rows;
+      let fixedFeeRates:ReturnType<typeof parseFixedFeeRates>|undefined;
+      if(resolved.release.pricingPolicy?.pricingModel==="FIXED_FEE"){
+        const row=(await client.query<{rates:unknown}>(`SELECT fixed_fee_rates AS rates FROM zzsh_supply.price_version WHERE id=$1 AND game_id=$2 AND status='SEALED'`,[resolved.release.priceVersionId,gameId])).rows[0];
+        try{fixedFeeRates=parseFixedFeeRates(row?.rates);}catch{throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"手续费率暂不可用");}
+      }
+      return {release,terms,rule:resolved.release.haffRule,pricingPolicy:resolved.release.pricingPolicy,fixedFeeRates};
+    });
+    const {release,terms}=result;
+    const rule = result.rule as {
       schema?: string;
       compatibility?: import("./delta-rental").DeltaCompatPricing;
+      fixedModes?: import("./delta-rental").DeltaHaffRule["fixedModes"];
       baseBySafeBox?: Record<string, string>;
       options?: Record<string, { enabled: boolean }>;
       vitalityDeltaByLevel?: Record<string,string>;
@@ -185,7 +213,8 @@ export async function handlePublishingRoute(
     } | null;
     const mappedTerms = terms.filter(term => Object.hasOwn(rule?.dailyDeltaByTermOption ?? {}, term.code));
     const customTerms = mappedTerms.filter(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION);
-    const customEnabled = rule?.compatibility?.modes?.custom?.enabled === true && customTerms.length > 0;
+    const modes=rule?.schema==="haff-ratio-v3"?rule.fixedModes:rule?.compatibility?.modes;
+    const customEnabled = modes?.custom?.enabled === true && customTerms.length > 0;
     const termOptions = terms.map(term => {
       let adjustment: string | null = null;
       const value = rule?.dailyDeltaByTermOption?.[term.code];
@@ -196,7 +225,7 @@ export async function handlePublishingRoute(
       response,
       200,
       {
-        releaseId: release.id,
+        releaseId: release.releaseId,
         generation: release.generation,
         ...(options.mediaStorage?.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
         termOptions,
@@ -221,15 +250,16 @@ export async function handlePublishingRoute(
           .filter(([, v]) => v.enabled)
           .map(([key]) => key)
           .sort(),
-        ...(rule?.schema === "haff-ratio-v2" ? {
-          pricingSchema: "haff-ratio-v2",
-          rentalModes: rule.compatibility?.modes ? { ...rule.compatibility.modes, custom: { ...rule.compatibility.modes.custom, enabled: customEnabled } } : undefined,
+        ...(["haff-ratio-v2","haff-ratio-v3"].includes(rule?.schema??"") ? {
+          pricingSchema: rule!.schema,
+          rentalModes: modes ? { ...modes, custom: { ...modes.custom, enabled: customEnabled } } : undefined,
           rentalTermOptions: {
             ordinary: { termOptionCodes: mappedTerms.map(term => term.code) },
             custom: { termOptionCodes: customTerms.map(term => term.code), requiredDailyConsumption: DELTA_CUSTOM_DAILY_CONSUMPTION, reasonCodes: !customTerms.length ? ["CUSTOM_10M_TERM_UNAVAILABLE"] : [] },
             fast: { termOptionCodes: mappedTerms.map(term => term.code) },
           },
         } : {}),
+        ...(result.pricingPolicy?{pricingPolicy:result.pricingPolicy,fixedFeeRates:result.fixedFeeRates}:{}),
         agreement: {
           id: release.agreement_id,
           title: release.title,
@@ -238,6 +268,7 @@ export async function handlePublishingRoute(
         },
       },
       requestId,
+      "private, no-store",
     );
     return true;
   }
@@ -321,6 +352,7 @@ export async function handlePublishingRoute(
     )
       throw invalid("Filter is invalid");
     let cursor = "";
+    let cursorMarket: string | null = null;
     if (query.has("cursor")) {
       let c: Record<string, unknown>;
       try {
@@ -335,6 +367,8 @@ export async function handlePublishingRoute(
       if (c.v !== 2 || c.filter !== sha256Hex(JSON.stringify(filter)) || typeof c.id !== "string")
         throw invalid("Cursor is invalid");
       cursor = c.id;
+      if (c.marketRevision !== undefined && typeof c.marketRevision !== "string") throw invalid("Cursor is invalid");
+      cursorMarket = c.marketRevision ?? null;
     }
     const data = await withPublicListingSnapshot(
       options.pool,
@@ -342,6 +376,7 @@ export async function handlePublishingRoute(
         if (filter.gameId) {
           await requirePublicGameService(client, filter.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
         }
+        if (query.has("cursor") && cursorMarket !== "publication-snapshot" && cursorMarket !== null) throw conflict("Listing prices changed; refresh from the first page");
         const values:unknown[]=[cursor,filter.gameId];
         const param=(value:unknown)=>{values.push(value);return '$'+values.length;};
         const predicates=candidatePredicates({resources:filter.itemId?[{itemId:filter.itemId,minQuantity:filter.minQuantity??"0"}]:[],skinGroups:[{ids:filter.skins,match:filter.skinMatch}]},filter.q,param);
@@ -405,6 +440,7 @@ export async function handlePublishingRoute(
                   v: 2,
                   id: last,
                   filter: sha256Hex(JSON.stringify(filter)),
+                  marketRevision: "publication-snapshot",
                 }),
               ).toString("base64url")
             : null,
@@ -640,6 +676,8 @@ export async function handlePublishingRoute(
     throw forbidden();
   const operation = `supply.publication.${action}`;
   const result = await withTransaction(options.pool, async (client) => {
+    // Fee schedules and benefits use this lock before any game or account lock.
+    if (action === "submit") await lockFixedFeePolicyChange(client);
     await setAuditContext(
       client,
       admin ? "admin" : "user",

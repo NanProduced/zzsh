@@ -101,6 +101,8 @@ const AMOUNT_LABELS: Record<string, string> = {
   feeBase: "包赔费基数",
   feeRate: "包赔费率",
   feeAmount: "包赔费",
+  platformServiceFee: "平台手续费",
+  membershipDiscount: "平台承担会员优惠",
   feePayer: "包赔费承担方",
   ownerGross: "号主毛额",
   ownerNet: "号主净额",
@@ -427,12 +429,18 @@ export function OrderFulfillmentSection({ orderId, displayNo, viewerId, orderSta
         const versionHash = typeof body.versionHash === "string" ? body.versionHash : body.settlement?.versionHash ?? null;
         const armed = target.body.proposedOwnerGross !== undefined || target.body.proposedOwnerNet !== undefined || target.body.proposedRenterRefund !== undefined;
         const numbers=[body.proposedOwnerGross,body.proposedFullPayoutFee,body.proposedOwnerNet,body.proposedRenterRefund];
-        if(armed && (!numbers.every(value=>typeof value==="string" && /^(0|[1-9]\d*)\.\d{2}$/.test(value))
-          || BigInt((numbers[0] as string).replace(".",""))-BigInt((numbers[1] as string).replace(".",""))!==BigInt((numbers[2] as string).replace(".","")))) {
+        const fixedFee = body.proposedPlatformServiceFee;
+        const fixedDiscount = body.proposedMembershipDiscount;
+        const cents = (value: string | undefined) => typeof value === "string" && /^(0|[1-9]\d*)\.\d{2}$/.test(value)
+          ? BigInt(value.replace(".", "")) : null;
+        const [gross, payout, net, refund] = numbers.map(cents);
+        const fee = fixedFee === undefined && fixedDiscount === undefined ? 0n
+          : cents(fixedDiscount) === null ? null : cents(fixedFee);
+        if (armed && (gross == null || payout == null || net == null || refund == null || fee === null || gross - payout - fee !== net)) {
           if(!clearIntent()){setBusy(false);return;}
           setPreview(null);setError("调整预览金额不完整，请重新读取后核对。");setBusy(false);return;
         }
-        const amounts = armed ? {ownerGross:body.proposedOwnerGross,feeAmount:body.proposedFullPayoutFee,ownerNet:body.proposedOwnerNet,renterRefund:body.proposedRenterRefund} : systemAmounts;
+        const amounts = armed ? {ownerGross:body.proposedOwnerGross,feeAmount:body.proposedFullPayoutFee,platformServiceFee:fixedFee,ownerNet:body.proposedOwnerNet,renterRefund:body.proposedRenterRefund} : systemAmounts;
         if (!clearIntent()) { setBusy(false); return; }
         setPreview({ amounts, versionHash, early: typeof body.early === "boolean" ? body.early : body.settlement?.early ?? null, adjustArmed: armed });
         setNotice(armed ? "已生成人工调整预览；确认后提交调整申请。" : "结算方案已生成，请核对金额后提交。");

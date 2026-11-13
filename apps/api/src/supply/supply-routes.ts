@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import { hasLegacyReadSnapshots } from "./legacy-listing-read";
 import { lockPublishingAccount, readPublishingAccount, unknownSupplyGate, withPublicListingSnapshot } from "./publishing";
@@ -73,6 +74,7 @@ import {
   updateTermDraft,
 } from "./rules";
 import { readFullPayoutTerms } from "./full-payout-terms";
+import { readPricingSchedules, readSchedulePriceOptions, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
@@ -498,7 +500,7 @@ export async function handleSupplyUserRoute(
       if (path === "/games") {
         const rows = await withTransaction(options.pool, async (client) => {
           const games = (await client.query<{ id: string; code: string; name: string; description: string | null; currentReleaseId: string | null }>(
-            `SELECT g.id,g.code,g.name,g.description,g.current_release_id AS "currentReleaseId"
+            `SELECT g.id,g.code,g.name,g.description,${effectiveRuleRelease("g")} AS "currentReleaseId"
                FROM zzsh_supply.game g JOIN zzsh_supply.game_service_operation s ON s.game_id=g.id AND s.service_code='ACCOUNT_RENTAL'
               WHERE g.enabled AND s.enabled ORDER BY g.code,g.id`,
           )).rows;
@@ -522,7 +524,7 @@ export async function handleSupplyUserRoute(
         const requestedReleaseId=query.has("releaseId")?decodeId(query.get("releaseId")!):undefined;
         const result=await withPublicListingSnapshot(options.pool,async client=>{
           await requirePublicGameService(client,gameId,GAME_SERVICE.ACCOUNT_RENTAL);
-          const row=(await client.query(`SELECT r.id,p.id AS "priceVersionId",p.funding_policy AS policy FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled AND p.status='SEALED'`,[gameId])).rows[0];
+          const row=(await client.query(`SELECT r.id,p.id AS "priceVersionId",p.funding_policy AS policy FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled AND p.status='SEALED'`,[gameId])).rows[0];
           if(!row || (requestedReleaseId!==undefined && requestedReleaseId!==row.id))throw notFound();
           return {releaseId:row.id,fullPayoutTerms:row.policy===null?null:await readFullPayoutTerms(client,gameId,validateFundingPolicy(row.policy),row.priceVersionId)};
         });
@@ -892,16 +894,70 @@ async function handleAdminRead(
       if(!row)throw notFound();await assertGameScope(client,adminUserId,access.isBoss,row.gameId);return row;
     });sendJson(response,200,result,requestId);return;
   }
+  const rulePlanMatch = /^\/games\/([^/]+)\/rule-release-schedules\/([^/]+)$/.exec(path);
+  if (rulePlanMatch) {
+    const gameId = decodeId(rulePlanMatch[1]!), releaseId = decodeId(rulePlanMatch[2]!);
+    if ([...query.keys()].length) throw invalid("Unsupported rule schedule query");
+    const result = await withTransaction(options.pool, async client => {
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      return (await client.query(`SELECT id, generation::text, price_version_id AS "priceVersionId",
+        term_version_id AS "termVersionId", agreement_version_id AS "agreementVersionId",
+        to_char(effective_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "effectiveAt",
+        announcement_version_id AS "announcementVersionId"
+        FROM zzsh_supply.rule_release WHERE game_id=$1 AND id=$2 AND effective_at IS NOT NULL`, [gameId, releaseId])).rows[0] ?? null;
+    });
+    if (!result) throw notFound();
+    sendJson(response, 200, result, requestId);
+    return;
+  }
   const rulesMatch = /^\/games\/([^/]+)\/rules$/.exec(path);
   if (rulesMatch) {
     const gameId = decodeId(rulesMatch[1]!);
     const result = await withTransaction(options.pool, async (client) => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const access = await requireAdminAccess(client, adminUserId);
       requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
       return listRules(client, adminUserId, access.isBoss, gameId);
     });
     sendJson(response, 200, result, requestId);
     return;
+  }
+  const priceOptionsMatch = /^\/games\/([^/]+)\/pricing-schedule-price-options$/.exec(path);
+  if (priceOptionsMatch) {
+    const gameId = decodeId(priceOptionsMatch[1]!), model = query.get("pricingModel");
+    if ((model !== "FIXED_FEE" && model !== "SPREAD") || [...query.keys()].some(key =>
+      !["pricingModel", "cursor"].includes(key) || query.getAll(key).length !== 1)) throw invalid("Unsupported price option query");
+    const result = await withTransaction(options.pool, async client => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      await assertRulesGameSupported(client, gameId);
+      return readSchedulePriceOptions(client, gameId, model, query.get("cursor"));
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const pricingSchedulesMatch=/^\/games\/([^/]+)\/pricing-schedules$/.exec(path);
+  if(pricingSchedulesMatch){
+    const gameId=decodeId(pricingSchedulesMatch[1]!);
+    const scheduleId = query.get("scheduleId"), kind = query.get("kind");
+    if ([...query.keys()].some(key => !["scheduleId", "kind"].includes(key) || query.getAll(key).length !== 1)
+      || ((scheduleId !== null || kind !== null) && (!scheduleId || (kind !== "price" && kind !== "mode"))))
+      throw invalid("Unsupported pricing schedule query");
+    const confirmation: Parameters<typeof readPricingSchedules>[2] = scheduleId && (kind === "price" || kind === "mode") ? { id: decodeId(scheduleId), kind } : undefined;
+    const result=await withTransaction(options.pool,async client=>{
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
+      const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client,adminUserId,access.isBoss,gameId);await assertRulesGameSupported(client,gameId);
+      return readPricingSchedules(client,gameId,confirmation);
+    });
+    sendJson(response,200,result,requestId);return;
   }
   // Approved public catalog media usable as a binding option. Scoped to
   // catalog maintenance rather than media review: choosing an image must not
@@ -1055,6 +1111,7 @@ async function handleAdminWrite(
     gameIdResolver: (client: PoolClient) => Promise<string | undefined>,
     action: (client: PoolClient, access: EffectiveAdminAccess, gameId: string) => Promise<{ status: number; body: unknown; details?: Record<string, unknown> }>,
     auditAction?: string,
+    bossOnly = false,
   ): Promise<void> => {
     const fingerprintBody = request.body;
     await runIdempotentWrite(
@@ -1069,6 +1126,7 @@ async function handleAdminWrite(
         await assertAdminContextInTransaction(client, {userId:actor.id,sessionId:actor.sessionId});
         const access = await requireAdminAccess(client, actor.id);
         requirePermission(access, permission);
+        if (bossOnly && !access.isBoss) throw new SecurityApiError(403, "FORBIDDEN", "Only a boss can schedule pricing");
         const gameId = await gameIdResolver(client);
         if (gameId) await assertGameScope(client, actor.id, access.isBoss, gameId);
         if (gameId && operation.startsWith("supply.rules.")) await assertRulesGameSupported(client, gameId);
@@ -1095,7 +1153,7 @@ async function handleAdminWrite(
             outcome: "SUCCESS",
             requestId,
             reason: typeof (request.body as Record<string, unknown>)?.reason === "string" ? (request.body as Record<string, string>).reason! : operation,
-            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}), ...(result.details?.mediaContext ? { mediaContext: result.details.mediaContext } : {}) },
+            details: { operation, gameId: gameId ?? objectId, before, after, result: "APPLIED", ...(result.details?.identityReview ? { identityReview: result.details.identityReview } : {}), ...(result.details?.mediaContext ? { mediaContext: result.details.mediaContext } : {}), ...(result.details?.pricingSchedule ? { pricingSchedule: result.details.pricingSchedule } : {}) },
           });
         }
         return { status: result.status, body: result.body };
@@ -1381,13 +1439,45 @@ async function handleAdminWrite(
   }
   if (path === "/price-drafts" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["gameId", "mode"]);
+    ensureOnlyFields(body, ["gameId", "mode", "fixedFeeRates", "sourcePriceVersionId"]);
     const gameId = decodeId(requiredString(body, "gameId", 128));
     await write("supply.rules.price_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
-      const draft = await createPriceDraft(client, actor.id, access.isBoss, gameId, body.mode);
+      const draft = await createPriceDraft(client, actor.id, access.isBoss, gameId, body.mode, body.fixedFeeRates,
+        body.sourcePriceVersionId === undefined ? undefined : decodeId(requiredString(body, "sourcePriceVersionId", 128)));
       return { status: 200, body: draft };
     }, "supply.rules.price_draft_created");
     return;
+  }
+  const priceScheduleMatch=/^\/games\/([^/]+)\/pricing-policy-schedules$/.exec(path);
+  if(priceScheduleMatch&&method==="POST"){
+    const gameId=decodeId(priceScheduleMatch[1]!),body=bodyOf(request);
+    ensureOnlyFields(body,["pricingModel","priceVersionId","expectedGeneration","effectiveAt","announcementVersionId"]);
+    const pricingModel=requiredString(body,"pricingModel",16);
+    if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
+    const priceVersionId=decodeId(requiredString(body,"priceVersionId",128)),expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
+    await write("supply.rules.pricing_policy_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
+      const result=await (pricingModel==="FIXED_FEE"?scheduleFixedFeePrice:scheduleSpreadPrice)(client,
+        {userId:actor.id,isBoss:access.isBoss},{gameId,priceVersionId,expectedGeneration,effectiveAt});
+      await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
+      const scheduled={...result,gameId,priceVersionId,pricingModel,announcementVersionId};
+      return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
+    },"supply.rules.pricing_policy_scheduled",true);return;
+  }
+  const pricingModeScheduleMatch=/^\/games\/([^/]+)\/pricing-mode-schedules$/.exec(path);
+  if(pricingModeScheduleMatch&&method==="POST"){
+    const gameId=decodeId(pricingModeScheduleMatch[1]!),body=bodyOf(request);
+    ensureOnlyFields(body,["pricingModel","expectedGeneration","effectiveAt","announcementVersionId"]);
+    const pricingModel=requiredString(body,"pricingModel",16);
+    if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
+    const expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
+    const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
+    await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
+      const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt});
+      await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
+      const scheduled={...result,gameId,pricingModel,announcementVersionId};
+      return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
+    },"supply.rules.pricing_mode_scheduled",true);return;
   }
   const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);
   if (priceUpdateMatch && method === "PUT") {
@@ -1484,7 +1574,7 @@ async function handleAdminWrite(
   }
   if (path === "/releases" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["gameId", "priceVersionId", "termVersionId", "agreementVersionId", "expectedGeneration"]);
+    ensureOnlyFields(body, ["gameId", "priceVersionId", "termVersionId", "agreementVersionId", "expectedGeneration", "effectiveAt", "announcementVersionId"]);
     const gameId = decodeId(requiredString(body, "gameId", 128));
     const priceVersionId = decodeId(requiredString(body, "priceVersionId", 128));
     const termVersionId = decodeId(requiredString(body, "termVersionId", 128));
@@ -1495,10 +1585,13 @@ async function handleAdminWrite(
       ADMIN_PERMISSION.supplyRulesActivate,
       async () => gameId,
       async (client, access) => {
-        const result = await activateRelease(client, actor.id, access.isBoss, gameId, priceVersionId, termVersionId, agreementVersionId, requiredString(body, "expectedGeneration", 20));
-        return { status: 200, body: result, details: { releaseId: result.releaseId, generation: result.generation, affectedCount: result.affectedCount } };
+        const effectiveAt = requiredString(body, "effectiveAt", 40);
+        const announcementVersionId = decodeId(requiredString(body, "announcementVersionId", 128));
+        const result = await activateRelease(client, actor.id, access.isBoss, gameId, priceVersionId, termVersionId, agreementVersionId,
+          requiredString(body, "expectedGeneration", 20), { effectiveAt, announcementVersionId });
+        return { status: 200, body: result, details: { pricingSchedule: result } };
       },
-      "supply.rules.release_activated",
+      "supply.rules.release_scheduled", true,
     );
     return;
   }

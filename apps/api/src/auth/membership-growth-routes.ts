@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "../supply/effective-rule-release";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { INestApplication } from "@nestjs/common";
@@ -159,7 +160,7 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
           `SELECT r.id AS "releaseId", r.price_version_id AS "priceVersionId"
              FROM zzsh_supply.rule_release r JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
             WHERE p.status='SEALED'
-            ORDER BY (EXISTS (SELECT 1 FROM zzsh_supply.game g WHERE g.current_release_id=r.id AND g.enabled)) DESC, r.created_at DESC, r.id DESC
+            ORDER BY (EXISTS (SELECT 1 FROM zzsh_supply.game g WHERE ${effectiveRuleRelease("g")}=r.id AND g.enabled)) DESC, r.created_at DESC, r.id DESC
             LIMIT 1`,
         )).rows[0];
         const sealed = sealedRelease ? await sealedFactsOrNull(client, sealedRelease.releaseId, sealedRelease.priceVersionId) : null;

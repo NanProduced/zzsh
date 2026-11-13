@@ -14,6 +14,7 @@ import type { PrestartPaymentBasis } from "../order/prestart-termination";
 import { STAGE_CARD_PRE_SEND_FAILURES } from "./order-stage-card-retry";
 import type { StageCardKind } from "./order-stage-cards";
 import { isLegacyListedQuote } from "../supply/legacy-listed-quote";
+import { normalizeQuote } from "../supply/content-hash";
 import { LEGACY_ORDER_STATUS_SQL } from "../order/legacy-order-read";
 
 export type OrderTeamActor={realm:"user"|"admin";userId:string;sessionId:string};
@@ -115,6 +116,13 @@ export function projectOrderTerms(snapshot:unknown,itemNames:ReadonlyMap<string,
   const hash=quote.contentHash,digest=quote.confirmationDigest;
   const version=typeof hash==="string"&&hash.length>0&&hash.length<=256?hash
     :typeof digest==="string"&&digest.length>0&&digest.length<=256?digest:null;
+  let fixedQuote=false;
+  if(quote.schemaVersion===4){
+    try{
+      const names=["schemaVersion","currency","priceVersionId","ruleReleaseId","mode","lines","resourceTotal","ownerTotal","platformFullProfit","tenantDeposit","publisherBailRequirement","termSeconds","expiryDisclosures","unitAmountsInformational","roundingPolicy","pricingInputs"];
+      fixedQuote=normalizeQuote(Object.fromEntries(names.map(name=>[name,quote[name]]))).schemaVersion===4;
+    }catch{return base("UNKNOWN",version,[]);}
+  }
   const rawLines=Array.isArray(quote.lines)?quote.lines:[];
   const parsed=rawLines.map(line=>parseTermsLine(line,itemNames));
   const known=parsed.filter((line):line is TermsParsedLine=>line!==null);
@@ -129,7 +137,7 @@ export function projectOrderTerms(snapshot:unknown,itemNames:ReadonlyMap<string,
   const publisherBail=quote.publisherBailRequirement==null?null:termsAmount(quote.publisherBailRequirement);
   const complete=rawLines.length>0&&known.length===rawLines.length
     &&known.every(line=>line.buyerCents!==null&&line.ownerCents!==null&&line.platformCents!==null)
-    &&(quote.schemaVersion===1||quote.schemaVersion===2||isLegacyListedQuote(quote))&&quote.currency==="CNY";
+    &&(quote.schemaVersion===1||quote.schemaVersion===2||isLegacyListedQuote(quote)||fixedQuote)&&quote.currency==="CNY";
   const depositsReadable=(quote.tenantDeposit==null||tenantDeposit!==null)&&(quote.publisherBailRequirement==null||publisherBail!==null);
   if(!complete||!resource||!ownerRental||!platformTotal||!depositsReadable)return base("UNKNOWN",version,lines);
   let buyerSum=0n,ownerSum=0n;

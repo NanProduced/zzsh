@@ -68,7 +68,8 @@ function sealedListing(deposit: unknown = declared()) {
     if (text.includes("SELECT * FROM zzsh_supply.listing_version")) rows = [version];
     else if (text.includes("SELECT u.suspended")) rows = [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }];
     else if (text.includes("game_service_operation")) rows = [{ id: "service", gameId: "game", gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (text.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: "game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release", catalog_revision: "1" }];
+    else if (text.includes("FROM zzsh_supply.game g WHERE id=")) rows = [{ id: "game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release", catalog_revision: "1" }];
+    else if (text.includes("AS retired")) rows = [{ retired: false }];
     else if (text.includes("funding_policy AS policy")) rows = [{ policy: null }];
     else if (text.includes("rule_acceptance")) rows = [{}];
     else if (text.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = [{ id: "media", account_id: "account", game_id: "game", owner_user_id: "owner", ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", content_hash: "a".repeat(64), review_state: "APPROVED", access_class: "PUBLIC_DISPLAY", technical_state: "READY", public_storage_key: "PRIVATE_STORAGE" }];

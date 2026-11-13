@@ -160,8 +160,8 @@ export async function applyLegacyGrowthMaintenance(client: PoolClient, input: Le
       await setAuditContext(client, "admin", input.execution.actorAdminId, input.execution.actorSessionId, input.requestId);
       await assertCreditInitializationWindowOpen(client, input.execution);
       const written = await writePreparedLegacyGrowth(client, prepared, port, input.executionKey);
-      // A concurrent unique-fingerprint winner can have another key. Read the actual persisted row, never guess from written/request.
-      const stored = await port.readByFingerprint(client, prepared.subjectUserId, prepared.fingerprint);
+      // The port returns the inserted row or the actual unique-fingerprint winner, including its original key.
+      const stored = written.storedRecord;
       if (!validRecord(stored, prepared.subjectUserId, prepared.fingerprint) || stored.receiptDigest !== prepared.record.receiptDigest) unavailable();
       await assertCreditInitializationWindowOpen(client, input.execution);
       const receipt: LegacyGrowthMaintenanceReceipt = { schema: "legacy-growth-maintenance-receipt-v1", operation: LEGACY_GROWTH_MAINTENANCE_OPERATION, executionKey: input.executionKey, subjectUserId: input.subjectUserId,

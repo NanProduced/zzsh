@@ -55,7 +55,7 @@ function factsRow(patch: FactPatch = {}) {
     cancel_reason: null, cancelled_at: null, confirmation_id: "pc_1", payment_source: "JOINPAY", disposition: "APPLIED",
     currency: "CNY", amount_cents: "15908", merchant_identity_id: "merchant_1", merchant_order_no: "ORIGINAL_1",
     channel_trx_no: "TRX_1", order_cents: "15908", opening_confirmed: false, has_posting: false, pending_settlement: false,
-    pending_adjustment: false, earning_count: "0", active_refund_count: "0", other_termination: false, ...patch };
+    pending_adjustment: false, earning_count: "0", active_refund_count: "0", other_termination: false, fixed_pricing:false, ...patch };
 }
 function termRow(patch: FactPatch = {}) {
   return { id: "pterm_existing", order_id: "order_1", state: "APPROVED", requested_by_party: "SUPPORT",
@@ -63,7 +63,7 @@ function termRow(patch: FactPatch = {}) {
     basis_digest: basis.digest, payment_basis: basis, liability_root_id: "prestart_refund_1", liability_event_id: "prestart_liability_1",
     ...patch };
 }
-function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderUpdate?: boolean; poststartReady?: boolean; fullPayoutSelected?: boolean | null } = {}) {
+function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderUpdate?: boolean; poststartReady?: boolean; fullPayoutSelected?: boolean | null; fixedFeeRate?:string|null; badFixedReceipt?:boolean } = {}) {
   const calls: { sql: string; values: any[] }[] = [];
   const recognized: { basis: any; policy?: string }[] = [];
   const audits: any[] = [];
@@ -74,14 +74,17 @@ function fixture(t: any, options: { facts?: FactPatch; current?: any; failOrderU
     if (sql.startsWith("SELECT o.id,o.status,o.revision")) return { rows: [facts], rowCount: 1 };
     if (sql.includes("to_regprocedure('zzsh_order.prestart_liability_complete")) return { rows: [{ ready: true }], rowCount: 1 };
     if (sql.includes("to_regprocedure('zzsh_order.cancel_order_after_start")) return { rows: [{ ready: options.poststartReady !== false }], rowCount: 1 };
+    if (sql.includes("zzsh_order.fixed_fee_poststart_rate") && sql.includes(" AS rate"))
+      return {rows:[{selected:options.fullPayoutSelected === undefined ? false : options.fullPayoutSelected,rate:options.fixedFeeRate === undefined ? '0.1' : options.fixedFeeRate}],rowCount:1};
     if (sql.startsWith("SELECT zzsh_order.poststart_full_payout_selected"))
       return {rows:[{selected:options.fullPayoutSelected === undefined ? false : options.fullPayoutSelected}],rowCount:1};
     if (sql.includes("SELECT zzsh_order.cancel_order_after_start")) {
       const refund=BigInt(values[2]),gross=BigInt(values[3]),paid=BigInt(facts.amount_cents);
       const selected=options.fullPayoutSelected === undefined ? false : options.fullPayoutSelected;
-      const fee=selected?(gross*8n+50n)/100n:0n,owner=gross-fee;
+      const fee=selected?(gross*8n+50n)/100n:0n,service=sql.includes('cancel_order_after_start_v3')?(gross+5n)/10n:0n,owner=gross-fee-service;
       return {rows:[{value:{caseId:'case_1',orderId:values[0],status:'CANCELLED',paidCents:String(paid),refundCents:String(refund),
        ownerCents:String(owner),ownerGrossCents:String(gross),fullPayoutFeeCents:String(fee),fullPayoutSelected:selected,
+       ...(sql.includes('cancel_order_after_start_v3')?{fixedFeeRate:options.fixedFeeRate??'0.1',platformServiceFeeCents:String(options.badFixedReceipt?service+1n:service)}:{}),
        platformContributionCents:String(paid-refund-owner),commissionCents:'0',channelResult:'NOT_SUBMITTED'}}],rowCount:1};
     }
     if (sql.startsWith("SELECT revision::text") && sql.includes("SUPPORT_AFTER_START_CANCELLED"))
@@ -140,6 +143,21 @@ test('客服开租后取消复用锁与原款守卫，按填写金额分配，�
  const unknown=fixture(t,{facts:{opening_confirmed:true},fullPayoutSelected:null});
  await assert.rejects(supportCancelAfterOpening(unknown.client,actor,{...input,refundCents:'5000',ownerCents:'2000',ownerAmountBasis:amountBasis}),/FULL_PAYOUT_UNKNOWN/);
  assert.equal(unknown.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start')),false);
+});
+
+test('fixed-fee special cancellation uses frozen gross fee and rejects an incomplete or changed receipt',async t=>{
+ const facts={opening_confirmed:true,fixed_pricing:true,amount_cents:'10000',order_cents:'10000'};
+ const input={orderId:'order_1',expectedOrderRevision:'1',reason:'双方协商取消',refundCents:'6000',ownerCents:'4000',ownerAmountBasis:'GROSS_BEFORE_FEE_V1' as const,requestId:'req_1'};
+ const h=fixture(t,{facts,fullPayoutSelected:true,fixedFeeRate:'0.1'});
+ const result=await supportCancelAfterOpening(h.client,actor,input);
+ const record=(result.body as any).poststartCancellation;
+ assert.deepEqual([record.ownerGrossCents,record.platformServiceFeeCents,record.fullPayoutFeeCents,record.ownerCents,record.platformContributionCents,record.commissionCents],['4000','400','320','3280','720','0']);
+ assert(h.calls.some(c=>c.sql.includes('cancel_order_after_start_v3')));
+ const bad=fixture(t,{facts,fullPayoutSelected:true,fixedFeeRate:'0.1',badFixedReceipt:true});
+ await assert.rejects(supportCancelAfterOpening(bad.client,actor,input),/receipt differs/);
+ const missing=fixture(t,{facts,fullPayoutSelected:true,fixedFeeRate:null});
+ await assert.rejects(supportCancelAfterOpening(missing.client,actor,input),/basis is unavailable/);
+ assert.equal(missing.calls.some(c=>c.sql.includes('SELECT zzsh_order.cancel_order_after_start_v3')),false);
 });
 
 test("未开租允许全额原款应退；已开租/结算/草稿/佣金/退款/终止阻断", () => {
@@ -245,6 +263,11 @@ test("只读预检返回原支付金额与退款进度；已有记录不暴露�
   assert.equal(preview.eligibility.refundCents, "15908");
   assert.equal(preview.openingConfirmed, true);
   assert.equal(preview.supportCancellation, null);
+  const fixed = fixture(t, { facts: { opening_confirmed:true, fixed_pricing:true }, fullPayoutSelected:true, fixedFeeRate:'0.1' });
+  const fixedPreview = await readSupportCancellation(fixed.client,actor,'order_1');
+  assert.deepEqual([fixedPreview.poststartEligibility.allowed,fixedPreview.poststartEligibility.fullPayoutSelected,fixedPreview.poststartEligibility.fixedFeeRate],[true,true,'0.1']);
+  const unavailable = fixture(t, { facts: { opening_confirmed:true, fixed_pricing:true },poststartReady:false });
+  assert.equal((await readSupportCancellation(unavailable.client,actor,'order_1')).poststartEligibility.reason,'PAYMENT_BASIS_UNAVAILABLE');
   const existing = fixture(t, { current: termRow(), facts: { status: "CANCELLED", cancel_reason: "SUPPORT_CANCELLED_REFUND", revision: "2", cancelled_at: "2026-10-30T00:00:00.000000Z" } });
   const already = await readSupportCancellation(existing.client, actor, "order_1");
   assert.equal(already.eligibility.allowed, false);

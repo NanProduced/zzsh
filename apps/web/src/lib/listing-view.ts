@@ -223,9 +223,8 @@ export function conditionLines(
   return lines;
 }
 /**
- * Per-item projection that may fail: a favorite record whose summary DTO is incomplete (for
- * example a current listing without a quote) degrades to a single fault card. The strict
- * `toListingCard` stays authoritative for callers that must not render an unpriced listing.
+ * An incomplete favorite summary degrades to a single fault card. An explicitly
+ * unpriced public listing can still show its public details without a rental action.
  */
 export function previewListingCard(listing: PublicListing): { ok: true; card: ListingCardData } | { ok: false } {
   try {
@@ -253,11 +252,15 @@ function listingVisibility(listing: PublicListing) {
 
 export function toListingCard(listing: PublicListing): ListingCardData {
   if (listing.source === "LEGACY_READ_ONLY") return toHistoricalListingCard(listing);
-  if (!listing.quote) throw new Error("Current listing has no authoritative quote");
+  const quote = listing.quote;
+  if (!quote && (quote !== null || listing.canCreateOrder !== false || !listing.availability?.state ||
+    listing.availability.state === "RENTABLE" || !listing.id || !listing.versionId))
+    throw new Error("Current listing has no authoritative quote");
+  const lines = quote?.lines ?? [];
   const items = new Map(listing.presentation.items.map((item) => [item.id, item]));
-  const haffLines = listing.quote.lines.filter((line) => line.unit === "HAFF_BASE");
-  const itemLines = listing.quote.lines.filter((line) => line.unit !== "HAFF_BASE");
-  const resourceLines: ResourceLine[] = listing.quote.lines.map((line) => {
+  const haffLines = lines.filter((line) => line.unit === "HAFF_BASE");
+  const itemLines = lines.filter((line) => line.unit !== "HAFF_BASE");
+  const resourceLines: ResourceLine[] = lines.map((line) => {
     const unitPrice = formatReferenceYuan(line.buyerUnitAmount.amount);
     return {
     itemId: line.itemId,
@@ -286,25 +289,25 @@ export function toListingCard(listing: PublicListing): ListingCardData {
     releaseId: listing.releaseId,
     displayNo: listing.displayNo ?? null,
     fullPayoutSelected: listing.fullPayoutSelected ?? null,
-    baseRenterHaffRatioWanPerYuan: listing.quote.baseRenterHaffRatioWanPerYuan ?? null,
-    baseRatioReferenceOnly: listing.quote.schemaVersion === 3,
+    baseRenterHaffRatioWanPerYuan: quote?.baseRenterHaffRatioWanPerYuan ?? null,
+    baseRatioReferenceOnly: quote?.schemaVersion === 3,
     title: listing.title?.trim() || structuredTitle || (listing.displayNo ? `账号 ${listing.displayNo}` : "账号资料待补充"),
     imageUrl: firstMedia?.coverUrl ?? firstMedia?.url,
     media,
     resourceLines,
-    resourceTotalLabel: formatMoneyLabel(listing.quote.resourceTotal) ?? "以平台确认为准",
-    haffRentLabel: quoteLineSubtotalLabel(haffLines, listing.quote.lines.length > 0),
-    itemResourceTotalLabel: quoteLineSubtotalLabel(itemLines, listing.quote.lines.length > 0),
-    depositLabel: formatMoneyLabel(listing.quote.tenantDeposit),
-    payableTotalLabel: formatMoneyLabel(listing.quote.tenantPayableTotal),
-    termLabel: termLabel(listing.quote.termSeconds),
+    resourceTotalLabel: formatMoneyLabel(quote?.resourceTotal) ?? "以平台确认为准",
+    haffRentLabel: quoteLineSubtotalLabel(haffLines, lines.length > 0),
+    itemResourceTotalLabel: quoteLineSubtotalLabel(itemLines, lines.length > 0),
+    depositLabel: formatMoneyLabel(quote?.tenantDeposit),
+    payableTotalLabel: formatMoneyLabel(quote?.tenantPayableTotal),
+    termLabel: termLabel(quote?.termSeconds),
     termOptionLabel: listing.termOption?.displayName ?? (listing.termOption ? "未确认" : null),
     conditionLines: conditions,
     loginMethod: listing.attributeDisplay?.loginMethod ?? null,
     ...projectListingSkins(listing),
     entitlementNames: listing.presentation.entitlements.map((entitlement) => entitlement.name),
-    rentalMode: listing.quote.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
-    unitAmountsInformational: listing.quote.unitAmountsInformational === true,
+    rentalMode: quote?.rentalMode ?? (listing.attributes?.rental_mode as "ordinary" | "custom" | "fast" | undefined) ?? null,
+    unitAmountsInformational: quote?.unitAmountsInformational === true,
   };
 }
 function projectListingMedia(listing: PublicListing): ListingMedia[] {

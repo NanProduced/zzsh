@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { LocalSession, localOrigin, validateProfile, writePrivate } from '../local-auth.mjs';
 import { deriveR07FilterConfig, parseRegionWordList } from './legacy-region-coverage.mjs';
+import { NEXT_MIGRATION_PROFILE } from './local-target-registry.mjs';
 
 // Local R06 formal HTTP initialization only. No DB connection or advisory lock.
 const restricted = 'E:/zzsh-local-state/restricted';
@@ -63,12 +64,17 @@ function tableRows(manifest, manifestPath, table) {
 export function validateInputs(plan, read = readPin, { expectedHashes = sourceHashes, tableRead = tableRows } = {}) {
   const r07 = plan?.schema === 'zzsh.round07-legal-filter-plan.v1';
   assert((r07 || plan?.schema === 'zzsh.round06-legal-filter-plan.v1') && plan.refs && token(plan.filterKey), 'INVALID_PLAN');
-  const bytes = Object.fromEntries(Object.entries(plan.refs).map(([name, ref]) => [name, read(ref)]));
+  const roundInput=read(plan.refs.roundInput), round=json(roundInput);
+  assert.notEqual(round?.target?.migrationProfile, NEXT_MIGRATION_PROFILE, 'NEXT_LEGACY_LEGAL_FILTER_RETIRED');
+  const registryBytes=read(plan.refs.registry), registry=json(registryBytes);
+  assert.notEqual(registry?.migrationProfile, NEXT_MIGRATION_PROFILE, 'NEXT_LEGACY_LEGAL_FILTER_RETIRED');
+  const bytes = Object.fromEntries(Object.entries(plan.refs).map(([name, ref]) => [name,
+    name === 'roundInput' ? roundInput : name === 'registry' ? registryBytes : read(ref)]));
   const requiredHashes = r07 ? {...expectedHashes, filter:plan.sourceHashes?.filter, businessManifest:plan.sourceHashes?.businessManifest} : expectedHashes;
   for (const name of Object.keys(requiredHashes)) assert(hash(requiredHashes[name]) && digest(bytes[name]) === requiredHashes[name], 'REVIEWED_SOURCE_CHANGED');
-  const round = json(bytes.roundInput), core = json(bytes.roundReceipt), binding = json(bytes.binding);
+  const core = json(bytes.roundReceipt), binding = json(bytes.binding);
   const actor = json(bytes.actor), profile = validateProfile(json(bytes.profile)), state = json(bytes.session);
-  const business = json(bytes.businessReceipt), manifest = json(bytes.businessManifest), config = json(bytes.filter), registry = json(bytes.registry);
+  const business = json(bytes.businessReceipt), manifest = json(bytes.businessManifest), config = json(bytes.filter);
   const build = json(bytes.buildManifest);
   const target = round.target, actual = binding.actualResource, resource = binding.resource;
   assert(round.schema === 'zzsh.local-round.v1' && target?.bootstrapReservation === (r07 ? 'ROUND07_BOOTSTRAP_RESERVED' : 'ROUND06_BOOTSTRAP_RESERVED')

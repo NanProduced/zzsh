@@ -7,7 +7,8 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import type { Pool, PoolClient } from "pg";
 import { matchesKnown0155LineEndings } from "./business-migration-compat";
-import { supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
+import { fixedFeeSupportCancelContractSql,supportPoststartTriggersSql,supportPoststartExecutorSafeSql } from "../finance/support-poststart-schema";
+import { distributionAccrualTaskAbsentSql, distributionAccrualTaskContractSql } from "../finance/distribution-accrual-tasks";
 import { compensationTriggersSql, compensationFunctionsSafeSql, compensationIncidentIndexSafeSql } from '../finance/order-compensation-schema';
 
 const IDENTIFIER = /^[a-z][a-z0-9_]{0,62}$/;
@@ -495,6 +496,7 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
       GRANT UPDATE(level_code,policy_version_id,commission_frozen,revision) ON zzsh_order.distribution_participant TO ${runtimeUser};
       GRANT UPDATE(active) ON zzsh_order.distribution_invite_code TO ${runtimeUser};`);
   await configureDistributionFinancialPrivileges(pool, runtimeRole);
+  await configureDistributionAccrualTaskPrivileges(pool, runtimeRole);
   await configureCreditGuaranteePrivileges(pool, runtimeRole);
   await configureContinuityFinancePrivileges(pool, runtimeRole);
   await configureChannelRefundPrivileges(pool, runtimeRole);
@@ -508,11 +510,98 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   await configureUserAuthThrottlePrivileges(pool, runtimeRole);
   await configureOrderCompensationPrivileges(pool, runtimeRole);
   await configureSupportPoststartCancellationPrivileges(pool, runtimeRole);
+  await configureFixedFeeSupportCancellationPrivileges(pool, runtimeRole);
+  await configureFixedFeePersonalPrivileges(pool, runtimeRole);
+  await configureScheduledSpreadPrivileges(pool, runtimeRole);
+  const marketPrice = "zzsh_supply.public_market_price(jsonb,text,text)";
+  if ((await pool.query("SELECT to_regprocedure($1) AS fn", [marketPrice])).rows[0]?.fn) {
+    await pool.query(`REVOKE ALL ON FUNCTION ${marketPrice} FROM PUBLIC, ${runtimeUser};
+      GRANT EXECUTE ON FUNCTION ${marketPrice} TO ${runtimeUser}`);
+  }
   await configureDocsLibraryPrivileges(pool, runtimeRole);
   const discardGuideDraft = "zzsh_content.discard_guide_draft(text,text,bigint)";
   if ((await pool.query("SELECT to_regprocedure($1) AS fn", [discardGuideDraft])).rows[0]?.fn) {
     await pool.query(`GRANT EXECUTE ON FUNCTION ${discardGuideDraft} TO ${runtimeUser}`);
   }
+}
+
+/** Never expose the new cancellation executor unless its complete ledger contract is installed. */
+export async function configureFixedFeeSupportCancellationPrivileges(pool:Pick<Pool,"query">,runtimeRole:string):Promise<void>{
+ const role=quoteIdentifier(runtimeRole);
+ const row=(await pool.query(`SELECT
+  to_regprocedure('zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text)') IS NOT NULL AS executor,
+  to_regprocedure('zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text)') IS NOT NULL AS helper,
+  (SELECT count(*)::int FROM pg_attribute WHERE attrelid=to_regclass('zzsh_order.support_poststart_cancellation')
+    AND attname IN('fixed_fee_rate','platform_service_fee_cents') AND attnum>0 AND NOT attisdropped) AS columns,
+  EXISTS(SELECT 1 FROM pg_proc g WHERE g.oid=to_regprocedure('zzsh_order.guard_support_poststart_cancellation()')
+    AND position('fixed_fee_poststart_rate' IN g.prosrc)>0) AS marker,
+  (${fixedFeeSupportCancelContractSql}) AS safe,
+  (${supportPoststartTriggersSql}) AS triggers`)).rows[0];
+ if(!row||typeof row.executor!=='boolean'||typeof row.helper!=='boolean'||!Number.isInteger(row.columns)||typeof row.marker!=='boolean'||typeof row.safe!=='boolean'||!Number.isInteger(row.triggers))
+  throw new Error('Fixed fee cancellation contract inventory unavailable');
+ if(!row.executor&&!row.helper&&row.columns===0&&!row.marker)return;
+ if(!row.executor||!row.helper||row.columns!==2||!row.marker||!row.safe||row.triggers!==12)throw new Error('Fixed fee cancellation contract is partially deployed');
+ await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text),zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text) FROM PUBLIC, ${role};
+  GRANT EXECUTE ON FUNCTION zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text),zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text) TO ${role}`);
+}
+
+/** Do not grant the v5 verifier when its listing, order or funding guards are only partially installed. */
+export async function configureFixedFeePersonalPrivileges(pool: Pick<Pool,"query">, runtimeRole: string): Promise<void> {
+  const role=quoteIdentifier(runtimeRole);
+  const inventory=(await pool.query(`SELECT
+    to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)') IS NOT NULL AS verifier,
+    to_regprocedure('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)') IS NOT NULL AS common,
+    to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()') IS NOT NULL AS guard,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
+      AND t.tgname='rental_order_fixed_fee_personal_guard' AND t.tgfoid=to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()')
+      AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgqual IS NULL) AS fixed_trigger,
+    EXISTS(SELECT 1 FROM pg_trigger t WHERE t.tgrelid=to_regclass('zzsh_order.rental_order')
+      AND t.tgname='rental_order_personal_guard' AND t.tgfoid=to_regprocedure('zzsh_order.guard_personal_order()')
+      AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23
+      AND position('personal-quote-v5' IN pg_get_triggerdef(t.oid))>0
+      AND position('IS DISTINCT FROM' IN pg_get_triggerdef(t.oid))>0) AS legacy_trigger,
+    EXISTS(SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_supply.listing_version')
+      AND c.conname='listing_version_schema_version_check' AND c.contype='c' AND c.convalidated
+      AND pg_get_constraintdef(c.oid)='CHECK ((schema_version = ANY (ARRAY[1, 2, 3, 4])))') AS listing_constraint,
+    EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+      WHERE p.oid=to_regprocedure('zzsh_order.guard_supply_final_funding()') AND p.proowner=c.relowner AND NOT p.prosecdef
+        AND position('personal-quote-v5' IN p.prosrc)>0 AND position('credit_guarantee_waived_revision' IN p.prosrc)>0
+        AND EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=to_regclass('zzsh_supply.listing_publication')
+          AND a.attname='credit_guarantee_waived_revision' AND a.attnum>0 AND NOT a.attisdropped)) AS funding_guard,
+    NOT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+      WHERE p.oid IN(to_regprocedure('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),to_regprocedure('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)'),to_regprocedure('zzsh_order.guard_fixed_fee_personal_order()'))
+        AND (p.proowner<>c.relowner OR p.prosecdef)) AS functions_safe`)).rows[0];
+  const keys=["verifier","common","guard","fixed_trigger","legacy_trigger","listing_constraint","funding_guard","functions_safe"] as const;
+  if(!inventory||keys.some(key=>typeof inventory[key]!=="boolean"))throw new Error("Fixed fee order contract inventory unavailable");
+  if(!inventory.verifier&&!inventory.common&&!inventory.guard&&!inventory.fixed_trigger&&!inventory.legacy_trigger&&!inventory.listing_constraint&&!inventory.funding_guard)return;
+  if(keys.some(key=>inventory[key]!==true))throw new Error("Fixed fee order contract is partially deployed");
+  await pool.query(`REVOKE ALL ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text),zzsh_order.guard_fixed_fee_personal_order() FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order),zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text) TO ${role}`);
+}
+
+/** Grant the scheduled verifier only when both insertion guards and the payout reader agree. */
+export async function configureScheduledSpreadPrivileges(pool: Pick<Pool, "query">, runtimeRole: string) {
+  const verifier = "zzsh_order.assert_scheduled_spread_order_v6(zzsh_order.rental_order)";
+  const state = (await pool.query(`SELECT /* scheduled-spread-acl */
+    EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.rental_order')
+      AND tgname='rental_order_scheduled_spread_personal_guard') AS installed,
+    EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('zzsh_order.rental_order')
+      AND tgname='rental_order_personal_guard' AND position('personal-quote-v6' IN pg_get_triggerdef(oid))>0) AS exempt,
+    EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
+      WHERE c.oid=to_regclass('zzsh_order.rental_order') AND t.tgname='rental_order_scheduled_spread_personal_guard'
+        AND p.oid=to_regprocedure('zzsh_order.guard_scheduled_spread_personal_order()')
+        AND p.proowner=c.relowner AND NOT p.prosecdef AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=23 AND t.tgqual IS NULL
+        AND EXISTS(SELECT 1 FROM pg_proc v WHERE v.oid=to_regprocedure($1) AND v.proowner=c.relowner AND NOT v.prosecdef)
+        AND position('scheduled spread settlement basis differs' IN
+          (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('zzsh_order.check_settlement_posting_batch()')))>0
+        AND position('personal-quote-v6' IN
+          (SELECT prosrc FROM pg_proc WHERE oid=to_regprocedure('zzsh_order.poststart_full_payout_selected(jsonb,text,text,text,text,text,text)')))>0
+    ) AS ready`, [verifier])).rows[0];
+  if (state?.installed === false && state.exempt === false) return;
+  if (!state?.installed || !state.exempt || !state.ready) throw new Error("Scheduled spread order contract is partially deployed");
+  const role = quoteIdentifier(runtimeRole);
+  await pool.query(`REVOKE ALL ON FUNCTION ${verifier} FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION ${verifier} TO ${role}`);
 }
 
 /**
@@ -784,6 +873,31 @@ export async function configureDistributionFinancialPrivileges(pool: Pick<Pool, 
     GRANT EXECUTE ON FUNCTION zzsh_order.canonical_finance_json(jsonb,integer),zzsh_order.derive_payment_referral_inputs(text),
       zzsh_order.earning_expected_lines(text) TO ${role};
   `);
+}
+
+/** Preserve the old prefix; a partial accrual contract must not receive runtime grants. */
+export async function configureDistributionAccrualTaskPrivileges(pool: Pick<Pool, "query">, runtimeRole: string): Promise<void> {
+  const role = quoteIdentifier(runtimeRole);
+  const row = (await pool.query(`SELECT ${distributionAccrualTaskAbsentSql} AS absent,
+    ${distributionAccrualTaskContractSql} AS ready`)).rows[0];
+  if (!row || typeof row.absent !== 'boolean' || typeof row.ready !== 'boolean')
+    throw new Error('Distribution accrual task inventory is unavailable');
+  if (row.absent) return;
+  if (!row.ready) throw new Error('Distribution accrual task contract is partially deployed');
+  const table = 'zzsh_order.distribution_accrual_task';
+  const columns = ['posting_id', 'state', 'reason_code', 'next_attempt_at', 'created_at', 'updated_at'];
+  await resetRuntimeTablePrivileges(pool, table, 'PUBLIC', { columns, select: false });
+  await resetRuntimeTablePrivileges(pool, table, role, { columns });
+  await pool.query(`GRANT INSERT(posting_id) ON ${table} TO ${role};
+    GRANT UPDATE(state,reason_code,next_attempt_at,updated_at) ON ${table} TO ${role};
+    REVOKE ALL ON FUNCTION zzsh_order.guard_distribution_accrual_task(),
+      zzsh_order.enqueue_distribution_accrual_task(),zzsh_order.guard_referral_earning_task(),
+      zzsh_order.derive_frozen_referral_accrual(text),zzsh_order.frozen_referral_earning_seed(jsonb,jsonb) FROM PUBLIC, ${role};
+    GRANT EXECUTE ON FUNCTION zzsh_order.derive_frozen_referral_accrual(text),
+      zzsh_order.frozen_referral_earning_seed(jsonb,jsonb) TO ${role};`);
+  const runtimeContract = distributionAccrualTaskContractSql.replaceAll('current_user', '$1::name');
+  if ((await pool.query(`SELECT ${runtimeContract} AS ready`, [runtimeRole])).rows[0]?.ready !== true)
+    throw new Error('Distribution accrual task runtime privileges are incomplete');
 }
 
 /** Optional schema: no-op on the old prefix; fail on partial deployment. */

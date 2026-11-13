@@ -1,5 +1,9 @@
 import type { Money, OwnerIncomePreview, OwnerQuote, PublishingOptions, RentalMode } from "./supply-types.ts";
 
+export function usesRentalModes(options: Pick<PublishingOptions, "pricingSchema"> | null | undefined): options is { pricingSchema: "haff-ratio-v2" | "haff-ratio-v3" } {
+  return options?.pricingSchema === "haff-ratio-v2" || options?.pricingSchema === "haff-ratio-v3";
+}
+
 export function customTermOptions(options: Pick<PublishingOptions, "termOptions" | "rentalTermOptions"> | null | undefined) {
   const allowed = options?.rentalTermOptions?.custom?.termOptionCodes;
   return (options?.termOptions ?? []).filter(term => term.dailyConsumption === "10000000" && (!allowed || allowed.includes(term.code)));
@@ -11,10 +15,15 @@ export function matchedOwnerNetEstimate(preview: OwnerIncomePreview | null, sele
   if (preview?.state !== "READY" || !preview.binding || estimate?.state !== "READY" || !estimate.serviceFee || estimate.schema !== "owner-normal-end-estimate.v1" || estimate.scenario !== "ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END" || typeof selected !== "boolean" || estimate.selected !== selected) return null;
   const validMoney = (value: Money | null | undefined) => value?.currency === "CNY" && value.unit === "yuan" && value.scale === 2 && typeof value.amount === "string" ? centsOfMoney(value) : null;
   const gross = validMoney(estimate.ownerGross), fee = validMoney(estimate.serviceFee.amount), net = validMoney(estimate.ownerNet), base = validMoney(estimate.serviceFee.base);
-  if (gross === null || fee === null || net === null || base === null || gross !== validMoney(preview.totalExpectedIncome) || fee + net !== gross) return null;
+  const platform = estimate.platformFee;
+  const platformAmount = platform === undefined ? 0n : validMoney(platform?.amount);
+  if (gross === null || fee === null || net === null || base === null || platformAmount === null
+    || gross !== validMoney(preview.totalExpectedIncome) || fee + platformAmount + net !== gross) return null;
+  if (platform !== undefined && (!platform || platform.payer !== "OWNER" || validMoney(platform.base) !== gross
+    || typeof platform.rate !== "string" || !/^0(?:\.[0-9]{1,8})?$/.test(platform.rate))) return null;
   if (selected ? estimate.serviceFee.payer !== "OWNER" || estimate.serviceFee.rate !== "0.08" || base !== gross || !estimate.policy?.fullPayoutPolicyRef || !estimate.policy.fullPayoutPolicyVersion || !estimate.policy.disclosureVersion : estimate.serviceFee.payer !== "NONE" || estimate.serviceFee.rate !== "0" || fee !== 0n || base !== 0n) return null;
   if (quote && (quote.ruleReleaseId !== preview.binding.releaseId || validMoney(quote.ownerTotal) !== gross || (quote.catalogRevision && quote.catalogRevision !== preview.binding.catalogRevision))) return null;
-  return { ...estimate, ownerGross: estimate.ownerGross!, ownerNet: estimate.ownerNet!, serviceFee: { ...estimate.serviceFee, base: estimate.serviceFee.base!, amount: estimate.serviceFee.amount! } };
+  return { ...estimate, platformFee: platform ? { ...platform, amount: platform.amount! } : undefined, ownerGross: estimate.ownerGross!, ownerNet: estimate.ownerNet!, serviceFee: { ...estimate.serviceFee, base: estimate.serviceFee.base!, amount: estimate.serviceFee.amount! } };
 }
 
 export function centsOfMoney(money: { amount: string } | null | undefined): bigint | null {

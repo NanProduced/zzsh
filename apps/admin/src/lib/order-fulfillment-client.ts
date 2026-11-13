@@ -29,7 +29,7 @@ export type SettlementVersionView = {
   supersededAt?: string | null;
   proposedOwnerNet?: string | null;
   proposedRenterRefund?: string | null;
-  inputSnapshot?: { proposedOwnerGross?: string | null; proposedFullPayoutFee?: string | null; lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }> } | null;
+  inputSnapshot?: { proposedOwnerGross?: string | null; proposedFullPayoutFee?: string | null; proposedPlatformServiceFee?: string | null; lines?: Array<{ itemId?: string; openingQuantity?: string; remainingQuantity?: string; consumedQuantity?: string }> } | null;
   computation?: { ok?: boolean; reasons?: string[]; early?: boolean; amounts?: Record<string, SettlementAmount>; consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> } } | null;
   decisions?: Array<{ party?: string; action?: string; reason?: string | null; versionHash?: string; createdAt?: string }>;
 };
@@ -49,7 +49,7 @@ export type SettlementReadView = {
   openingGeneration?: { state?: "CREATED" | "REVIEW_REQUIRED"; reason?: string | null; paymentConfirmationId?: string; createdAt?: string; updatedAt?: string } | null;
   openingGenerationRecoveryRequired?: boolean;
   posting?: { id?: string; settlementVersionId?: string; versionHash?: string; early?: boolean; postedAt?: string; refundDueAt?: string | null; amounts?: Record<string, SettlementAmount>;
-    owner?:{availableCents?:string};refund?:{payableCents?:string};manualAdjustment?:{proposedOwnerGross?:string|null;proposedFullPayoutFee?:string|null}|null } | null;
+    owner?:{availableCents?:string};refund?:{payableCents?:string};manualAdjustment?:{proposedOwnerGross?:string|null;proposedFullPayoutFee?:string|null;proposedPlatformServiceFee?:string|null}|null } | null;
   versions?: SettlementVersionView[];
   amounts?: Record<string, SettlementAmount>;
   consumed?: { haff?: unknown; items?: Array<{ itemId?: string; consumed?: unknown; remaining?: unknown }> };
@@ -61,6 +61,8 @@ export type SettlementReadView = {
   systemRenterRefund?: string;
   proposedOwnerGross?: string;
   proposedFullPayoutFee?: string;
+  proposedPlatformServiceFee?: string;
+  proposedMembershipDiscount?: string;
   proposedOwnerNet?: string;
   proposedRenterRefund?: string;
 };
@@ -120,9 +122,10 @@ export type SupportCancelView = {
   eligibility: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed?: boolean };
   openingConfirmed: boolean;
   supportCancellation: SupportCancelRow | null;
-  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean; fullPayoutSelected?: boolean | null };
+  poststartEligibility?: { allowed: boolean; reason: SupportCancelReason | null; refundCents: string | null; openingConfirmed: boolean; fullPayoutSelected?: boolean | null; fixedFeeRate?: string };
   poststartCancellation?: { caseId: string; refundCents: string; ownerCents: string; platformContributionCents: string;
     ownerGrossCents?: string | null; fullPayoutFeeCents?: string | null; fullPayoutSelected?: boolean | null;
+    fixedFeeRate?: string; platformServiceFeeCents?: string;
     commissionCents: string; reason: string; refundState?: string };
   refund: SupportCancelRefund | null;
   existing: boolean;

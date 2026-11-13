@@ -8,6 +8,7 @@ import type { FundingPolicy } from './funding-policy';
 import { readFundingPolicyForRelease } from "./funding-authority";
 import { validateOwnerDepositAmount, validateOwnerDepositDeclaration, type OwnerDepositDeclaration } from "./funding-policy";
 import { computeDeltaQuote, projectDeltaQuote, type QuoteAmount, type QuoteInput } from "./pricing";
+import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import { parseIncomePreviewInventory, projectResourceIncomePreview, readIncomePreviewContext, readPublishingAccount, type IncomePreviewItem } from "./publishing";
 import { ensureOnlyFields, invalid, notFound } from "./supply-util";
 
@@ -34,12 +35,14 @@ export type OwnerNormalEndEstimate = {
   schema: 'owner-normal-end-estimate.v1'; state: 'READY' | 'INCOMPLETE' | 'UNAVAILABLE';
   scenario: 'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END'; selected: boolean | null;
   ownerGross: QuoteAmount | null; serviceFee: { base: QuoteAmount | null; rate: string | null; amount: QuoteAmount | null; payer: 'OWNER' | 'NONE' | null };
+  platformFee?: { base: QuoteAmount | null; rate: string | null; amount: QuoteAmount | null; payer: 'OWNER' };
   ownerNet: QuoteAmount | null; policy: Pick<FundingPolicy,'fullPayoutPolicyRef'|'fullPayoutPolicyVersion'|'disclosureVersion'> | null;
   roundingPolicy: typeof FULL_PAYOUT_FEE_ROUNDING_POLICY; reasonCodes: string[];
 };
 export type OwnerIncomePreview = {
   schema: "owner-income-preview.v1"; state: "READY" | "PARTIAL" | "INCOMPLETE" | "UNAVAILABLE";
-  binding: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; termVersionId: string; catalogRevision: string } | null;
+  binding: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; termVersionId: string; catalogRevision: string;
+    pricingPolicy?: NonNullable<import('./content-hash').ContentPayloadInput['pricingPolicy']> } | null;
   evaluatedAt: string; refreshAfter: string; rentalMode: RentalPricingSelection["rentalMode"] | null;
   ownerHaffRatioWanPerYuan: string | null; termSeconds: string | null; lines: PreviewLine[];
   ratioRanges: Record<RentalMode, { min: string; max: string | null } | null> | null;
@@ -115,15 +118,20 @@ function sumKnown(amounts: Array<QuoteAmount | null>): QuoteAmount | null {
   return known.length ? yuanAmountObject(known.reduce((sum, amount) => sum + parseNonNegativeDecimal(amount.amount, 2, "owner income").value, 0n)) : null;
 }
 
-function normalEndEstimate(income: Pick<OwnerIncomePreview,'state'|'totalExpectedIncome'>, selected: boolean | null, policy: FundingPolicy | null): OwnerNormalEndEstimate {
+function normalEndEstimate(income: Pick<OwnerIncomePreview,'state'|'totalExpectedIncome'>, selected: boolean | null, policy: FundingPolicy | null,
+  platform?:{rate:string|null;amount:QuoteAmount|null}): OwnerNormalEndEstimate {
   const result: OwnerNormalEndEstimate = { schema:'owner-normal-end-estimate.v1',state:income.state==='UNAVAILABLE'?'UNAVAILABLE':'INCOMPLETE',scenario:'ALL_DECLARED_INVENTORY_CONSUMED_NORMAL_END',selected,ownerGross:income.totalExpectedIncome,
-    serviceFee:{base:null,rate:null,amount:null,payer:null},ownerNet:null,policy:null,roundingPolicy:FULL_PAYOUT_FEE_ROUNDING_POLICY,reasonCodes:[] };
+    serviceFee:{base:null,rate:null,amount:null,payer:null},...(platform?{platformFee:{base:income.totalExpectedIncome,rate:platform.rate,amount:platform.amount,payer:'OWNER' as const}}:{}),
+    ownerNet:null,policy:null,roundingPolicy:FULL_PAYOUT_FEE_ROUNDING_POLICY,reasonCodes:[] };
   if(income.state!=='READY'||!income.totalExpectedIncome){result.reasonCodes=['OWNER_GROSS_INCOME_INCOMPLETE'];return result;}
   if(selected===null){result.reasonCodes=['FULL_PAYOUT_SELECTION_UNKNOWN'];return result;}
   if(selected&&!policy){result.state='UNAVAILABLE';result.reasonCodes=['FULL_PAYOUT_FUNDING_POLICY_UNAVAILABLE'];return result;}
   const gross=decimalToBigInt(parseNonNegativeDecimal(income.totalExpectedIncome.amount,2,'owner gross income'),2);
   const fee=selected?fullPayoutServiceFeeCents(gross):0n;
-  result.state='READY';result.serviceFee={base:yuanAmountObject(selected?gross:0n),rate:selected?'0.08':'0',amount:yuanAmountObject(fee),payer:selected?'OWNER':'NONE'};result.ownerNet=yuanAmountObject(gross-fee);
+  if(platform&&(!platform.amount||platform.rate===null)){result.state='UNAVAILABLE';result.reasonCodes=['PLATFORM_FEE_UNAVAILABLE'];return result;}
+  const ordinaryFee=platform?decimalToBigInt(parseNonNegativeDecimal(platform.amount!.amount,2,'platform fee'),2):0n;
+  if(gross<ordinaryFee+fee){result.state='UNAVAILABLE';result.reasonCodes=['OWNER_INCOME_INSUFFICIENT'];return result;}
+  result.state='READY';result.serviceFee={base:yuanAmountObject(selected?gross:0n),rate:selected?'0.08':'0',amount:yuanAmountObject(fee),payer:selected?'OWNER':'NONE'};result.ownerNet=yuanAmountObject(gross-ordinaryFee-fee);
   if(selected&&policy)result.policy={fullPayoutPolicyRef:policy.fullPayoutPolicyRef,fullPayoutPolicyVersion:policy.fullPayoutPolicyVersion,disclosureVersion:policy.disclosureVersion};
   return result;
 }
@@ -134,7 +142,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
     const account = await readPublishingAccount(client, input.accountId);
     if (account.owner_user_id !== context.userId || account.game_id !== gameId) throw notFound();
   }
-  const evaluatedAt = (await client.query<{ evaluatedAt: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "evaluatedAt"`)).rows[0]!.evaluatedAt;
+  const evaluatedAt = (await client.query<{ evaluatedAt: string }>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]!.evaluatedAt;
   const response: OwnerIncomePreview = {
     schema: "owner-income-preview.v1", state: "UNAVAILABLE", binding: null, evaluatedAt, refreshAfter: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
     rentalMode: input.attributes.rentalPricing?.rentalMode ?? null, ownerHaffRatioWanPerYuan: null, ratioRanges: null, termSeconds: null, lines: [], ownerHaffIncome: null,
@@ -142,10 +150,12 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
     normalEndEstimate: normalEndEstimate({state:'UNAVAILABLE',totalExpectedIncome:null},input.attributes.full_payout_declaration?.selected??null,null),
     missingFields: [], reasonCodes: [], unitAmountsInformational: true, estimateOnly: true, incomeBasis: "OWNER_RESOURCE_INCOME_BEFORE_FEES",
   };
-  const pricing = await readIncomePreviewContext(client, gameId, input, true);
+  const pricing = await readIncomePreviewContext(client, gameId, input, true,{asOf:evaluatedAt,...(input.accountId?{accountId:input.accountId,ownerUserId:context.userId}:{}),
+    ...(input.attributes.rentalPricing?{rentalMode:input.attributes.rentalPricing.rentalMode}:{})});
   if (!pricing.available) return { ...response, reasonCodes: [pricing.reason] };
   const { release, items, commission } = pricing;
-  response.binding = { gameId, releaseId: release.releaseId, releaseGeneration: release.generation, priceVersionId: release.priceVersionId, termVersionId: release.termVersionId, catalogRevision: release.catalogRevision };
+  response.binding = { gameId, releaseId: release.releaseId, releaseGeneration: release.generation, priceVersionId: release.priceVersionId, termVersionId: release.termVersionId, catalogRevision: release.catalogRevision,
+    ...(release.pricingPolicy?{pricingPolicy:release.pricingPolicy}:{}) };
   if (release.priceStatus !== "SEALED") return { ...response, reasonCodes: ["RULE_UNCONFIGURED"] };
   const quantities = new Map(input.inventory.map(row => [row.itemId, row.quantity])), selected = items.filter(row => quantities.has(row.itemId) || (row.enabled && row.required));
   if ([...quantities.keys()].some(itemId => !items.some(item => item.itemId === itemId))) throw invalid("库存物品不属于当前游戏", "inventory");
@@ -155,7 +165,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   }
   const missing = response.missingFields, reasons = new Set<string>();
   for (const field of ["safe_box_code", "vit_level", "bear_level"] as const) if (input.attributes[field] == null) missing.push(`attributes.${field}`);
-  if (release.haffRule?.schema === "haff-ratio-v2") {
+  if (release.haffRule?.schema === "haff-ratio-v2" || release.haffRule?.schema === "haff-ratio-v3") {
     if (!input.attributes.rentalPricing) missing.push("attributes.rentalPricing");
     else if (input.attributes.rentalPricing.rentalMode !== "ordinary" && input.attributes.rentalPricing.ownerRatioB === undefined) missing.push("attributes.rentalPricing.ownerRatioB");
     if (input.pricingOptionCode) throw invalid("当前租赁方式不能混入旧计价选项", "pricingOptionCode");
@@ -188,10 +198,10 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   }));
   if (selected.some(row => row.pricingKind === null)) reasons.add("RESOURCE_PRICE_UNAVAILABLE");
   const conditions: QuoteInput["conditions"] = { safeBoxCode: input.attributes.safe_box_code ?? undefined, vitLevel: input.attributes.vit_level ?? undefined, bearLevel: input.attributes.bear_level ?? undefined, termOptionCode: input.termOptionCode ?? undefined, pricingOptionCode: input.pricingOptionCode ?? undefined, rentalPricing: input.attributes.rentalPricing ?? undefined };
-  if (release.haffRule?.schema === "haff-ratio-v2" && release.haffRule.dailyDeltaByTermOption && typeof release.haffRule.dailyDeltaByTermOption === "object" && !Array.isArray(release.haffRule.dailyDeltaByTermOption) && term && items.some(row => row.enabled && row.pricingKind === "HAFF_RATIO")) {
+  if (["haff-ratio-v2","haff-ratio-v3"].includes(release.haffRule?.schema??"") && release.haffRule?.dailyDeltaByTermOption && typeof release.haffRule.dailyDeltaByTermOption === "object" && !Array.isArray(release.haffRule.dailyDeltaByTermOption) && term && items.some(row => row.enabled && row.pricingKind === "HAFF_RATIO")) {
     const rule = release.haffRule;
     let customCode = term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION && Object.hasOwn(rule.dailyDeltaByTermOption, term.code) ? term.code : null;
-    if (!customCode && rule.compatibility?.modes?.custom?.enabled) {
+    if (!customCode && (rule.compatibility?.modes?.custom?.enabled || rule.fixedModes?.custom?.enabled)) {
       const candidates = (await client.query<{ code: string }>(`SELECT code FROM zzsh_supply.term_option WHERE version_id=$1 AND daily_consumption=$2::numeric ORDER BY code`, [release.termVersionId, DELTA_CUSTOM_DAILY_CONSUMPTION])).rows;
       customCode = candidates.find(row => Object.hasOwn(rule.dailyDeltaByTermOption, row.code))?.code ?? null;
     }
@@ -200,11 +210,14 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   }
   const haff = resolveDeltaHaffContext({ mode: release.mode, haffRule: release.haffRule, hasHaffLines: selected.some(row => row.pricingKind === "HAFF_RATIO"), conditions, customerTier: "STANDARD" });
   if (!haff.reasonCodes.length && haff.ownerDenominator) response.ownerHaffRatioWanPerYuan = formatDecimalExact(haff.ownerDenominator);
-  const quoted = term ? computeDeltaQuote({ priceVersionId: release.priceVersionId, customerTier: "STANDARD", mode: release.mode, roundingPolicy: release.roundingPolicy, ...(release.commissionRate === null ? {} : { commissionRate: release.commissionRate }), haffRule: release.haffRule, conditions, lines: quoteLines, termOption: term, entitlements: knownEntitlements }) : null;
+  const fixedFee=release.pricingPolicy?.pricingModel==="FIXED_FEE";
+  const quoted = term ? computeDeltaQuote({ priceVersionId: release.priceVersionId, customerTier: "STANDARD", mode: release.mode, roundingPolicy: release.roundingPolicy, ...(release.commissionRate === null ? {} : { commissionRate: release.commissionRate }), ...(fixedFee?{fixedFeeAlgorithm:FIXED_FEE_ALGORITHM}:{}), haffRule: release.haffRule, conditions, lines: quoteLines, termOption: term, entitlements: knownEntitlements }) : null;
   if (quoted && !quoted.quotable) for (const reason of quoted.reasonCodes) reasons.add(reason);
   const owner = quoted?.quotable ? projectDeltaQuote(quoted.quote, "owner") : null;
   response.lines = selected.map(item => {
-    const priced = owner?.lines.find(row => row.itemId === item.itemId) ?? fixed.lines.find(row => row.itemId === item.itemId);
+    const gross = fixedFee && quoted?.quotable ? quoted.quote.lines.find(row=>row.itemId===item.itemId) : null;
+    const priced = gross ? {unitQuantity:gross.unitQuantity,ownerUnitAmount:gross.buyerUnitAmount,ownerAmount:gross.buyerAmount}
+      : owner?.lines.find(row => row.itemId === item.itemId) ?? fixed.lines.find(row => row.itemId === item.itemId);
     return { itemId: item.itemId, code: item.code, name: item.name, quantity: quantities.get(item.itemId) ?? null, unit: item.unit,
       unitQuantity: priced?.unitQuantity ?? null, ownerUnitAmount: priced?.ownerUnitAmount ?? null, ownerAmount: priced?.ownerAmount ?? null };
   });
@@ -214,7 +227,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
   response.ownerHaffIncome = haffLines.length && haffLines.every(row => row.ownerAmount !== null) ? sumKnown(haffLines.map(row => row.ownerAmount)) : null;
   if (term && haffLines.length && haffLines.every(row => row.quantity !== null)) response.termSeconds = calculateDeltaTermSeconds(haffLines.reduce((sum, row) => sum + BigInt(row.quantity!), 0n), term).termSeconds;
   response.state = owner && missing.length === 0 && reasons.size === 0 ? "READY" : response.lines.some(row => row.ownerAmount !== null) ? "PARTIAL" : missing.length ? "INCOMPLETE" : "UNAVAILABLE";
-  response.totalExpectedIncome = response.state === "READY" ? owner!.ownerTotal! : null;
+  response.totalExpectedIncome = response.state === "READY" ? fixedFee && quoted?.quotable ? quoted.quote.resourceTotal : owner!.ownerTotal! : null;
   const deposit = input.attributes.owner_deposit_declaration, fullPayout = input.attributes.full_payout_declaration;
   const policy = fullPayout && (fullPayout.selected || deposit) ? await readFundingPolicyForRelease(client, release.releaseId) : null;
   if (deposit && fullPayout) {
@@ -224,7 +237,8 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
       response.baseTenantDeposit = yuanAmountObject(BigInt(deposit.amountCents)); response.depositState = "KNOWN";
     }
   }
-  response.normalEndEstimate = normalEndEstimate(response, fullPayout?.selected ?? null, policy);
+  response.normalEndEstimate = normalEndEstimate(response, fullPayout?.selected ?? null, policy,
+    fixedFee?{rate:release.commissionRate,amount:quoted?.quotable?quoted.quote.platformFullProfit:null}:undefined);
   response.reasonCodes = [...reasons].sort();
   return response;
 }

@@ -11,6 +11,7 @@ import {readLegacyCommissionFinance,readLegacyCommissionFinanceVersion,readLegac
 import {readOriginalPaymentDistributionBasis,type PaymentDistributionBasis} from './distribution-payment-basis';
 import {distributionPolicyRates,referralPercent,validateDistributionPolicy,usesLegacyRentalDistributionBase} from './distribution-policy';
 import {prepareAccrualFromFrozenPayment} from './distribution-accrual';
+import {FIXED_FEE_EVIDENCE_JOINS,FIXED_FEE_EVIDENCE_SELECT,fixedFeeAccrualFacts} from './distribution-fixed-fee-evidence';
 
 // Legacy task and rental IDs share a numeric space; only explicit rental provenance may join an order.
 export const legacyRentalDistributionPredicate=(alias:'o'|'p')=>`${alias}.source_kind='HISTORICAL_DISTRIBUTION' AND ${alias}.source_entity='la_distribution_order' AND ${alias}.snapshot->>'sourceOrderType'='1'`;
@@ -75,7 +76,8 @@ export async function readEarningCalculation(c:PoolClient,actor:UserContext,row:
  try{
   if(f.beneficiary_user_id!==actor.userId||`native:${f.id}`!==row.id||f.order_id!==row.order_id||f.beneficiary_role!==row.role||exactCents(f.amount_cents)!==exactCents(row.source_amount)
    )throw unavailable();
-  const {policyVersion,level,percent,rateMode,policy}=verifiedFrozenCalculation(f);
+  const {policyVersion,level,percent,rateMode,policy,basis}=verifiedFrozenCalculation(f);
+  if(basis.schema==='payment-distribution-basis.v2')return{knowledge:'UNKNOWN',reason:'FROZEN_CALCULATION_NOT_VERIFIED'};
   if((rateMode==='UNIFORM'||usesLegacyRentalDistributionBase(policy))&&calculationVersion!==2)return{knowledge:'UNKNOWN',reason:usesLegacyRentalDistributionBase(policy)?'LEGACY_RENTAL_CALCULATION_REQUIRES_VERSION_2':'UNIFORM_CALCULATION_REQUIRES_VERSION_2'};
   const levelName=level.code?(policy.schema==='distribution-policy.v3'?policy.legacySource.levelNames[level.code]:policy.schema==='distribution-policy.v4'?policy.levelNames[level.code]:undefined):undefined;
   return{knowledge:'KNOWN',policyVersion,beneficiaryLevelCode:level.code,...(levelName?{beneficiaryLevelName:levelName}:{}),...(rateMode?{rateMode}:{}),percent:percent.percent,
@@ -98,10 +100,11 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
   CASE WHEN p.id IS NULL THEN NULL ELSE jsonb_build_object('id',p.id,'order_id',p.order_id,'payment_confirmation_id',p.payment_confirmation_id,
    'version_hash',p.version_hash,'early',p.early,'manual_reason',p.manual_reason,'captured_cents',p.captured_cents::text,'owner_net_cents',p.owner_net_cents::text,
    'renter_refund_cents',p.renter_refund_cents::text,'platform_contribution_cents',p.platform_contribution_cents::text,'compensation_fee_cents',p.compensation_fee_cents::text,
-   'posted_at',to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) END AS posting
+   'posted_at',to_char(p.posted_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) END AS posting,${FIXED_FEE_EVIDENCE_SELECT}
   FROM zzsh_order.rental_referral_earning e
   LEFT JOIN zzsh_order.payment_distribution_basis b ON b.order_id=e.order_id AND b.payment_confirmation_id=e.payment_confirmation_id
   LEFT JOIN zzsh_order.settlement_posting p ON p.id=e.posting_id AND p.order_id=e.order_id AND p.payment_confirmation_id=e.payment_confirmation_id
+  LEFT JOIN zzsh_order.rental_order o ON o.id=e.order_id ${FIXED_FEE_EVIDENCE_JOINS}
   WHERE e.id=ANY($1::text[])`,[ids])).rows;
  const seen=new Set<string>();
  for(const f of rows){
@@ -112,15 +115,15 @@ export async function readAdminEarningCalculations(c:PoolClient,earningRootIds:s
    const {seed,basis,level,percent,rateMode}=verifiedFrozenCalculation(f),p=f.posting;
    if(p.id!==f.posting_id||p.order_id!==f.order_id||p.payment_confirmation_id!==f.payment_confirmation_id||hash(canonicalize(p))!==f.posting_digest
     ||typeof p.early!=='boolean'||p.manual_reason!==null&&typeof p.manual_reason!=='string')throw unavailable();
-   const allocation=prepareAccrualFromFrozenPayment(basis,{origin:'NATIVE',orderId:f.order_id,confirmationId:f.payment_confirmation_id,postingId:p.id,
+   const allocation=prepareAccrualFromFrozenPayment(basis,fixedFeeAccrualFacts(basis,{origin:'NATIVE',orderId:f.order_id,confirmationId:f.payment_confirmation_id,postingId:p.id,
     postingDigest:f.posting_digest,postedAt:p.posted_at,classification:p.early?'EARLY':'NORMAL',calculationMode:p.manual_reason===null?'SYSTEM':'MANUAL',
-    capturedCents:p.captured_cents,ownerNetCents:p.owner_net_cents,renterRefundCents:p.renter_refund_cents,platformContributionCents:p.platform_contribution_cents,compensationFeeCents:p.compensation_fee_cents});
+    capturedCents:p.captured_cents,ownerNetCents:p.owner_net_cents,renterRefundCents:p.renter_refund_cents,platformContributionCents:p.platform_contribution_cents,compensationFeeCents:p.compensation_fee_cents,settlementVersionHash:p.version_hash},f.fixed_evidence));
    if(allocation.knowledge!=='KNOWN'||seed.baseDigest!==allocation.digest)throw unavailable();
    const items=allocation.items.filter(item=>item.beneficiaryUserId===f.beneficiary_user_id&&item.role===f.beneficiary_role);
    if(items.length!==1)throw unavailable();const item=items[0]!;
    if(item.amountCents!==exactCents(f.amount_cents)||item.economicKey!==f.economic_key||seed.economicKey!==item.economicKey||seed.dueAt!==item.dueAt)throw unavailable();
    result.set(f.id,{knowledge:'KNOWN',policyVersion:basis.policyVersion,levelCode:level.code,...(rateMode?{rateMode}:{}),percent:percent.percent,baseCents:allocation.baseCents,
-    formula:usesLegacyRentalDistributionBase(basis.policyConfig)?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
+    formula:basis.schema==='payment-distribution-basis.v2'?'FIXED_FEE_MINUS_MEMBERSHIP_DISCOUNT':usesLegacyRentalDistributionBase(basis.policyConfig)?'LEGACY_RENTAL_CAPTURE_MINUS_OWNER_AND_REFUND':'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',reasonCodes:[]});
   }catch{result.set(f.id,unknownCalculation('FROZEN_CALCULATION_NOT_VERIFIED'));}
  }
  return result;

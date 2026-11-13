@@ -63,10 +63,10 @@ test("NEXT refuses the obsolete approval initializer before profile reads or req
     const result = spawnSync(process.execPath, [fileURLToPath(new URL("./initialize-local-policy.mjs", import.meta.url)),
       "--execute", "--input", file, "--input-sha", digest(bytes), "--out", join(dir, "not-created")], { encoding: "utf8", timeout: 5000 });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    assert.match(result.stderr, /NEXT_LEGACY_POLICY_INITIALIZER_RETIRED/);
     assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
     let writes = 0, requests = 0;
-    await assert.rejects(runPolicyInitialization({ target, write: () => writes++, fetcher: async () => { requests++; } }), /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    await assert.rejects(runPolicyInitialization({ target, write: () => writes++, fetcher: async () => { requests++; } }), /NEXT_LEGACY_POLICY_INITIALIZER_RETIRED/);
     assert.deepEqual([writes, requests], [0, 0]);
 });
 

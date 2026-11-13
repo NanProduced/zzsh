@@ -50,6 +50,7 @@ export type LegalDocumentVersion = {
   sealedAt: string | null;
   approvalRequestId: string | null;
   createdAt: string;
+  source?: "SYSTEM_INITIAL" | null;
 };
 
 export type LegalAcceptanceRef = { versionId: string; digest: string };
@@ -150,8 +151,9 @@ const SELECT_FIELDS = `v."id", v."doc_type" AS "docType", v."title", v."body", v
   v."revision"::text AS "revision", v."approval_request_id" AS "approvalRequestId",
   to_char(v."effective_at" AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "effectiveAt",
   to_char(v."sealed_at" AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "sealedAt",
-  to_char(v."created_at" AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"`;
-const RETURNING_FIELDS = SELECT_FIELDS.replaceAll('v."', '"');
+  to_char(v."created_at" AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt",
+  CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source`;
+const RETURNING_FIELDS = SELECT_FIELDS.replaceAll('v."', '"').replace("to_jsonb(v)", "to_jsonb(legal_document_version)");
 
 /**
  * 摘要校验只依赖存储值：text 行永远 sha256(body)（绝不重算历史行），

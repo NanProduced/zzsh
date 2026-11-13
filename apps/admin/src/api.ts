@@ -573,7 +573,32 @@ export type SkinDepositRecommendation = {
   };
 };
 
+export type PricingModel = "SPREAD" | "FIXED_FEE";
+export type PricingScheduleRow = {
+  id: string;
+  pricingModel: PricingModel;
+  priceVersionId?: string;
+  generation: string;
+  effectiveAt: string;
+  source?: "SYSTEM_INITIAL" | "ADMIN";
+};
+export type PricingSchedules = { asOf: string } & (
+  { available: false; reason: "INCOMPLETE" | "NOT_INSTALLED" } |
+  { available: true; current: (PricingScheduleRow & { priceScheduleId: string; priceVersionId: string }) | null;
+    currentPrices: PricingScheduleRow[]; prices: PricingScheduleRow[]; modes: PricingScheduleRow[]; priceGenerations: Record<PricingModel, string>;
+    modeGeneration: string; truncated: boolean; spreadSchedulingEnabled: boolean;
+    announcements: { id: string; title: string; publishedAt: string; gameId: string | null }[];
+    announcementsTruncated: boolean }
+);
+
+export type SchedulePriceOptions = {
+  items: { id: string; sealedAt: string; fixedFeeRates: PriceVersionRecord["fixedFeeRates"] }[];
+  nextCursor: string | null;
+};
+
 export type PriceVersionRecord = {
+  fullPayoutTermsVersionId?: string | null;
+  fixedFeeRates?: Record<"ordinary" | "custom" | "fast", string> | null;
   id: string;
   gameId: string;
   mode: "SPREAD" | "PERCENT";
@@ -617,7 +642,13 @@ export type FullPayoutTermsRecord = {
   title: string; digest: string; status: "DRAFT" | "SEALED"; revision: string;
   createdAt: string; sealedAt: string | null;
 };
+export type RuleReleasePlan = {
+  id: string; generation: string; effectiveAt: string; announcementVersionId: string;
+  priceVersionId: string; termVersionId: string; agreementVersionId: string;
+};
 export type RulesResponse = {
+  newListingPrice?: { priceVersionId: string; pricingModel: "FIXED_FEE" | "SPREAD" | "LEGACY_SPREAD" | "LEGACY_PERCENT"; priceEffectiveAt: string | null; modeEffectiveAt: string | null } | null;
+  ruleScheduling?: { available: boolean; asOf: string; generation: string; plans: RuleReleasePlan[]; truncated: boolean };
   game: SupplyGame;
   release: RuleReleaseRecord | null;
   priceVersions: PriceVersionRecord[];
@@ -774,6 +805,7 @@ export type AdminOrder = {
   renterName: string;
   gameId: string;
   releaseId: string;
+  priceVersionId?: string;
   contentHash: string;
   revision: string;
   fulfillmentAssignment?: {

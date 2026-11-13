@@ -1506,6 +1506,13 @@
       "when": 1794456000016,
       "tag": "0214_support_presence_comments",
       "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1794456000017,
+      "tag": "0215_fixed_fee_contracts",
+      "breakpoints": true
     }
   ]
 }

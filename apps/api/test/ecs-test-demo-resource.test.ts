@@ -18,6 +18,8 @@ import * as refundSource from "../src/order/local-sandbox-refund-source";
 import * as refundStore from "../src/order/channel-refund-store";
 import * as rentalRefund from "../src/finance/native-rental-refund-store";
 import { runEcsDemoRefundStep } from "../src/order/local-sandbox-refund-worker";
+import { EventEmitter } from "node:events";
+import { runEcsDemoAccrualTasks } from "../src/order/ecs-demo-refund-lifecycle";
 
 type Input = Parameters<typeof createEcsTestDemoResource>[0];
 const input = (): Input => ({
@@ -32,6 +34,30 @@ const input = (): Input => ({
   reference: "synthetic_demo", sourceSnapshotSha256: "a".repeat(64), restoreReceiptSha256: "b".repeat(64), administratorId: "synthetic_admin",
 });
 const scope = () => { const value = createEcsTestDemoResource(input()); assert(value); return value; };
+
+test("demo accrual keeps its controlled source and exact resource on the worker lock session",async t=>{
+  const runtime=createEcsTestDemoRuntime({...input(),appId:"synthetic_app"});assert(runtime);
+  const resource=require('../src/finance/ecs-test-demo-resource');
+  let checks=0; t.mock.method(resource,'assertEcsTestDemoResource',async(_client:unknown,actual:unknown)=>{checks++;assert.equal(actual,runtime.demo);});
+  const original=runtime.earnings.accrueOn;let called=0;
+  runtime.earnings.accrueOn=async(client,orderId,key)=>{called++;assert.equal(client,c);assert.equal(orderId,'order_demo');assert.match(key,/^accrual_[0-9a-f]{40}$/);return{knowledge:'KNOWN',items:[{}]};};
+  t.after(()=>{runtime.earnings.accrueOn=original;});
+  const wire:string[]=[],sources:string[]=[],releases:unknown[]=[];
+  const c=Object.assign(new EventEmitter(),{async query(sql:string,args:any[]=[]){wire.push(sql);
+    if(sql.includes('pg_try_advisory_lock'))return{rows:[{acquired:true}]};
+    if(sql.includes('pg_advisory_unlock'))return{rows:[{released:true}]};
+    if(sql.startsWith('SELECT d.oid'))return{rows:[{oid:111,name:'zzsh_ecs_test_demo',role:'demo_runtime',marker:'zzsh:ecs-test:v1',complete:true}]};
+    if(sql.includes('distribution_accrual_task_schema_v1'))return{rows:[{absent:false,ready:true}]};
+    if(sql.includes('FROM zzsh_order.distribution_accrual_task t JOIN')){sources.push(args[0]);return{rows:[{postingId:'posting_demo',orderId:'order_demo'}]};}
+    if(sql.startsWith('UPDATE zzsh_order.distribution_accrual_task'))return{rows:[],rowCount:1};
+    return{rows:[],rowCount:0};},release(value?:unknown){releases.push(value);}});
+  const pool={connect:async()=>c} as unknown as Pool;
+  const result=await runEcsDemoAccrualTasks(pool,runtime,10);
+  assert.equal(result?.completed,1);assert.deepEqual(sources,['CONTROLLED']);assert.equal(called,1);assert(checks>=2);
+  assert(wire.findIndex(sql=>sql.includes('pg_try_advisory_lock'))<wire.findIndex(sql=>sql.startsWith('UPDATE zzsh_order.distribution_accrual_task')));
+  assert(wire.some(sql=>sql.includes('pg_advisory_unlock')));assert.deepEqual(releases,[undefined]);
+  await assert.rejects(runEcsDemoAccrualTasks(pool,{...runtime,demo:{...runtime.demo}} as any,10),/ECS_TEST_DEMO_REFUND_WORKER_INVALID/);
+});
 
 test("demo amount rejection occurs before a target or balance write",async()=>{
   let connections=0;

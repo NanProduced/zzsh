@@ -5,16 +5,31 @@ import type {SupplyRuntimeOptions} from '../src/supply/supply-routes';
 import type {SupplyNodeRequest,SupplyNodeResponse} from '../src/supply/supply-util';
 import {compatRule} from './pricing-compat-fixture';
 
-async function options(rule:Record<string,unknown>|null,code='delta',terms=[{code:'daily-10m',name:'TEST_ONLY',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'}]){
+async function options(rule:Record<string,unknown>|null,code='delta',terms=[{code:'daily-10m',name:'TEST_ONLY',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'}],fixed=false,account?:{id:string;owner:string}){
   let body:any;const queries:string[]=[];
-  const pool={async query(sql:string){queries.push(sql);
+  const {compatibility,...base}=compatRule(),fixedRule={...base,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},rates={ordinary:'0.10',custom:'0.12',fast:'0.15'};
+  const client={async query(sql:string){queries.push(sql);
+    if(/^(BEGIN|COMMIT|ROLLBACK|SET TRANSACTION)/.test(sql))return{rows:[]};
     if(sql.includes('game_service_operation'))return{rows:[{id:'service_1',gameId:'game_1',gameCode:code,gameEnabled:true,serviceCode:'ACCOUNT_RENTAL',enabled:true,revision:'1'}]};
-    if(sql.includes('SELECT r.id,r.generation'))return{rows:[{id:'release_1',generation:'1',term_version_id:'term_1',haff_rule:rule,agreement_id:'agreement_1',title:'TEST_ONLY',body:'Existing test agreement, not an operating policy',digest:'d'}]};
+    if(sql.includes('u."suspended"'))return{rows:[{suspended:false,accountStatus:'ACTIVE'}]};
+    if(sql.includes('SELECT "suspended"'))return{rows:[{suspended:false}]};
+    if(sql.includes('FROM "zzsh_iam"."user_identity_state"'))return{rows:[]};
+    if(sql.includes('FROM "zzsh_auth_user"."session"'))return{rows:[{}],rowCount:1};
+    if(sql.includes('SELECT * FROM zzsh_supply.rental_account'))return{rows:account?[{owner_user_id:account.owner,game_id:'game_1'}]:[]};
+    if(sql.includes('FROM zzsh_supply.listing_publication p'))return{rows:[]};
+    if(sql.includes('r.id AS "releaseId"'))return{rows:[{releaseId:'release_1',generation:'1',priceVersionId:'price_1',termVersionId:'term_1',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1',priceStatus:'SEALED',haffRule:rule,agreement_id:'agreement_1',title:'TEST_ONLY',body:'Existing test agreement, not an operating policy',digest:'d'}]};
+    if(sql.includes('AS at'))return{rows:[{at:'2026-10-25T00:00:00.000000Z'}]};
+    if(sql.includes('to_regclass'))return{rows:[{modes:fixed,prices:fixed}]};
+    if(sql.includes('FROM zzsh_supply.pricing_mode_schedule m'))return{rows:[{id:'mode-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',pricingModel:'FIXED_FEE',priceScheduleId:'schedule-1',priceVersionId:'fixed-price',priceMode:'PERCENT',priceStatus:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates,haffRule:fixedRule}]};
+    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule s'))return{rows:[{id:'schedule-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixed-price',mode:'PERCENT',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',haffRule:fixedRule,rates}]};
+    if(sql.includes('SELECT fixed_fee_rates AS rates'))return{rows:[{rates}]};
     if(sql.includes('term_option'))return{rows:terms};
     throw Error('Unexpected options query');
-  }};
+  },release(){}};
+  const pool={query:client.query,async connect(){return client;}};
   const response={status(){return this;},setHeader(){return this;},json(value:unknown){body=value;}} as unknown as SupplyNodeResponse;
-  await handlePublishingRoute({method:'GET',headers:{}} as SupplyNodeRequest,response,{pool} as unknown as SupplyRuntimeOptions,'request_options','/games/game_1/publishing-options',new URLSearchParams(),false);
+  const userAuth={api:{async getSession(){return{user:{id:'owner-1'},session:{id:'session-1'}};}}};
+  await handlePublishingRoute({method:'GET',headers:{cookie:'fixture-cookie'}} as SupplyNodeRequest,response,{pool,userAuth} as unknown as SupplyRuntimeOptions,'request_options','/games/game_1/publishing-options',new URLSearchParams(account?{accountId:account.id}:{}),false);
   return{body,queries};
 }
 test('draft attribute dictionary does not inherit TEST_ONLY pricing keys or omit real levels',async()=>{
@@ -28,6 +43,21 @@ test('draft attribute dictionary does not inherit TEST_ONLY pricing keys or omit
   assert.equal(r.body.loginMethodOptions.find((o:any)=>o.code==='legacy_login_qq').displayName,'QQ账密');
   assert.deepEqual(r.body.pricingInputOptions,{safeBoxCodes:[],vitalityLevels:[6,7],bearLevels:[6,7]});
   assert(!JSON.stringify(r.body).includes('"50"'));assert(r.queries.every(q=>!/^\s*(INSERT|UPDATE|DELETE)/.test(q)));
+});
+
+test('fixed-fee publishing options use the effective fixed rule rather than the old release price',async()=>{
+  const result=await options(compatRule(),'delta',undefined,true);
+  assert.equal(result.body.pricingSchema,'haff-ratio-v3');
+  assert.equal(result.body.rentalModes.ordinary.enabled,true);assert.equal(result.body.rentalModes.custom.enabled,true);assert.equal(result.body.rentalModes.fast.enabled,true);
+  assert.equal(result.body.pricingPolicy.priceVersionId,'fixed-price');assert.deepEqual(result.body.fixedFeeRates,{ordinary:'0.1',custom:'0.12',fast:'0.15'});
+  assert.equal(result.body.releaseId,'release_1');assert.equal(result.body.rentalTermOptions.custom.requiredDailyConsumption,'10000000');
+  assert(result.queries.includes('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'));
+  assert(result.queries.every(q=>!/^\s*(INSERT|UPDATE|DELETE)/.test(q)));
+});
+test('account-specific publishing options require the owner of that account',async()=>{
+  const owned=await options(compatRule(),'delta',undefined,true,{id:'account-1',owner:'owner-1'});
+  assert.equal(owned.body.pricingPolicy.pricingModel,'FIXED_FEE');
+  await assert.rejects(options(compatRule(),'delta',undefined,true,{id:'account-1',owner:'other-user'}),(error:{status?:number})=>error.status===404);
 });
 test('a partial or missing pricing map does not erase the independent declaration dictionary',async()=>{
   const r=await options({baseBySafeBox:{safe_box_1x2:'50'},vitalityDeltaByLevel:{'4':'0'},bearDeltaByLevel:{'5':'0'}});

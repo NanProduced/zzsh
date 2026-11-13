@@ -7,10 +7,10 @@ import { buildListingCandidates,PUBLIC_STANDARD_TIER_GUARD } from "../src/supply
 import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
 import { validateListingQuery,validateConfigCatalog,publicFilterMetadata,listingReadMode } from "../src/supply/listing-filter-config";
-import { buildMixedListingCandidates,mixedListingBinding,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
+import { buildLegacyListingCandidates,buildMixedListingCandidates,mixedListingBinding,LEGACY_NATIVE_TAKEOVER_GUARD } from "../src/supply/legacy-listing-read";
 
 function skinCandidateQuery(match:"ANY"|"ALL") {
-  return parseListingQueryV2(new URLSearchParams({queryVersion:"2",gameId:"game",filters:JSON.stringify({skinGroups:[{categoryId:"agents",ids:["skin-luna"],match}]})}),"/listings");
+  return parseListingQueryV2(new URLSearchParams({queryVersion:"2",gameId:"game",filters:JSON.stringify({skinGroups:[{ownerKind:"AGENT",ids:["skin-luna"],match}]})}),"/listings");
 }
 
 test("a region configuration holds the whole published word list and refuses to grow without bound",()=>{
@@ -62,7 +62,9 @@ test("listing v2 finite parsing, normalization, UTF8 budget and independent lega
   assert.deepEqual(parseListingFilters({resources:[{itemId:"b",minQuantity:"9007199254740993"},{itemId:"a",minQuantity:"0"}],gradingCodes:["7","3"]}),{resources:[{itemId:"a",minQuantity:"0"},{itemId:"b",minQuantity:"9007199254740993"}],gradingCodes:["3","7"]});
   assert.deepEqual(parseListingFilters({resources:[{itemId:"a",maxQuantity:"0"},{itemId:"b",minQuantity:"9007199254740993",maxQuantity:"9007199254740993"}]}),{resources:[{itemId:"a",maxQuantity:"0"},{itemId:"b",minQuantity:"9007199254740993",maxQuantity:"9007199254740993"}]});
   for(const resource of [{itemId:"a"},{itemId:"a",minQuantity:""},{itemId:"a",minQuantity:null},{itemId:"a",maxQuantity:null},{itemId:"a",minQuantity:"2",maxQuantity:"1"},{itemId:"a",minQuantity:"0",maxQuantity:"1000000000000000000000000"}])assert.throws(()=>parse({filters:JSON.stringify({resources:[resource]})}),(e:any)=>e.status===400&&Boolean(e.details?.[0]?.path));
-  for(const filters of [null,{price:{min:1}},{resources:[{itemId:"a",minQuantity:null}]},{resources:[{itemId:"a",minQuantity:"1e2"}]},{resources:[{itemId:"a",minQuantity:"1000000000000000000000000"}]},{resources:[{itemId:"a",minQuantity:"01"}]},{resources:[{itemId:"a",minQuantity:"0",unit:"M"}]},{safeBoxCodes:["a","a"]},{vitality:{min:-1}},{bear:{min:"6"}},{regions:[{province:"a",city:"b"},{province:"a",city:"b"}]},{skinGroups:[{categoryId:"cat",ids:["a","a"],match:"ALL"}]},{skinGroups:Array.from({length:9},(_,i)=>({categoryId:"cat"+i,ids:[],match:"ANY"}))}])assert.throws(()=>parse({filters:JSON.stringify(filters)}),(e:any)=>e.status===400&&Boolean(e.details?.[0]?.path));
+  for(const filters of [null,{price:{min:1}},{resources:[{itemId:"a",minQuantity:null}]},{resources:[{itemId:"a",minQuantity:"1e2"}]},{resources:[{itemId:"a",minQuantity:"1000000000000000000000000"}]},{resources:[{itemId:"a",minQuantity:"01"}]},{resources:[{itemId:"a",minQuantity:"0",unit:"M"}]},{safeBoxCodes:["a","a"]},{vitality:{min:-1}},{bear:{min:"6"}},{regions:[{province:"a",city:"b"},{province:"a",city:"b"}]},{skinGroups:[{ownerKind:"AGENT",ids:["a","a"],match:"ALL"}]},{skinGroups:Array.from({length:9},()=>({ownerKind:"AGENT",ids:[],match:"ANY"}))}])assert.throws(()=>parse({filters:JSON.stringify(filters)}),(e:any)=>e.status===400&&Boolean(e.details?.[0]?.path));
+  assert.throws(() => parseListingFilters({skinGroups:[{categoryId:"retired",ids:["a"],match:"ANY"}]}),
+    (error: unknown) => (error as { code?: string }).code === "SKIN_CATEGORY_RETIRED");
   for(const extra of [{filters:"{"},{limit:"0"},{limit:"51"},{limit:"1.5"},{sort:"recommended"},{sort:"coreQuantity"},{coreItemId:"haff"},{itemId:"legacy"},{skinId:"legacy"},{direction:"down"}])assert.throws(()=>parse(extra));
   const duplicate=new URLSearchParams("queryVersion=2&gameId=a&q=one&q=two");assert.throws(()=>parseListingQueryV2(duplicate,"/listings?"+duplicate));
   const raw="x".repeat(8192);assert.doesNotThrow(()=>parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=a"),raw));assert.throws(()=>parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=a"),raw+"中"));
@@ -106,6 +108,20 @@ test("listing read mode distinguishes legacy-only, mixed and native from source 
   assert.equal(listingReadMode({ruleReleaseId:"release",hasConfig:true,hasSnapshots:false}),"NATIVE");
   assert.equal(listingReadMode({ruleReleaseId:"release",hasConfig:true,hasSnapshots:true}),"MIXED");
   assert.equal(listingReadMode({ruleReleaseId:"release",hasConfig:false,hasSnapshots:true}),"MIXED");
+});
+test("native and mixed sort queries bind only used parameters and use the frozen amount for ratio",()=>{
+  for(const sort of ["latest","resourceTotal","coreQuantity","ratio"]){
+    const params=new URLSearchParams({queryVersion:"2",gameId:"game",sort,...(["coreQuantity","ratio"].includes(sort)?{coreItemId:"haff"}:{})});
+    const query=parseListingQueryV2(params,"/listings");
+    for(const candidate of [buildListingCandidates(query,null),buildLegacyListingCandidates(query,null),buildMixedListingCandidates(query,null)]){
+      const references=new Set([...candidate.text.matchAll(/\$(\d+)/g)].map(match=>Number(match[1])));
+      assert.deepEqual([...references].sort((a,b)=>a-b),candidate.values.map((_,index)=>index+1),`${sort} parameters must match the query`);
+      if(sort==="ratio"&&candidate.text.includes("quoteValues,resourceTotal,amount")){
+        assert.match(candidate.text,/quoteValues,resourceTotal,amount/);
+        assert.match(candidate.text,/pricingPolicy/);
+      }
+    }
+  }
 });
 test("mixed candidates merge both sources once with native priority and one seek/order/limit",()=>{
   const filters=encodeURIComponent(JSON.stringify({safeBoxCodes:["box-a"]}));
@@ -162,9 +178,9 @@ test("mixed candidates merge both sources once with native priority and one seek
 });
 test("mixed read keeps configured historical safe box codes next to priced rule codes",async()=>{
   const config=parseFilterConfig({schemaVersion:1,fields:[{key:"safeBoxCodes",operator:"ANY",label:"安全箱",enabled:true,order:0,options:[{value:"safe_box_1x2",label:"基础安全箱(1*2)"},{value:"safe_box_3x3",label:"顶级安全箱(3*3)"}]},{key:"vitality",operator:"MIN",label:"体力",enabled:true,order:1,levels:[6,7]}],sorts:[{key:"latest",label:"最新发布",enabled:true,order:0}]});
-  const catalog={game:{id:"game",code:"delta",catalogRevision:"1",ruleReleaseId:"release",rule:{baseBySafeBox:{safe_box_3x3:"50"}}},items:[],categories:[]};
+  const catalog={game:{id:"game",code:"delta",catalogRevision:"1",ruleReleaseId:"release",rule:{baseBySafeBox:{safe_box_3x3:"50"}}},items:[],categories:[],safeBoxes:["safe_box_3x3"],levels:{vitality:[6],bear:[]},pricingAvailable:true};
   const state={catalog,config,legacyReadOnly:false,mixed:true,mode:"MIXED",hasLegacySnapshots:true,allowLegacyOptions:true,filterRevision:"1",catalogRevision:"1",ruleReleaseId:"release"} as unknown as Parameters<typeof publicFilterMetadata>[0];
-  const metadata=publicFilterMetadata(state,true) as ReturnType<typeof publicFilterMetadata>;
+  const metadata=publicFilterMetadata(state,true,"TYPE") as ReturnType<typeof publicFilterMetadata>;
   assert.deepEqual(metadata.fields.find(f=>f.key==="safeBoxCodes")!.options!.map(o=>o.value).sort(),["safe_box_1x2","safe_box_3x3"],"metadata keeps the configured historical code next to the priced code");
   const query=(codes:string[])=>parseListingQueryV2(new URLSearchParams(`queryVersion=2&gameId=game&filters=${encodeURIComponent(JSON.stringify({safeBoxCodes:codes}))}`),"/listings");
   await validateListingQuery({} as never,query(["safe_box_1x2"]),state);
@@ -187,4 +203,16 @@ test("mixed cursor binding rejects a cursor issued under native or legacy mode",
   const legacy={...mixed,queryHash:sha256Hex(canonicalize({mode:"LEGACY_READ_ONLY",q:null,filters:{},sort:"latest",direction:"DESC",coreItemId:null})),ruleReleaseId:"legacy-read-only"};
   assert.throws(()=>decodeListingCursor(encodeListingCursor(position,legacy,key),mixed,key),(e:any)=>e.status===409);
   assert.throws(()=>decodeListingCursor(encodeListingCursor(position,mixed,key),{...mixed,ruleReleaseId:"release-2"},key),(e:any)=>e.status===409);
+});
+
+test("a mixed-market cursor cannot seek into a new effective price plan", () => {
+  const query = parseListingQueryV2(new URLSearchParams("queryVersion=2&gameId=delta&sort=resourceTotal"), "/listings");
+  const key = { keyId: "market", secret: "s".repeat(32) };
+  const revisions = { filterRevision: "1", catalogRevision: "1", ruleReleaseId: "release" };
+  const before = mixedListingBinding(query, revisions, undefined, "spread:1");
+  const position = { id: "account-a", key: "120.05", isNull: false };
+  const cursor = encodeListingCursor(position, before, key);
+  assert.deepEqual(decodeListingCursor(cursor, before, key), position);
+  assert.throws(() => decodeListingCursor(cursor, mixedListingBinding(query, revisions, undefined, "spread:2"), key),
+    (error: unknown) => (error as { status?: number }).status === 409);
 });

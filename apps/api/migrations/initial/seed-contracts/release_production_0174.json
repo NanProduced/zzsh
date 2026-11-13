@@ -11,11 +11,11 @@
   },
   "reviewedTarget": {
     "method": "INITIAL_PLUS_TAIL_READBACK",
-    "sourceCount": 215,
-    "sourceChainSha256": "846f18afea814d8cd601dfc9e0349ed9a7e2798baaaaac43ef476620278c8d1f",
-    "through": "0214_support_presence_comments"
+    "sourceCount": 216,
+    "sourceChainSha256": "aaaff527169755dd0bd5675f29aa9632e7e0a2eed89992868bd3e2d3ee0a3123",
+    "through": "0215_fixed_fee_contracts"
   },
-  "evidence": "独立参考库重放至0188；0174基线安装至0208后升级至0214，核对静态种子、结构、中文注释与空业务数据；对照0208已验证首装，权限仅移除重复账号专用权限及运营角色对应授权。",
+  "evidence": "独立参考库重放至0188；0174基线空库安装至0215及0208前向升级均核对版本账、静态种子、结构、中文注释与运行角色权限；初始经营配置另行初始化。",
   "tables": {
     "zzsh_iam.admin_permission": {
       "count": 96,

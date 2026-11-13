@@ -41,9 +41,14 @@ export function projectStoredUpdate(body: string | undefined, value: unknown, do
   return { document: projected, settings: projected ? { ...settings, mediaIds: updateProjection(projected).mediaIds } : settings };
 }
 
-const alive = `(v."update_settings"->>'validUntil' IS NULL OR (v."update_settings"->>'validUntil')::timestamptz > $1::timestamptz)`;
-// visibleFrom 之前整条动态不可见；未来时间即定时，不引入任务队列。
-const visible = `(v."update_settings"->>'visibleFrom' IS NULL OR (v."update_settings"->>'visibleFrom')::timestamptz <= $1::timestamptz)`;
+// Use the same visibility predicate in public reads and when binding an advance notice.
+export function updateVisibilitySql(asOf: string) {
+  return {
+    alive: `(v."update_settings"->>'validUntil' IS NULL OR (v."update_settings"->>'validUntil')::timestamptz > ${asOf}::timestamptz)`,
+    visible: `(v."update_settings"->>'visibleFrom' IS NULL OR (v."update_settings"->>'visibleFrom')::timestamptz <= ${asOf}::timestamptz)`,
+  };
+}
+const { alive, visible } = updateVisibilitySql("$1");
 const pin = `(i."type" = 'ANNOUNCEMENT' AND ${alive} AND ${visible} AND COALESCE((v."update_settings"->>'pinned')::boolean, false) AND (v."update_settings"->>'pinnedUntil')::timestamptz > $1::timestamptz)`;
 export async function checkUpdateRelease(client: PoolClient, item: { id: string; type: string; gameId?: string | null }, value: unknown): Promise<void> {
   let settings: UpdateSettings;

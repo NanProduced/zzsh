@@ -41,7 +41,7 @@ export function AccountFacts({ version }: { version: Version | null | undefined 
       <div><dt className="text-xs text-muted-foreground">全额包赔</dt><dd className="font-medium">{fp && typeof fp.selected === "boolean" ? (fp.selected ? "已选" : "未选") : "未申报"}</dd></div>
       <div><dt className="text-xs text-muted-foreground">资料报价（资源金额）</dt><dd className="font-medium tabular-nums">{q ? "¥" + formatAmount(q.resourceTotal.amount) + " · " + formatTermDays(q.termSeconds) : "未提供"}</dd></div>
     </dl>
-    {q && <p className="mt-2 text-xs text-muted-foreground">来自本份资料保存的报价，非按当前规则重新试算。规则组合：{version.releaseId ?? "未提供"}；租客档位口径未提供，不能作为当前下单报价。</p>}
+    {q && <p className="mt-2 text-xs text-muted-foreground">{version.publication ? "上架时冻结的基础报价。租客优惠在下单时核算。" : "资料中保存的报价。"} 规则组合 {version.releaseId ?? "未提供"}{version.publication?.priceVersionId ? ` · 价目 ${version.publication.priceVersionId}` : ""}。</p>}
     <p className="mt-2 text-xs text-muted-foreground">暂未提供：押金是否在当前上限内（只返回资金待核原因）、租客价/号主得分项、每单押金、已确认规则版本。{attrs.length === 0 ? "号主未申报属性。" : ""}</p>
   </div>;
 }
@@ -70,6 +70,6 @@ export function FactsCard({ version }: { version: Version | null | undefined }) 
   return <Card className="gap-2 px-4"><div className="flex items-center justify-between"><h2 className="text-base font-semibold">当前资料</h2></div>
     {version ? <dl className="text-sm">{kv("上号时间", version.attributeDisplay?.serviceWindow?.displayName ?? "未确认")}{attributeFacts(version).filter(fact => ["本人脸声明", "封禁记录声明", "小段位"].includes(fact.label)).map(fact => kv(fact.label, fact.value))}{kv("每日消耗", term?.dailyConsumption ? quantityText(term.dailyConsumption.quantity) : "未确认")}{kv("号主申报押金", dep && typeof dep.amountCents === "string" ? formatFundingCents(dep.amountCents) : "未申报")}{kv("全额包赔", fp && typeof fp.selected === "boolean" ? (fp.selected ? "已选" : "未选") : "未申报")}{kv("报价", q ? "¥" + formatAmount(q.resourceTotal.amount) + " · " + formatTermDays(q.termSeconds) : "未提供")}</dl> : <p className="mt-2 text-sm text-muted-foreground">当前资料未提供。</p>}
     {version && quoteLineFacts(version).length ? <ul className="text-xs text-muted-foreground">{quoteLineFacts(version).map(line => <li key={line.itemId}>{line.name} · {line.quantity}{line.amount ? ` · ¥${formatAmount(line.amount)}` : ""}</li>)}</ul> : null}
-    {q && <p className="text-xs text-muted-foreground">报价依据：资料保存值 · 规则 {version!.releaseId ?? "未提供"}；非当前规则重新试算，租客档位口径未提供。</p>}
+    {q && <p className="text-xs text-muted-foreground">{version!.publication ? "上架冻结报价" : "资料保存报价"} · 规则 {version!.releaseId ?? "未提供"}{version!.publication?.priceVersionId ? ` · 价目 ${version!.publication.priceVersionId}` : ""}。</p>}
     <p className="text-xs text-muted-foreground">暂未提供：押金上限核验、每单押金、已确认规则版本。声明不是平台核验。</p></Card>;
 }

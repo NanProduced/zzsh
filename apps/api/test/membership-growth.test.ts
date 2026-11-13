@@ -373,6 +373,13 @@ test("multi-mode entitlement caps stay bounded to their tier and keep legacy sin
 
 test("sealedEnabledRentalModes reads the release authoritative modes and fails closed", () => {
   assert.deepEqual(sealedEnabledRentalModes(compatRule()), ["ordinary", "custom", "fast"]);
+  const { compatibility, ...fixedBase } = compatRule();
+  const fixed = { ...fixedBase, schema: "haff-ratio-v3", fixedModes: compatibility!.modes };
+  assert.deepEqual(sealedEnabledRentalModes(fixed), ["ordinary", "custom", "fast"]);
+  const fixedFastOff = structuredClone(fixed); fixedFastOff.fixedModes.fast = { enabled: false };
+  assert.deepEqual(sealedEnabledRentalModes(fixedFastOff), ["ordinary", "custom"]);
+  assert.equal(sealedEnabledRentalModes({ ...fixed, fixedModes: { ...fixed.fixedModes, custom: { enabled: true } } }), null);
+  assert.equal(sealedEnabledRentalModes({ ...fixed, baseBySafeBox: {} }), null);
   const fastOff = compatRule();
   fastOff.compatibility!.modes.fast = { enabled: false };
   assert.deepEqual(sealedEnabledRentalModes(fastOff), ["ordinary", "custom"]);

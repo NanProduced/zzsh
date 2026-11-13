@@ -66,7 +66,7 @@ test("unquoted draft skins use current visible identities with explicit withheld
 test("resource income preview uses authoritative fixed prices, exact group quantity and unknown semantics without writes",async()=>{
   const queries:string[]=[];
   const rows=[{itemId:"barrett",code:"df_billable_barrett_bullet",name:"巴雷特",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"0.5",ownerUnitAmount:"0.2"},{itemId:"card",code:"df_billable_top_insure_card",name:"保险卡",unit:"DAY",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"1",buyerUnitAmount:"5",ownerUnitAmount:"3"},{itemId:"six",code:"level6_round",name:"六级",unit:"ROUND",enabled:true,pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"8",ownerUnitAmount:"4"},{itemId:"day",code:"legacy_day",name:"旧天",unit:"DAY",enabled:false,pricingKind:null}];
-  const client={query:async(sql:string)=>{queries.push(sql);return {rows:sql.includes('commission_rate')?[{releaseId:"release",generation:"2",priceVersionId:"price",catalogRevision:"92",mode:"SPREAD",commissionRate:null,roundingPolicy:"HALF_UP_CENT_V1"}]:rows};}};
+  const client={query:async(sql:string)=>{queries.push(sql);return {rows:sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes('commission_rate')?[{releaseId:"release",generation:"2",priceVersionId:"price",catalogRevision:"92",mode:"SPREAD",commissionRate:null,roundingPolicy:"HALF_UP_CENT_V1"}]:rows};}};
   const binding={releaseId:"release",catalogRevision:"92"};
   const empty=await readResourceIncomePreview(client as never,"game",[],binding);assert.equal(empty.available,true);assert.equal(empty.ownerTotal,null);
   const priced=await readResourceIncomePreview(client as never,"game",[{itemId:"barrett",quantity:"2"},{itemId:"card",quantity:"3"},{itemId:"six",quantity:"120"}],binding);
@@ -102,7 +102,7 @@ test("only original DAY insurance is a current resource; generic PIECE items and
 test("retired insurance cannot acquire a new price or income projection even with an enabled stale catalog row",async()=>{
  for(const code of ['top_insure_card_piece','df_billable_top_insure_card_piece']){
   const row={itemId:'wrong',code,name:'保险卡',unit:'PIECE',enabled:true,pricingKind:'FIXED_UNIT',unitQuantity:'1',buyerUnitAmount:'5',ownerUnitAmount:'3'};
-  const client={query:async(sql:string)=>({rows:sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
+  const client={query:async(sql:string)=>({rows:sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes('commission_rate')?[{releaseId:'r',generation:'1',priceVersionId:'p',catalogRevision:'1',mode:'SPREAD',commissionRate:null,roundingPolicy:'HALF_UP_CENT_V1'}]:[row]})};
   const empty=await readResourceIncomePreview(client as never,'g',[],{releaseId:'r',catalogRevision:'1'});assert.deepEqual(empty.lines,[]);assert.equal(empty.ownerTotal,null);
   await assert.rejects(()=>readResourceIncomePreview(client as never,'g',[{itemId:'wrong',quantity:'3'}],{releaseId:'r',catalogRevision:'1'}),/基础单位为天/);
   const queries:string[]=[],priceClient={query:async(sql:string)=>{queries.push(sql);return sql.startsWith('SELECT * FROM')?{rows:[{id:'p',game_id:'g',status:'DRAFT',revision:'1',mode:'SPREAD',haff_rule:null}]}:sql.includes('FROM "zzsh_supply"."billable_item"')?{rows:[{id:'wrong',code,unit:'PIECE',quantityScale:0,gameId:'g'}]}:{rows:[],rowCount:0};}};
@@ -126,11 +126,11 @@ test("referenced inventory units cannot be changed in place even when renaming r
 
 test("quote confirmation locks the game and refuses stale catalog/release without rewriting frozen published snapshots",async()=>{
   const queries:string[]=[];
-  const client={query:async(sql:string)=>{queries.push(sql);return {rows:[{current_release_id:'r1',catalog_revision:'89'}]};}};
-  const account={game_id:'g'};
-  const version={rule_release_id:'r1',origin:'NATIVE',review_state:'DRAFT',payload:{ruleRefs:{catalogRevision:'89'}}};
+  const client={query:async(sql:string)=>{queries.push(sql);return {rows:[sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")?{modes:false,prices:false}:{current_release_id:'r1',catalog_revision:'89'}]};}};
+  const account={id:'account',owner_user_id:'owner',game_id:'g'};
+  const version={rule_release_id:'r1',origin:'NATIVE',review_state:'DRAFT',payload:{schemaVersion:2,ruleRefs:{catalogRevision:'89'}}};
   await assertCurrentRelease(client as never,account as never,version as never);
-  assert.ok(queries[0]?.endsWith(' FOR SHARE'));
+  assert.ok(queries[0]?.endsWith(' FOR SHARE OF g'));
   for(const changes of [{rule_release_id:'r0'},{payload:{ruleRefs:{catalogRevision:'88'}}},{payload:{ruleRefs:{}}}])await assert.rejects(()=>assertCurrentRelease(client as never,account as never,{...version,...changes} as never));
   await assertCurrentRelease(client as never,account as never,{...version,review_state:'PUBLISHED',payload:{ruleRefs:{}}} as never);
   assert.deepEqual(version.payload.ruleRefs,{catalogRevision:'89'});
@@ -279,7 +279,7 @@ function nativeGateClient(acceptance = false, migrated = false) {
   return { query: async (sql: string) => {
     if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
     if (sql.includes("AS retired")) return { rows: [{ retired: migrated }], rowCount: 1 };
-    if (sql.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: "g", gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
     if (sql.includes("rule_acceptance")) return { rows: acceptance ? [{ ok: 1 }] : [], rowCount: acceptance ? 1 : 0 };
     return { rows: [], rowCount: 0 };
@@ -293,7 +293,7 @@ test("admin approval cannot publish an account that has already been published",
   const client = { query: async (sql: string) => {
     sqls.push(sql);
     if (sql.includes("FROM zzsh_supply.listing_version")) return { rows: [version], rowCount: 1 };
-    if (sql.includes("SELECT current_release_id")) return { rows: [{ current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("AS current_release_id,catalog_revision")) return { rows: [{ current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [{}], rowCount: 1 };
     throw new Error("unexpected query");

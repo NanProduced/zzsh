@@ -9,7 +9,7 @@ import { assertGameScope, conflict, fingerprintRequest, invalid, notFound, sha25
 import { legacyDisplayDigest, parseLegacyDisplaySnapshot, type LegacyDisplayInput } from "./legacy-display-snapshot";
 import { legacyAccountCaptureFactDigest, parseLegacyAccountCaptureFact } from "./legacy-account-capture-fact";
 import { decodeListingCursor, encodeListingCursor, type ListingCursorBinding, type ListingCursorKey } from "./listing-cursor";
-import { candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
+import { candidateMarketPrice, candidatePredicates, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD, type ListingPosition } from "./listing-candidates";
 import { admissionForAccount, evaluatePublicDisplayGuard, legacyAdmissionSql, legacyAdmissionRevision, type LegacyPublicAdmission, type LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { ListingQueryV2 } from "./listing-filter-contract";
 import { SecurityApiError } from "../auth/security-core";
@@ -290,6 +290,7 @@ const VISIBLE_BASE = `g.enabled AND gs.enabled AND a.lifecycle='ACTIVE' AND ${LE
  AND ${LEGACY_DISPLAY_IDENTITY_SQL}
  AND (d.account_id IS NULL OR (d.snapshot#>>'{risk,highRiskOwner}'='false' AND d.observation_version_id=h.observation_version_id AND d.base_source_digest=h.source_digest))
  AND ${LEGACY_NATIVE_TAKEOVER_GUARD}`;
+// The source status is retained for history; a migrated listing needs a fresh owner submission.
 const NOT_RETIRED_LEGACY_SOURCE = `NOT (g.code='delta' AND h.source_system='legacy_mysql_restore' AND h.source_entity='la_rental_accounts')`;
 const VISIBLE_SOURCE = `${VISIBLE_BASE} AND h.source_status=3 AND ${NOT_RETIRED_LEGACY_SOURCE}`;
 const VISIBLE = `${VISIBLE_SOURCE} AND NOT a.owner_paused`;
@@ -386,6 +387,7 @@ export async function readLegacyListing(client: PoolClient, accountId: string, a
 export function legacyListingSortLabel(sort:string,configuredLabel:string|null):string {
   if(sort==="latest")return "更新时间";
   if(sort==="resourceTotal")return "资源费用";
+  if(sort==="ratio"&&!configuredLabel)return "比例排序";
   return configuredLabel??sort;
 }
 
@@ -402,8 +404,12 @@ export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingP
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[VISIBLE,legacyAdmissionSql(admission,p),`a.game_id=${p(query.gameId)}`,...legacySearchPredicate(query.q,p),...candidatePredicates(query.filters,null,p,"COALESCE(d.snapshot->'attributes',v.attributes)")];
   const legacyPrice=`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`;
-  const legacyRatio=`CASE WHEN ${legacyPrice}>0 THEN ((SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})::numeric / ${legacyPrice}) END`;
-  const key=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?legacyPrice:query.sort==="ratio"?legacyRatio:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+  let key=`h.source_updated_at`;
+  if(query.sort==="resourceTotal")key=legacyPrice;
+  else if(query.sort==="ratio"||query.sort==="coreQuantity"){
+    const quantity=`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
+    key=query.sort==="ratio"?`CASE WHEN ${legacyPrice}>0 THEN (${quantity}::numeric / ${legacyPrice}) END`:quantity;
+  }
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
@@ -414,7 +420,7 @@ export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingP
 // Mixed mode keeps native and legacy rows in one candidate set: the union is
 // deduplicated by accountId with the native publication taking priority, then
 // one seek/order/limit runs over the merged set. Legacy sort keys come from the
-// frozen snapshot facts; native keys from the frozen publication payload.
+// frozen snapshot facts; native keys use the price frozen at publication.
 // The seek predicate is pushed into each branch using that branch's own sort
 // expression and its qualified account id, so the merged set equals the filtered
 // union while each branch (and the DISTINCT ON / final sort) carries fewer rows.
@@ -424,8 +430,7 @@ export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPo
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const game=p(query.gameId),core=query.coreItemId===null?null:p(query.coreItemId);
   const publication=`pub.published_at`;
-  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
-  const price=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
+  const price=candidateMarketPrice();
   const nativeRatio=`CASE WHEN ${price}>0 THEN ((SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})::numeric / ${price}) END`;
   const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:query.sort==="ratio"?nativeRatio:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
   const legacyPrice=`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`;
@@ -448,8 +453,8 @@ export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPo
   return {text,values};
 }
 
-export function mixedListingBinding(query:ListingQueryV2,revisions:{filterRevision:string;catalogRevision:string;ruleReleaseId:string},admission?:LegacyPublicAdmission):ListingCursorBinding {
-  return {queryVersion:2,gameId:query.gameId,queryHash:sha256Hex(canonicalize({mode:"MIXED",...(admission?{admission:legacyAdmissionRevision(admission)}:{}),gameId:query.gameId,q:query.q,filters:query.filters,sort:query.sort,direction:query.direction,coreItemId:query.coreItemId})),sort:query.sort,direction:query.direction,coreItemId:query.coreItemId,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:revisions.ruleReleaseId};
+export function mixedListingBinding(query:ListingQueryV2,revisions:{filterRevision:string;catalogRevision:string;ruleReleaseId:string},admission?:LegacyPublicAdmission,marketRevision?:string|null):ListingCursorBinding {
+  return {queryVersion:2,gameId:query.gameId,queryHash:sha256Hex(canonicalize({mode:"MIXED",...(marketRevision?{marketRevision}:{}),...(admission?{admission:legacyAdmissionRevision(admission)}:{}),gameId:query.gameId,q:query.q,filters:query.filters,sort:query.sort,direction:query.direction,coreItemId:query.coreItemId})),sort:query.sort,direction:query.direction,coreItemId:query.coreItemId,filterRevision:revisions.filterRevision,catalogRevision:revisions.catalogRevision,ruleReleaseId:revisions.ruleReleaseId};
 }
 
 export async function listLegacyReadListings(client: PoolClient,q:ListingQueryV2,key:ListingCursorKey,revisions:{filterRevision:string;catalogRevision:string;sortLabel:string},admission?:LegacyPublicAdmission) {

@@ -7,7 +7,7 @@ import { friendlyError } from "../../api";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../../components/ui/sheet";
-import { draftCommand, RULES_RELEASE_OPERATION, type useRulesWrite } from "./rules-write";
+import { draftCommand, type useRulesWrite } from "./rules-write";
 import { centsYuan, referenceUnitYuan, safeBoxLabel, skinSummary, yuanCents, yuanInput } from "./rules-model";
 import { sourcePriceVersion } from "./price-draft";
 import { sealChecks } from "./step0-editors";
@@ -40,12 +40,12 @@ export function StageBadge({ stage, at }: { stage: PublishStage; at?: string | n
 export function activePriceDraft(rules: RulesResponse): PriceVersionRecord | undefined {
   // 已提交待生效的版本之前留下的旧草稿不算"进行中"，否则封版后会误把旧空草稿当成编辑目标。
   const s = pendingSealedPrice(rules);
-  return rules.priceVersions.filter(v => v.status === "DRAFT" && (!s || v.createdAt > (s.sealedAt ?? ""))).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  return rules.priceVersions.filter(v => v.status === "DRAFT" && !v.fixedFeeRates && (!s || v.createdAt > (s.sealedAt ?? ""))).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 }
 /** 已提交（封存）但还没生效、且比线上新的价格版本。 */
 export function pendingSealedPrice(rules: RulesResponse): PriceVersionRecord | undefined {
   const r = rules.release;
-  return rules.priceVersions.filter(v => v.status === "SEALED" && v.id !== r?.priceVersionId && (!r || (v.sealedAt ?? "") > r.activatedAt)).sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))[0];
+  return rules.priceVersions.filter(v => v.status === "SEALED" && !v.fixedFeeRates && v.id !== r?.priceVersionId && (!r || (v.sealedAt ?? "") > r.activatedAt)).sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))[0];
 }
 export function priceStage(rules: RulesResponse, dirty: boolean): PublishStage {
   // 草稿和线上一样时不算「待发布」，避免显示「已保存草稿 · 0 项」。
@@ -131,17 +131,15 @@ export function priceDiff(rules: RulesResponse, target: PriceVersionRecord | und
   return out;
 }
 
-export type ActivationReceipt = { at: string; changes: DiffRow[] };
 
 const SECTION_NAME: Record<Section, string> = { pricing: "租赁定价", items: "物资价目", skin: "皮肤推荐押金", deposit: "押金规则" };
 
 /** 页顶一行：状态标签 + 待发布修改 (N)。点开右侧抽屉看改动、检查、提交和生效。 */
-export function PublishBar({ rules, command, dirty, isBoss, canEdit, onOpenSection }: { rules: RulesResponse; command: Command; dirty: boolean; isBoss: boolean; canEdit: boolean; onOpenSection: (s: Section) => void }) {
+export function PublishBar({ rules, command, dirty, isBoss, canEdit, onOpenSection, onSchedule }: { rules: RulesResponse; command: Command; dirty: boolean; isBoss: boolean; canEdit: boolean; onOpenSection: (s: Section) => void; onSchedule: (priceVersionId: string) => void }) {
   const [open, setOpen] = useState(false);
-  const [confirm, setConfirm] = useState<"seal" | "activate" | null>(null);
+  const [confirm, setConfirm] = useState<"seal" | null>(null);
   const [error, setError] = useState<string>();
   const [toast, setToast] = useState<string>();
-  const [receipt, setReceipt] = useState<ActivationReceipt | null>(null);
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(undefined), 4000); return () => clearTimeout(t); }, [toast]);
   const draft = activePriceDraft(rules);
   const sealed = pendingSealedPrice(rules);
@@ -163,18 +161,6 @@ export function PublishBar({ rules, command, dirty, isBoss, canEdit, onOpenSecti
       setToast(isBoss ? "已提交。请核对后点“确认生效”。" : "已提交，等待 Boss 生效。");
     } catch (failure) { setError(friendlyError(failure)); }
   };
-  const activate = async () => {
-    if (!sealed || !release) return;
-    setError(undefined);
-    const changes = sealedRows;
-    try {
-      const r = await command.write({ operation: RULES_RELEASE_OPERATION, resourceId: rules.game.id, gameId: rules.game.id, path: "/supply/releases", method: "POST", body: { gameId: rules.game.id, priceVersionId: sealed.id, termVersionId: release.termVersionId, agreementVersionId: release.agreementVersionId, expectedGeneration: release.generation } });
-      if (!r) return;
-      setReceipt({ at: r.fresh.release?.activatedAt ?? new Date().toISOString(), changes });
-      setToast("已生效，新订单按新价格计算。");
-    } catch (failure) { setError(friendlyError(failure)); }
-  };
-
 function renderDrawerDiffValue(after: string) {
   if (after === "将移除") {
     return <span className="inline-flex items-center rounded-md bg-destructive/10 px-2 py-0.5 text-xs font-medium text-destructive">将移除</span>;
@@ -258,23 +244,24 @@ function renderDrawerDiffValue(after: string) {
     {toast ? <div role="status" className="fixed bottom-6 right-6 z-50 rounded-md bg-foreground px-4 py-2 text-sm text-background shadow-lg">{toast}</div> : null}
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetContent side="right" closeLabel="关闭" className="w-full overflow-y-auto sm:max-w-lg">
-        <SheetHeader><SheetTitle>待发布修改</SheetTitle><SheetDescription>保存的改动先进草稿；提交后锁定，Boss 确认生效后才替换线上。</SheetDescription></SheetHeader>
+        <SheetHeader><SheetTitle>待发布修改</SheetTitle><SheetDescription>保存的改动先进入草稿。封存后由 Boss 绑定公告安排生效。</SheetDescription></SheetHeader>
         <div className="space-y-6 px-4 pb-6">
-          {receipt ? <section className="space-y-2 rounded-md border border-emerald-500/40 bg-emerald-500/5 p-3" aria-label="生效回执"><div className="flex items-center gap-2"><StageBadge stage="live" at={receipt.at} /><span className="text-sm font-medium">已生效</span></div><p className="text-xs text-muted-foreground">生效时间 {fmtTime(receipt.at)}。之后的新订单按新价格；已有订单不变。</p>{list(receipt.changes)}</section> : null}
           {draft ? <section className="space-y-3" aria-label="草稿改动">
             <div className="flex items-center gap-2"><StageBadge stage={dirty ? "unsaved" : "draft"} /><h3 className="text-sm font-semibold">草稿改动 {draftRows.length} 项</h3><span className="ml-auto text-xs text-muted-foreground" title={`草稿编号 ${draft.id}`}>{savedLabel(draft)}</span></div>
             {list(draftRows)}
             <div className="space-y-1"><p className="text-xs font-medium">提交前检查</p><ul className="space-y-1 text-sm">{checks.map(c => <li key={c.label} className="flex items-center gap-2"><span className={c.ok ? "text-emerald-600" : "text-destructive"}>{c.ok ? "✓" : "✗"}</span><span className={c.ok ? "text-muted-foreground" : ""}>{c.ok ? c.label : (c.failLabel ?? c.label)}</span>{!c.ok && c.section ? <Button type="button" variant="link" size="sm" className="h-auto p-0" onClick={() => go(c.section!)}>去配置</Button> : null}</li>)}</ul></div>
             {dirty ? <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs">还有输入没保存，先在页面里保存再提交。</p> : null}
-            {canEdit ? confirm === "seal" ? <div className="flex flex-wrap items-center gap-2 rounded-md border border-border p-3"><span className="text-sm">提交后这份草稿锁定，不能再改。</span><Button type="button" size="sm" onClick={() => { setConfirm(null); void seal(); }}>确认提交</Button><Button type="button" size="sm" variant="ghost" onClick={() => setConfirm(null)}>取消</Button></div> : <Button type="button" disabled={!checksOk || !draftRows.length || command.locked} onClick={() => setConfirm("seal")}>提交发布</Button> : null}
+            {canEdit ? confirm === "seal" ? <div className="flex flex-wrap items-center gap-2 rounded-md border border-border p-3"><span className="text-sm">提交后这份草稿锁定，不能再改。</span><Button type="button" size="sm" onClick={() => { setConfirm(null); void seal(); }}>确认提交</Button><Button type="button" size="sm" variant="ghost" onClick={() => setConfirm(null)}>取消</Button></div> : <Button type="button" disabled={!checksOk || !draftRows.length || command.locked} onClick={() => setConfirm("seal")}>封存版本</Button> : null}
           </section> : null}
           {sealed ? <section className="space-y-3" aria-label="待生效">
             <div className="flex items-center gap-2"><StageBadge stage="sealed" /><h3 className="text-sm font-semibold">已提交 {sealedRows.length} 项</h3><span className="ml-auto text-xs text-muted-foreground">提交于 {fmtTime(sealed.sealedAt)}</span></div>
             {list(sealedRows)}
             {draft ? <p className="text-xs text-muted-foreground">另有一份新草稿在编辑中，它不会随这次生效。</p> : null}
-            {isBoss ? confirm === "activate" ? <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary p-3"><span className="text-sm">确认后立即替换线上价格，新订单按新价格计算。</span><Button type="button" size="sm" onClick={() => { setConfirm(null); void activate(); }}>确认生效</Button><Button type="button" size="sm" variant="ghost" onClick={() => setConfirm(null)}>取消</Button></div> : <Button type="button" disabled={command.locked || !release} onClick={() => setConfirm("activate")}>确认生效</Button> : <p className="text-sm text-muted-foreground">已提交，等待 Boss 生效。</p>}
+            {isBoss ? <Button type="button" disabled={command.locked || !release} onClick={() => { setOpen(false); onSchedule(sealed.id); }}>安排生效</Button>
+              : <p className="text-sm text-muted-foreground">已提交，等待 Boss 排期。</p>}
+            <p className="text-xs text-muted-foreground">生效后新上架账号采用新规则，已上架账号继续使用上架时的价格与费率，已有订单沿用自己的快照。</p>
           </section> : null}
-          {!draft && !sealed && !receipt ? <p className="text-sm text-muted-foreground">没有待发布的修改。在{Object.values(SECTION_NAME).join("、")}里直接改，保存后会出现在这里。</p> : null}
+          {!draft && !sealed ? <p className="text-sm text-muted-foreground">没有待发布的修改。在{Object.values(SECTION_NAME).join("、")}里直接改，保存后会出现在这里。</p> : null}
           {command.state.kind === "conflict" ? <p role="alert" className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-sm">刚被别人改过，你的输入已保留。请刷新核对后再操作。</p> : null}
           {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
         </div>

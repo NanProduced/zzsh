@@ -7,6 +7,12 @@ import { computeSettlement, SETTLEMENT_ROUNDING_POLICY, type SettlementInventory
 import { compatRule } from "./pricing-compat-fixture";
 import { simulateMembershipProfit, canSimulateMembershipProfit } from "../src/auth/membership-profit-simulation";
 
+test("fixed-fee discount allocation uses a locale-independent item order", () => {
+  const lines = [{ itemId: "a", buyerCents: 10n, ownerCents: 9n }, { itemId: "B", buyerCents: 10n, ownerCents: 9n }];
+  assert.deepEqual(allocateCombinedDiscount(lines, 19n, "STABLE"), [10n, 9n]);
+  assert.deepEqual(allocateCombinedDiscount([...lines].reverse(), 19n, "STABLE"), [9n, 10n]);
+});
+
 test("profit simulation uses the same exact aggregate discount and never treats deposit or costs as profit", () => {
   const input = threePlusThree();
   input.deposits = { tenantDepositCents: "40000", publisherBailRequirementCents: "20000" };
@@ -92,6 +98,19 @@ test("total discount rounds the combined base once: 3 + 3 cents at 90% is 5, nev
   for (const line of discounted.quote.lines) assert.ok(Number(line.buyerAmount.amount) >= Number(line.ownerAmount.amount));
   // Per-line rounding would have produced 0.03 + 0.03 = 0.06.
   assert.notEqual(Object.values(buyers).reduce((sum, value) => sum + Number(value), 0), 0.06);
+});
+
+test("new scheduled-spread tie allocation stays stable and settles partial consumption", () => {
+  const input=threePlusThree();input.lines[0]!.itemId="a";input.lines[1]!.itemId="B";
+  const base=computeDeltaQuote(input);assert(base.quotable);
+  const discounted=applyTotalDiscountToQuote(base.quote,"0.9","STABLE");assert(discounted);
+  assert.deepEqual(Object.fromEntries(discounted.quote.lines.map(line=>[line.itemId,line.buyerAmount.amount])),{B:"0.02",a:"0.03"});
+  const partial=computeSettlement({orderId:"order-1",settlementVersionId:"sv-1",openingVersionId:"op-1",quoteDigest:"d".repeat(64),paymentDigest:"p".repeat(64),
+    roundingPolicy:SETTLEMENT_ROUNDING_POLICY,feePolicyVersion:"1",renterUserId:"renter-1",ownerUserId:"owner-1",depositAmount:"0.00",capturedAmount:"0.05",
+    fullPayout:"NOT_SELECTED",fullPayoutPolicyRef:null,rentalStarted:true,endReason:"TENANT_VOLUNTARY_EARLY",
+    haff:settlementLine(discounted.quote,"a","5600"),items:[settlementLine(discounted.quote,"B","1")]});
+  assert.equal(partial.ok,true,JSON.stringify(partial));assert.equal(partial.amounts!.haffConsumedBuyer.amount,"0.02");
+  assert.equal(BigInt(partial.amounts!.renterCharge.amount.replace(".",""))+BigInt(partial.amounts!.renterRefund.amount.replace(".","")),5n);
 });
 
 test("total discount refuses invalid ratios and owner-income reduction, and keeps zero bases legal", () => {

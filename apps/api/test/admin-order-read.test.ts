@@ -815,6 +815,9 @@ test('clarity-02: 本单兑换比例只取冻结报价 denominators.buyer，缺�
  assert.equal(orderHaffRatio({lines:[{unit:'PIECE'}],pricingInputs:{denominators:{buyer:'1'}}}).state,'UNKNOWN','无哈夫行不给比例');
  assert.deepEqual(orderHaffRatio(null),{source:'ORDER_QUOTE_SNAPSHOT',state:'UNKNOWN',wanPerYuan:null,customerTier:null},'档位缺失不默认 STANDARD');
  assert.equal(orderHaffRatio({lines,personal:{membership:{tier:'SVIP'}},pricingInputs:{denominators:{buyer:'1'}}}).customerTier,'SVIP');
+ const fixed={schemaVersion:4,lines,pricingInputs:{denominators:{buyer:'1'},compatibility:{customerTier:'STANDARD'}}};
+ assert.equal(orderHaffRatio(fixed).customerTier,null,'固定手续费报价的 STANDARD 是计价基准，不是实际会员等级');
+ assert.equal(orderHaffRatio({...fixed,personal:{membershipGrowth:{effectiveTier:'GOLD'}}}).customerTier,'GOLD');
 });
 
 test('迁入单以账号为准：ZZ 编号、真实名称、无草稿标题；账号视图按公开版本投影', () => {

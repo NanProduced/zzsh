@@ -26,3 +26,19 @@ export const supportPoststartExecutorSafeSql=`EXISTS(SELECT 1 FROM pg_proc p
    AND h.proowner=c.relowner AND NOT h.prosecdef AND h.provolatile='i')
   AND EXISTS(SELECT 1 FROM pg_constraint k WHERE k.conrelid=c.oid AND k.conname='support_poststart_owner_fee_shape' AND k.convalidated)
   AND (SELECT count(*) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname IN('owner_gross_cents','full_payout_fee_cents','full_payout_selected') AND a.attnum>0 AND NOT a.attisdropped)=3)`;
+
+export const fixedFeeSupportCancelContractSql=`EXISTS(SELECT 1 FROM pg_proc p
+ JOIN pg_class c ON c.oid=to_regclass('zzsh_order.support_poststart_cancellation')
+ WHERE p.oid=to_regprocedure('zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text)')
+  AND p.proowner=c.relowner AND p.prosecdef AND 'search_path=pg_catalog'=ANY(p.proconfig)
+  AND EXISTS(SELECT 1 FROM pg_proc h WHERE h.oid=to_regprocedure('zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text)')
+   AND h.proowner=c.relowner AND NOT h.prosecdef AND h.provolatile='i')
+  AND (SELECT count(*) FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname IN('fixed_fee_rate','platform_service_fee_cents') AND a.attnum>0 AND NOT a.attisdropped)=2
+  AND EXISTS(SELECT 1 FROM pg_constraint k WHERE k.conrelid=c.oid AND k.conname='support_poststart_owner_fee_shape' AND k.convalidated
+   AND position('platform_service_fee_cents' IN pg_get_constraintdef(k.oid))>0)
+  AND EXISTS(SELECT 1 FROM pg_constraint k WHERE k.conrelid=to_regclass('zzsh_order.settlement_ledger_entry') AND k.conname='settlement_ledger_accounts' AND k.convalidated
+   AND position('PLATFORM_SERVICE_FEE' IN pg_get_constraintdef(k.oid))>0 AND position('supportCancellationId' IN pg_get_constraintdef(k.oid))>0)
+  AND EXISTS(SELECT 1 FROM pg_proc g WHERE g.oid=to_regprocedure('zzsh_order.guard_support_poststart_cancellation()') AND g.proowner=c.relowner
+   AND position('fixed_fee_poststart_rate' IN g.prosrc)>0 AND position('platform_service_fee_cents' IN g.prosrc)>0)
+  AND EXISTS(SELECT 1 FROM pg_proc g WHERE g.oid=to_regprocedure('zzsh_order.guard_support_poststart_entry()') AND g.proowner=c.relowner
+   AND position('PLATFORM_SERVICE_FEE' IN g.prosrc)>0))`;

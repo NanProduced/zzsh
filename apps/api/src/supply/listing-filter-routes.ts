@@ -66,7 +66,7 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
       return {...page,items:await projectMedia(page.items)};
     }
     if(state.mixed){
-      const binding=mixedListingBinding(q,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId!},options.legacyPublicAdmission);
+      const binding=mixedListingBinding(q,{filterRevision:state.filterRevision!,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId!},options.legacyPublicAdmission,"publication-snapshot");
       const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
       await validateListingQuery(client,q,state);
       const sql=buildMixedListingCandidates(q,after,options.legacyPublicAdmission),rows=(await client.query<{id:string;version_id:string;key:string|null;source:string}>(sql.text,sql.values)).rows;
@@ -77,9 +77,9 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
         const account=page.account(row.id);if(!account)continue;
         try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
       const more=scanned<rows.length||rows.length===200;
-      return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+      return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)?.label??"比例排序",filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
     }
-    const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"RENTABLE_ONLY",gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
+    const binding:ListingCursorBinding={queryVersion:2,gameId:q.gameId,queryHash:sha256Hex(canonicalize({mode:"RENTABLE_ONLY",marketRevision:"publication-snapshot",gameId:q.gameId,q:q.q,filters:q.filters,sort:q.sort,direction:q.direction,coreItemId:q.coreItemId})),sort:q.sort,direction:q.direction,coreItemId:q.coreItemId,filterRevision:state.filterRevision??"0",catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId??""};
     const after=q.cursor===null?null:decodeListingCursor(q.cursor,binding,options.listingCursorKey);
     await validateListingQuery(client,q,state);
     const sql=buildListingCandidates(q,after),rows=(await client.query<{id:string;version_id:string;key:string|null}>(sql.text,sql.values)).rows;
@@ -89,6 +89,6 @@ export async function listV2(request:SupplyNodeRequest,options:SupplyRuntimeOpti
       const account=page.account(row.id);if(!account)continue;
       try{items.push(await listingDetail(client,account,"public",options.supplyGateReader??unknownSupplyGate,undefined,undefined,false,"RENTABLE",{version:page.version(row.id),shared:page.shared}));}catch(e){if((e as {status?:number}).status!==404)throw e;}}
     const more=scanned<rows.length||rows.length===200;
-    return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)!.label,filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
+    return {queryVersion:2,items:await projectMedia(items),nextCursor:more&&last?encodeListingCursor(last,binding,options.listingCursorKey):null,sort:q.sort,direction:q.direction,sortLabel:state.config!.sorts.find(s=>s.key===q.sort)?.label??"比例排序",filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,ruleReleaseId:state.ruleReleaseId,scannedCount:scanned,scanBudget:200,scanBudgetReached:scanned===200,limit:q.limit};
   });
 }

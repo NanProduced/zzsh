@@ -89,6 +89,7 @@ test("non-integer, inconsistent or incomplete evidence fails closed",async()=>{
 });
 
 test("SQL guards all four snapshot components, current posting identity and actual local acceptance",()=>{
+  assert(ADMIN_USER_CONSUMPTION_SQL.includes("'settlement-version-v4'"));
   for(const field of ["haffConsumedBuyer","itemConsumedBuyer","earlyMakeup","feeAmount","renterCharge"])
     assert(ADMIN_USER_CONSUMPTION_SQL.includes(`jsonb_typeof(s.input_snapshot #> '{amounts,${field}}')='string'`));
   for(const guard of ["a.disposition IS DISTINCT FROM 'APPLIED'","a.status IS DISTINCT FROM 'COMPLETED'",

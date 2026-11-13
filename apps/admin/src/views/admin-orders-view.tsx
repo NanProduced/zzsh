@@ -594,7 +594,8 @@ function TracePanel({ order }: { order: AdminOrder }) {
       <dl className="grid grid-cols-[6rem_minmax(0,1fr)] gap-x-3 gap-y-3">
         <KeyValue label="订单 ID"><code className="break-all">{order.id}</code></KeyValue>
         <KeyValue label="版本 ID"><code className="break-all">{order.versionId}</code></KeyValue>
-        <KeyValue label="规则版本"><code className="break-all">{order.releaseId}</code></KeyValue>
+        <KeyValue label="下单规则版本"><code className="break-all">{order.releaseId}</code></KeyValue>
+        {order.priceVersionId ? <KeyValue label="下单价目"><code className="break-all">{order.priceVersionId}</code></KeyValue> : null}
         <KeyValue label="内容摘要"><code className="break-all">{order.contentHash}</code></KeyValue>
         <KeyValue label="修订"><code>{order.revision}</code></KeyValue>
       </dl>

@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { test } from "node:test";
 
 import type { Pool, PoolClient } from "pg";
@@ -6,7 +9,70 @@ import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../src/auth/security-core";
 import { assertBusinessRuntimeIdentity, BusinessDatabaseService, createBusinessPool } from "../src/database/business";
 import { closeResource, finishDatabaseTest } from "./database-test-support";
-import { applyRuntimePrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+import { applyRuntimePrivileges, configureDistributionAccrualTaskPrivileges, configureFixedFeePersonalPrivileges, configureFixedFeeSupportCancellationPrivileges, configureNativeRefundReviewPrivileges, configureOpeningAutoConfirmPrivileges, configureSettlementRefundPolicyPrivileges, configureSkinIdentityPrivileges } from "../src/database/business-migrations";
+
+test("distribution accrual privileges reject a partial contract and grant only task operations",async()=>{
+  for(const [absent,ready] of [[true,false],[false,false]] as const){
+    const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[{absent,ready}]};}} as unknown as Pool;
+    if(absent)await configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime');
+    else await assert.rejects(configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime'),/partially deployed/);
+    assert.equal(calls.length,1,'an absent or partial contract receives no grants');
+  }
+  const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[sql.includes(' AS absent,')?{absent:false,ready:true}:{ready:true}]};}} as unknown as Pool;
+  await configureDistributionAccrualTaskPrivileges(pool,'fixture_runtime');
+  const grants=calls.find(sql=>sql.includes('GRANT INSERT(posting_id)'))!;
+  assert.match(grants,/GRANT UPDATE\(state,reason_code,next_attempt_at,updated_at\)/);
+  assert.doesNotMatch(grants,/GRANT (DELETE|TRUNCATE|UPDATE\(posting_id)/);
+  assert.match(grants,/GRANT EXECUTE ON FUNCTION zzsh_order\.derive_frozen_referral_accrual/);
+});
+
+test("fixed-fee order privileges reject partially installed guards before any grant",async()=>{
+  const complete={verifier:true,common:true,guard:true,fixed_trigger:true,legacy_trigger:true,listing_constraint:true,funding_guard:true,functions_safe:true};
+  const keys=Object.keys(complete) as Array<keyof typeof complete>;
+  for(const key of keys){
+    const writes:string[]=[];
+    const pool={query:async(sql:string)=>{writes.push(sql);return {rows:[{...complete,[key]:false}]};}} as unknown as Pool;
+    await assert.rejects(configureFixedFeePersonalPrivileges(pool,"fixture_runtime"),/partially deployed/);
+    assert.equal(writes.length,1);
+  }
+  const writes:string[]=[];
+  const empty={...complete,verifier:false,common:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false};
+  for(const key of keys.filter(key=>key!=="functions_safe")){
+    const pool={query:async()=>({rows:[{...empty,[key]:true}]})} as unknown as Pool;
+    await assert.rejects(configureFixedFeePersonalPrivileges(pool,"fixture_runtime"),/partially deployed/);
+  }
+  const absent={query:async(sql:string)=>{writes.push(sql);return {rows:[empty]};}} as unknown as Pool;
+  await configureFixedFeePersonalPrivileges(absent,"fixture_runtime");assert.equal(writes.length,1);
+  const ready={query:async(sql:string)=>{writes.push(sql);return {rows:[complete]};}} as unknown as Pool;
+  await configureFixedFeePersonalPrivileges(ready,"fixture_runtime");assert.match(writes.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.assert_fixed_fee_personal_order_v5/);
+});
+
+test("fixed-fee identity guard preserves the complete v4 contract except the bound listing price",()=>{
+  const base=readFileSync(resolve(__dirname,"../../migrations/business/0078_personal_quote_v4.sql"),"utf8").replace(/\r\n/g,"\n");
+  const candidate=readFileSync(resolve(__dirname,"../../migrations/candidates/fixed-fee-mode/personal-order-contract.sql"),"utf8").replace(/\r\n/g,"\n");
+  const old=base.match(/CREATE FUNCTION zzsh_order\.assert_personal_growth_order_v4\(n zzsh_order\.rental_order\) RETURNS void LANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/)?.[1];
+  const fixed=candidate.match(/CREATE FUNCTION zzsh_order\.assert_personal_growth_for_fixed_fee_v5\(n zzsh_order\.rental_order, expected_listing_price_id text\)\s+RETURNS void LANGUAGE plpgsql AS \$\$([\s\S]*?)\$\$;/)?.[1];
+  assert(old&&fixed);
+  const original="v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM n.quote_snapshot->>'priceVersionId'";
+  const changed="v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM expected_listing_price_id";
+  assert.equal(old.split(original).length,2);assert.equal(fixed.split(changed).length,2);
+  assert.equal(fixed.replace(changed,original),old);
+  assert(candidate.includes(createHash('sha256').update(old).digest('hex')));
+});
+
+test("fixed-fee cancellation privileges stay closed for a partial contract",async()=>{
+  const ready={executor:true,helper:true,columns:2,marker:true,safe:true,triggers:12};
+  for(const partial of [{executor:false},{helper:false},{columns:1},{marker:false},{safe:false},{triggers:11}]){
+    const calls:string[]=[];const pool={query:async(sql:string)=>{calls.push(sql);return {rows:[{...ready,...partial}]};}} as unknown as Pool;
+    await assert.rejects(configureFixedFeeSupportCancellationPrivileges(pool,'fixture_runtime'),/partially deployed/);assert.equal(calls.length,1);
+  }
+  const calls:string[]=[];const absent={query:async(sql:string)=>{calls.push(sql);return {rows:[{executor:false,helper:false,columns:0,marker:false,safe:false,triggers:12}]};}} as unknown as Pool;
+  await configureFixedFeeSupportCancellationPrivileges(absent,'fixture_runtime');assert.equal(calls.length,1);
+  const orphan={query:async()=>({rows:[{executor:false,helper:false,columns:0,marker:true,safe:false,triggers:12}]})} as unknown as Pool;
+  await assert.rejects(configureFixedFeeSupportCancellationPrivileges(orphan,'fixture_runtime'),/partially deployed/);
+  const complete={query:async(sql:string)=>{calls.push(sql);return {rows:[ready]};}} as unknown as Pool;
+  await configureFixedFeeSupportCancellationPrivileges(complete,'fixture_runtime');assert.match(calls.at(-1)!,/GRANT EXECUTE ON FUNCTION zzsh_order\.cancel_order_after_start_v3/);
+});
 
 test('directory pool is single-use within the existing ten business connection slots and both pools close',async()=>{
   const config={database:{host:'127.0.0.1',port:1,name:'offline',user:'offline',password:'offline'}},shared=createBusinessPool(config,{max:8}),directory=createBusinessPool(config,{max:2,maxUses:1});
@@ -142,10 +208,14 @@ function fundingAclFixture(present: readonly unknown[], incompleteInventory = fa
     if (sql.includes("user_auth_throttle_event_id_seq")) return { rows: [{ event: false, captcha: false, sequence: false }] };
     if (sql.includes("post_order_compensation(text)")) return { rows: [{ present: false, executor: false, verifier: false, triggers: 0, functions_safe: false, incident_index: false }] };
     if (args[0] === "zzsh_order.support_poststart_cancellation") return { rows: [{ present: false, functions: 0, triggers: 0, executor_safe: false }] };
+    if (sql.includes("AS absent") && sql.includes("distribution_accrual_task")) return { rows: [{ absent: true, ready: false }] };
+    if (sql.includes("cancel_order_after_start_v3")) return { rows: [{ executor: false, helper: false, columns: 0, marker: false, safe: false, triggers: 0 }] };
+    if (sql.includes("scheduled-spread-acl")) return { rows: [{ installed: false, exempt: false, ready: false }] };
+    if (sql.includes("assert_fixed_fee_personal_order_v5")) return { rows: [{ verifier:false,common:false,guard:false,fixed_trigger:false,legacy_trigger:false,listing_constraint:false,funding_guard:false,functions_safe:true }] };
     if (sql.startsWith("SELECT name,to_regprocedure(name)")) return { rows: (args[0] as string[]).slice(0, incompleteInventory ? 1 : 2).map((name, index) => ({ name, present: present[index] })) };
     if (sql.startsWith("SELECT name,to_regclass")) return { rows: (args[0] as string[]).map(name => ({ name, present: false })) };
     if (sql.includes("count(*)")) return { rows: [{ count: 0, ready: false }] };
-    return { rows: [{ relation: null, present: false, proof: false, initializer: false, allocator: null, ready: false }] };
+    return { rows: [{ relation: null, fn: null, present: false, proof: false, initializer: false, allocator: null, ready: false }] };
   } } as unknown as Parameters<typeof applyRuntimePrivileges>[0];
   return { pool, seen, grants: () => seen.filter(sql => sql.includes("GRANT EXECUTE ON FUNCTION zzsh_supply.valid_funding_policy_legacy_v1")) };
 }

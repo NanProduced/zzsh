@@ -42,6 +42,12 @@ test("B1 projection: titleFacts, available, blockers; unquoted owner total is nu
   assert.equal(listed.available, true); assert.deepEqual(listed.blockers, []);
   assert.equal(listed.historicalReadOnly, false); assert.equal("version_origin" in listed, false);
   assert.equal((projectOwnerAccount({ ...base, version_origin: "LEGACY_OBSERVATION" } as any) as any).historicalReadOnly, true);
+  const retired = projectOwnerAccount({ ...base, retired_legacy: true, rental_state: "HISTORICAL" } as any);
+  assert.equal(retired.available, false); assert.equal(retired.historicalReadOnly, true);
+  assert(retired.blockers.includes("LEGACY_LISTING_RELIST_REQUIRED"));
+  assert.match(RENTAL_STATE_SQL, /source_system='legacy_mysql_restore'.*THEN 'HISTORICAL'/);
+  const otherGame = projectOwnerAccount({ ...base, retired_legacy: false, payload: { ...base.payload, schemaVersion: 3 } } as any);
+  assert.equal(otherGame.available, true); assert.equal(otherGame.historicalReadOnly, false);
   assert.equal(listed.accountDisplay.displayNo, "AC0000000001");
   assert.equal(listed.accountDisplay.titleFacts.haffBase, "50000000");
   assert.equal(listed.accountDisplay.titleFacts.level, 30);

@@ -18,15 +18,17 @@ import { legacyListedSourceRatio } from "./legacy-listed-quote";
 export const DELTA_QUOTE_SCHEMA_VERSION = 1;
 export const DELTA_HAFF_RATIO_SCHEMA = "haff-ratio-v1";
 export const DELTA_HAFF_COMPAT_SCHEMA = "haff-ratio-v2";
+export const DELTA_HAFF_FIXED_SCHEMA = "haff-ratio-v3";
 export const CUSTOMER_TIERS = ["STANDARD", "VIP", "SVIP", "DISCOUNT_USER"] as const;
 export type CustomerTier = typeof CUSTOMER_TIERS[number];
 export type RentalMode = "ordinary" | "custom" | "fast";
 export type RentalPricingSelection = { rentalMode: RentalMode; ownerRatioB?: string };
 type RatioBound = { base: "C" | "ABSOLUTE"; value: string };
+type RentalModeBounds = Record<RentalMode, { enabled: boolean; min?: RatioBound; max?: RatioBound }>;
 export type DeltaCompatPricing = {
   ordinary: { spreadDelta: string; discounts: Record<CustomerTier, string> };
   fast: { spreadDelta: string; discounts: Record<CustomerTier, string> };
-  modes: Record<RentalMode, { enabled: boolean; min?: RatioBound; max?: RatioBound }>;
+  modes: RentalModeBounds;
 };
 export const DELTA_HAFF_BASE_PER_MILLION = 1_000_000n;
 export const DELTA_ROUNDING_POLICY = "HALF_UP_CENT_V1";
@@ -140,6 +142,7 @@ export type DeltaHaffRule = {
   options?: Record<string, { delta: string; enabled: boolean }>;
   spreadDelta?: string;
   compatibility?: DeltaCompatPricing;
+  fixedModes?: RentalModeBounds;
 };
 
 const DECIMAL_PATTERN = /^(0|[1-9]\d*)(?:\.\d{1,8})?$/;
@@ -183,6 +186,31 @@ function parseSignedDecimalMap(value: unknown, label: string, integerKeys: boole
 export function validateDeltaHaffRule(value: unknown, mode: "SPREAD" | "PERCENT"): DeltaHaffRule {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("Haff rule is invalid");
   const rule = value as Record<string, unknown>;
+  if (rule.schema === DELTA_HAFF_FIXED_SCHEMA) {
+    ensureOnlyFields(rule, ["schema", "baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption", "fixedModes"]);
+    if (mode !== "PERCENT") throw invalid("Fixed fee pricing requires PERCENT");
+    compatFields(rule.fixedModes, ["ordinary", "custom", "fast"]);
+    const modes = rule.fixedModes as RentalModeBounds;
+    for (const name of ["ordinary", "custom", "fast"] as const) {
+      const config = modes[name];
+      compatFields(config, name === "ordinary" ? ["enabled"] : ["enabled", "min", "max"]);
+      if (typeof config.enabled !== "boolean") throw invalid("Mode enabled is required");
+      if (name !== "ordinary" && config.enabled) for (const bound of config.max === undefined ? [config.min] : [config.min, config.max]) {
+        compatFields(bound, ["base", "value"]);
+        if (!bound || !["C", "ABSOLUTE"].includes(bound.base)) throw invalid("Invalid ratio bound");
+        compatDecimal(bound.value, true);
+      }
+    }
+    if (!Object.values(modes).some((entry) => entry.enabled)) throw invalid("No enabled pricing mode");
+    return {
+      schema: DELTA_HAFF_FIXED_SCHEMA,
+      baseBySafeBox: parsePositiveDecimalMap(rule.baseBySafeBox, "Haff base ratios", false),
+      vitalityDeltaByLevel: parseSignedDecimalMap(rule.vitalityDeltaByLevel, "Haff vitality deltas", true),
+      bearDeltaByLevel: parseSignedDecimalMap(rule.bearDeltaByLevel, "Haff bear deltas", true),
+      dailyDeltaByTermOption: parseSignedDecimalMap(rule.dailyDeltaByTermOption, "Haff daily deltas", false),
+      fixedModes: modes,
+    };
+  }
   if (rule.schema === DELTA_HAFF_COMPAT_SCHEMA) {
     ensureOnlyFields(rule, ["schema", "baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption", "compatibility"]);
     if (mode !== "SPREAD") throw invalid("Compatibility pricing requires SPREAD");
@@ -322,8 +350,9 @@ export function resolveDeltaHaffContext(input: {
   hasHaffLines: boolean;
   conditions: DeltaHaffConditions;
   customerTier?: CustomerTier;
-}): DeltaHaffContext {
-  if (input.haffRule?.schema === DELTA_HAFF_COMPAT_SCHEMA) return resolveCompatHaffContext(input);
+}, retainedPublishedSelection?: RentalPricingSelection): DeltaHaffContext {
+  if (input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA) return resolveFixedHaffContext(input, retainedPublishedSelection);
+  if (input.haffRule?.schema === DELTA_HAFF_COMPAT_SCHEMA) return resolveCompatHaffContext(input, retainedPublishedSelection);
   if (input.conditions.rentalPricing || (input.customerTier && input.customerTier !== "STANDARD")) return { haffSchema: null, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   const reasons = new Set<DeltaQuoteReasonCode>();
   const fail = (code: DeltaQuoteReasonCode): void => { reasons.add(code); };
@@ -409,6 +438,15 @@ function compatRatioBound(value: RatioBound, base: Decimal): Decimal {
 /** Informational bounds only; the formal quote still checks all rules independently. */
 export function resolveDeltaHaffDisplayRange(input: { mode: "SPREAD" | "PERCENT"; haffRule?: DeltaHaffRule | null; conditions: DeltaHaffConditions; rentalMode: RentalMode }): { min: string; max: string | null } | null {
   try {
+    if (input.haffRule?.schema === DELTA_HAFF_FIXED_SCHEMA && !input.conditions.pricingOptionCode) {
+      const rule = validateDeltaHaffRule(input.haffRule, input.mode), mode = rule.fixedModes![input.rentalMode];
+      if (!mode.enabled) return null;
+      const base = compatBaseRatio(rule, input.conditions);
+      const min = input.rentalMode === "ordinary" ? base : compatRatioBound(mode.min!, base);
+      const max = input.rentalMode === "ordinary" ? base : mode.max ? compatRatioBound(mode.max, base) : null;
+      if (base.value <= 0n || min.value <= 0n || (max && subtractDecimal(max, min).value < 0n)) return null;
+      return { min: formatDecimalExact(min), max: max ? formatDecimalExact(max) : null };
+    }
     if (input.haffRule?.schema !== DELTA_HAFF_COMPAT_SCHEMA || input.conditions.pricingOptionCode) return null;
     const rule = validateDeltaHaffRule(input.haffRule, input.mode), config = rule.compatibility!;
     const mode = config.modes[input.rentalMode];
@@ -423,7 +461,29 @@ export function resolveDeltaHaffDisplayRange(input: { mode: "SPREAD" | "PERCENT"
   } catch { return null; }
 }
 
-function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0]): DeltaHaffContext {
+function resolveFixedHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0], retainedSelection?: RentalPricingSelection): DeltaHaffContext {
+  const failed: DeltaHaffContext = { haffSchema: DELTA_HAFF_FIXED_SCHEMA, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
+  try {
+    const rule = validateDeltaHaffRule(input.haffRule, input.mode);
+    if (input.customerTier !== "STANDARD" || !input.hasHaffLines || input.conditions.pricingOptionCode) return failed;
+    const selection = normalizeRentalPricing(input.conditions.rentalPricing), mode = rule.fixedModes![selection.rentalMode];
+    const retained = retainedSelection !== undefined && selection.rentalMode === retainedSelection.rentalMode && selection.ownerRatioB === retainedSelection.ownerRatioB;
+    if (!mode.enabled) return failed;
+    const c = input.conditions, base = compatBaseRatio(rule, c);
+    const ratio = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "ratio");
+    if (selection.rentalMode !== "ordinary" && !retained) {
+      const min = compatRatioBound(mode.min!, base), max = mode.max === undefined ? null : compatRatioBound(mode.max, base);
+      if (subtractDecimal(ratio, min).value < 0n || (max !== null && (subtractDecimal(max, min).value < 0n || subtractDecimal(max, ratio).value < 0n))) return failed;
+    }
+    if (base.value <= 0n || ratio.value <= 0n) return { ...failed, reasonCodes: ["INVALID_DENOMINATOR"] };
+    const value = formatDecimalExact(ratio);
+    return { haffSchema: rule.schema, ownerDenominator: ratio, buyerDenominator: ratio, spreadDelta: null, reasonCodes: [],
+      conditions: { safeBoxCode: c.safeBoxCode!, vitLevel: String(c.vitLevel), bearLevel: String(c.bearLevel), termOptionCode: c.termOptionCode! },
+      compatibility: { rentalMode: selection.rentalMode, customerTier: "STANDARD", baseRatioC: formatDecimalExact(base), ownerRatioB: value, memberDelta: "0" } };
+  } catch { return failed; }
+}
+
+function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffContext>[0], retainedSelection?: RentalPricingSelection): DeltaHaffContext {
   const failed: DeltaHaffContext = { haffSchema: DELTA_HAFF_COMPAT_SCHEMA, ownerDenominator: null, buyerDenominator: null, spreadDelta: null, conditions: {}, reasonCodes: ["RULE_INPUT_MISSING"] };
   try {
     const rule = validateDeltaHaffRule(input.haffRule, input.mode);
@@ -438,7 +498,8 @@ function resolveCompatHaffContext(input: Parameters<typeof resolveDeltaHaffConte
     const c = input.conditions;
     const base = compatBaseRatio(rule, c);
     const owner = selection.rentalMode === "ordinary" ? base : parseNonNegativeDecimal(selection.ownerRatioB!, 8, "B");
-    if (selection.rentalMode !== "ordinary") {
+    const retained = retainedSelection !== undefined && selection.rentalMode === retainedSelection.rentalMode && selection.ownerRatioB === retainedSelection.ownerRatioB;
+    if (selection.rentalMode !== "ordinary" && !retained) {
       const min = compatRatioBound(mode.min!, base); const max = mode.max === undefined ? null : compatRatioBound(mode.max, base);
       // 无上限时只校验 B ≥ 下限；有上限时保持原有 max ≥ min 且 min ≤ B ≤ max。
       if (subtractDecimal(owner, min).value < 0n || (max !== null && (subtractDecimal(max, min).value < 0n || subtractDecimal(max, owner).value < 0n))) return failed;
@@ -560,7 +621,7 @@ type DeltaProjectedLine = {
 };
 
 export type DeltaProjectedQuote = {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   rentalMode?: RentalMode;
   currency: "CNY";
   ruleReleaseId: string | null;
@@ -602,7 +663,7 @@ export function projectDeltaQuote(quote: InternalQuote | DeltaProjectedQuote, vi
     termSeconds: quote.termSeconds,
     expiryDisclosures: quote.expiryDisclosures,
     unitAmountsInformational: quote.unitAmountsInformational,
-    ...(quote.schemaVersion === 2 || quote.schemaVersion === 3 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
+    ...(quote.schemaVersion === 2 || quote.schemaVersion === 3 || quote.schemaVersion === 4 ? { rentalMode: quote.pricingInputs?.compatibility?.rentalMode ?? (quote as DeltaProjectedQuote).rentalMode } : {}),
   };
   const ownerRatio = quote.schemaVersion === 3
     ? legacyListedSourceRatio(quote, "owner") ?? undefined

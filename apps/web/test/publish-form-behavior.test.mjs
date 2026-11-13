@@ -1739,7 +1739,7 @@ test('v2 recommendation verifies every selected skin across catalog pages, reche
   });
   try {
     await p.render(); await p.clickButton('查看推荐押金');
-    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前版本资料）')), true);
+    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前账号资料）')), true);
     assert.equal(reads.length, 2, 'selected facts outside the visible picker page are read as metadata');
     await p.clickButton('采用推荐');
     assert.equal(await p.waitFor(() => p.host.querySelector('#publish-deposit').value === '312.34'), true);

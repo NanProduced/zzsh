@@ -36,8 +36,10 @@ import {
   GrowthRuleError,
   growthWindowStartAt,
 } from "./membership-growth";
-import { computeDeltaQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
+import { computeDeltaQuote, computePublishedSpreadQuote, type InternalQuote, type PricingLineInput, type QuoteInput } from "../supply/pricing";
 import { applyTotalDiscountToQuote } from "./membership-total-discount";
+import { FIXED_FEE_ALGORITHM } from "../supply/fixed-fee";
+import { normalizeRentalPricing } from "../supply/delta-rental";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { canonicalize, normalizeQuote, normalizeTime } from "../supply/content-hash";
 import { decimalToBigInt, formatScaledInteger, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
@@ -74,7 +76,7 @@ export type AcceptedSettlementSnapshot = {
   effectiveAtUtc: string;
   recordedAtUtc: string;
   inputSnapshot: {
-    schema: "settlement-version-v2" | "settlement-version-v3";
+    schema: "settlement-version-v2" | "settlement-version-v3" | "settlement-version-v4";
     renterUserId: string;
     ownerUserId: string;
     listingVersionId: string;
@@ -161,7 +163,7 @@ function legalMinimumBillingCents(snapshot: AcceptedSettlementSnapshot): string 
 
 export function mapAcceptedSettlementToGrowthFacts(snapshot: AcceptedSettlementSnapshot): ContributionMapping {
   const unmapped: ContributionMapping["unmapped"] = [];
-  if (snapshot.supersededAt !== null || snapshot.postingId === null || !["settlement-version-v2","settlement-version-v3"].includes(snapshot.inputSnapshot.schema)
+  if (snapshot.supersededAt !== null || snapshot.postingId === null || !["settlement-version-v2","settlement-version-v3","settlement-version-v4"].includes(snapshot.inputSnapshot.schema)
     || snapshot.inputSnapshot.renterUserId !== snapshot.renterUserId) {
     return { facts: [], unmapped: [{ code: "SNAPSHOT_INVALID", detail: "settlement version is not the accepted current posted snapshot" }] };
   }
@@ -546,7 +548,7 @@ function quoteInputForGrowth(base: QuoteInput, contract: GrowthPricingContract):
   return { ...base, customerTier: "STANDARD", lines, haffRule };
 }
 
-function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, frozenLegacyBase?: InternalQuote): { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string } | null {
+function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract, NotPricedParameter>, source: GrowthOfferPlan["source"], benefitVersion: string, binding: OfferBinding, depositWaived: boolean, entitlementId?: string, validUntil?: string, allowanceCents?: string, approvedUniformTier = false, precomputedBase?: InternalQuote, discountOrdering?: "STABLE"): { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string } | null {
   const depositCents = tenantDepositAfterBenefit(base.deposits?.tenantDepositCents ?? null, depositWaived, allowanceCents);
   base = { ...base, deposits: { ...base.deposits, ...(depositCents === null ? {} : { tenantDepositCents: depositCents }) } };
   const planInput = { source, benefitVersion, binding, ...(entitlementId ? { entitlementId } : {}), ...(validUntil ? { validUntil } : {}) };
@@ -558,14 +560,15 @@ function quoteCandidate(base: QuoteInput, contract: Exclude<ModePricingContract,
     // Actual amounts and owner floors always come from this listing's sealed base, never the old contract.
     const carryRatio = approvedUniformTier || unified || source !== "GROWTH";
     if ((carryRatio && entitlementPricingSummary(contract).knowledge !== "KNOWN") || (!carryRatio && contract.priceVersionId !== base.priceVersionId)) return null;
-    const result = frozenLegacyBase ? { quotable: true as const, quote: normalizeQuote({ ...frozenLegacyBase,
+    const result = precomputedBase ? { quotable: true as const, quote: normalizeQuote({ ...precomputedBase,
       tenantDeposit: depositCents === null ? null : yuanAmountObject(BigInt(depositCents)) }) } : computeDeltaQuote(base);
     if (!result.quotable) return null;
-    const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio);
+    const discounted = applyTotalDiscountToQuote(result.quote, contract.payableRatio, discountOrdering);
     if (!discounted) return null;
     return { quote: discounted.quote, plan: quoteToGrowthOfferPlan(discounted.quote, planInput), payableRatio: contract.payableRatio };
   }
-  if (frozenLegacyBase) return null;
+  if (base.fixedFeeAlgorithm === FIXED_FEE_ALGORITHM) return null;
+  if (precomputedBase) return null;
   const input = quoteInputForGrowth(base, contract);
   if (!input) return null;
   const result = computeDeltaQuote(input);
@@ -909,6 +912,31 @@ export type MembershipGrowthQuoteCandidatesResult =
   | { knowledge: "KNOWN"; policyVersion: string; candidates: Array<{ plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string }>; entitlementIds: string[]; effectiveTier: Exclude<NonNullable<GrowthProjectionDto["effectiveTier"]>, "UNKNOWN">; policyTier: NonNullable<ReturnType<typeof policyTierForGrowthProjection>>; asOfUtc: string }
   | { knowledge: "UNKNOWN"; reason: string; asOfUtc?: string; entitlementId?: string };
 
+function matchesFixedBaseQuote(quote: InternalQuote, input: MembershipGrowthQuoteCandidatesInput): boolean {
+  try {
+    const normalized = normalizeQuote(quote), source = input.quoteInput;
+    const selected = normalizeRentalPricing(source.conditions.rentalPricing), conditions = normalized.pricingInputs.conditions;
+    if (normalized.schemaVersion !== 4 || source.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM || source.mode !== "PERCENT"
+      || source.priceVersionId !== input.priceVersionId || normalized.priceVersionId !== input.priceVersionId
+      || normalized.pricingInputs.fixedFeeAlgorithm !== FIXED_FEE_ALGORITHM || typeof source.commissionRate !== "string"
+      || decimalToBigInt(parseNonNegativeDecimal(normalized.pricingInputs.commissionRate!, 8, "rate"), 8)
+        !== decimalToBigInt(parseNonNegativeDecimal(source.commissionRate, 8, "rate"), 8)
+      || normalized.pricingInputs.compatibility?.rentalMode !== selected.rentalMode
+      || selected.ownerRatioB !== undefined && normalized.pricingInputs.compatibility?.ownerRatioB !== selected.ownerRatioB
+      || !conditions || conditions.safeBoxCode !== source.conditions.safeBoxCode || conditions.vitLevel !== String(source.conditions.vitLevel)
+      || conditions.bearLevel !== String(source.conditions.bearLevel) || conditions.termOptionCode !== source.conditions.termOptionCode
+      || normalized.lines.length !== source.lines.length || new Set(source.lines.map(line => line.itemId)).size !== source.lines.length) return false;
+    return source.lines.every(line => {
+      const frozen = normalized.lines.find(item => item.itemId === line.itemId);
+      if (!frozen || frozen.quantity !== line.quantity || frozen.unit !== line.unit || frozen.pricingKind !== line.pricingKind) return false;
+      if (line.pricingKind !== "FIXED_UNIT") return true;
+      return line.unitQuantity === frozen.unitQuantity && typeof line.buyerUnitAmount === "string"
+        && decimalToBigInt(parseNonNegativeDecimal(line.buyerUnitAmount, 8, "unit"), 8)
+          === decimalToBigInt(parseNonNegativeDecimal(frozen.buyerUnitAmount.amount, 8, "unit"), 8);
+    });
+  } catch { return false; }
+}
+
 /**
  * T personal-quote-v4 seam (membership-growth-consumption.md fdceac11…): one authoritative asOf for growth, grace,
  * entitlements and policy. Supported precision: asOf is microsecond (canonical 6 digits); entitlement/policy are evaluated
@@ -927,6 +955,17 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     || input.baseQuote.legacyQuote.sourceEntity !== "la_rental_accounts"
     || input.baseQuote.legacyQuote.rentalMode !== (input.quoteInput.conditions.rentalPricing?.rentalMode ?? "ordinary")))
     return { knowledge: "UNKNOWN", reason: "LEGACY_QUOTE_SOURCE_INVALID", asOfUtc };
+  const fixed = input.baseQuote.schemaVersion === 4;
+  if (fixed && !matchesFixedBaseQuote(input.baseQuote, input)) return { knowledge: "UNKNOWN", reason: "FIXED_FEE_BASE_INVALID", asOfUtc };
+  const spreadProof=input.publishedSpreadListing;
+  // Only new scheduled-spread confirmations use the deterministic DB-compatible tie break; old orders retain their frozen allocation.
+  if(spreadProof){
+    if(spreadProof.accountId!==input.accountId||spreadProof.ownerUserId!==input.ownerUserId||spreadProof.gameId!==input.gameId
+      ||spreadProof.listingVersionId!==input.listingVersionId||spreadProof.contentHash!==input.listingHash
+      ||spreadProof.payload.ruleRefs.releaseId!==input.ruleReleaseId)return {knowledge:"UNKNOWN",reason:"SPREAD_LISTING_BINDING_INVALID",asOfUtc};
+    const rebuilt=computePublishedSpreadQuote(input.quoteInput,spreadProof);
+    if(!rebuilt.quotable||canonicalize(rebuilt.quote)!==canonicalize(input.baseQuote))return {knowledge:"UNKNOWN",reason:"SPREAD_BASE_INVALID",asOfUtc};
+  }
   let model: Awaited<ReturnType<typeof readMembershipGrowthModel>>;
   try { model = await readMembershipGrowthModel(client, input.userId, asOfUtc); }
   catch (error) { if (error instanceof GrowthRuleError) return { knowledge: "UNKNOWN", reason: "GROWTH_UNKNOWN", asOfUtc }; throw error; }
@@ -952,7 +991,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
   const growthContract = tier?.pricing?.[rentalMode];
   if (!configuredModeContract(growthContract)) return { knowledge: "UNKNOWN", reason: "GROWTH_PRICE_UNAVAILABLE", asOfUtc };
   const binding: OfferBinding = { userId: input.userId, accountId: input.accountId, ownerUserId: input.ownerUserId, listingVersionId: input.listingVersionId, ruleReleaseId: input.ruleReleaseId, quantityDigest: input.quantityDigest };
-  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN", legacy ? input.baseQuote : undefined);
+  const growthCandidate = quoteCandidate(input.quoteInput, growthContract, "GROWTH", policyRow.version, binding, tier.tenantDeposit === "WAIVED", undefined, undefined, tier.depositAllowanceCents, uniformPolicy.tiers[policyTier].knowledge === "KNOWN", legacy || fixed || spreadProof ? input.baseQuote : undefined, spreadProof?"STABLE":undefined);
   if (!growthCandidate) return { knowledge: "UNKNOWN", reason: "GROWTH_QUOTE_UNAVAILABLE", asOfUtc };
   let rows: StoredQuoteEntitlement[];
   try {
@@ -967,7 +1006,7 @@ export async function readMembershipGrowthQuoteCandidatesAt(client: PoolClient, 
     if (state !== "ACTIVE") continue; // proven expired / revoked / replaced / pending / not started: excluded normally
     if (entitlement.kind !== "FRIEND" && entitlement.kind !== "PRESTIGE") return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_KIND_UNKNOWN", asOfUtc, entitlementId: entitlement.id };
     if (!configuredModeContract(entitlement.pricingPayload)) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_PRICE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
-    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined, false, legacy ? input.baseQuote : undefined);
+    const candidate = quoteCandidate(input.quoteInput, entitlement.pricingPayload, entitlement.kind, policyRow.version, binding, entitlement.depositWaived, entitlement.id, entitlement.endsAt, entitlement.depositAllowanceCents ?? undefined, false, legacy || fixed || spreadProof ? input.baseQuote : undefined, spreadProof?"STABLE":undefined);
     if (!candidate) return { knowledge: "UNKNOWN", reason: "ENTITLEMENT_QUOTE_UNAVAILABLE", asOfUtc, entitlementId: entitlement.id };
     candidates.push(candidate);
     entitlementIds.push(entitlement.id);

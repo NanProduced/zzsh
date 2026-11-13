@@ -178,7 +178,8 @@ export function orderHaffRatio(quote:unknown):AdminOrderHaffRatio{
  const q=rec(quote),inputs=rec(q?.pricingInputs),den=rec(inputs?.denominators);
  if(q?.schemaVersion===3){const ratio=legacyListedSourceRatio(q,'buyer');return ratio?{...unknown,state:'KNOWN',wanPerYuan:ratio,referenceOnly:true}:unknown;}
  // 客户档位只取冻结报价自身记录；缺失保持 null，不默认为 STANDARD。
- const tierRaw=rec(inputs?.compatibility)?.customerTier??rec(rec(q?.personal)?.membership)?.tier;
+ const tierRaw=q?.schemaVersion===4?rec(rec(q?.personal)?.membershipGrowth)?.effectiveTier
+  :rec(inputs?.compatibility)?.customerTier??rec(rec(q?.personal)?.membership)?.tier;
  const customerTier=typeof tierRaw==='string'&&/^[A-Z_]{1,32}$/.test(tierRaw)?tierRaw:null;
  if(!q||!Array.isArray(q.lines)||!q.lines.some((line:any)=>rec(line)?.unit==='HAFF_BASE')||typeof den?.buyer!=='string')return {...unknown,customerTier};
  try{const ratio=parseNonNegativeDecimal(den.buyer,8,'order buyer ratio');return ratio.value>0n?{...unknown,state:'KNOWN',wanPerYuan:formatDecimalExact(ratio),customerTier}:{...unknown,customerTier};}catch{return {...unknown,customerTier};}

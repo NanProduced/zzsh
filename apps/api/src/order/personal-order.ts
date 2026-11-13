@@ -66,6 +66,7 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
     const db=error as {code?:string;constraint?:string;message?:string};
     if(db.code==="23505" && db.constraint==="rental_order_confirmation_unique")used();
     if(db.code==="40001" && db.message==="personal confirmation expired")throw new SecurityApiError(409,"CONFIRMATION_EXPIRED","Confirmation expired; confirm again");
+    if(db.code==="40001" && ["scheduled spread published policy differs","fixed fee published policy differs","scheduled spread effective policy changed","fixed fee effective policy changed"].includes(db.message ?? ""))throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Published price does not match; confirm again");
     if(db.code==="40001" && (db.message==="formal guarantee binding changed" || db.message==="formal guarantee expired at order write")) {
       throw new SecurityApiError(503,"CONFIRMATION_DEPENDENCY_UNAVAILABLE","Confirmation guarantee is no longer valid");
     }

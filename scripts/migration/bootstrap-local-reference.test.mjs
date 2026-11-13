@@ -191,26 +191,30 @@ test("historical five-admin package is superseded before credentials", t => {
 
 test("formal initialization plan preserves the current five-digit number contract", () => {
     assert.deepEqual(plan.formalAdminInitialization.serverAssignedFirstLogins, ["zz00001", "zz00002"]);
+    assert.equal(plan.formalAdminInitialization.scope, "LEGACY_TARGET_ONLY");
+    assert.deepEqual(plan.nextDeployment, { status: "NOT_READY", administrators: { bosses: 2, operations: 2,
+        operationsScope: "ALL_GAMES", firstEnrollmentDeadline: "NONE", totp: "SELF_ENROLL" }, policyInitialization: "MUST_NOT_REQUIRE_ACTIVE_BOSS" });
+    assert.equal(plan.connections, 0); assert.equal(plan.credentialReads, 0);
     const result = run(["--execute", "--initialize-admins"]);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /FORMAL_INITIALIZATION_INPUT_REQUIRED/);
 });
 
-for (const stage of ["bosses", "staff"]) test("next target refuses legacy admin enrollment before credentials: " + stage, { skip: process.platform !== "win32" }, t => {
+for (const stage of ["bosses", "staff"]) for (const inputNamesNext of [true, false]) test("next target refuses legacy admin enrollment before credentials: " + stage + ":" + inputNamesNext, { skip: process.platform !== "win32" }, t => {
     const pkg = fixture(t), root = pkg.root;
     const instance = { host: "127.0.0.1", port: 55439, systemIdentifier: "123456" };
-    const target = { database: "zzsh_test_regression", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c", instance, migrationProfile: "LOCAL_MIGRATION_NEXT_V1" };
+    const target = { database: "zzsh_test_regression", oid: "123", nonce: "a1b2c3d4e5f60718293a4b5c", instance, ...(inputNamesNext ? {migrationProfile: "LOCAL_MIGRATION_NEXT_V1"} : {}) };
     const binding = { resource: { database: target.database, resourceOid: target.oid }, initialization: { nonce: target.nonce, imProvisioner: false, imIdentityRepository: false, imAppId: null }, origins: { apiOrigin: "http://127.0.0.1:4292", adminOrigin: "http://127.0.0.1:4291" } };
     const bindingBytes = JSON.stringify(binding), bindingFile = join(root, "binding.json");
     writeFileSync(bindingFile, bindingBytes);
     const input = { kind: "FORMAL_LOCAL_ADMIN_INITIALIZATION_V1", numberingDigits: 5, target, resource: "scene_test", names: { "boss-one": "Boss1", "boss-two": "Boss2", operations: "运营", support: "客服" }, serverBinding: { file: bindingFile, sha256: hash(bindingBytes) } };
     const inputBytes = JSON.stringify(input), inputFile = join(root, "input.json");
     writeFileSync(inputFile, inputBytes);
-    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } }));
+    writeFileSync(join(root, "resource.json"), JSON.stringify({ ...target, migrationProfile: "LOCAL_MIGRATION_NEXT_V1", marker: "zzsh:regression-test:v1", roles: { migration: { name: "fixture_m", oid: "456" }, runtime: { name: "fixture_r", oid: "457" } } }));
     const out = join("E:/zzsh-local-state/restricted", "data-first-bootstrap-next-" + root.split(/[\\/]/).at(-1).toLowerCase());
     const result = run(["--execute", "--initialize-admins", "--stage", stage, "--input", inputFile, "--input-sha", hash(inputBytes), "--credentials", join(root, "missing-credentials.json"), "--out", out]);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /NEXT_MIGRATION_ADMISSION_INCOMPLETE/);
+    assert.match(result.stderr, /NEXT_LEGACY_ADMIN_INITIALIZER_RETIRED/);
     assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
     assert.equal(existsSync(out), false);
 });
@@ -237,7 +241,7 @@ for (const invalid of ["six-digit", "im-enabled"]) test("formal initialization r
     assert.doesNotMatch(result.stderr, /ENOENT|ECONN/);
 });
 
-for (const mode of ["commit", "replay", "rollback", "unknown", "commit-rollback-tag", "rollback-wrong-tag", "postcommit", "next-fence", "next-fence-lost", "skin-time", "skin-created", "skin-field", "v2-schema-old", "v2-schema-current", "session-expired", "target-rule-drift", "target-extra-price"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
+for (const mode of ["commit", "replay", "rollback", "unknown", "commit-rollback-tag", "rollback-wrong-tag", "postcommit", "next-legacy", "skin-time", "skin-created", "skin-field", "v2-schema-old", "v2-schema-current", "session-expired", "target-rule-drift", "target-extra-price"]) test("business execution host: " + mode, { skip: process.platform !== "win32" }, t => {
     const pkg = fixtureV2(t, (tables, manifest) => {
         if (mode.startsWith("v2-")) return;
         tables.find(table => table.table === "firearm_classification").rows = ['{"id":"class-1","created_by_admin_id":"original-admin","updated_by_admin_id":null,"revision":9007199254740993}'];
@@ -275,7 +279,7 @@ fs.writeFileSync=function(file,...rest){return write.call(this,path.resolve(Stri
 mod.syncBuiltinESMExports();
 async function query(sql,params=[]){calls.push(sql);
 if(sql.includes('pg_try_advisory_lock($1::integer')||sql.includes('pg_try_advisory_xact_lock'))return {rows:[{acquired:true}]};
-if(sql.includes('pg_locks l WHERE'))return {rows:[{database:'zzsh_test_regression',oid:'123',nonce:'a1b2c3d4e5f60718293a4b5c',system_identifier:'12345',held:mode!=='next-fence-lost'}]};
+if(sql.includes('pg_locks l WHERE'))return {rows:[{database:'zzsh_test_regression',oid:'123',nonce:'a1b2c3d4e5f60718293a4b5c',system_identifier:'12345',held:true}]};
 if(sql.includes('pg_locks WHERE'))return {rows:[{database:'postgres',system_identifier:'12345',held:true}]};
 if(sql==='SELECT pg_backend_pid() AS pid')return {rows:[{pid:111}]};
 if(sql.includes('pg_try_advisory_lock')||sql.includes('pg_advisory_unlock'))return {rows:[{ok:true}]};
@@ -304,6 +308,13 @@ class Pool{async connect(){calls.push('pool.connect');return {query,getTransacti
 mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:String(name).replaceAll(String.fromCharCode(92),'/').endsWith('/legal/legal-documents.js')?legalStub:originalLoad.call(this,name,...rest)};
 `);
     const result = spawnSync(process.execPath, ["--require", preload, script, "--execute", ...pkg.args, "--maintenance-admin-id", "existing-boss", "--maintenance-session-id", "existing-session", "--legal-input", legalInput, "--legal-input-sha", hash(readFileSync(legalInput)), "--oid", "123", "--nonce", "a1b2c3d4e5f60718293a4b5c", "--credentials", join(pkg.root, "credentials.json"), "--receipt", requestedReceipt], { encoding: "utf8", timeout: 5000, env: { ...process.env, DB_PASSWORD_FILE: join(pkg.root, "password.txt") } });
+    if (mode.startsWith('next-')) {
+        assert.notEqual(result.status,0);
+        assert.match(result.stderr,/NEXT_LEGACY_BUSINESS_BOOTSTRAP_RETIRED/);
+        assert.equal(existsSync(receipt),false);
+        assert.equal(existsSync(calls),false);
+        return;
+    }
     assert.ok(existsSync(receipt), (result.stderr||"") + (result.stdout||"") + " STATUS=" + result.status);
     const observed = JSON.parse(readFileSync(receipt)), sql = JSON.parse(readFileSync(calls));
     assert.equal(observed.database, "zzsh_test_regression");
@@ -312,11 +323,10 @@ mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:String(name).r
     assert.equal(observed.poolClosed, true);
     assert.equal(observed.maintenanceClosed, true);
     assert.equal(observed.unlock, true);
-    if (mode === "commit" || mode === "replay" || mode === "skin-time" || mode === "v2-schema-current" || mode === 'next-fence') {
+    if (mode === "commit" || mode === "replay" || mode === "skin-time" || mode === "v2-schema-current") {
         assert.equal(result.status, 0, JSON.stringify({ error: observed.error, status: observed.status, step: observed.step }));
         assert.equal(observed.status, "REFERENCE_BOOTSTRAP_COMMITTED");
         assert.equal(observed.commitAck, true);
-        if(mode==='next-fence'){assert.equal(observed.migrationProfile,'LOCAL_MIGRATION_NEXT_V1');assert.equal(observed.targetFence,'HELD_UNTIL_TRANSACTION_END');}
         assert.equal(observed.rentalReference.status, "SOURCE_RENTAL_REFERENCE_CHECKED");
         assert.equal(observed.legal.status, "EXACT_PRESENT"); assert.equal(observed.legal.inputSha256, hash(readFileSync(legalInput)));
         assert.equal(sql.filter(query => query.startsWith("INSERT INTO")).length, mode === "replay" ? 0 : 12);
@@ -350,9 +360,6 @@ mod._load=function(name,...rest){return name==='pg'?{Client,Pool}:String(name).r
             assert.match(observed.error.message, /REFERENCE_EXISTING_ROW_DIFFERS:zzsh_supply.skin/);
             assert.equal(sql.some(query => /^(INSERT INTO|UPDATE) "zzsh_supply"\."skin"/.test(query)), false);
         }
-    } else if (mode === 'next-fence-lost') {
-        assert.equal(result.status,1);assert.equal(observed.status,'FAILED_STOPPED');assert.equal(observed.rollbackAck,true);
-        assert.equal(sql.some(query => /^(INSERT INTO|UPDATE) /.test(query)),false);assert.equal(sql.includes('COMMIT'),false);
     } else if (mode === 'rollback-wrong-tag') {
         assert.equal(result.status,1);assert.equal(observed.status,'REFERENCE_ROLLBACK_UNKNOWN');assert.equal(observed.rollbackAck,false);
         assert.equal(sql.includes('COMMIT'),false);

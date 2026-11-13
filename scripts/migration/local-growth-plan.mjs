@@ -60,7 +60,10 @@ export function assertGrowthScopePartition(allOrders, scope, payments) {
 }
 
 /** Original full-source cohort closes every renter source; no-order cohort members get reviewed empty coverage. */
-export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded = [], targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef }) {
+export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded = [], targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef, isNextMigration = false }) {
+    if (typeof isNextMigration !== "boolean") fail("GROWTH_MIGRATION_PROFILE_INVALID");
+    const reason = isNextMigration ? "旧平台租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇" : "本地Nov3完整旧源租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇";
+    const keyPrefix = isNextMigration ? "legacy-growth-" : "nov3-growth-";
     const canonical = modules.canonicalize, proof = value => { const canonicalText = canonical(value); return { canonical: canonicalText, digest: sha(canonicalText) }; };
     const targetById = new Map(targets.map(row => [row.legacyId, row])), cohortById = new Map(cohort.map(row => [row.sourceId, row.userId]));
     if (cohortById.size !== cohort.length || targetById.size !== orders.length || cohort.length !== new Set(cohort.map(row => row.userId)).size) fail("GROWTH_SOURCE_DENOMINATOR_CONFLICT");
@@ -122,7 +125,7 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded =
         const expectedSourceKeys = entries.map(row => row.sourceKey).sort();
         const receipt = { subjectUserId: userId, cutoff, fromExclusive: null, sourceExtractSha256: lineage.captureReceiptSha256, sourceSetSha256: sha(canonical({ subjectUserId: userId, cutoff, fromExclusive: null, expectedSourceKeys })), expectedSourceKeys,
             refundReviewEvidenceRefs: [...new Set([reviewProof.digest, ...entries.flatMap(row => row.refundReviewRefs)])].sort() };
-        const business = { schema: "legacy-growth-maintenance-package-v1", reason: "本地Nov3完整旧源租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇", source: { receipt, inputs: entries.map(row => row.input), corrections: [], admitted: { receiptDigests: [sha(canonical(receipt))], componentDigests: entries.map(row => row.componentDigest), correctionDigests: [] }, gameIdBySettlementId: Object.fromEntries(entries.map(row => [row.sourceKey, row.input.binding.gameId])) } };
+        const business = { schema: "legacy-growth-maintenance-package-v1", reason, source: { receipt, inputs: entries.map(row => row.input), corrections: [], admitted: { receiptDigests: [sha(canonical(receipt))], componentDigests: entries.map(row => row.componentDigest), correctionDigests: [] }, gameIdBySettlementId: Object.fromEntries(entries.map(row => [row.sourceKey, row.input.binding.gameId])) } };
         const bytes = JSON.stringify(business) + "\n", businessSha256 = sha(bytes), prepared = modules.prepareLegacyGrowthBackfill({ ...business.source, packageDigest: businessSha256 });
         if (!prepared.ok) fail("GROWTH_PREPARATION_REJECTED:" + prepared.reason);
         const projected = entries.map(row => ({ row, result: modules.projectLegacyGrowthConsumption(row.input, new Set(business.source.admitted.componentDigests), receipt) }));
@@ -142,7 +145,7 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded =
             lifetime += BigInt(projection.lifetimeCents); rolling += BigInt(projection.rollingCents);
         } else summary.pending++;
         summary.contributions += prepared.rows.length;
-        packages.push({ userId, bytes, sha256: businessSha256, executionKey: "nov3-growth-" + businessSha256.slice(0, 48), prepared, projection });
+        packages.push({ userId, bytes, sha256: businessSha256, executionKey: keyPrefix + businessSha256.slice(0, 48), prepared, projection });
     }
     summary.lifetimeCents = lifetime.toString(); summary.rollingCents = rolling.toString();
     return { packages, review, reviewDigest: reviewProof.digest, summary, unknownSources: audit };

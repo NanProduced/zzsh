@@ -1,6 +1,8 @@
 import {createHash} from 'node:crypto';
 import {canonicalize,normalizeTime} from '../supply/content-hash';
 import {conflict,invalid} from '../supply/supply-util';
+import {formatDecimalExact,parseNonNegativeDecimal} from '../supply/decimal';
+import {fixedFeeAllowsPayableRatio} from '../supply/fixed-fee';
 import {allocateFrozenReferralPair,distributionPolicyRates,referralPercent,validateDistributionPolicy,type DistributionPolicyConfig,type ReferralRatio} from './distribution-policy';
 import type {RentalReferralRole} from './distribution-mechanism';
 
@@ -9,11 +11,22 @@ export type PaymentReferralRelation={knowledge:'KNOWN_NONE'|'KNOWN_PARENT'|'UNKN
 export type PaymentReferralFacts={role:RentalReferralRole;partyUserId:string;relation:PaymentReferralRelation;beneficiary:PaymentReferralParticipant|null};
 export type FrozenReferralStatus='ELIGIBLE'|'SKIPPED_DISABLED'|'SKIPPED_FAST'|'SKIPPED_MODE'|'SKIPPED_NO_PARENT'|'SKIPPED_INELIGIBLE'|'SKIPPED_BELOW_MIN'|'UNKNOWN_POLICY'|'UNKNOWN_MODE'|'UNKNOWN_RELATION'|'UNKNOWN_PARTICIPANT'|'UNKNOWN_LEVEL'|'UNKNOWN_ESTIMATE'|'UNKNOWN_ESTIMATE_CONSERVATION';
 export type FrozenReferralRole={role:RentalReferralRole;partyUserId:string;status:FrozenReferralStatus;beneficiaryUserId:string|null;relationId:string|null;relationDigest:string|null;levelCode:string|null;percent:string|null;ratio:ReferralRatio|null;estimatedCents:string|null};
-export type PaymentDistributionBasis={schema:'payment-distribution-basis.v1';orderId:string;gameId:string;currency:'CNY';confirmationId:string;acceptedAt:string;paymentDigest:string;admissionId:string;admissionRevision:string;policyVersion:string|null;policyDigest:string|null;policyConfig:DistributionPolicyConfig|null;accountMode:string|null;estimateBaseCents:string|null;estimateDigest:string|null;roles:FrozenReferralRole[];digest:string};
+export type FixedFeeDistributionPricing={fixedFeeRate:string;payableRatio:string};
+type PaymentBasisCommon={orderId:string;gameId:string;currency:'CNY';confirmationId:string;acceptedAt:string;paymentDigest:string;admissionId:string;admissionRevision:string;policyVersion:string|null;policyDigest:string|null;policyConfig:DistributionPolicyConfig|null;accountMode:string|null;estimateBaseCents:string|null;estimateDigest:string|null;roles:FrozenReferralRole[];digest:string};
+export type PaymentDistributionBasis=PaymentBasisCommon&({schema:'payment-distribution-basis.v1'}|{schema:'payment-distribution-basis.v2';fixedFeePricing:FixedFeeDistributionPricing|null});
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex'),id=(v:string)=>{if(typeof v!=='string'||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(v))throw invalid('Original payment basis identifier required');return v;},digest=(v:string)=>{if(!/^[0-9a-f]{64}$/.test(v))throw invalid('Original source digest required');return v;};
+function fixedPricingOrNull(value:unknown):FixedFeeDistributionPricing|null{
+ if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).sort().join(',')!=='fixedFeeRate,payableRatio')return null;
+ const pricing=value as Record<string,unknown>;
+ if(typeof pricing.fixedFeeRate!=='string'||typeof pricing.payableRatio!=='string')return null;
+ try{
+  if(!fixedFeeAllowsPayableRatio(pricing.fixedFeeRate,pricing.payableRatio))return null;
+  return{fixedFeeRate:formatDecimalExact(parseNonNegativeDecimal(pricing.fixedFeeRate,8,'fixed fee rate')),payableRatio:formatDecimalExact(parseNonNegativeDecimal(pricing.payableRatio,8,'payable ratio'))};
+ }catch{return null;}
+}
 
 /** Server-read facts only. This freezes eligibility/ratios; it creates no money or ledger plan. */
-export function freezePaymentDistributionBasis(input:{orderId:string;gameId:string;currency:'CNY';confirmationId:string;acceptedAt:string;paymentDigest:string;admissionId:string;admissionRevision:string;origin:'NATIVE'|'LEGACY_MYSQL'|'UNKNOWN';accountMode:string|null;estimate:{baseCents:string;sourceDigest:string}|null;policy:{versionId:string;digest:string;config:DistributionPolicyConfig}|null;facts:PaymentReferralFacts[]}):PaymentDistributionBasis{
+export function freezePaymentDistributionBasis(input:{orderId:string;gameId:string;currency:'CNY';confirmationId:string;acceptedAt:string;paymentDigest:string;admissionId:string;admissionRevision:string;origin:'NATIVE'|'LEGACY_MYSQL'|'UNKNOWN';accountMode:string|null;estimate:{baseCents:string;sourceDigest:string}|null;policy:{versionId:string;digest:string;config:DistributionPolicyConfig}|null;facts:PaymentReferralFacts[];fixedFeePricing?:FixedFeeDistributionPricing|null}):PaymentDistributionBasis{
  if(input.origin!=='NATIVE')throw conflict('Historical or unknown-origin payment cannot acquire a new distribution basis');
  for(const value of [input.orderId,input.gameId,input.confirmationId,input.admissionId])id(value);if(input.currency!=='CNY')throw invalid('Unsupported original payment currency');digest(input.paymentDigest);if(!/^[1-9]\d{0,18}$/.test(input.admissionRevision))throw invalid('Exact admission revision required');
  if(input.accountMode!==null&&!/^[a-z][a-z0-9_-]{0,63}$/.test(input.accountMode))throw invalid('Original account mode required');
@@ -40,10 +53,11 @@ export function freezePaymentDistributionBasis(input:{orderId:string;gameId:stri
  if(policy&&input.estimate){const renter=roles.find(r=>r.role==='RENTER_REFERRAL')!,owner=roles.find(r=>r.role==='OWNER_REFERRAL')!;
   // Unknown counterpart ratios do not authorize a partial pair or an implicit subsidy.
   const uncertain=roles.some(r=>r.status.startsWith('UNKNOWN'));if(uncertain){for(const r of roles)if(r.status==='ELIGIBLE')r.status='UNKNOWN_ESTIMATE_CONSERVATION';}
-  else{try{const allocation=allocateFrozenReferralPair(input.estimate.baseCents,renter.status==='ELIGIBLE'?renter.ratio:null,owner.status==='ELIGIBLE'?owner.ratio:null,policy.minimumAccrualCents);for(const r of roles)if(r.status==='ELIGIBLE'){const amount=r.role==='RENTER_REFERRAL'?allocation.renterCents:allocation.ownerCents;r.estimatedCents=amount;if(amount===null)r.status='SKIPPED_BELOW_MIN';}}
-   catch(e){if((e as {status?:number}).status!==409)throw e;for(const r of roles)if(r.status==='ELIGIBLE')r.status='UNKNOWN_ESTIMATE_CONSERVATION';}}
+  else{try{const allocation=allocateFrozenReferralPair(input.estimate.baseCents,renter.status==='ELIGIBLE'?renter.ratio:null,owner.status==='ELIGIBLE'?owner.ratio:null,input.fixedFeePricing===undefined?policy.minimumAccrualCents:'0');for(const r of roles)if(r.status==='ELIGIBLE'){const amount=r.role==='RENTER_REFERRAL'?allocation.renterCents:allocation.ownerCents;r.estimatedCents=input.fixedFeePricing===undefined?amount:amount??'0';if(amount===null&&input.fixedFeePricing===undefined)r.status='SKIPPED_BELOW_MIN';}}
+   catch(e){if((e as {status?:number}).status!==409)throw e;if(input.fixedFeePricing===undefined)for(const r of roles)if(r.status==='ELIGIBLE')r.status='UNKNOWN_ESTIMATE_CONSERVATION';}}
  }
- const basis={schema:'payment-distribution-basis.v1' as const,orderId:input.orderId,gameId:input.gameId,currency:'CNY' as const,confirmationId:input.confirmationId,acceptedAt,paymentDigest:input.paymentDigest,admissionId:input.admissionId,admissionRevision:input.admissionRevision,policyVersion:input.policy?.versionId??null,policyDigest:input.policy?.digest??null,policyConfig:policy,accountMode:input.accountMode,estimateBaseCents:input.estimate?.baseCents??null,estimateDigest:input.estimate?.sourceDigest??null,roles:roles.sort((a,b)=>a.role.localeCompare(b.role))};
+ const common={orderId:input.orderId,gameId:input.gameId,currency:'CNY' as const,confirmationId:input.confirmationId,acceptedAt,paymentDigest:input.paymentDigest,admissionId:input.admissionId,admissionRevision:input.admissionRevision,policyVersion:input.policy?.versionId??null,policyDigest:input.policy?.digest??null,policyConfig:policy,accountMode:input.accountMode,estimateBaseCents:input.estimate?.baseCents??null,estimateDigest:input.estimate?.sourceDigest??null,roles:roles.sort((a,b)=>a.role.localeCompare(b.role))};
+ const basis=input.fixedFeePricing===undefined?{schema:'payment-distribution-basis.v1' as const,...common}:{schema:'payment-distribution-basis.v2' as const,...common,fixedFeePricing:fixedPricingOrNull(input.fixedFeePricing)};
  return{...basis,digest:sha(canonicalize(basis))};
 }
 

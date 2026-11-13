@@ -245,6 +245,7 @@ export type Presentation = {
 export type PublicationFact = {
   source: string;
   publishedAt: string;
+  priceVersionId?: string;
 };
 
 export type Version = {

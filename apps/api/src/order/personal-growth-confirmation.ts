@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {SecurityApiError} from "../auth/security-core";
 import {chooseCompleteOffer,quoteToGrowthOfferPlan,type GrowthOfferPlan,type GrowthTier,type NormalGrowthTier,type OfferBinding} from "../auth/membership-growth";
-import {canonicalize,normalizeQuote,normalizeTime} from "../supply/content-hash";
+import {canonicalize,normalizePricingPolicy,normalizeQuote,normalizeTime} from "../supply/content-hash";
 import {yuanAmountObject} from "../supply/decimal";
 import {applyTotalDiscountToQuote} from "../auth/membership-total-discount";
 import type {InternalQuote} from "../supply/pricing";
@@ -12,7 +12,7 @@ export type GrowthConfirmationKnown={knowledge:"KNOWN";policyVersion:string;cand
   effectiveTier?:Exclude<GrowthTier,"UNKNOWN">;policyTier?:NormalGrowthTier;asOfUtc?:string};
 const fail=(message:string):never=>{throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN",message);};
 const tiers=["STANDARD","SILVER","GOLD","PLATINUM","DIAMOND","BLACK_GOLD"] as const;
-export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:OfferBinding,asOfUtc:string,baseQuote:InternalQuote){
+export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:OfferBinding,asOfUtc:string,baseQuote:InternalQuote,discountOrdering?:"STABLE"){
   if(!known.effectiveTier || !tiers.includes(known.effectiveTier) || !known.policyTier || !["STANDARD","SILVER","GOLD","PLATINUM","DIAMOND"].includes(known.policyTier) || known.asOfUtc!==asOfUtc || !/^[1-9]\d{0,18}$/.test(known.policyVersion))return fail("Growth benefit metadata is unavailable");
   if((known.effectiveTier==="BLACK_GOLD"?"DIAMOND":known.effectiveTier)!==known.policyTier)return fail("Growth benefit tier binding is invalid");
   for(const candidate of known.candidates){
@@ -30,7 +30,7 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
   const selected=known.candidates.find(c=>c.plan===choice.selected);if(!selected)return fail("Selected offer cannot be recovered");
   if(selected.payableRatio!==undefined){
     const base=normalizeQuote({...baseQuote,tenantDeposit:selected.quote.tenantDeposit});
-    const verified=applyTotalDiscountToQuote(base,selected.payableRatio);
+    const verified=applyTotalDiscountToQuote(base,selected.payableRatio,discountOrdering);
     if(!verified||canonicalize(verified.quote)!==canonicalize(normalizeQuote(selected.quote)))return fail("Selected discount does not match the frozen quote");
   }
   const depositPlan=known.candidates.find(c=>c.plan.source===choice.depositBasis && (c.plan.depositWaived?"0":c.plan.depositCents)===choice.depositCents && (c.plan.validUntil==null || normalizeTime(c.plan.validUntil)!>normalizeTime(asOfUtc)!))?.plan;
@@ -45,9 +45,10 @@ export function selectPersonalGrowthOffer(known:GrowthConfirmationKnown,binding:
   return {quote,benefits,growth,...(selected.payableRatio===undefined?{}:{payableRatio:selected.payableRatio})};
 }
 
-/** Shared frozen-v4 consumer for settlement. It never reselects current benefits or recalculates an old order. */
+/** The frozen growth selection is shared by v4 and the separately price-bound v5. */
 export function frozenPersonalGrowthV4Valid(personal:Record<string,unknown>,expected:{userId:string;ownerUserId:string;accountId:string;listingVersionId:string;ruleReleaseId:string;listingHash:string},depositCents:string):boolean{
-  if(personal.schema!=="personal-quote-v4" || Object.hasOwn(personal,"membership") || personal.userId!==expected.userId || personal.ownerUserId!==expected.ownerUserId || personal.accountId!==expected.accountId || personal.listingVersionId!==expected.listingVersionId || personal.listingHash!==expected.listingHash)return false;
+  if(!["personal-quote-v4","personal-quote-v5","personal-quote-v6"].includes(String(personal.schema)) || Object.hasOwn(personal,"membership") || personal.userId!==expected.userId || personal.ownerUserId!==expected.ownerUserId || personal.accountId!==expected.accountId || personal.listingVersionId!==expected.listingVersionId || personal.listingHash!==expected.listingHash)return false;
+  if(personal.schema==="personal-quote-v5"||personal.schema==="personal-quote-v6")try{if(normalizePricingPolicy(personal.pricingPolicy).pricingModel!==(personal.schema==="personal-quote-v5"?"FIXED_FEE":"SPREAD"))return false;}catch{return false;}
   const g=personal.membershipGrowth as Record<string,unknown>|undefined,b=g?.binding as Record<string,unknown>|undefined;
   return !!g && g.schema==="membership-growth-v2" && typeof g.policyVersion==="string" && /^[1-9]\d{0,18}$/.test(g.policyVersion) && tiers.includes(g.effectiveTier as Exclude<GrowthTier,"UNKNOWN">)
     && g.policyTier===(g.effectiveTier==="BLACK_GOLD"?"DIAMOND":g.effectiveTier) && ["GROWTH","FRIEND","PRESTIGE"].includes(String(g.selectedSource)) && ["GROWTH","FRIEND","PRESTIGE"].includes(String(g.depositSource))

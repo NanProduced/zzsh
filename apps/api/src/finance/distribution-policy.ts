@@ -68,10 +68,26 @@ export function distributionPolicyRates(policy:DistributionPolicyConfig,levelCod
  const level=policy.levels.find(l=>l.code===levelCode);return level?{mode:'LEVEL' as const,levelCode:level.code,renterPercent:level.renterPercent,ownerPercent:level.ownerPercent}:null;
 }
 export function usesLegacyRentalDistributionBase(policy:DistributionPolicyConfig|null|undefined){return policy?.schema==='distribution-policy.v3'||policy?.schema==='distribution-policy.v4'&&policy.baseMode==='LEGACY_RENTAL';}
-/** Pair applies the actual payment-frozen ratios; no rebalance or silent subsidy. */
-export function allocateFrozenReferralPair(baseCents:string,renter:ReferralRatio|null,owner:ReferralRatio|null,minimumAccrualCents:string){
- const base=BigInt(unsigned(baseCents)),minimum=BigInt(unsigned(minimumAccrualCents));const amount=(r:ReferralRatio|null)=>{if(!r)return 0n;const n=BigInt(unsigned(r.numerator)),d=BigInt(unsigned(r.denominator));if(d===0n||n>d)throw invalid('Frozen referral ratio invalid');return divideToScale({value:base*n,scale:0},{value:d,scale:0},0).value;};
- const r=amount(renter),o=amount(owner);if(r+o>base)throw conflict('Rounded referral pair exceeds source base');return{renterCents:r>0n&&r>=minimum?r.toString():null,ownerCents:o>0n&&o>=minimum?o.toString():null,skipped:{renter:r===0n||r<minimum,owner:o===0n||o<minimum}};
+export function allocateFrozenReferralPair(
+ baseCents:string,renter:ReferralRatio|null,owner:ReferralRatio|null,minimumAccrualCents:string,
+ rounding:'LEGACY'|'FIXED_FEE'='LEGACY',
+){
+ const base=BigInt(unsigned(baseCents)),minimum=BigInt(unsigned(minimumAccrualCents));
+ const amount=(ratio:ReferralRatio|null)=>{
+  if(!ratio)return 0n;
+  const n=BigInt(unsigned(ratio.numerator)),d=BigInt(unsigned(ratio.denominator));
+  if(d===0n||n>d)throw invalid('Frozen referral ratio invalid');
+  return divideToScale({value:base*n,scale:0},{value:d,scale:0},0).value;
+ };
+ const renterRounded=amount(renter),ownerRounded=amount(owner);
+ if(rounding==='FIXED_FEE'&&renter&&owner)boundedPair(renter,owner);
+ const excess=renterRounded+ownerRounded-base;
+ if(excess>0n&&rounding==='LEGACY')throw conflict('Rounded referral pair exceeds source base');
+ // The renter keeps their rounded share. The owner absorbs only the excess, before either minimum is applied.
+ const ownerAllocated=excess>0n?ownerRounded-excess:ownerRounded;
+ const payable=(cents:bigint)=>cents>0n&&cents>=minimum?cents.toString():null;
+ const renterCents=payable(renterRounded),ownerCents=payable(ownerAllocated);
+ return {renterCents,ownerCents,skipped:{renter:renterCents===null,owner:ownerCents===null}};
 }
 export function frozenDistributionPolicyDigest(config:DistributionPolicyConfig){return createHash('sha256').update(canonicalize(config)).digest('hex');}
 
