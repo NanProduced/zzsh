@@ -200,7 +200,7 @@ async function mountHarness(t, { fetchImpl, perms, surface }) {
       );
     });
   await render();
-  const settle = async (ms = 25) => {
+  const settle = async (ms = 0) => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, ms));
     });

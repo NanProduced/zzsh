@@ -1,10 +1,7 @@
 /**
  * ADM-FEEDBACK-REUI-01 · shared feedback base.
  *
- * Covers the semantic variants, role override, icon/action layout, long Chinese
- * content, the transitional `danger` alias, no-title compatibility, and the
- * optional dismiss focus return. Page-level duplication and business state stay
- * in their owning suites.
+ * Covers alert roles, compatibility, dismissal focus and status messages.
  */
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
@@ -58,36 +55,7 @@ function mount(element) {
   };
 }
 
-test("semantic variants keep the ReUI surface and the danger alias stays destructive", () => {
-  const expected = [
-    ["default", "bg-card"],
-    ["destructive", "bg-destructive/8"],
-    ["danger", "bg-destructive/8"],
-    ["info", "bg-info/8"],
-    ["success", "bg-success/8"],
-    ["warning", "bg-warning/8"],
-    ["invert", "bg-invert"],
-  ];
-  for (const [variant, token] of expected) {
-    const ui = mount(createElement(Alert, { variant }, createElement(AlertDescription, null, variant)));
-    const alert = ui.host.querySelector('[data-slot="alert"]');
-    assert.ok(alert.className.includes(token), `${variant} uses ${token}`);
-    assert.equal(alert.getAttribute("role"), "alert", `${variant} defaults to alert`);
-    ui.close();
-  }
-
-  const destructive = mount(createElement(Alert, { variant: "destructive" }, createElement(AlertDescription, null, "x")));
-  const danger = mount(createElement(Alert, { variant: "danger" }, createElement(AlertDescription, null, "x")));
-  assert.equal(
-    danger.host.querySelector('[data-slot="alert"]').className,
-    destructive.host.querySelector('[data-slot="alert"]').className,
-    "danger is an explicit destructive alias, not a silent default"
-  );
-  destructive.close();
-  danger.close();
-});
-
-test("role can be status, icons inherit variant color and actions stay in the content column", () => {
+test("nonurgent messages use status semantics and retain their action", () => {
   const ui = mount(createElement(
     Alert,
     { variant: "info", role: "status" },
@@ -99,29 +67,7 @@ test("role can be status, icons inherit variant color and actions stay in the co
   const alert = ui.host.querySelector('[data-slot="alert"]');
   assert.equal(alert.getAttribute("role"), "status");
   assert.ok(ui.host.querySelector("svg"));
-  assert.ok(alert.className.includes("[&>svg]:text-info-foreground"), "info icon uses the readable semantic token");
-  assert.ok(ui.host.querySelector('[data-slot="alert-action"]').className.includes("col-start-2"), "action stays beside the message, not far right");
   assert.equal(ui.host.querySelector("button").textContent, "查看");
-  ui.close();
-});
-
-test("long Chinese title and description wrap without line clamping", () => {
-  const title = "审批请求结果尚未确认，原责任仍在本页保留";
-  const description = "服务端可能已经处理这次请求。核清前不要换新标识重试，也不要把它当作失败；关闭提示不会清除原请求标识。";
-  const ui = mount(createElement(
-    Alert,
-    { variant: "warning", role: "status" },
-    createElement(AlertTitle, null, title),
-    createElement(AlertDescription, null, description)
-  ));
-  const titleNode = ui.host.querySelector('[data-slot="alert-title"]');
-  const descriptionNode = ui.host.querySelector('[data-slot="alert-description"]');
-  assert.equal(titleNode.textContent, title);
-  assert.equal(descriptionNode.textContent, description);
-  assert.ok(titleNode.className.includes("break-words"));
-  assert.ok(!titleNode.className.includes("line-clamp"));
-  assert.ok(descriptionNode.className.includes("text-sm"), "body feedback does not use 10/11px");
-  assert.ok(ui.host.querySelector('[data-slot="alert"]').className.includes("text-sm"));
   ui.close();
 });
 

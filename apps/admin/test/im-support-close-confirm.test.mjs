@@ -1,3 +1,4 @@
+import { grantedSupportConnection } from "./support-connection-fixture.mjs";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -105,6 +106,8 @@ globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input), browser.location.href);
   const method = init.method ?? "GET";
   requests.push({ path: `${url.pathname}${url.search}`, method });
+  const connection = grantedSupportConnection(url.pathname, init.method);
+  if (connection) return connection;
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: currentAdmin, token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations") && method === "GET") {
     const rows = ["a", "b"]

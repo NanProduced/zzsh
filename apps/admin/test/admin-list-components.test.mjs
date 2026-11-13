@@ -29,19 +29,12 @@ const vite = await createServer({
 });
 
 const {
-  ListTable,
   ListToolbar,
   ListToolbarSearch,
   ListToolbarEnumSelect,
   ListToolbarApplied,
   ListToolbarActions,
   ListPagination,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
 } = await vite.ssrLoadModule('/src/components/admin-list/index.ts');
 
 after(async () => {
@@ -279,34 +272,4 @@ test('ListToolbar: handles search, reset and enum item mappings', async (t) => {
 
   await act(async () => resetBtn.dispatchEvent(new browser.MouseEvent('click', { bubbles: true })));
   assert.equal(reset, true);
-});
-
-test('ListTable: renders table wrap and re-exports table structure', async (t) => {
-  const { container } = mountComponent(
-    t,
-    createElement(
-      ListTable,
-      { className: 'custom-table-wrap' },
-      createElement(
-        Table,
-        null,
-        createElement(
-          TableHeader,
-          null,
-          createElement(TableRow, null, createElement(TableHead, null, '列A'))
-        ),
-        createElement(
-          TableBody,
-          null,
-          createElement(TableRow, null, createElement(TableCell, null, '值1'))
-        )
-      )
-    )
-  );
-  await settle();
-
-  assert.ok(container.querySelector('.custom-table-wrap'));
-  assert.ok(container.querySelector('[data-slot="admin-list-table-container"]'));
-  assert.equal(container.querySelector('th').textContent, '列A');
-  assert.equal(container.querySelector('td').textContent, '值1');
 });

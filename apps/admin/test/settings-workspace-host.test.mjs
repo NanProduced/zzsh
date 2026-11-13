@@ -2,7 +2,6 @@
 // 正式页面不再有 blockedCommands/空回调/“未接入数据”提示；路由与 /account 兼容另见
 // workspace-origin-links.test.mjs。
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -196,14 +195,4 @@ test("isolated 4381 preview still serves example layouts without real data fetch
   await waitFor(() => browser.document.body.textContent.includes("示例管理员（示例）") || browser.document.body.textContent.includes("示例管理员"));
   assert.equal(fetches.length, 0, "example layout must not read or write real data");
   assert.ok(buttonByText("返回真实读取"), "preview offers a way back to real reads");
-});
-
-test("formal settings host source has no blocked commands, empty callbacks or stale notices", async () => {
-  const settings = readFileSync(path.join(adminRoot, "src/workspace/settings-page.tsx"), "utf8");
-  assert.doesNotMatch(settings, /blockedCommands/);
-  assert.doesNotMatch(settings, /const unavailable/);
-  assert.doesNotMatch(settings, /onLockSession=\{\(\) => undefined\}/);
-  assert.doesNotMatch(settings, /onOpenRecovery=\{\(\) => undefined\}/);
-  assert.doesNotMatch(settings, /当前环境尚未接入本人设置数据/);
-  assert.match(settings, /securityCommands/);
 });

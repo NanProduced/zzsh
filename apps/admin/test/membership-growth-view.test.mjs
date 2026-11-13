@@ -18,7 +18,7 @@ async function ui(t) {
   globalThis.window=browser;globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);
   globalThis.requestAnimationFrame=browser.requestAnimationFrame.bind(browser);globalThis.cancelAnimationFrame=browser.cancelAnimationFrame.bind(browser);globalThis.IS_REACT_ACT_ENVIRONMENT=true;
   Object.defineProperty(globalThis,'navigator',{value:browser.navigator,configurable:true});
-  const vite=await createServer({configFile:false,root:rootPath,plugins:[react()],resolve:{alias:{'@':fileURLToPath(new URL('../src',import.meta.url))}},server:{middlewareMode:true,hmr:false,ws:false,watch:null},optimizeDeps:{noDiscovery:true,include:[]}});
+  const vite=await createServer({ ssr: { external: ["@zzsh/content"] },configFile:false,root:rootPath,plugins:[react()],resolve:{alias:{'@':fileURLToPath(new URL('../src',import.meta.url))}},server:{middlewareMode:true,hmr:false,ws:false,watch:null},optimizeDeps:{noDiscovery:true,include:[]}});
   const view=await vite.ssrLoadModule('/src/views/membership-growth-view.tsx'),form=await vite.ssrLoadModule('/src/views/membership-entitlement-form.tsx'),businessSummary=await vite.ssrLoadModule('/src/views/approval/business-summary.tsx');
   const host=browser.document.createElement('div');browser.document.body.append(host);
   const {createRoot}=await import('react-dom/client'),root=createRoot(host);
@@ -613,7 +613,7 @@ test("unified policy draft validation stays conservative and never fills missing
 });
 
 test("policy approval uses immutable saved-draft metadata rather than the full policy body", async () => {
-  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)), "@brand": fileURLToPath(new URL("../../../assets/brand", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  const vite = await createServer({ ssr: { external: ["@zzsh/content"] }, configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)), "@brand": fileURLToPath(new URL("../../../assets/brand", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
   try {
     const { policyDraftApprovalPayload } = await vite.ssrLoadModule("/src/views/membership-growth-admin-host.tsx");
     const meta = { id: "draft-1", version: "2", status: "DRAFT", payloadHash: "a".repeat(64), ruleReleaseId: "release-1", priceVersionId: "price-1", sourceRef: "fixture", effectiveAtUtc: "2026-10-10T00:00:00.000Z" };
@@ -626,7 +626,7 @@ test("policy approval uses immutable saved-draft metadata rather than the full p
 });
 
 test("GAP-007 membership host gate matches nav/API read admission and hides writes from summary readers", async () => {
-  const vite = await createServer({ configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
+  const vite = await createServer({ ssr: { external: ["@zzsh/content"] }, configFile: false, root: rootPath, plugins: [react()], resolve: { alias: { "@": fileURLToPath(new URL("../src", import.meta.url)) } }, server: { middlewareMode: true, hmr: false, watch: null }, optimizeDeps: { noDiscovery: true, include: [] } });
   try {
     const { membershipGrowthAccess } = await vite.ssrLoadModule("/src/views/membership-growth-admin-host.tsx");
     const snap = (permissions, isBoss = false) => ({ authenticated: true, permissions, security: { isBoss } });

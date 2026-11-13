@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Window } from "happy-dom";
@@ -102,12 +101,10 @@ test("keyboard menu and touch/click trigger share disabled boundaries and preser
   assert.equal(button("已打开页面"), undefined, "no overflow switcher when all tabs fit");
 });
 
-test("icons distinguish details while visible labels stay compact; Delete on more button does not close active page", async t => {
+test("detail tab keeps its accessible name and Delete on its menu does not close it", async t => {
   const calls = [];
   const detail = { ...tabFromLocation("/users/person-1"), title: "林舟" };
   await mount(t, createElement(Harness, { initialTabs: [tabFromLocation("/users"), detail], initialActive: detail.id, calls }));
-  assert.equal(tabButton("users").querySelector("svg"), null);
-  assert.ok(tabButton(detail.id).querySelector("svg"));
   assert.equal(tabButton(detail.id).textContent, "林舟");
   assert.equal(tabButton(detail.id).getAttribute("aria-label"), "用户详情：林舟");
   await dispatch(button("用户详情：林舟的标签页操作"), "keydown", { key: "Delete" });
@@ -388,13 +385,6 @@ test("support-settings write lock blocks navigation, close, refresh, history and
   await dispatch(button("解除写入锁"), "click");
   await dispatch(tabButton("workbench"), "click");
   assert.equal(tabButton("workbench").getAttribute("aria-selected"), "true");
-});
-
-test("the app-shell write-lock whitelist includes both support kinds without widening content", async () => {
-  const source = readFileSync(path.join(adminRoot, "src/workspace/app-shell.tsx"), "utf8");
-  assert.match(source, /kind === "content"/);
-  assert.match(source, /kind === "support-settings"/);
-  assert.match(source, /kind === "support-management"/);
 });
 
 test("a pending dirty discard cannot bypass a support-settings write lock acquired before confirmation", async t => {

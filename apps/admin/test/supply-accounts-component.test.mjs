@@ -13,7 +13,7 @@ function workDetail() {
   d.supervision = { historical: false, facts, changes: null, previousVersion: null, restrictionHistory: { state: 'NOT_RECORDED', items: [], limit: 20 }, ownerLink: { state: 'READY', userId: 'owner-a' }, orders: { state: 'READY', items: [], total: 0 } };
   d.contextKey = 'ctx'; return d;
 }
-const tick = async (h) => { for (let i = 0; i < 6; i++) await h.settle(); };
+const tick = (h) => h.settle(0);
 async function pickAccountStatus(h, label) {
   await h.click(h.el.querySelector('[aria-label="账号状态"]')); await tick(h);
   const option = [...h.browser.document.querySelectorAll('[role="option"]')].find(node => node.textContent.trim() === label); assert(option, label);

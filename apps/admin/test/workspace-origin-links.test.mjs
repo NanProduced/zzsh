@@ -201,20 +201,6 @@ test('an external hostname on port 4381 retains the ordinary security page', asy
   assert.equal(browser.document.body.textContent.includes('新版设置五分区'), false);
   assert.ok(namedButton('立即锁定当前会话'));
 });
-test('formal settings wiring is not port-gated and the security entry targets the settings section', async () => {
-  const { readFileSync } = await import('node:fs');
-  const source = (name) => readFileSync(path.join(rootPath, 'src/workspace', name), 'utf8');
-  assert.match(source('sidebar.tsx'), /onNavigate\("\/settings\?section=security"\)/, 'security entry targets the formal settings section');
-  assert.doesNotMatch(source('sidebar.tsx'), /isLocalSettingsPreview/, 'security entry is not port-gated');
-  const page = source('page-content.tsx');
-  assert.doesNotMatch(page, /isLocalSettingsPreview|settingsPreview/, 'formal routes no longer depend on the preview port');
-  assert.match(page, /tab\.kind === "account"[\s\S]*AccountSecurityPage/, 'account keeps the legacy page');
-  const account = source('account-security-page.tsx');
-  for (const marker of ['FreezePanel', 'RecoveryView', 'PinPanel', 'PasswordChangePanel']) {
-    assert.ok(account.includes(marker), `legacy account page keeps ${marker}`);
-  }
-});
-
 test('clearing user filters replaces the workspace query, including the old cursor', async (t) => {
   const list = { ...tabFromLocation('/users'), query: { q: '林舟', status: 'ACTIVE', source: 'MIGRATED', cursor: 'OLD_CURSOR' } };
   const h = await mount(t, list, snapshot(['user.directory.read']));

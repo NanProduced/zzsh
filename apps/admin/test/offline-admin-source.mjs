@@ -4,6 +4,9 @@ import {createRequire,Module} from "node:module";
 import {fileURLToPath} from "node:url";
 
 const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),"../../.."),require=createRequire(path.join(tree,"package.json")),ts=require("typescript");
+// Reuse only emitted JS. Each loader still evaluates fresh modules for the case.
+const compiled = new Map();
+
 /** Current T component probes use the same in-memory TypeScript loading as Web tests: no Vite, listener, optimizer or dependency write. */
 export async function createOfflineAdminSource(options){
   const root=options.root,cache=new Map();
@@ -29,10 +32,19 @@ export async function createOfflineAdminSource(options){
       if(name.startsWith("@zzsh/")){const shared=native.resolve(name);if(/\.(?:tsx?|jsx?)$/.test(shared))return load(shared);}
       return native(name);
     };
-    const source=fs.readFileSync(file,"utf8");
-    // .mjs 会让 transpileModule 保留 ESM 语法（impliedNodeFormat）；按 .js 转译成 CJS 才能走 m.require。
-    const transpileName=file.endsWith(".mjs")?file.slice(0,-4)+".js":file;
-    m._compile(ts.transpileModule(source,{fileName:transpileName,compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
+    const source = fs.readFileSync(file, "utf8");
+    let artifact = compiled.get(file);
+    if (artifact?.source !== source) {
+      // Treat .mjs as .js so TypeScript emits CommonJS for Module._compile.
+      const transpileName = file.endsWith(".mjs") ? file.slice(0, -4) + ".js" : file;
+      const { outputText } = ts.transpileModule(source, {
+        fileName: transpileName,
+        compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+      });
+      artifact = { source, outputText };
+      compiled.set(file, artifact);
+    }
+    m._compile(artifact.outputText, file);
     return m.exports;
   };
   return {ssrLoadModule:async url=>load(path.join(root,url.replace(/^\//,""))),close:async()=>cache.clear()};

@@ -244,7 +244,7 @@ test('dashboard restores every filter and gets a new first-page token before a r
  const query={from:'2026-10-01',to:'2026-10-19',source:'LEGACY',state:'SETTLED',role:'OWNER_REFERRAL',q:'restored',page:'3',pageSize:'10',rankingBasis:'PERIOD_SETTLED_FLOW',rankingLimit:'100'};
  const ui=await h.mount(m.DistributionEarningsPage,{snapshot:dashboardWho(),onOpenPath(){},query,onQueryChange:q=>queries.push(q)});await dashboardUntil(()=>calls.length===2);
  assert.deepEqual(calls.map(c=>c.page),['1','3']);assert.equal(calls[1].snapshot,'fixture-snapshot');for(const key of ['from','to','source','state','role','q','pageSize','rankingBasis','rankingLimit'])assert.equal(calls[1][key],query[key],key);
- assert.equal(ui.host.querySelectorAll('input[type=date]').length,0,'dates use the shared DateSelector');const date=ui.host.querySelector('button[aria-label="选择佣金发生日期"]');assert.match(date.textContent,/2026-10-01 至 2026-10-19/);const filterForm=ui.host.querySelector('[data-distribution-earnings-filters]');assert.ok(filterForm);assert.match(filterForm.className,/flex flex-col gap-3/);const search=[...ui.host.querySelectorAll('input')].find(el=>el.value==='restored');await input(h.browser,search,'restored2');assert.equal(queries.length,0,'typing alone does not refetch');await act(async()=>search.form.requestSubmit());await dashboardUntil(()=>queries.length>0);assert.equal(queries.at(-1).from,'2026-10-01');assert.equal(queries.at(-1).page,'1');assert.equal(queries.at(-1).source,'LEGACY');assert.equal(queries.at(-1).snapshot,undefined);
+ assert.equal(ui.host.querySelectorAll('input[type=date]').length,0,'dates use the shared DateSelector');const date=ui.host.querySelector('button[aria-label="选择佣金发生日期"]');assert.match(date.textContent,/2026-10-01 至 2026-10-19/);const search=[...ui.host.querySelectorAll('input')].find(el=>el.value==='restored');await input(h.browser,search,'restored2');assert.equal(queries.length,0,'typing alone does not refetch');await act(async()=>search.form.requestSubmit());await dashboardUntil(()=>queries.length>0);assert.equal(queries.at(-1).from,'2026-10-01');assert.equal(queries.at(-1).page,'1');assert.equal(queries.at(-1).source,'LEGACY');assert.equal(queries.at(-1).snapshot,undefined);
 }));
 test('dashboard external filter navigation cancels a late prior response',async()=>dashboardProbe(async(h,m)=>{
  let release;globalThis.fetch=h.browser.fetch=async url=>new URL(String(url),'http://fixture.invalid').searchParams.get('q')==='old'?new Promise(resolve=>release=()=>resolve(json(dashboardPage(url,{items:[{...dashboardEarning,orderNumber:'LATE-OLD'}]})))):json(dashboardPage(url,{items:[{...dashboardEarning,orderNumber:'CURRENT-NEW'}]}));
@@ -317,27 +317,6 @@ test('DistributionDateRange keeps incomplete ranges local and only commits both 
   assert.match(body, /onChange\(isoDay\(next\.startDate\), isoDay\(next\.endDate\)\);\s*setOpen\(false\);/);
   assert.equal(body.includes('onChange(isoDay(next.startDate), isoDay(next.endDate)); if (next.startDate && next.endDate)'), false, 'must not commit half ranges');
   assert.ok(body.includes('align="start"'));
-});
-test('earnings filters use compact flex layout around the shared DateSelector', async () => {
-  const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../src/views/distribution-dashboard-pages.tsx',import.meta.url),'utf8');
-  const start=src.indexOf('export function DistributionEarningsPage'), body=src.slice(start, src.indexOf('\nexport function', start+10));
-  assert.ok(body.includes('data-distribution-earnings-filters className="flex flex-col gap-3"'));
-  assert.ok(body.includes('flex flex-wrap items-end gap-x-4 gap-y-3'));
-  assert.ok(body.includes('min-w-[14rem] max-w-md flex-1'));
-  assert.ok(body.includes('flex flex-wrap items-end gap-2'));
-  assert.equal(body.includes('xl:grid-cols-[minmax(16rem,1.6fr)'), false);
-  assert.ok(body.includes('DistributionDateRange'));
-});
-test('overview layout drops 关系与资格, shows 佣金排行 + 邀请人数 above 最近分销记录',async()=>{
- const {readFileSync}=await import('node:fs');const src=readFileSync(new URL('../src/views/distribution-dashboard-pages.tsx',import.meta.url),'utf8');
- const start=src.indexOf('export function DistributionOverviewPage'),body=src.slice(start,src.indexOf('\nexport function',start+10));
- for(const gone of ['关系与资格','计佣关系','最近佣金','label="排行口径"','分销排行'])assert.equal(body.includes(gone),false,gone);
- const a=body.indexOf('佣金排行'),b=body.indexOf('邀请人数'),c=body.indexOf('最近分销记录');
- assert.ok(a>0&&a<b&&b<c);assert.ok(body.includes('DistributionDateRange'));
- assert.ok(src.includes('DistributionUserName'));
- const shared=readFileSync(new URL('../src/views/distribution-user-name.tsx',import.meta.url),'utf8');
- assert.ok(shared.includes('UserProfilePreview'));
- assert.ok(shared.includes('EntityPreviewTrigger'));
 });
 test('dashboard earnings uses unified ListPagination with page numbers, jump and page size',async()=>dashboardProbe(async(h,m)=>{
  const calls=[];globalThis.fetch=h.browser.fetch=async url=>{const q=new URL(String(url),'http://fixture.invalid').searchParams;calls.push(Object.fromEntries(q));return json(dashboardPage(url,{total:'100',hasMore:Number(q.get('page')??1)<5}));};

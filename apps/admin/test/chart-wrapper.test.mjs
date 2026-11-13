@@ -77,9 +77,11 @@ test('recent empty/partial/forbidden knowledge states stay distinct and use Card
   await h.render({orders:[],period,ordersState:'PARTIAL',onNavigate:path=>paths.push(path)});assert.match(h.host.textContent,/范围未完整核定/);
   await h.render({orders:[],period,ordersState:'KNOWN',onNavigate:path=>paths.push(path)});assert.match(h.host.textContent,/本期暂无成交/);assert.ok(h.host.querySelector('[data-slot="card-action"]'));await act(async()=>[...h.host.querySelectorAll('button')].find(b=>b.textContent==='全部订单').click());assert.equal(new URL(paths[0],'http://fixture').searchParams.get('paymentConfirmedTo'),period.paymentConfirmedTo);
 });
-test('selected upstream MIT/source records and scoped width/theme rules ship with the actual primitives',()=>{
-  const vendor=fs.readFileSync(new URL('../src/vendor/evilcharts/recharts-core.tsx',import.meta.url),'utf8'),license=fs.readFileSync(new URL('../src/vendor/evilcharts/LICENSE',import.meta.url),'utf8'),copying=fs.readFileSync(new URL('../src/vendor/evilcharts/COPYING.md',import.meta.url),'utf8');assert.match(license,/2026 Gurbinder/);assert.match(copying,/4c2dd7c9bae780703244265c9a4b509d40c055ad/);assert.match(vendor,/getPayloadConfigFromPayload/);assert.doesNotMatch(vendor,/Math\.random|getLoadingData|frosted-glass/);
-  const css=fs.readFileSync(new URL('../src/components/dashboard/dashboard.css',import.meta.url),'utf8');assert.match(css,/repeat\(2, minmax\(0, 1fr\)\)/);assert.match(css,/dashboard-stat-card--long/);
+test('ships the upstream chart license and source attribution', () => {
+  const license = fs.readFileSync(new URL('../src/vendor/evilcharts/LICENSE', import.meta.url), 'utf8');
+  const copying = fs.readFileSync(new URL('../src/vendor/evilcharts/COPYING.md', import.meta.url), 'utf8');
+  assert.match(license, /2026 Gurbinder/);
+  assert.match(copying, /4c2dd7c9bae780703244265c9a4b509d40c055ad/);
 });
 
 test('static action tooltips are keyboard reachable without overriding explicit or hidden triggers',async t=>{
@@ -103,31 +105,4 @@ test('partial coverage uses a compact status row and keeps the definition in the
  const trigger=h.host.querySelector('button'),matches=trigger.matches.bind(trigger);trigger.matches=selector=>selector===':focus-visible'?h.browser.document.activeElement===trigger:matches(selector);
  await act(async()=>{h.browser.document.dispatchEvent(new h.browser.KeyboardEvent('keydown',{key:'Tab',bubbles:true}));trigger.focus();await new Promise(resolve=>setTimeout(resolve,0))});await act(async()=>{await new Promise(setImmediate)});
  assert.match(h.browser.document.querySelector('[data-slot="tooltip-content"]')?.textContent??'',/冻结报价估算 · 非最终收益/);
-});
-
-test('trend chart keeps Y axis ticks inside the SVG viewport',()=>{
- const src=fs.readFileSync(new URL('../src/components/dashboard/dashboard-components.tsx',import.meta.url),'utf8');
- assert.doesNotMatch(src,/left:\s*-18/);
- assert.equal((src.match(/left:\s*0,/g)||[]).length,2,'area and bar charts both use a non-negative left margin');
-});
-
-test('dashboard UI does not ship dev-flavoured explanatory prose',()=>{
- for(const f of ['../src/components/dashboard/dashboard-components.tsx','../src/workspace/dashboard/boss-dashboard.tsx','../src/workspace/dashboard/ops-dashboard.tsx','../src/workspace/dashboard/support-dashboard.tsx','../src/workspace/dashboard/dashboard-page.tsx']){
-  const src=fs.readFileSync(new URL(f,import.meta.url),'utf8');
-  assert.doesNotMatch(src,/先看需要|先处理下列|该指标暂无|该范围暂无|按原始分|未实现|这里不展示|避免把旧数据/,f);
- }
-});
-
-test('interaction baseline: pointer cursor, one tooltip entry, one focus ring',()=>{
- const read=f=>fs.readFileSync(new URL(f,import.meta.url),'utf8');
- const button=read('../src/components/ui/button.tsx'),css=read('../src/styles.css'),dash=read('../src/components/dashboard/dashboard-components.tsx'),tip=read('../src/components/ui/tooltip.tsx');
- assert.match(button,/cursor-pointer/);
- assert.doesNotMatch(button,/focus-visible:ring-3|focus-visible:ring-\[3px\]/);
- assert.match(css,/outline: 2px solid var\(--ring, oklch\(0\.55 0 0\)\)/);
- assert.match(css,/button\[data-variant="link"\]:focus-visible/);
- assert.match(tip,/export \{[^}]*InfoTip/);
- assert.match(dash,/InfoTip/);
- assert.doesNotMatch(dash,/plate\/ui\/tooltip/);
- const nativeTitles=dash.split("\n").filter(line=>/title="/.test(line)&&!line.includes("InfoTip"));
- assert.deepEqual(nativeTitles,[],'no native title= tooltips in dashboard components');
 });

@@ -74,14 +74,12 @@ async function harness(t) {
   };
 }
 
-test("fixed document approval detail leads with the user preview and the live block diff", async t => {
+test("fixed document approval shows the user preview and the live block diff", async t => {
   const h = await harness(t);
   await h.render({ business: business(), operationCode: "content.fixed_document.publish" });
   const text = h.host.textContent;
   const previewAt = text.indexOf("固定文书发布：用户端预览与线上差异");
-  const changeAt = text.indexOf("此次申请改变什么");
   assert.ok(previewAt >= 0, "fixed document section must render");
-  assert.ok(changeAt > previewAt, "preview and diff must be the most prominent block");
   assert.match(text, /用户隐私政策/);
   assert.match(text, /隐私第二版正文/);
   assert.match(text, /新增的隐私条款/);

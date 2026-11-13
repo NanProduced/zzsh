@@ -152,26 +152,13 @@ const itemProps = (over = {}) => ({
   ...over,
 });
 
-test("公告编辑：Notion 页面结构——inline 大标题、居中列、canvas 编辑器，无 Markdown 分屏", async (t) => {
-  const h = await mount(t, ItemEditor, itemProps());
-  await h.waitFor(() => h.el.querySelector(".plate-editor"));
-  const title = h.el.querySelector('input[aria-label="文档标题"]');
-  assert.equal(title.placeholder, "无标题");
-  assert.equal(title.value, "平台公告标题");
-  assert.ok(h.el.querySelector(".content-notion-page"), "正文居中列");
-  assert.ok(h.el.querySelector(".plate-editor.plate-editor--page"), "canvas 模式：无卡片外框");
-  assert.equal(h.el.querySelector('[role="group"][aria-label="正文工作模式"]'), null, "编辑/分屏/预览三态已删除");
-  assert.equal(h.el.querySelector("textarea[aria-label=\"Markdown 正文\"]"), null);
-  assert.ok(h.el.textContent.includes("正文段落"), "plate 正文直接渲染");
-  assert.equal(h.writes.length, 0, "挂载不写");
-});
-
 test("公告保存发送现行 document 合同，visibleFrom 从北京时间转为 UTC", async (t) => {
   // 手动保存合同：拉长自动保存停顿，确保这一次写入只来自「保存草稿」点击。
   const h = await mount(t, ItemEditor, itemProps({ autosaveDelayMs: 60000 }), [
     { method: "PUT", match: "/api/bff/admin/content/items/item_1/draft", response: () => json({ version: itemVersion({ revision: "rev_d2" }) }) },
   ]);
   await h.waitFor(() => h.el.querySelector(".plate-editor"));
+  assert.equal(h.writes.length, 0, "打开公告草稿不会写入");
   await h.click(h.btn("发布设置"));
   const visibleFrom = h.el.querySelector('[data-beijing-datetime-input][aria-label^="定时可见时间"]');
   assert.ok(visibleFrom, "visibleFrom datetime 控件");

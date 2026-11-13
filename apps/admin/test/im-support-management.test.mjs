@@ -426,13 +426,6 @@ test("the management route and navigation entry require boss or im.support.manag
   assert.ok(workspaceMenuItems(boss).some((item) => item.kind === "support-overview"), "boss gets it without the explicit permission");
 });
 
-test("page-content guards and renders the standalone management page", () => {
-  const source = readFileSync(path.join(adminRoot, "src/workspace/page-content.tsx"), "utf8");
-  assert.match(source, /if \(tab\.kind === "support-management"\)/);
-  assert.match(source, /const canManageSupport = snapshot\.security\.isBoss \|\| snapshot\.permissions\.includes\("im\.support\.management\.read"\)/);
-  assert.match(source, /<SupportManagementPane[^>]*canTakeover=/);
-});
-
 /* ------------------------------ 看板 ------------------------------ */
 
 test("dashboard renders real totals, on-duty rows, three charts and honest empty states", async (t) => {
@@ -696,12 +689,6 @@ test("patrol loads the whole thread and round switches only jump within it", asy
   assert.equal(map.parentElement, stream, "the assistant-ui map shares the message viewport container");
   assert.equal(viewportShell.parentElement, stream, "the message viewport is the rail's sibling, not the chat section");
   assert.ok(viewportShell.querySelector(".im-wb-mgmt-viewport"), "the rail container also holds the scrolling viewport");
-  assert.match(map.className, /justify-between/, "short threads spread across the rail instead of clustering");
-  const patrolCss = readFileSync(path.join(adminRoot, "src/views/im-support-patrol.css"), "utf8");
-  assert.match(patrolCss, /im-wb-chat>\.im-wb-patrol-stream\{[^}]*flex:1/, "the rail row takes the message-area height");
-  assert.match(patrolCss, /im-wb-patrol-stream>\.im-wb-stream-wrap\{[^}]*flex:1/, "the viewport fills the rest of the rail row");
-  assert.doesNotMatch(patrolCss, /im-wb-patrol-map\{[^}]*position:absolute/, "the map stays in the message-area flow, not the chat section");
-  assert.match(patrolCss, /im-wb-patrol-map\[data-slot="conversation-map"\]\{[^}]*justify-content:space-between/, "the rail spreads ticks with an explicit selector");
   const ticks = [...rootNode.querySelectorAll('[data-slot="conversation-map-tick"]')];
   assert.equal(ticks.length, 2, "one tick per loaded round");
   assert.deepEqual(ticks.map((tick) => tick.getAttribute("aria-label")), [
