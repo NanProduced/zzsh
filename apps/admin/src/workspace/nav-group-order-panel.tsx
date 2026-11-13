@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownIcon, ArrowUpIcon, CheckIcon, RotateCcwIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, CheckIcon, ChevronDownIcon, RotateCcwIcon } from "lucide-react";
 
 import type { WorkspaceMenuItem } from "./nav-config.ts";
 import { NAV_FIXED_FIRST_GROUP_ID, NAV_FIXED_LAST_GROUP_ID, NAV_GROUP_DEFAULT_ORDER } from "./nav-config.ts";
@@ -103,10 +103,10 @@ function MoveButtons({
 }) {
   return (
     <div className={className}>
-      <button type="button" className={buttonClassName} disabled={upDisabled} onClick={() => onMove(-1)} aria-label={`将「${label}」上移`} title="上移">
+      <button type="button" className={buttonClassName} disabled={upDisabled} onClick={() => onMove(-1)} aria-label={`将「${label}」上移`}>
         <ArrowUpIcon className="size-3.5" aria-hidden="true" />
       </button>
-      <button type="button" className={buttonClassName} disabled={downDisabled} onClick={() => onMove(1)} aria-label={`将「${label}」下移`} title="下移">
+      <button type="button" className={buttonClassName} disabled={downDisabled} onClick={() => onMove(1)} aria-label={`将「${label}」下移`}>
         <ArrowDownIcon className="size-3.5" aria-hidden="true" />
       </button>
     </div>
@@ -196,6 +196,7 @@ export function NavGroupOrderPanel({
   const controller = useNavGroupOrder(adminUserId, items);
   const groups = splitNavGroups(orderNavGroups(items, controller.order));
   const movable = movableNavGroupIds(items);
+  const [open, setOpen] = useState(false);
 
   return (
     <section className="rounded-xl border border-border bg-surface-raised/40 p-4 sm:p-5" aria-labelledby="nav-group-panel-title">
@@ -206,39 +207,55 @@ export function NavGroupOrderPanel({
             调整左侧导航的分组先后。「工作区」固定在最前，「个人」固定在最后；只显示当前账号有权访问的分组。
           </p>
         </div>
-      </div>
-      <div className="nav-group-panel__list">
-        {groups.filter((group) => !groupIsFixed(group)).map((group) => {
-          const position = movable.indexOf(group.id);
-          return (
-            <div key={group.id} className="nav-group-panel__row">
-              <div>
-                <span className="nav-group-panel__name">{group.label || "其他"}</span>
-                <span className="nav-group-panel__meta">{pageLabels(group)}</span>
-              </div>
-              <span className="nav-group-panel__index">{position + 1}</span>
-              <MoveButtons
-                label={group.label || "其他"}
-                upDisabled={position <= 0}
-                downDisabled={position >= movable.length - 1}
-                onMove={(delta) => controller.move(group.id, delta)}
-                className="nav-group-panel__moves"
-                buttonClassName="nav-group-panel__move"
-              />
-            </div>
-          );
-        })}
-      </div>
-      <div className="nav-group-panel__foot">
-        <p className="nav-group-panel__scope">
-          保存范围：<strong>仅当前浏览器</strong>，按管理账号分别保存；换设备或换浏览器不会跟随。
-          与主题偏好不同，主题在同一浏览器的多个账号间共用。页面搜索始终按默认顺序列出分组，不受这里影响。
-        </p>
-        <button type="button" className="nav-group-panel__reset" onClick={controller.reset}>
-          <RotateCcwIcon className="size-3.5" aria-hidden="true" />
-          恢复侧栏默认顺序
+        <button
+          type="button"
+          className="nav-group-panel__toggle"
+          aria-expanded={open}
+          aria-controls={open ? "nav-group-order-list" : undefined}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span>{open ? "收起" : "展开"}</span>
+          <ChevronDownIcon className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
         </button>
       </div>
+      {open ? (
+        <>
+          <div id="nav-group-order-list" className="nav-group-panel__list">
+            {groups.filter((group) => !groupIsFixed(group)).map((group) => {
+              const position = movable.indexOf(group.id);
+              return (
+                <div key={group.id} className="nav-group-panel__row">
+                  <div>
+                    <span className="nav-group-panel__name">{group.label || "其他"}</span>
+                    <span className="nav-group-panel__meta">{pageLabels(group)}</span>
+                  </div>
+                  <span className="nav-group-panel__index">{position + 1}</span>
+                  <MoveButtons
+                    label={group.label || "其他"}
+                    upDisabled={position <= 0}
+                    downDisabled={position >= movable.length - 1}
+                    onMove={(delta) => controller.move(group.id, delta)}
+                    className="nav-group-panel__moves"
+                    buttonClassName="nav-group-panel__move"
+                  />
+                </div>
+              );
+            })}
+          </div>
+          <div className="nav-group-panel__foot">
+            <p className="nav-group-panel__scope">
+              保存范围：<strong>仅当前浏览器</strong>，按管理账号分别保存；换设备或换浏览器不会跟随。
+              与主题偏好不同，主题在同一浏览器的多个账号间共用。页面搜索始终按默认顺序列出分组，不受这里影响。
+            </p>
+            <button type="button" className="nav-group-panel__reset" onClick={controller.reset}>
+              <RotateCcwIcon className="size-3.5" aria-hidden="true" />
+              恢复侧栏默认顺序
+            </button>
+          </div>
+        </>
+      ) : (
+        <p className="nav-group-panel__summary">可调整 {movable.length} 个分组 · 当前顺序仅保存在当前浏览器</p>
+      )}
       {controller.error ? <p className="nav-group-panel__notice">当前浏览器无法保存偏好，本次调整只在此页面有效。</p> : null}
     </section>
   );

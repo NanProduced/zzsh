@@ -32,7 +32,7 @@ import { ConsultationUserCard } from "./im-support-user-card";
 import { EntityPreviewTrigger } from "../components/admin-preview";
 import { ConsultationEventsCard, ConsultationRoundsTimeline } from "./im-support-events";
 import "./im-support-details.css";
-import { formatDuration } from "./im-support-management-model";
+import { formatDuration, parseSupportSender, type SupportSender } from "./im-support-management-model";
 import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { Button } from "../components/ui/button";
@@ -86,6 +86,8 @@ type SupportMessage = {
   messageServerId?: string;
   messageType?: number;
   revoked?: boolean;
+  /** 服务端历史消息附带的发送者姓名；实时消息没有该字段时退回角色标签。 */
+  sender?: SupportSender;
   /** Shared decode of a NIM team notification; display decides visibility. */
   notice?: ImSystemNotice;
   /** Raw channel message kept intact so reply/revoke/delete address the original. */
@@ -198,15 +200,23 @@ const REPLY_UNCERTAIN_NOTICE = "回复结果未确认，请刷新确认后再发
 // 结果的接口，目录缺席、分页、转交、失权都证明不了远端到底有没有执行这次结束本轮。
 const CLOSE_OUTCOME_UNKNOWN_NOTICE = "本轮结束结果未确认：这次结束本轮可能已生效也可能没有。平台目前没有按咨询读取本轮结果的接口，本页无法确认，也不会重复提交；请由平台侧核对后再处理。";
 const ROUND_CLOSED_NOTICE = "本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。";
-type SupportHistoryPage={messages:NimMessageLike[];hasMore:boolean;anchor?:NimMessageLike|string};
+type SupportHistoryRow=NimMessageLike&{sender?:SupportSender};
+type SupportHistoryPage={messages:SupportHistoryRow[];hasMore:boolean;anchor?:NimMessageLike|string};
+export function supportHistoryMessage(row:SupportHistoryRow):SupportHistoryRow|null{
+  const message=nimMessageView(row);
+  if(!message)return null;
+  const sender=parseSupportSender(row.sender);
+  return sender?{...message,sender}:message;
+}
 async function readConsultationHistory(client:NimWebClientLike,conversationId:string,before?:NimMessageLike|string):Promise<SupportHistoryPage>{
   if(client.transport==="local-fake"){
     const messages=await client.getMessageHistory(conversationId,50,typeof before==="object"?before:undefined);
-    return {messages,hasMore:messages.length===50,anchor:oldestNimMessage(messages)};
+    const mapped=messages.map(message=>supportHistoryMessage(message)).filter((message):message is SupportHistoryRow=>message!==null);
+    return {messages:mapped,hasMore:messages.length===50,anchor:oldestNimMessage(messages)};
   }
   const query=new URLSearchParams({mode:"member",conversationId,limit:"50"});if(typeof before==="string")query.set("cursor",before);
-  const page=await adminRequest<{messages:NimMessageLike[];hasMore:boolean;nextCursor:string|null}>(`/im/messages?${query}`);
-  return {messages:page.messages.map(nimMessageView).filter((message):message is NimMessageLike=>message!==null),hasMore:page.hasMore,anchor:page.nextCursor??undefined};
+  const page=await adminRequest<{messages:SupportHistoryRow[];hasMore:boolean;nextCursor:string|null}>(`/im/messages?${query}`);
+  return {messages:page.messages.map(supportHistoryMessage).filter((message):message is SupportHistoryRow=>message!==null),hasMore:page.hasMore,anchor:page.nextCursor??undefined};
 }
 
 // 「案件进度」stepper 与「下一步 / 轮到你回复」已移除：assignedAdmin + messageScopeState
@@ -352,7 +362,7 @@ function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
   return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
 }
 
-export function messageFromNim(message: NimMessageLike, accountId: string, peerAccountId?: string | null): SupportMessage | null {
+export function messageFromNim(message: SupportHistoryRow, accountId: string, peerAccountId?: string | null): SupportMessage | null {
   if (typeof message.senderId !== "string" || !message.senderId) return null;
   const id = message.messageServerId || message.messageClientId || `${message.senderId}-${message.createTime}`;
   const self = message.senderId === accountId;
@@ -365,6 +375,7 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
     messageClientId: message.messageClientId,
     ...(message.messageServerId ? { messageServerId: message.messageServerId } : {}),
     ...(message.messageType === undefined ? {} : { messageType: message.messageType }),
+    ...(message.sender ? { sender: message.sender } : {}),
     // 引用/撤回/删除都需要原消息对象；列表行只是它的展示投影，不能反向拼一个。
     source: message,
   };
@@ -383,6 +394,30 @@ export function messageFromNim(message: NimMessageLike, accountId: string, peerA
   const from: SupportMessage["from"] = self || (peerAccountId ? message.senderId !== peerAccountId : false) ? "agent" : "customer";
   return { ...base, from, text, ...(image === undefined ? {} : { image }), ...(media === undefined ? {} : { media }) };
 }
+export function supportMessageAuthor(
+  message: Pick<SupportMessage, "self" | "senderId" | "from" | "sender">,
+  selected: Pick<Consultation, "peerAccountId" | "botAccountId" | "user"> | null,
+  operatorName: string,
+  operatorAvatar?: string | null,
+): { name: string; role: string; avatar?: string | null } {
+  if (message.self) return { name: operatorName, role: "平台客服", avatar: operatorAvatar };
+  if (selected?.peerAccountId && message.senderId === selected.peerAccountId) {
+    return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户", avatar: selected.user?.avatar };
+  }
+  if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) {
+    return { name: "洲洲助手（Bot）", role: "机器人", avatar: null };
+  }
+  // 服务端历史投影已给出每个发送者的平台身份；转交前的其他客服也显示完整姓名。
+  if (message.sender?.displayName) {
+    const role = message.sender.role === "ADMIN" ? "平台客服" : message.sender.role === "SYSTEM" ? "机器人" : "平台用户";
+    return { name: message.sender.displayName, role, avatar: message.sender.avatar };
+  }
+  // Historical senders the server did not project stay neutral instead of borrowing the current assignee's identity.
+  return message.from === "agent"
+    ? { name: "客服", role: "平台客服", avatar: null }
+    : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户", avatar: null };
+}
+
 function httpStatus(error: unknown): number | undefined {
   if (error instanceof AdminApiError) return error.status;
   return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : undefined;
@@ -2847,14 +2882,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           ? <div className="im-wb-empty"><ShieldCheck size={22} /><strong>无法查看该会话历史</strong></div>
           : <div className="im-wb-empty"><Headphones size={22} /><strong>{hasSelection ? "等待第一条消息" : "尚未选择会话"}</strong><span>{hasSelection ? "该会话暂时没有可读消息。" : "从左侧队列选择会话。"}</span></div>);
 
-  const authorFor = (message: SupportMessage) => {
-    if (message.self) return { name: operatorName, role: "平台客服", avatar: snapshot.user.image };
-    if (selected?.peerAccountId && message.senderId === selected.peerAccountId) return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户", avatar: selected.user?.avatar };
-    // Historical senders we cannot map stay neutral instead of borrowing the
-    // current assignee's identity.
-    if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) return { name: "洲洲助手（Bot）", role: "机器人", avatar: null };
-    return message.from === "agent" ? { name: "客服", role: "平台客服", avatar: null } : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户", avatar: null };
-  };
+  const authorFor = (message: SupportMessage) => supportMessageAuthor(message, selected, operatorName, snapshot.user.image);
   const userHoverCard = selected ? <div className="im-wb-author-hover">
     <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
       request={adminRequest} scope={profileScope}

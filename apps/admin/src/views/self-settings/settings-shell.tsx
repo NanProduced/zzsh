@@ -12,12 +12,10 @@ import { Alert, AlertAction, AlertDescription } from "../../components/ui/alert"
  */
 
 export function SettingsPageHeader({
-  eyebrow,
   title,
   description,
   aside,
 }: {
-  eyebrow: string;
   title: string;
   description: string;
   aside?: ReactNode;
@@ -25,7 +23,6 @@ export function SettingsPageHeader({
   return (
     <div className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-start sm:justify-between">
       <div className="min-w-0">
-        <div className="text-muted-foreground mb-1 font-mono text-[11px] tracking-wider uppercase">{eyebrow}</div>
         <h1 className="text-2xl font-bold tracking-tight text-foreground">{title}</h1>
         <p className="text-muted-foreground mt-1 text-sm">{description}</p>
       </div>

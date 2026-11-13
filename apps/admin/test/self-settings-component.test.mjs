@@ -138,7 +138,7 @@ function stubFetch(body) {
 test("adapter: 六个调用都走既有 adminRequest 与合同 §0.1 路径", async () => {
   const calls = stubFetch({});
   await api.readProfile();
-  await api.updateProfileDisplayName("新的显示名称");
+  await api.updateProfileDisplayName({ displayName: "新的显示名称" });
   await api.readSessions();
   await api.revokeSession({ sessionId: "session_fixture_other", password: "pw", totpCode: "123456" });
   await api.revokeOtherSessions({ sessionIds: ["session_fixture_other"], password: "pw", totpCode: "123456" });
@@ -436,7 +436,7 @@ test("profile: 400 保留输入并说明拒绝；5xx 归入未知态；缺写回
 
   const offline = mount(ProfileView, { adminUserId: PROFILE.adminUserId, sessionId: "s", accountStatus: "ACTIVE", locked: false, load: async () => ({ ...PROFILE }) });
   await settle();
-  assert.ok(byText(offline, "暂未开放"), "缺写合同必须说明而不是摆出必然失败的按钮");
+  assert.ok(byText(offline, "当前不可修改"), "缺写合同必须说明而不是摆出必然失败的按钮");
   assert.equal([...offline.el.querySelectorAll('button')].some(b=>b.textContent==='保存显示名称'),false);
   assert.equal(offline.el.querySelector('input'),null);
   offline.unmount();

@@ -107,8 +107,8 @@ test("profile: 校验与服务端同规则——码点上限与控制字符", ()
   assert.equal(displayNameIssue("a".repeat(DISPLAY_NAME_MAX_CODE_POINTS)), null);
   // 代理对按 1 个码点计，与后端 [...value].length 一致；用 UTF-16 长度会误判。
   assert.equal(displayNameIssue("👍".repeat(DISPLAY_NAME_MAX_CODE_POINTS)), null, "emoji 按码点计不应超限");
-  assert.match(displayNameIssue("含\u0007控制符"), /控制字符/);
-  assert.match(displayNameIssue("含\n换行"), /控制字符/);
+  assert.match(displayNameIssue("含\u0007控制符"), /不可见字符/);
+  assert.match(displayNameIssue("含\n换行"), /不可见字符/);
 });
 
 test("profile: 原值/草稿分离——仅真正改动才算脏", () => {

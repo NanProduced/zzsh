@@ -255,7 +255,6 @@ export function ActivityView({
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8">
       <SettingsPageHeader
-        eyebrow="设置 · 安全活动"
         title="本人安全活动"
         description="只列出服务端确认归属本人的安全事件：我发起的，以及他人对我账号执行的操作。"
         aside={
@@ -283,7 +282,7 @@ export function ActivityView({
       {failure && events.length === 0 && !(forbidden && failure.kind === "forbidden") ? (
         <SettingsNotice tone="danger" role="alert" action={<Button size="sm" variant="secondary" onClick={retryLastAttempt} disabled={loading}>重试本次查询</Button>}>
           {failure.message}
-          {failure.requestId ? <span className="mt-1 block break-all font-mono text-[11px]">请求编号 {failure.requestId}</span> : null}
+          {failure.requestId ? <span className="mt-1 block break-all font-mono text-xs">请求编号 {failure.requestId}</span> : null}
         </SettingsNotice>
       ) : null}
 
@@ -307,7 +306,7 @@ export function ActivityView({
       ) : null}
 
       {notRecorded.length > 0 ? (
-        <p className="text-muted-foreground text-[11px]">未纳入记录：{notRecorded.join("、")}</p>
+        <p className="text-muted-foreground text-xs">未纳入记录：{notRecorded.join("、")}</p>
       ) : null}
 
       {loading && !hasLoadedOnce ? (

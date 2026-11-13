@@ -161,7 +161,7 @@ export function parseProfileUpdatePayload(payload: unknown): ProfileFacts {
 export function displayNameIssue(draft: string): string | null {
   const trimmed = draft.trim();
   if (!trimmed) return "显示名称不能为空。";
-  if (/[\u0000-\u001f\u007f-\u009f]/.test(draft)) return "显示名称不能包含控制字符。";
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(draft)) return "显示名称不能包含换行或其他不可见字符。";
   const codePoints = [...trimmed].length;
   if (codePoints > DISPLAY_NAME_MAX_CODE_POINTS) {
     return `显示名称最多 ${DISPLAY_NAME_MAX_CODE_POINTS} 个字符，当前 ${codePoints} 个。`;

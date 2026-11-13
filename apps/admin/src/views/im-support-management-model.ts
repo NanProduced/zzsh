@@ -463,7 +463,25 @@ export function parseAuditConversations(value: unknown): AuditPage<AuditConversa
   return { items, nextCursor: text(root.nextCursor) || null };
 }
 
-export type AuditMessage = NimMessageLike & { sender?: { displayName: string; avatar: string | null; role: "USER" | "ADMIN" | "SYSTEM"; platformId?: string; displayUsername?: string } };
+export type SupportSender = { displayName: string; avatar: string | null; role: "USER" | "ADMIN" | "SYSTEM"; platformId?: string; displayUsername?: string };
+export type AuditMessage = NimMessageLike & { sender?: SupportSender };
+
+/** 服务端历史消息附带的发送者投影；字段缺失或角色未知时不猜身份。 */
+export function parseSupportSender(value: unknown): SupportSender | undefined {
+  const author = recordOf(value);
+  const role = author.role === "USER" || author.role === "ADMIN" || author.role === "SYSTEM" ? author.role : null;
+  if (!role) return undefined;
+  const platformId = role !== "SYSTEM" && /^[A-Za-z0-9._:-]{1,128}$/.test(text(author.platformId)) ? text(author.platformId) : null;
+  const publicLogin = text(author.displayUsername).trim().toUpperCase();
+  const displayUsername = role === "ADMIN" && /^ZZ\d{1,19}$/.test(publicLogin) ? publicLogin : null;
+  return {
+    displayName: text(author.displayName).trim(),
+    avatar: text(author.avatar) || null,
+    role,
+    ...(platformId ? { platformId } : {}),
+    ...(displayUsername ? { displayUsername } : {}),
+  };
+}
 
 const CARD_KINDS = ["ORDER_OPENING", "ORDER_ENDING", "ORDER_SETTLED", "ORDER_CANCELLED", "ORDER_PRICE_CHANGE"] as const;
 const AUDIT_MESSAGE_TYPES = ["CONSULTATION", "ORDER"] as const;
@@ -502,12 +520,7 @@ function parseMessage(value: unknown): AuditMessage | null {
   };
   const normalized = nimMessageView(base);
   if (!normalized) return null;
-  const author = recordOf(row.sender);
-  const role: NonNullable<AuditMessage["sender"]>["role"] | null = author.role === "USER" || author.role === "ADMIN" || author.role === "SYSTEM" ? author.role : null;
-  const platformId = role !== "SYSTEM" && /^[A-Za-z0-9._:-]{1,128}$/.test(text(author.platformId)) ? text(author.platformId) : null;
-  const publicLogin = text(author.displayUsername).trim().toUpperCase();
-  const displayUsername = role === "ADMIN" && /^ZZ\d{1,19}$/.test(publicLogin) ? publicLogin : null;
-  const sender = role ? { displayName: text(author.displayName).trim(), avatar: text(author.avatar) || null, role, ...(platformId ? { platformId } : {}), ...(displayUsername ? { displayUsername } : {}) } : undefined;
+  const sender = parseSupportSender(row.sender);
   return { ...normalized, ...(card ? { card } : {}), ...(sender ? { sender } : {}) };
 }
 

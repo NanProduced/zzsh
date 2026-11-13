@@ -43,7 +43,7 @@ const vite = await createServer({
   resolve: { alias: { "@": path.join(adminRoot, "src") } },
   server: { middlewareMode: true, hmr: false, ws: false },
 });
-const { ImSupportView, messageFromNim } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
+const { ImSupportView, messageFromNim, supportHistoryMessage, supportMessageAuthor } = await vite.ssrLoadModule("/src/views/im-support-view.tsx");
 const notifications = await vite.ssrLoadModule("/src/views/im-support-notifications.ts");
 after(async () => { await vite.close(); });
 
@@ -65,6 +65,19 @@ test("admin support messages trust only a valid server systemNotice", () => {
   assert.equal(regular?.from, "customer");
   assert.equal(regular?.text, "普通消息");
   assert.equal(regular?.notice, undefined);
+});
+
+test("history sender projection keeps the full administrator name", () => {
+  const row = {
+    messageClientId: "history-admin", senderId: "zzs-admin", createTime: 1, messageType: 0, text: "转交前消息",
+    sender: { displayName: "客服 B", avatar: null, role: "ADMIN", displayUsername: "ZZ00002" },
+  };
+  const history = supportHistoryMessage(row);
+  assert.ok(history);
+  assert.equal(history.sender.displayName, "客服 B");
+  const selected = { peerAccountId: "user-a", botAccountId: "bot-a", user: { id: "user-a", name: "用户 A", username: "user-a" } };
+  assert.deepEqual(supportMessageAuthor({ self: false, senderId: "zzs-admin", from: "agent", sender: history.sender }, selected, "客服 A"), { name: "客服 B", role: "平台客服", avatar: null });
+  assert.equal(supportMessageAuthor({ self: false, senderId: "admin-legacy", from: "agent" }, selected, "客服 A").name, "客服");
 });
 
 function snapshot(permissions, boss = false) {
@@ -299,12 +312,13 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
       { messageClientId: "n-2", messageServerId: "n-2", conversationId: "conv-a", senderId: "system", createTime: Date.parse("2026-09-17T00:01:30.000Z"), messageType: 5, attachment: { type: 3 } },
       { messageClientId: "m-1", messageServerId: "m-1", conversationId: "conv-a", senderId: "user-a", createTime: Date.parse("2026-09-17T00:02:00.000Z"), messageType: 0, text: "用户提问" },
       { messageClientId: "m-2", messageServerId: "m-2", conversationId: "conv-a", senderId: "admin-a", createTime: Date.parse("2026-09-17T00:03:00.000Z"), messageType: 0, text: "客服回复" },
-      { messageClientId: "m-3", messageServerId: "m-3", conversationId: "conv-a", senderId: "admin-other", createTime: Date.parse("2026-09-17T00:04:00.000Z"), messageType: 0, text: "另一位客服" },
+      { messageClientId: "m-3", messageServerId: "m-3", conversationId: "conv-a", senderId: "admin-other", createTime: Date.parse("2026-09-17T00:04:00.000Z"), messageType: 0, text: "另一位客服", sender: { displayName: "客服 B", avatar: null, role: "ADMIN", displayUsername: "ZZ00002" } },
+      { messageClientId: "m-4", messageServerId: "m-4", conversationId: "conv-a", senderId: "admin-legacy", createTime: Date.parse("2026-09-17T00:05:00.000Z"), messageType: 0, text: "旧客服消息" },
     ],
   };
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept"]) });
   await selectFirst(rootNode);
-  await waitFor(() => rootNode.querySelectorAll(".im-wb-msg").length === 3);
+  await waitFor(() => rootNode.querySelectorAll(".im-wb-msg").length === 4);
 
   const system = rootNode.querySelector(".im-wb-sys");
   assert.ok(system, "a TEAM_INVITE notification renders as a system line, not a bubble");
@@ -320,9 +334,10 @@ test("messages keep real sender identity, notices stay neutral, and only own mes
   assert.doesNotMatch(rootNode.textContent, /已读/, "no read receipt is claimed without a source");
   assert.equal(peer.querySelector(".im-wb-msg-meta b").textContent, "用户 A");
   assert.equal(own.querySelector(".im-wb-msg-meta b").textContent, "客服 A");
-  // A historical staff message from someone else must not borrow the current assignee's name.
-  const other = [...rootNode.querySelectorAll('.im-wb-msg[data-from="agent"]')].find((item) => item !== own);
-  assert.equal(other.querySelector(".im-wb-msg-meta b").textContent, "客服");
+  // 服务端历史投影给出完整姓名；没有投影的旧消息仍不借用当前接待人姓名。
+  const otherMessages = [...rootNode.querySelectorAll('.im-wb-msg[data-from="agent"]')].filter((item) => item !== own);
+  assert.equal(otherMessages[0].querySelector(".im-wb-msg-meta b").textContent, "客服 B");
+  assert.equal(otherMessages[1].querySelector(".im-wb-msg-meta b").textContent, "客服");
 });
 
 test("bot-covered team notices stay hidden and never become the queue summary", async (t) => {

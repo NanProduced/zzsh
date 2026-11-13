@@ -237,6 +237,8 @@ test("5. SettingsView with Base UI RadioGroup supports keyboard navigation, sing
   const h1 = container.querySelector("h1");
   assert.ok(h1);
   assert.equal(h1.textContent, "外观与偏好");
+  assert.equal(container.textContent.includes("设置 · 外观"), false, "redundant eyebrow is removed");
+  assert.equal(container.querySelectorAll("[title]").length, 0, "settings controls do not use native title hints");
 
   // Radio cards: 3 radios, single tab stop
   const radios = Array.from(container.querySelectorAll('[role="radio"]'));

@@ -6,7 +6,6 @@ import {
   LaptopIcon,
   MoonIcon,
   RotateCcwIcon,
-  ShieldIcon,
   SunIcon,
 } from "lucide-react";
 
@@ -17,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { Theme, ThemeMode } from "../api";
 import { getSystemTheme, type ThemeStorageStatus } from "../lib/theme";
+import { SettingsPageHeader } from "./self-settings/settings-shell";
 
 type SettingsViewProps = {
   theme: Theme;
@@ -27,7 +27,6 @@ type SettingsViewProps = {
   themeStorageStatus?: ThemeStorageStatus;
   urlTheme?: Theme | null;
   onExitPreview?: () => void;
-  onOpenPath: (path: string, title?: string) => void;
   /** 与侧栏就地编辑态等价的兜底面板，由设置页按当前账号权限装配。 */
   navGroupPanel?: ReactNode;
 };
@@ -41,7 +40,6 @@ export function SettingsView({
   themeStorageStatus = "saved",
   urlTheme = null,
   onExitPreview,
-  onOpenPath,
   navGroupPanel,
 }: SettingsViewProps) {
   const systemTheme = getSystemTheme();
@@ -64,19 +62,11 @@ export function SettingsView({
   ];
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8 p-4 sm:p-6 lg:p-8">
-      {/* Page Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b pb-5">
-        <div>
-          <div className="text-muted-foreground font-mono text-[11px] tracking-wider uppercase mb-1">
-            设置 · 外观
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">外观与偏好</h1>
-          <p className="text-muted-foreground text-sm mt-1">
-            管理当前浏览器中的控制台外观与显示偏好。选择即时生效。
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+    <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6 lg:p-8">
+      <SettingsPageHeader
+        title="外观与偏好"
+        description="管理当前浏览器中的控制台外观与显示偏好。选择即时生效，主题只保存在当前浏览器。"
+        aside={
           <Button
             type="button"
             variant="outline"
@@ -88,8 +78,8 @@ export function SettingsView({
             <RotateCcwIcon className="size-3.5" />
             <span>恢复外观默认值</span>
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       {/* Temporary Preview Banner */}
       {urlTheme && (
@@ -143,15 +133,15 @@ export function SettingsView({
                   value={option.id}
                   aria-label={option.label}
                   className={cn(
-                    "group relative flex flex-col justify-between rounded-xl border p-3.5 text-left transition-all cursor-pointer select-none",
+                    "group relative flex cursor-pointer select-none flex-row items-center gap-3 rounded-lg border p-3 text-left transition-all sm:flex-col sm:items-stretch sm:justify-between sm:rounded-xl sm:p-3.5",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                     isSelected
                       ? "border-foreground bg-surface-raised shadow-sm"
                       : "border-border/80 bg-surface/50 hover:border-border hover:bg-surface-raised/60"
                   )}
                 >
-                  {/* Miniature Illustration Mockup */}
-                  <div className="mb-3 overflow-hidden rounded-lg border border-border/70 shadow-xs">
+                  {/* Miniature Illustration Mockup: desktop only; mobile uses the live theme itself. */}
+                  <div aria-hidden="true" className="hidden overflow-hidden rounded-lg border border-border/70 shadow-xs sm:mb-3 sm:block">
                     {option.id === "light" && (
                       <div className="h-20 bg-slate-100 p-2 flex flex-col justify-between">
                         <div className="flex items-center gap-1">
@@ -203,32 +193,32 @@ export function SettingsView({
                     )}
                   </div>
 
-                  {/* Card Title & Icon */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Icon className="size-4 text-muted-foreground group-hover:text-foreground" />
-                      <span className="text-sm font-medium text-foreground">{option.label}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Icon className="size-4 shrink-0 text-muted-foreground group-hover:text-foreground" />
+                        <span className="truncate text-sm font-medium text-foreground">{option.label}</span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {isPreviewingThis && (
+                          <span className="rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-xs font-medium text-amber-500">
+                            预览中
+                          </span>
+                        )}
+                        {isSelected && (
+                          <div className="flex size-4 items-center justify-center rounded-full bg-foreground text-background">
+                            <CheckIcon className="size-3 stroke-[2.5]" />
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex items-center gap-1.5">
-                      {isPreviewingThis && (
-                        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-500 border border-amber-500/20">
-                          临时预览中
-                        </span>
-                      )}
-                      {isSelected && (
-                        <div className="flex size-4 items-center justify-center rounded-full bg-foreground text-background">
-                          <CheckIcon className="size-3 stroke-[2.5]" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
 
-                  {/* Dynamic Note for System Option */}
-                  {option.description && (
-                    <div className="mt-1 text-[11px] text-muted-foreground font-sans">
-                      {option.description}
-                    </div>
-                  )}
+                    {option.description && (
+                      <div className="mt-0.5 font-sans text-xs text-muted-foreground sm:mt-1">
+                        {option.description}
+                      </div>
+                    )}
+                  </div>
                 </Radio.Root>
               );
             })}
@@ -264,34 +254,13 @@ export function SettingsView({
             </div>
           </div>
 
-          {/* Account Security Quick Navigation */}
-          <div className="rounded-xl border border-border bg-surface-raised/40 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                <ShieldIcon className="size-4 text-muted-foreground" />
-                <span>账号安全与认证设置</span>
-              </div>
-              <p className="text-xs text-muted-foreground max-w-md">
-                修改登录密码、配置快捷 PIN 码、双因素认证 (TOTP)、闲置自动锁定及紧急会话恢复。
-              </p>
-            </div>
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => onOpenPath("/account", "账号安全")}
-              className="shrink-0 text-xs gap-1.5"
-            >
-              <span>前往账号安全页</span>
-            </Button>
-          </div>
         </div>
 
-        {/* Right Column: Live Interface Preview */}
-        <div className="lg:col-span-5 xl:col-span-4 space-y-3">
-          <div className="flex items-center justify-between text-xs font-mono uppercase tracking-wider text-muted-foreground">
+        {/* Right Column: Live Interface Preview; mobile applies the theme itself. */}
+        <div className="hidden space-y-3 lg:col-span-5 lg:block xl:col-span-4">
+          <div className="flex items-center justify-between font-mono text-xs uppercase tracking-wider text-muted-foreground">
             <span>界面预览</span>
-            <span className="rounded bg-surface-raised px-1.5 py-0.5 text-[10px] text-foreground font-sans">
+            <span className="rounded bg-surface-raised px-1.5 py-0.5 font-sans text-xs text-foreground">
               当前渲染：{theme === "dark" ? "深色" : "浅色"}
             </span>
           </div>
@@ -305,7 +274,7 @@ export function SettingsView({
                 <div className="size-2 rounded-full bg-amber-500/70" />
                 <div className="size-2 rounded-full bg-emerald-500/70" />
               </div>
-              <div className="text-[10px] font-mono tracking-wider text-muted-foreground">
+              <div className="font-mono text-xs tracking-wider text-muted-foreground">
                 ZZSH · CONSOLE
               </div>
               <div className="w-8" />
@@ -352,9 +321,9 @@ export function SettingsView({
                 </div>
 
                 {/* Mini Preview Status Footer */}
-                <div className="pt-2 border-t border-border flex items-center justify-between text-[9px] font-mono text-muted-foreground">
+                <div className="pt-2 border-t border-border flex items-center justify-between font-mono text-xs text-muted-foreground">
                   <span>模式：{themeMode === "system" ? "跟随系统" : themeMode === "dark" ? "深色" : "浅色"}</span>
-                  <span className="font-sans text-[9px] text-foreground font-medium">
+                  <span className="font-sans text-xs font-medium text-foreground">
                     {theme === "dark" ? "Dark Theme" : "Light Theme"}
                   </span>
                 </div>

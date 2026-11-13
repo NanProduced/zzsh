@@ -263,7 +263,6 @@ export function ProfileView({
   return (
     <div className="mx-auto max-w-6xl space-y-8 p-4 sm:p-6 lg:p-8">
       <SettingsPageHeader
-        eyebrow="设置 · 个人资料"
         title="个人资料"
         description="本人在管理平台各处显示的名称。登录编号由平台分配，只读且不可自行修改。"
       />
@@ -282,7 +281,7 @@ export function ProfileView({
           }
         >
           {loadFailure.message}
-          {loadFailure.requestId ? <span className="mt-1 block break-all font-mono text-[11px]">请求编号 {loadFailure.requestId}</span> : null}
+          {loadFailure.requestId ? <span className="mt-1 block break-all font-mono text-xs">请求编号 {loadFailure.requestId}</span> : null}
         </SettingsNotice>
       ) : null}
 
@@ -364,7 +363,7 @@ export function ProfileView({
             </div>
             <SettingsRow
               title="ZZ 登录编号"
-              description="用于工单与线下核对的稳定编号；不是内部标识，也不随登录邮箱变化。"
+              description="用于工单和线下核对的固定编号；不会随登录邮箱变化。"
               action={
                 <div className="flex items-center gap-2">
                   <code className="max-w-[16rem] truncate rounded border border-border bg-surface px-2 py-1 font-mono text-xs text-foreground">
@@ -386,7 +385,7 @@ export function ProfileView({
             ) : null}
             <SettingsRow
               title="资料最后变更时间"
-              description={`${beijingDateTime(facts.updatedAt)}（北京时间）。这是当前资料的变更时间，不能据此证明某次请求是否执行。`}
+              description={`${beijingDateTime(facts.updatedAt)}（北京时间）。`}
             />
             <SettingsRow
               title="账号状态"
@@ -394,15 +393,15 @@ export function ProfileView({
                 label: frozen ? "已冻结" : accountStatus === "PENDING_ENROLLMENT" ? "待完成绑定" : "正常",
                 tone: frozen ? "error" : accountStatus === "PENDING_ENROLLMENT" ? "warning" : "success",
               }}
-              description="冻结与授权由服务端判定；本页不修改账号状态。"
+              description="冻结与授权由平台判定；本页不修改账号状态。"
             />
           </SettingsGroup>
 
-          <SettingsGroup title="显示信息" description="同事在列表、审批与客服上下文中看到的名称。">
-            {writeUnavailable ? <SettingsRow title="显示名称" description={writeDisabledReason ?? '用于在平台中显示的名称。'} status={{ label: '暂未开放修改', tone: 'neutral' }} action={<span className="max-w-[36ch] break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">{facts.displayName}</span>}/> : <form className="space-y-4 p-4" onSubmit={(event) => void submit(event)} noValidate>
+          <SettingsGroup title="显示名称" description="同事在列表、审批与客服上下文中看到的名称。保存后立即生效，客服工作台会显示新名称。">
+            {writeUnavailable ? <SettingsRow title="显示名称" description={writeDisabledReason ?? '用于在平台中显示的名称。'} status={{ label: '当前不可修改', tone: 'neutral' }} action={<span className="max-w-[36ch] break-words text-sm font-medium text-foreground [overflow-wrap:anywhere]">{facts.displayName}</span>}/> : <form className="space-y-4 p-4" onSubmit={(event) => void submit(event)} noValidate>
               <Field
                 label="显示名称"
-                hint={`最多 ${DISPLAY_NAME_MAX_CODE_POINTS} 个字符（按 Unicode 码点计），不能包含控制字符；服务端按同一规则校验并以其为准。`}
+                hint={`最多 ${DISPLAY_NAME_MAX_CODE_POINTS} 个字符，中英文、数字和常用符号都可以。`}
                 error={validationIssue ?? undefined}
               >
                 <Input

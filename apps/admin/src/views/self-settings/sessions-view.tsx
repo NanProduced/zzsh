@@ -245,7 +245,6 @@ export function SessionsView({
   return (
     <div className="mx-auto max-w-6xl space-y-8 p-4 sm:p-6 lg:p-8">
       <SettingsPageHeader
-        eyebrow="设置 · 设备与会话"
         title="设备与会话"
         description="查看在哪些设备上登录过，退出不再使用或不认识的设备。"
       />
@@ -256,7 +255,7 @@ export function SessionsView({
       {loadFailure ? (
         <SettingsNotice tone="danger" role="alert" action={<Button size="sm" variant="secondary" onClick={() => void read()} disabled={loading}>重新读取</Button>}>
           {loadFailure.message}
-          {loadFailure.requestId ? <span className="mt-1 block break-all font-mono text-[11px]">请求编号 {loadFailure.requestId}</span> : null}
+          {loadFailure.requestId ? <span className="mt-1 block break-all font-mono text-xs">请求编号 {loadFailure.requestId}</span> : null}
         </SettingsNotice>
       ) : null}
 
@@ -460,7 +459,7 @@ function SessionRowView({
           </dl>
           <button type="button" title={`会话引用 ${row.id}`} aria-label="复制会话引用"
             onClick={() => { void navigator.clipboard?.writeText(row.id).catch(() => undefined); }}
-            className="text-muted-foreground hover:text-foreground mt-1 inline-flex items-center gap-1 text-[11px]">
+            className="text-muted-foreground hover:text-foreground mt-1 inline-flex items-center gap-1 text-xs">
             <CopyIcon className="size-3" aria-hidden />复制会话引用
           </button>
         </div>

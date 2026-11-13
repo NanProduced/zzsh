@@ -231,9 +231,10 @@ test("BFF filters user cookies, rejects Authorization/Origin and preserves query
   failure(await read(new Fixture(), "/profile", false, { headers: { cookie: undefined, authorization: "Bearer offline_user" } }), 401);
   failure(await read(new Fixture(), "/profile", false, { headers: { cookie: undefined, authorization: "Basic malformed" } }), 400);
 });
-test("only three exact GET paths enter R0; write/HEAD/OPTIONS/encoded/case/tail/neighbor paths never authenticate", async () => {
+test("only three exact GET paths enter R0; non-profile writes and unsupported methods never authenticate", async () => {
   for (const bff of [false, true]) {
-    for (const method of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) for (const path of PATHS) { const f = new Fixture(); failure(await read(f, path, bff, { method }), 404); assert.equal(f.sdkHeaders.length, 0); }
+    for (const method of ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) for (const path of PATHS) { const f = new Fixture(); failure(await read(f, path, bff, { method }), 404); assert.equal(f.sdkHeaders.length, 0); }
+    for (const path of ["/sessions", "/security-activity"]) { const f = new Fixture(); failure(await read(f, path, bff, { method: "POST" }), 404); assert.equal(f.sdkHeaders.length, 0); }
     for (const path of ["/profile/", "/%70rofile", "/profile%2f", "/Profile", "/profile/extra", "/sessions/revoke", "/sessions/revoke-others", "/security-activity/", "/../self/profile"]) { const f = new Fixture(); failure(await read(f, path, bff), 404); assert.equal(f.sdkHeaders.length, 0); }
     for (const url of ["/api/v1/admin/selfish/profile", "/api/bff/admin/%73elf/profile", "/api/bff/admin/self%2fprofile"]) { const f = new Fixture(); failure(await read(f, "/profile", bff, { originalUrl: url }), 404); assert.equal(f.sdkHeaders.length, 0); }
   }

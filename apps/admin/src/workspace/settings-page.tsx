@@ -9,7 +9,7 @@ import { RecoveryView } from "../views/recovery-view";
 import { ProfileView } from "../views/self-settings/profile-view";
 import { SessionsView } from "../views/self-settings/sessions-view";
 import { ActivityView } from "../views/self-settings/activity-view";
-import { readProfile, readSessions, readSecurityActivity, revokeOtherSessions, revokeSession } from "../views/self-settings/self-settings-api";
+import { readProfile, readSessions, readSecurityActivity, revokeOtherSessions, revokeSession, updateProfileDisplayName } from "../views/self-settings/self-settings-api";
 import type { SessionSnapshot } from "../api";
 import { isLocalSettingsPreview } from "./settings-preview";
 import type { settingsPreviewData } from "./settings-preview-data";
@@ -26,6 +26,7 @@ const SECTIONS = [
 type Section = typeof SECTIONS[number]["id"];
 type Props = ComponentProps<typeof SettingsView> & {
   query: Record<string, string>;
+  onOpenPath: (path: string, title?: string) => void;
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   idleMinutes: number;
   onIdleMinutes: (value: number) => void;
@@ -36,8 +37,7 @@ type Props = ComponentProps<typeof SettingsView> & {
   onQueryChange: (query: Record<string, string>) => void;
 };
 
-// 本人资料改名尚未开放：精确说明只读范围，不宣称读取未接通。
-const WRITE_DISABLED = "显示名称修改暂未开放；头像可通过“更换头像”按钮修改。";
+const PREVIEW_WRITE_DISABLED = "示例布局不会保存任何真实资料。";
 
 export function SettingsWorkspace(props: Props) {
   const { query, snapshot, onOpenPath, onDirtyChange, onQueryChange } = props;
@@ -75,7 +75,6 @@ export function SettingsWorkspace(props: Props) {
       adminUserId={snapshot.adminUserId}
       items={workspaceMenuItems({ isBoss: snapshot.security.isBoss, permissions: snapshot.permissions })}
     />}
-    onOpenPath={(path, title) => onOpenPath(path === "/account" ? pathFor("security") : path, title)}
   />;
   else if (section === "security") content = <SecuritySelfView
     adminUserId={snapshot.adminUserId}
@@ -92,7 +91,9 @@ export function SettingsWorkspace(props: Props) {
   />;
   else if (preview && !examples) content = <p className="p-6 text-sm text-muted-foreground" role="status">正在打开示例布局…</p>;
   else if (section === "profile") content = <ProfileView {...common}
-    load={preview ? examples!.readProfile : readProfile} writeDisabledReason={WRITE_DISABLED} avatarEditor={!preview} />;
+    load={preview ? examples!.readProfile : readProfile}
+    {...(preview ? { writeDisabledReason: PREVIEW_WRITE_DISABLED } : { saveDisplayName: updateProfileDisplayName })}
+    avatarEditor={!preview} />;
   else if (section === "sessions") content = <SessionsView {...common}
     load={preview ? examples!.readSessions : readSessions}
     {...(preview ? { writeDisabledReason: "示例布局不会注销任何真实会话。" } : { revokeSession, revokeOtherSessions })} />;
@@ -101,7 +102,7 @@ export function SettingsWorkspace(props: Props) {
     initialQuery={query} onQueryChange={(values) => onQueryChange({ ...query, ...values })} />;
 
   return <div className="mx-auto grid w-full max-w-7xl min-w-0 gap-4 md:grid-cols-[11rem_minmax(0,1fr)]">
-    <nav aria-label="个人设置分区" className="flex flex-wrap gap-1 border-b border-border pb-3 md:sticky md:top-4 md:flex-col md:flex-nowrap md:self-start md:border-b-0 md:pb-0">
+    <nav aria-label="个人设置分区" className="flex flex-nowrap gap-1 overflow-x-auto border-b border-border pb-3 md:sticky md:top-4 md:flex-col md:flex-nowrap md:self-start md:overflow-visible md:border-b-0 md:pb-0">
       {SECTIONS.map(({ id, label, icon: Icon }) => <a key={id} href={pathFor(id)}
         aria-current={section === id ? "page" : undefined}
         onClick={(event) => { if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); onOpenPath(pathFor(id)); }}

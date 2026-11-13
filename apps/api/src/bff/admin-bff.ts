@@ -733,7 +733,9 @@ export async function handleAdminBff(request: NodeRequest, response: NodeRespons
     await forwardYunxin(request, response, `/api/v1/im/admin${path.slice("/im".length)}${requestQuery(request)}`, requestId, options);
     return;
   }
-  if (method === "GET" && ["/self/profile", "/self/sessions", "/self/security-activity"].includes(path)) {
+  const selfProfileRead = method === "GET" && ["/self/profile", "/self/sessions", "/self/security-activity"].includes(path);
+  const selfProfileWrite = method === "POST" && path === "/self/profile";
+  if (selfProfileRead || selfProfileWrite) {
     await forwardSecurity(request, response, `/api/v1/admin${path}`, requestId, options, handleAdminSelfSettingsRoute);
     return;
   }

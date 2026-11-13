@@ -99,7 +99,6 @@ export function WorkspaceTopbar({
                   variant="ghost"
                   size="icon-sm"
                   aria-label={`主题模式：${themeMode === "light" ? "浅色" : themeMode === "dark" ? "深色" : "跟随系统"}`}
-                  title={`主题：${themeMode === "light" ? "浅色" : themeMode === "dark" ? "深色" : "跟随系统"}`}
                 >
                   {themeMode === "system" ? (
                     <LaptopIcon className="size-4" />

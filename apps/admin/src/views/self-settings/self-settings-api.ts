@@ -12,9 +12,9 @@ export function readProfile(): Promise<unknown> {
   return adminRequest<unknown>("/self/profile");
 }
 
-export function updateProfileDisplayName(displayName: string): Promise<unknown> {
+export function updateProfileDisplayName(input: { displayName: string }): Promise<unknown> {
   // 合同 §1.2 请求体严格：出现 displayName 以外的键即 400 unknown_field。
-  return adminRequest<unknown>("/self/profile", { displayName });
+  return adminRequest<unknown>("/self/profile", { displayName: input.displayName });
 }
 
 export function readSessions(): Promise<unknown> {

@@ -6,8 +6,9 @@ import { SecurityApiError } from "./security-core";
 import { adminAuthSubject } from "./admin-brute-force";
 import { loadIp2RegionFromEnv, maskSessionIp, normalizeSessionIp, parseSessionUserAgent, sessionRegion } from "./admin-session-device";
 import { withDirectoryReadTransaction } from "./user-directory-read";
+import { updateSelfDisplayName } from "./admin-self-profile-write";
 
-// R0 shares existing authentication/read transactions; no settings writer or new schema is mounted.
+// R0 shares existing authentication/read transactions; the self display-name writer is mounted separately.
 const USER_AGENT_MAX_LENGTH = 512;
 
 const ACTIVITY_DEFAULT_LIMIT = 20;
@@ -459,11 +460,19 @@ export async function handleAdminSelfSettingsRoute(request: ReadRequest, respons
     const origin = headerValue(request.headers.origin);
     if (origin && origin !== options.apiOrigin && origin !== options.adminOrigin) reject(403, API_V1_ERROR_CODES.FORBIDDEN, "Request rejected", "origin_rejected");
     const path = (request.originalUrl ?? request.url ?? "").split("?", 1)[0] ?? "";
-    if (request.method !== "GET" || !["/profile", "/sessions", "/security-activity"].some(tail => path === SELF_SETTINGS_PREFIX + tail)) {
+    const method = String(request.method ?? "GET").toUpperCase();
+    const profileWrite = method === "POST" && path === SELF_SETTINGS_PREFIX + "/profile";
+    if (!profileWrite && (method !== "GET" || !["/profile", "/sessions", "/security-activity"].some(tail => path === SELF_SETTINGS_PREFIX + tail))) {
       reject(404, API_V1_ERROR_CODES.NOT_FOUND, "Resource not found", "not_found");
     }
     const activityQuery = path.endsWith("/security-activity") ? parseActivityQuery(request) : undefined;
     const context = await readAdminContext(request, options);
+    if (profileWrite) {
+      const updated = await updateSelfDisplayName(context, (request as { body?: unknown }).body, requestId, options);
+      controller.signal.throwIfAborted();
+      sendJson(response, 200, { status: true, profile: profileView(updated) }, requestId);
+      return;
+    }
     const data = await withDirectoryReadTransaction(options.pool, controller.signal, async client => {
       await assertAdminContextInTransaction(client, context);
       const profile = await readSelfProfile(client, context);

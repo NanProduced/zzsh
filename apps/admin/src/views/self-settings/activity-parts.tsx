@@ -168,7 +168,7 @@ function CopyRequestId({ requestId }: { requestId: string }) {
         }
       />
       <TooltipContent>
-        <span className="font-mono text-[11px]">{copied ? "已复制" : `请求编号 ${requestId}`}</span>
+        <span className="font-mono text-xs">{copied ? "已复制" : `请求编号 ${requestId}`}</span>
       </TooltipContent>
     </Tooltip>
   );
@@ -204,7 +204,7 @@ export function ActivityTimeline({ events, dimmed }: { events: ActivityEvent[]; 
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-medium text-foreground" title={event.action}>{label ?? "未识别的事件"}</span>
-                        <Badge variant="outline" className="text-[11px] font-normal">
+                        <Badge variant="outline" className="text-xs font-normal">
                           {activityActorPhrase(event.actorKind, event.actorRef, event.action)}
                         </Badge>
                       </div>

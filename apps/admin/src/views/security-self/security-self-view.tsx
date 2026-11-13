@@ -32,6 +32,7 @@ import {
   type SecurityCommandHandlers,
 } from "./command-dialogs";
 import { OperationResultDialog, PendingRecordsBlock, type ResolvedRefresh } from "./operation-dialog";
+import { SettingsPageHeader } from "../self-settings/settings-shell";
 
 const defaultPendingStore = createLocalPendingStore();
 
@@ -82,7 +83,7 @@ function SecurityRow({
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-sm font-medium text-foreground">{title}</h3>
           {status ? (
-            <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center rounded-full border border-border bg-surface px-2 py-0.5 text-xs text-muted-foreground">
               {status}
             </span>
           ) : null}
@@ -373,15 +374,11 @@ export function SecuritySelfView({
 
   return (
     <div className="mx-auto max-w-6xl space-y-8 p-4 sm:p-6 lg:p-8">
-      <div className="flex flex-col gap-4 border-b pb-5 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div className="text-muted-foreground mb-1 font-mono text-[11px] tracking-wider uppercase">设置 · 安全</div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">账号安全</h1>
-          <p className="text-muted-foreground mt-1 text-sm">管理本人的登录密码、身份验证器、会话锁定与应急恢复入口。</p>
-          <p className="text-muted-foreground mt-0.5 text-xs">当前管理员：{accountLabel}</p>
-        </div>
-        <AccountStatusBadge status={facts.accountStatus} />
-      </div>
+      <SettingsPageHeader
+        title="账号安全"
+        description={`管理本人的登录密码、身份验证器、会话锁定与应急恢复入口。当前管理员：${accountLabel}`}
+        aside={<AccountStatusBadge status={facts.accountStatus} />}
+      />
 
       {frozen ? (
         <p className="rounded-md border border-rose-500/30 bg-rose-500/10 p-3 text-xs leading-relaxed text-rose-500 dark:text-rose-400">

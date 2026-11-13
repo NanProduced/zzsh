@@ -121,6 +121,55 @@ test("security section runs on the real command adapter with real host callbacks
   await waitFor(() => !text().includes("恢复面板桩"));
 });
 
+test("profile section saves display name through the real self-profile adapter", async (t) => {
+  browser.location.href = "http://127.0.0.1:3101/settings?section=profile";
+  const calls = [];
+  let refreshes = 0;
+  const profile = { adminUserId: "admin-1", zzNumber: "ZZ00001", displayName: "测试管理员", avatarUrl: null, updatedAt: "2026-10-15T00:00:00.000Z" };
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname !== "/api/bff/admin/self/profile") throw new Error(`unexpected test request ${url.pathname}`);
+    const method = init.method ?? "GET";
+    calls.push({ method, body: init.body });
+    if (method === "GET") return json(profile);
+    const body = JSON.parse(String(init.body));
+    return json({ status: true, profile: { ...profile, displayName: body.displayName } });
+  };
+  await mount(t, { query: { section: "profile" }, onRefresh: async () => { refreshes += 1; return SNAPSHOT; } });
+  await waitFor(() => browser.document.body.textContent.includes("测试管理员"));
+  const input = browser.document.querySelector("input");
+  assert.ok(input, "display-name input is rendered on the real profile section");
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype, "value").set;
+    setter.call(input, "新显示名称");
+    input.dispatchEvent(new browser.Event("input", { bubbles: true }));
+  });
+  await settle();
+  const save = buttonByText("保存显示名称");
+  assert.ok(save && !save.disabled);
+  await click(save);
+  await waitFor(() => calls.some((call) => call.method === "POST"));
+  assert.deepEqual(JSON.parse(calls.find((call) => call.method === "POST").body), { displayName: "新显示名称" });
+  await waitFor(() => browser.document.body.textContent.includes("显示名称已保存"));
+  assert.equal(refreshes, 1, "successful save refreshes the workspace session");
+});
+
+test("sidebar order panel starts collapsed and keeps accessible move controls", async (t) => {
+  browser.location.href = "http://127.0.0.1:3101/settings";
+  await mount(t, { snapshot: { ...SNAPSHOT, security: { ...SNAPSHOT.security, isBoss: true } } });
+  const panel = browser.document.querySelector('section[aria-labelledby="nav-group-panel-title"]');
+  assert.ok(panel, "appearance section renders the sidebar-order panel");
+  const toggle = panel.querySelector(".nav-group-panel__toggle");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.match(panel.textContent, /可调整 \d+ 个分组/);
+  assert.equal(panel.querySelectorAll(".nav-group-panel__row").length, 0);
+  await click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await waitFor(() => panel.querySelectorAll(".nav-group-panel__row").length > 0);
+  assert.equal(panel.querySelectorAll("[title]").length, 0, "move buttons do not use native title hints");
+  assert.match(panel.querySelector(".nav-group-panel__move").getAttribute("aria-label"), /上移/);
+});
+
 test("preview=1 stays inert outside the isolated 4381 port (production-like 3101)", async (t) => {
   browser.location.href = "http://127.0.0.1:3101/settings?section=profile&preview=1";
   const reads = [];
