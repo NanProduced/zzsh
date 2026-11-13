@@ -44,6 +44,11 @@ function attemptStatus(value: unknown, refund = false): string {
 function channelStatus(value: unknown): string {
   return guaranteeProviderRequestLabel("payment", typeof value === "string" ? value : "");
 }
+function refundBeforeSubmission(needsReview: unknown): string {
+  if (needsReview === true) return "退款已登记，暂未提交渠道，请联系客服核对。";
+  if (needsReview === false) return "退款已登记，等待处理。";
+  return "退款已登记，暂未提交渠道。";
+}
 function observedMoney(value: unknown): string {
   return typeof value === "string" && /^(0|[1-9]\d{0,23})$/.test(value) ? creditMoney(value) : "待核定";
 }
@@ -88,6 +93,7 @@ export function CreditCenter({ scope }: { scope: string }) {
   }
   // 收退记录引用的账号与保证金责任共用同一份已获权摘要，两个区域标签保持一致。
   const accountsWithPayments = new Set((data?.transactions ?? []).filter(item => item.paymentHistory.length > 0).map(item => item.accountId));
+  const automaticRefundReview = new Map((data?.transactions ?? []).map(item => [item.refundId, item.automaticRefundNeedsReview]));
   const requiredAccountIds = [...new Set([...accountGroups.keys(), ...(data?.transactions ?? []).map(item => item.accountId)])].sort();
   const summaryKey = requiredAccountIds.join(",");
 
@@ -250,7 +256,7 @@ export function CreditCenter({ scope }: { scope: string }) {
             {item.state === "PAYMENT_PENDING" ? item.demoPaymentEligible && data.paymentMode === "SIMULATED" && item.paymentId && item.paymentAmountCents
               ? <><p className="credit-muted">模拟缴纳尚未确认，可继续完成。</p><button type="button" className="button secondary" disabled={paymentBusy || Boolean(pending)} onClick={() => setCheckout({ scope, accountId:item.accountId, paymentId:item.paymentId!, amountCents:item.paymentAmountCents! })}>继续缴纳</button></>
               : <p className="credit-muted">{attemptStatus(item.paymentState)} · {channelStatus(item.paymentProviderState)}，支付结果仍待确认。</p> : null}
-            {["REFUND_REQUESTED", "REFUND_PROCESSING"].includes(item.state) ? <p className="credit-muted">{item.refundProviderState === "NOT_AUTHORIZED" ? "退款已登记，暂未提交渠道，请联系客服核对。" : item.refundProviderState === "SUBMITTED" ? "退款已提交渠道，尚无到账确认。" : "退款进度待确认，请联系客服核对。"}</p> : null}
+            {["REFUND_REQUESTED", "REFUND_PROCESSING"].includes(item.state) ? <p className="credit-muted">{item.refundProviderState === "NOT_AUTHORIZED" ? refundBeforeSubmission(automaticRefundReview.get(item.refundId)) : item.refundProviderState === "SUBMITTED" ? "退款已提交渠道，尚无到账确认。" : "退款进度待确认，请联系客服核对。"}</p> : null}
             {item.state === "REFUNDED" ? <p className="credit-muted">已记录退还，到账情况请以收款记录为准。</p> : null}
           </div>)}
           {accountsWithPayments.has(accountId) && group.contexts.some(item => item.state === "REQUIRED") ? <p className="credit-muted">此账号有缴纳记录，<a href="#credit-transactions" onClick={() => { if (transactionsRef.current) transactionsRef.current.open = true; }}>查看记录并核对进度</a>。</p> : null}
@@ -260,6 +266,7 @@ export function CreditCenter({ scope }: { scope: string }) {
         <ul>{data.transactions.map(item => <li key={item.requirementId}>
           <strong><Link href={`/account?view=accounts&accountId=${encodeURIComponent(item.accountId)}`} scroll={false}>{accountHeading(item.accountId).primary}</Link></strong>
           {item.requirementStatus === "RESTRICTED" ? <p className="credit-muted">保证金收退记录需要核实，请联系客服。</p> : null}
+          {item.refundStatus === "REQUESTED" && item.refundProviderState === "NOT_AUTHORIZED" && item.refundPolicyState === "AUTO_APPROVED" ? <p className="credit-muted">{refundBeforeSubmission(item.automaticRefundNeedsReview)}</p> : null}
           {item.paymentStatus != null || item.refundStatus != null ? <span>{item.paymentStatus != null ? <RecordStatus tone={attemptTone(item.paymentStatus)}>最近收款：{attemptStatus(item.paymentStatus)}</RecordStatus> : null}{item.paymentStatus != null && item.refundStatus != null ? " · " : null}{item.refundStatus != null ? <RecordStatus tone={attemptTone(item.refundStatus)}>最近退还：{attemptStatus(item.refundStatus, true)}</RecordStatus> : null}</span> : null}
           {item.paymentHistory.length ? <details><summary>缴纳记录 {item.paymentHistory.length} 笔</summary><ul>{item.paymentHistory.map(attempt => <li key={attempt.id}>
             <span><RecordStatus tone={attemptTone(attempt.status)}>{attemptStatus(attempt.status)}</RecordStatus> · {attempt.simulationSource ? "模拟缴纳，未发生真实扣款" : channelStatus(attempt.providerRequestState)}</span>

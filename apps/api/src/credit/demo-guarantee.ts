@@ -5,7 +5,7 @@ import { assertUserContextInTransaction } from "../auth/user-identity";
 import { recordAudit, withTransaction } from "../auth/security-core";
 import { assertEcsTestDemoResource, demoFinanceScope, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { conflict, invalid, notFound } from "../supply/supply-util";
-import { lockGuaranteeSubject, recordGuaranteePaymentResult, recordGuaranteeRefundResult } from "./credit-guarantee";
+import { AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE, automaticGuaranteeRefundIssue, lockGuaranteeSubject, recordGuaranteePaymentResult, recordGuaranteeRefundResult } from "./credit-guarantee";
 
 // TODO(正式上线前): 移除此测试渠道适配；模拟回执不能作为汇聚或银行到账证据。
 const id = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
@@ -58,9 +58,11 @@ export async function runDemoGuaranteeRefundBatch(pool: Pool, demo: DemoFinanceR
     return (await client.query<{ id: string }>(`SELECT f.id FROM zzsh_order.owner_guarantee_refund f
       JOIN zzsh_order.owner_guarantee_payment p ON p.id=f.payment_id AND p.requirement_id=f.requirement_id AND p.owner_user_id=f.owner_user_id
       JOIN zzsh_order.owner_guarantee_requirement r ON r.id=f.requirement_id
-      JOIN zzsh_supply.rental_account account ON account.id=r.account_id AND account.owner_user_id=r.owner_user_id
+      JOIN zzsh_supply.rental_account a ON a.id=r.account_id AND a.owner_user_id=r.owner_user_id
       WHERE f.status='REQUESTED' AND f.provider_request_state='NOT_AUTHORIZED' AND f.release_policy_state='AUTO_APPROVED'
-        AND (account.lifecycle='DELISTED' OR (account.lifecycle='ARCHIVED' AND zzsh_order.completed_guarantee_refund_eligible(account.id,account.owner_user_id)))
+        AND (a.lifecycle='DELISTED' OR (a.lifecycle='ARCHIVED' AND zzsh_order.completed_guarantee_refund_eligible(a.id,a.owner_user_id)))
+        AND r.status='REFUND_REQUESTED' AND (${AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE}) IS FALSE
+        AND EXISTS(SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id=a.owner_user_id)
         AND p.status='CONFIRMED' AND p.provider_request_state='CONFIRMED' AND p.original_receipt->>'source'=$1
         AND p.original_receipt->>'registrationDigest'=$2
         AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_type='owner_guarantee_payment' AND a.object_id=p.id
@@ -78,15 +80,14 @@ export async function runDemoGuaranteeRefundBatch(pool: Pool, demo: DemoFinanceR
             p.observed_amount_cents::text AS "paidAmount",p.provider_transaction_id AS "transactionId",p.merchant_order_no AS merchant,p.original_receipt AS receipt
           FROM zzsh_order.owner_guarantee_refund f JOIN zzsh_order.owner_guarantee_payment p
             ON p.id=f.payment_id AND p.requirement_id=f.requirement_id AND p.owner_user_id=f.owner_user_id
-          WHERE f.id=$1 AND f.release_policy_state='AUTO_APPROVED' AND p.status='CONFIRMED' AND p.provider_request_state='CONFIRMED'
+          JOIN zzsh_order.owner_guarantee_requirement r ON r.id=f.requirement_id AND r.owner_user_id=f.owner_user_id
+          WHERE f.id=$1 AND f.release_policy_state='AUTO_APPROVED' AND r.status='REFUND_REQUESTED' AND p.status='CONFIRMED' AND p.provider_request_state='CONFIRMED'
           FOR UPDATE OF f,p`, [refundId])).rows[0];
         if (!row || row.status !== "REQUESTED" || row.providerState !== "NOT_AUTHORIZED") return false;
-        if (subject.lifecycle === "ARCHIVED") {
-          const credit = await client.query(`SELECT user_id FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR SHARE`, [subject.ownerUserId]);
-          if (credit.rowCount !== 1 || (await client.query<{eligible:boolean}>(
-            `SELECT zzsh_order.completed_guarantee_refund_eligible($1,$2) AS eligible`, [subject.accountId, subject.ownerUserId],
-          )).rows[0]?.eligible !== true) return false;
-        }
+        if (await automaticGuaranteeRefundIssue(client, subject.accountId, subject.ownerUserId)) return false;
+        if (subject.lifecycle === "ARCHIVED" && (await client.query<{eligible:boolean}>(
+          `SELECT zzsh_order.completed_guarantee_refund_eligible($1,$2) AS eligible`, [subject.accountId, subject.ownerUserId],
+        )).rows[0]?.eligible !== true) return false;
         if (!["DELISTED", "ARCHIVED"].includes(subject.lifecycle) || row.amount !== row.paidAmount || row.transactionId !== ref("pay", proof.digest, row.paymentId)
           || row.receipt?.source !== source || row.receipt?.scope !== demoFinanceScope(demo) || row.receipt?.registrationDigest !== proof.digest
           || row.receipt?.paymentId !== row.paymentId || row.receipt?.merchantOrderNo !== row.merchant) throw conflict("原模拟付款依据不完整");

@@ -6,6 +6,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { gameScopeSql } from "../auth/admin-scope";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import type { UserObligationReader } from "../auth/user-identity";
+import { ORDER_COMPENSATION_OPERATION } from "../finance/order-compensation-contract";
 import { canonicalize } from "../supply/content-hash";
 import { parseNonNegativeDecimal } from "../supply/decimal";
 import { validateFundingPolicy, type FundingPolicy } from "../supply/funding-policy";
@@ -187,6 +188,8 @@ export async function readCreditSnapshot(client: PoolClient, userId: string, ini
 }
 
 async function lockCreditAccount(client: PoolClient, userId: string, initialize = true): Promise<CreditStateRow> {
+  // Credit events reference the user. Take that lock before the credit row, as publishing does.
+  if (!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR KEY SHARE`, [userId])).rowCount) throw notFound();
   if (initialize) await ensureCreditAccount(client, userId);
   await client.query(`SELECT set_config('zzsh.credit_mutation','1',true)`);
   const row = (await client.query<CreditStateRow>(
@@ -294,8 +297,7 @@ export async function confirmBreach(client: PoolClient, input: {
   const visibleReason = reason(input.visibleReason, "visibleReason");
   const internalBasis = reason(input.internalBasis, "internalBasis");
   if (!ID.test(input.actorAdminId) || !["OWNER", "RENTER"].includes(input.subjectRole)) throw invalid("Credit actor or role is invalid");
-  // Every credit mutation acquires the subject state before any source/event
-  // row.  This is the single lock order shared with reversal and recovery.
+  // Reversal and recovery also lock the subject credit state before source events.
   const state = await lockCreditAccount(client, userId);
   await assertBreachSubject(client, userId, sourceType, sourceId, input.subjectRole);
   const eventKey = `breach:${sourceType}:${sourceId}:${userId}:${input.subjectRole}`;
@@ -865,7 +867,15 @@ type GuaranteeRefundHistoryRow = {
 export async function readGuaranteeTransactions(client: PoolClient, userId: string, actor?: GuaranteeTransactionActor) {
   const scoped = actor ? `AND (${gameScopeSql("a.game_id","$3","$2")})` : "";
   const requirementParams = actor ? [userId, actor.isBoss, actor.userId] : [userId];
-  const requirements = (await client.query(`SELECT r.id AS "requirementId",r.account_id AS "accountId",r.listing_version_id AS "listingVersionId",r.price_version_id AS "priceVersionId",r.base_cents::text AS "baseCents",r.required_cents::text AS "requiredCents",r.score_snapshot AS "scoreSnapshot",r.status AS "requirementStatus",r.created_at::text AS "requirementCreatedAt"
+  const requirements = (await client.query(`SELECT r.id AS "requirementId",r.account_id AS "accountId",r.listing_version_id AS "listingVersionId",r.price_version_id AS "priceVersionId",r.base_cents::text AS "baseCents",r.required_cents::text AS "requiredCents",r.score_snapshot AS "scoreSnapshot",r.status AS "requirementStatus",r.created_at::text AS "requirementCreatedAt",
+    CASE WHEN EXISTS(SELECT 1 FROM zzsh_order.owner_guarantee_refund f WHERE f.requirement_id=r.id AND f.owner_user_id=r.owner_user_id
+      AND f.status='REQUESTED' AND f.provider_request_state='NOT_AUTHORIZED' AND f.release_policy_state='AUTO_APPROVED')
+      THEN CASE
+        WHEN r.status='RESTRICTED' OR (${AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE}) THEN true
+        WHEN NOT EXISTS(SELECT 1 FROM zzsh_credit.user_credit_state c WHERE c.user_id=a.owner_user_id) THEN NULL
+        WHEN a.lifecycle='ARCHIVED' THEN NOT zzsh_order.completed_guarantee_refund_eligible(a.id,a.owner_user_id)
+        WHEN a.lifecycle='DELISTED' THEN false
+      END END AS "automaticRefundNeedsReview"
     FROM zzsh_order.owner_guarantee_requirement r
     JOIN zzsh_supply.rental_account a ON a.id=r.account_id AND a.owner_user_id=r.owner_user_id
     WHERE r.owner_user_id=$1 ${scoped} ORDER BY r.created_at DESC,r.id DESC`, requirementParams)).rows as Array<Record<string, unknown> & { requirementId: string }>;
@@ -992,6 +1002,27 @@ export type DelistedGuaranteeRefund = {
   reason?: string;
 };
 
+/** Shared by the automatic-refund selector and the locked eligibility check. Account alias is `a`. */
+export const AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE = `a.staff_restricted
+    OR EXISTS(SELECT 1 FROM zzsh_iam.im_aftersale_record f JOIN zzsh_order.rental_order o ON o.id=f.order_id
+      WHERE o.account_id=a.id AND f.order_source='NATIVE' AND f.state='PENDING')
+    OR EXISTS(SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=a.owner_user_id AND e.subject_role='OWNER'
+      AND e.event_type='BREACH_CONFIRMED' AND ((e.source_type='ACCOUNT' AND e.source_id=a.id)
+        OR (e.source_type='ORDER' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.id=e.source_id AND o.account_id=a.id)))
+      AND NOT EXISTS(SELECT 1 FROM zzsh_credit.credit_event reversal WHERE reversal.reversal_of_id=e.id))
+    OR EXISTS(SELECT 1 FROM zzsh_iam.approval_request r JOIN zzsh_order.rental_order o ON o.id=r.operation_payload->>'orderId'
+      WHERE o.account_id=a.id AND o.owner_user_id=a.owner_user_id AND r.operation_code='${ORDER_COMPENSATION_OPERATION}'
+        AND r.operation_payload->>'origin'='NATIVE' AND r.status IN ('PENDING','APPROVED','EXECUTION_FAILED'))`;
+
+/** Caller holds the account lock, which also serializes new aftersales and compensation requests. */
+export async function automaticGuaranteeRefundIssue(client: PoolClient, accountId: string, ownerUserId: string): Promise<string | null> {
+  const credit = await client.query(`SELECT user_id FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR SHARE`, [ownerUserId]);
+  if (credit.rowCount !== 1) return "CREDIT_BASIS_UNAVAILABLE";
+  const row = (await client.query<{ unresolved: boolean }>(`SELECT ${AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE} AS unresolved
+    FROM zzsh_supply.rental_account a WHERE a.id=$1 AND a.owner_user_id=$2`, [accountId, ownerUserId])).rows[0];
+  return row?.unresolved === false ? null : "GUARANTEE_REVIEW_REQUIRED";
+}
+
 /** Called after permanent delisting or settlement. No channel request is made here. */
 async function enqueueAutomaticGuaranteeRefund(client: PoolClient, input: {
   accountId: string; ownerUserId: string; requestId: string;
@@ -1027,10 +1058,10 @@ async function enqueueAutomaticGuaranteeRefund(client: PoolClient, input: {
     return { state: "REVIEW_REQUIRED", refunds: [], reason };
   };
   if (requirements.some(requirement => requirement.status === "RESTRICTED")) return review("GUARANTEE_REVIEW_REQUIRED");
+  const issue = await automaticGuaranteeRefundIssue(client, input.accountId, input.ownerUserId);
+  if (issue) return review(issue);
   let unresolved: boolean;
   if (reason === "ORDER_COMPLETED") {
-    const credit = await client.query(`SELECT user_id FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR SHARE`, [input.ownerUserId]);
-    if (credit.rowCount !== 1) return review("CREDIT_BASIS_UNAVAILABLE");
     const result = (await client.query<{ eligible: boolean }>(
       `SELECT zzsh_order.completed_guarantee_refund_eligible($1,$2) AS eligible`, [input.accountId, input.ownerUserId],
     )).rows[0];
@@ -1200,7 +1231,7 @@ async function recordGuaranteeObservation(client: PoolClient, input: { paymentId
   return inserted.rowCount === 1;
 }
 
-/** Match delisting's account → requirement → transaction lock order for channel adapters. */
+/** Match delisting's user → account → requirement → transaction lock order for channel adapters. */
 export async function lockGuaranteeSubject(client: PoolClient, kind: "payment" | "refund", id: string) {
   const subject = (await client.query<{ accountId: string; requirementId: string; ownerUserId: string }>(
     `SELECT r.account_id AS "accountId",r.id AS "requirementId",p.owner_user_id AS "ownerUserId"
@@ -1208,6 +1239,7 @@ export async function lockGuaranteeSubject(client: PoolClient, kind: "payment" |
          ON r.id=p.requirement_id AND r.owner_user_id=p.owner_user_id WHERE p.id=$1`, [id],
   )).rows[0];
   if (!subject) throw notFound();
+  if (!(await client.query(`SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR KEY SHARE`, [subject.ownerUserId])).rowCount) throw notFound();
   const account = (await client.query<{ lifecycle: string }>(
     `SELECT lifecycle FROM zzsh_supply.rental_account WHERE id=$1 AND owner_user_id=$2 FOR UPDATE`,
     [subject.accountId, subject.ownerUserId],
