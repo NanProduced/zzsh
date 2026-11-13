@@ -601,7 +601,7 @@ function FixedDocumentSummary({ business }: { business: BusinessView }) {
         </FactGrid>
       </div>)}
     </div>
-    <p className="text-xs leading-relaxed text-muted-foreground">平台服务协议与隐私政策首次生效必须同一事务；之后可单份更新，用户只需重新同意变更的那份。提前结算告知保持纯文本，订单快照仍按 versionId + sha256(原文) 校验。</p>
+    <p className="text-xs leading-relaxed text-muted-foreground">平台服务协议与隐私政策首次生效必须同一事务；之后可单份更新，用户只需重新同意变更的那份。提前结算告知按订单绑定的文书版本展示，确认时记录版本与结算依据。</p>
   </Section>
   </div>;
 }

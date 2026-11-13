@@ -52,7 +52,7 @@ async function handlePublic(request: SupplyNodeRequest, response: Response, opti
     sendJson(response, 200, result, requestId, "public, max-age=0, must-revalidate");
     return;
   }
-  // 提前结算告知只进订单快照，不在公开文书路由暴露。
+  // 提前结算告知随订单适用版本读取，不在平台文书公开路由暴露。
   const docType = DOC_ROUTES.get(path.slice(1));
   if (!docType) throw notFound();
   const version = new URL(request.originalUrl ?? request.url ?? "/", "http://local").searchParams.get("version") ?? undefined;

@@ -85,8 +85,8 @@ export async function loadFixedDocumentTargets(
       if (!draft) { if (mode === "read") continue; throw notFound(); }
       if (draft.docType !== item.kind) throw conflict("固定文书类型与草稿不一致");
       if (draft.digest !== item.digest) throw conflict("固定文书摘要已变化，请重新提交");
-      if (item.kind === "EARLY_SETTLEMENT" ? draft.bodyFormat !== "text" : draft.bodyFormat !== "plate") {
-        throw conflict(item.kind === "EARLY_SETTLEMENT" ? "提前结算告知只能是纯文本" : "平台法律文书新版本只能使用 Plate 排版");
+      if (mode !== "read" && draft.bodyFormat !== "plate") {
+        throw conflict("固定文书新版本只能使用 Plate 排版");
       }
       if (mode === "submit" && draft.status !== "DRAFT") throw conflict("固定文书草稿已提交或已封存");
       if (mode === "execute" && (draft.status !== "PENDING" || draft.approvalRequestId !== approvalRequestId)) throw conflict("固定文书草稿不在本申请的待审批状态");

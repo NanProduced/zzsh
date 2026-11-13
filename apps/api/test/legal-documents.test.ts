@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { PoolClient } from "pg";
+import { plateDigest, type PlateDocumentEnvelope } from "@zzsh/content/plate";
 
 import {
   legalDigest,
@@ -137,9 +138,10 @@ test("order/settlement acceptance rejects unknown document types and sources", a
 
 test("submitting a draft binds the approval request and sealing only happens through that request", async () => {
   const body = "提前结算告知合成正文";
+  const document: PlateDocumentEnvelope = { format: "plate", schemaVersion: 1, preset: "legal", value: [{ type: "p", children: [{ text: body }] }] };
   const draft = {
-    id: "legal_early", docType: "EARLY_SETTLEMENT" as const, title: "提前结算告知", body, bodyFormat: "text" as const,
-    bodyDocument: null, digest: legalDigest(body), status: "DRAFT" as const, revision: "2", effectiveAt: null,
+    id: "legal_early", docType: "EARLY_SETTLEMENT" as const, title: "提前结算告知", body, bodyFormat: "plate" as const,
+    bodyDocument: document, digest: await plateDigest(document), status: "DRAFT" as const, revision: "2", effectiveAt: null,
     sealedAt: null, approvalRequestId: null, createdAt: "2026-10-30T00:00:00.000Z",
   };
   let current: typeof draft | { status: string; approvalRequestId: string | null; effectiveAt: string | null; sealedAt: string | null } = draft;

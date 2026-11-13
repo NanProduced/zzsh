@@ -7,7 +7,7 @@ import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { humanText } from "../supply/content-hash";
 import { conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "../supply/supply-util";
 
-/** 平台协议两份按份同意；EARLY_SETTLEMENT 只进订单快照，不进登录同意。 */
+/** 平台协议两份按份同意；提前结算告知绑定规则版本，不进登录同意。 */
 export const LEGAL_DOC_TYPES = ["PLATFORM_TERMS", "PLATFORM_PRIVACY"] as const;
 export type LegalDocType = (typeof LEGAL_DOC_TYPES)[number];
 
@@ -318,7 +318,7 @@ export async function submitLegalDocument(client: PoolClient, id: string, expect
   const current = await lockLegalDocument(client, id);
   if (current.status !== "DRAFT") throw conflict("Legal document is already submitted or sealed");
   if (current.revision !== expectedRevision) throw conflict("Legal document changed; reload and retry");
-  if (current.docType !== "EARLY_SETTLEMENT" && current.bodyFormat !== "plate") throw conflict("平台法律文书新版本只能使用 Plate 排版");
+  if (current.bodyFormat !== "plate") throw conflict("固定文书新版本只能使用 Plate 排版");
   const row = (await client.query<LegalDocumentVersion>(
     `UPDATE "zzsh_content"."legal_document_version"
         SET "status" = 'PENDING', "approval_request_id" = $2, "updated_at" = clock_timestamp()
