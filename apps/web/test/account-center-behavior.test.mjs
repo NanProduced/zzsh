@@ -63,7 +63,28 @@ function loadCenter(session) {
   const module = new Module(path.join(tree, "account-center-component-probe.cjs"));
   module.filename = path.join(tree, "account-center-component-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
+  const moduleCache = new Map();
   module.require = (name) => {
+    if (name.startsWith("./account-") || name === "./account-overview") {
+      const candidates = [
+        path.join(tree, "apps/web/src/components/account", `${name.slice(2)}.tsx`),
+        path.join(tree, "apps/web/src/components/account", `${name.slice(2)}.ts`),
+      ];
+      const target = candidates.find((f) => fs.existsSync(f));
+      if (target) {
+        if (moduleCache.has(target)) return moduleCache.get(target).exports;
+        const child = new Module(target);
+        child.filename = target;
+        child.paths = Module._nodeModulePaths(tree);
+        child.require = module.require;
+        moduleCache.set(target, child);
+        const code = fs.readFileSync(target, "utf8");
+        child._compile(typescript.transpileModule(code, {
+          compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true },
+        }).outputText, target);
+        return child.exports;
+      }
+    }
     if (name === "next/link") return function Link({ scroll: _scroll, ...props }) { return React.createElement("a", props); };
     if (name === "@/components/session/user-session-provider") return { useUserSession: () => session, useUserSessionStore: () => ({ getSnapshot: () => session }) };
     if (name === "./personal-wallet") {
