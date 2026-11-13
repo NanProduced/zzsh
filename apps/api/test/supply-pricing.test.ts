@@ -128,20 +128,8 @@ test("fixed-fee policy requires three explicit rates and selects by rental mode"
 });
 
 test("fixed-fee drafts cannot be activated through the legacy immediate release path", async () => {
-  const calls: string[] = [];
-  const client = { query: async (sql: string) => {
-    calls.push(sql);
-    if (sql.includes("pg_attribute")) return { rows: [{ available: true }] };
-    if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.includes("AS at")) return { rows: [{ at: "2026-01-01T00:00:00.000000Z" }] };
-    if (sql.includes("AND effective_at=")) return { rows: [] };
-    if (sql.includes("FROM zzsh_supply.game") || sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: "game" }] };
-    if (sql.includes('UNION ALL')) return { rows: ["price", "term", "agreement"].map(id => ({ id, status: "SEALED", gameId: "game" })) };
-    if (sql.includes('AS "fixedFeeRates"')) return { rows: [{ mode: "PERCENT", policy: null, fixedFeeRates: { ordinary: "0.1", custom: "0.1", fast: "0.1" } }] };
-    throw new Error("unexpected query");
-  } };
-  await assert.rejects(() => activateRelease(client as never, "admin", true, "game", "price", "term", "agreement", "0", { effectiveAt: "2099-01-01T00:00:00Z", announcementVersionId: "notice" }), /尚未开放发布/);
-  assert(!calls.some(sql => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(sql)));
+  const client = { query: async () => assert.fail("An immediate release must be rejected before querying the database") };
+  await assert.rejects(() => activateRelease(client as never, "admin", true, "game", "price", "term", "agreement", "0"), /须绑定公告和未来生效时间/);
 });
 
 test("fixed fee rounds once for the combined resource amount and allocates cents deterministically", () => {

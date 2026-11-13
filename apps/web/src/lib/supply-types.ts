@@ -294,7 +294,7 @@ export type PublishingCatalog = {
   inputScale: 0;
   ready: boolean;
   blockers: Array<{
-    code: "RULE_UNCONFIGURED" | "REQUIRED_ITEM_UNPRICED";
+    code: "RULE_UNCONFIGURED" | "PRICING_POLICY_UNAVAILABLE" | "REQUIRED_ITEM_UNPRICED";
     path: string;
     itemId?: string;
     name?: string;

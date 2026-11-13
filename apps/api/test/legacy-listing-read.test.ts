@@ -57,7 +57,7 @@ const config = parseFilterConfig({
 const catalog = {
   game: { id: "game_x", code: "delta", catalogRevision: "7", ruleReleaseId: null, rule: null },
   items: [{ id: "item_haff", code: "haff_base", name: "哈夫币", unit: "HAFF_BASE" }],
-  categories: [],
+  categories: [], safeBoxes: [], levels: { vitality: [], bear: [] }, pricingAvailable: false,
 };
 const legacyState = { catalog, config, legacyReadOnly: true, mixed: false, mode: "LEGACY_READ_ONLY", hasLegacySnapshots: true, allowLegacyOptions: true, filterRevision: "3", catalogRevision: "7", ruleReleaseId: null } as unknown as Parameters<typeof publicFilterMetadata>[0];
 const baseQuery: ListingQueryV2 = { queryVersion: 2, gameId: "game_x", q: null, filters: {}, sort: "latest", direction: "DESC", coreItemId: null, limit: 20, cursor: null, filterRevision: null, catalogRevision: null, ruleReleaseId: null };
@@ -124,7 +124,7 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   assert.match(text, /NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication/);
   const mixed = buildMixedListingCandidates(query, null);
   assert.match(mixed.text, /NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\)/);
-  assert.match(mixed.text, /v\.schema_version<>3/);
+  assert.match(mixed.text, /legacy\.source_system='legacy_mysql_restore'/);
   assert.match(mixed.text, /h\.source_status=3/);
   assert.match(mixed.text, new RegExp(LEGACY_NATIVE_TAKEOVER_GUARD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

@@ -164,7 +164,7 @@ test("mixed candidates merge both sources once with native priority and one seek
 });
 test("mixed read keeps configured historical safe box codes next to priced rule codes",async()=>{
   const config=parseFilterConfig({schemaVersion:1,fields:[{key:"safeBoxCodes",operator:"ANY",label:"安全箱",enabled:true,order:0,options:[{value:"safe_box_1x2",label:"基础安全箱(1*2)"},{value:"safe_box_3x3",label:"顶级安全箱(3*3)"}]},{key:"vitality",operator:"MIN",label:"体力",enabled:true,order:1,levels:[6,7]}],sorts:[{key:"latest",label:"最新发布",enabled:true,order:0}]});
-  const catalog={game:{id:"game",code:"delta",catalogRevision:"1",ruleReleaseId:"release",rule:{baseBySafeBox:{safe_box_3x3:"50"}}},items:[],categories:[]};
+  const catalog={game:{id:"game",code:"delta",catalogRevision:"1",ruleReleaseId:"release",rule:{baseBySafeBox:{safe_box_3x3:"50"}}},items:[],categories:[],safeBoxes:["safe_box_3x3"],levels:{vitality:[6],bear:[]},pricingAvailable:true};
   const state={catalog,config,legacyReadOnly:false,mixed:true,mode:"MIXED",hasLegacySnapshots:true,allowLegacyOptions:true,filterRevision:"1",catalogRevision:"1",ruleReleaseId:"release"} as unknown as Parameters<typeof publicFilterMetadata>[0];
   const metadata=publicFilterMetadata(state,true,"TYPE") as ReturnType<typeof publicFilterMetadata>;
   assert.deepEqual(metadata.fields.find(f=>f.key==="safeBoxCodes")!.options!.map(o=>o.value).sort(),["safe_box_1x2","safe_box_3x3"],"metadata keeps the configured historical code next to the priced code");

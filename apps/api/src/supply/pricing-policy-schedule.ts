@@ -108,17 +108,18 @@ export async function readSchedulePriceOptions(client: PoolClient, gameId: strin
 }
 
 /** Resolve the default for a new listing at one server-supplied instant. */
-export async function readEffectivePricingMode(client: PoolClient, gameId: string, asOf: string) {
+export async function readEffectivePricingMode(client: Pick<PoolClient, "query">, gameId: string, asOf: string) {
   if (typeof gameId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId)) throw invalid("Pricing policy reference is invalid");
   let at: string;
   try { at=normalizeTime(asOf)??""; } catch { throw invalid("Pricing policy time is invalid"); }
   if(!at)throw invalid("Pricing policy time is invalid");
   const row=(await client.query<{id:string;generation:string;effectiveAt:string;pricingModel:PricingModel;priceScheduleId:string|null;priceVersionId:string|null;
-    priceMode:string|null;priceStatus:string|null;roundingPolicy:string|null;rates:unknown;haffRule:unknown}>(`SELECT m.id,m.generation::text AS generation,${instantSql("m.effective_at")} AS "effectiveAt",
+    priceMode:string|null;priceStatus:string|null;roundingPolicy:string|null;rates:unknown;haffRule:unknown;priceEffectiveAt:string}>(`SELECT m.id,m.generation::text AS generation,${instantSql("m.effective_at")} AS "effectiveAt",
       m.pricing_model AS "pricingModel",s.id AS "priceScheduleId",s.price_version_id AS "priceVersionId",
+      ${instantSql("s.effective_at")} AS "priceEffectiveAt",
       p.mode AS "priceMode",p.status AS "priceStatus",p.rounding_policy AS "roundingPolicy",p.fixed_fee_rates AS rates,p.haff_rule AS "haffRule"
       FROM zzsh_supply.pricing_mode_schedule m
-      LEFT JOIN LATERAL (SELECT id,price_version_id FROM zzsh_supply.pricing_policy_schedule
+      LEFT JOIN LATERAL (SELECT id,price_version_id,effective_at FROM zzsh_supply.pricing_policy_schedule
         WHERE game_id=m.game_id AND pricing_model=m.pricing_model AND effective_at<=$2::timestamptz
         ORDER BY effective_at DESC,generation DESC LIMIT 1) s ON true
       LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=m.game_id
@@ -131,7 +132,27 @@ export async function readEffectivePricingMode(client: PoolClient, gameId: strin
   if(row.pricingModel==="SPREAD")spreadRule(row.haffRule);
   if(row.pricingModel==="FIXED_FEE")try{parseFixedFeeRates(row.rates);}catch{throw conflict("生效中的固定手续费率无法核实");}
   return {id:row.id,generation:row.generation,effectiveAt:row.effectiveAt,pricingModel:row.pricingModel,
-    priceScheduleId:row.priceScheduleId,priceVersionId:row.priceVersionId};
+    priceScheduleId:row.priceScheduleId,priceVersionId:row.priceVersionId,priceEffectiveAt:row.priceEffectiveAt,haffRule:row.haffRule};
+}
+
+/** New-listing readers use one effective instant. Before the first mode takes effect, only a verified legacy combination is usable. */
+export async function readNewListingPrice(client: Pick<PoolClient, "query">, gameId: string, legacyPriceVersionId: string, asOf: string, schema?: { modes: boolean; prices: boolean }) {
+  const tables = schema ?? (await client.query<{ modes: boolean; prices: boolean }>(`SELECT
+    to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
+    to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices`)).rows[0];
+  if (!tables || typeof tables.modes !== "boolean" || typeof tables.prices !== "boolean" || tables.modes !== tables.prices)
+    throw conflict("抽成模式配置不完整");
+  if (tables.modes) {
+    const current = await readEffectivePricingMode(client, gameId, asOf);
+    if (current) return current;
+  }
+  const row = (await client.query<{ priceVersionId: string; haffRule: unknown; pricingModel: "LEGACY_SPREAD" | "LEGACY_PERCENT" }>(
+    `SELECT p.id AS "priceVersionId",p.haff_rule AS "haffRule",
+      CASE WHEN p.mode='SPREAD' THEN 'LEGACY_SPREAD' ELSE 'LEGACY_PERCENT' END AS "pricingModel"
+      FROM zzsh_supply.price_version p WHERE p.id=$1 AND p.game_id=$2 AND p.status='SEALED'
+      AND to_jsonb(p)->>'fixed_fee_rates' IS NULL`, [legacyPriceVersionId, gameId])).rows[0];
+  if (!row) throw conflict("当前尚未配置可用价目");
+  return { ...row, priceScheduleId: null, priceEffectiveAt: null, effectiveAt: null };
 }
 
 /** The immutable publication owns the accepted policy; never substitute today's schedule. */
@@ -166,7 +187,7 @@ export async function readBoundListingPrice(client: PoolClient, gameId: string, 
 }
 
 /** Existing owner-published accounts keep their accepted model when the default changes. */
-export async function readListingPricingModel(client:PoolClient,input:{accountId:string;ownerUserId:string;gameId:string;asOf?:string}):Promise<{model:PricingModel|"LEGACY_SPREAD"|"LEGACY_PERCENT";asOf:string}|null> {
+export async function readListingPricingModel(client:PoolClient,input:{accountId:string;ownerUserId:string;gameId:string;asOf?:string;legacyPriceVersionId?:string}):Promise<{model:PricingModel|"LEGACY_SPREAD"|"LEGACY_PERCENT";asOf:string}|null> {
   if(!input||![input.accountId,input.ownerUserId,input.gameId].every(value=>typeof value==="string"&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)))throw invalid("Listing pricing reference is invalid");
   const tables=(await client.query<{modes:boolean;prices:boolean;asOf:string}>(`SELECT to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
     to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,${instantSql("clock_timestamp()")} AS "asOf"`)).rows[0];
@@ -193,6 +214,10 @@ export async function readListingPricingModel(client:PoolClient,input:{accountId
       if(previous.schemaVersion===1&&quote.schemaVersion===1&&quote.mode==="PERCENT")return {model:"LEGACY_PERCENT",asOf};
     }catch{throw conflict("已上架账号的抽成模式无法核实");}
     throw conflict("已上架账号的抽成模式无法核实");
+  }
+  if (input.legacyPriceVersionId) {
+    const price = await readNewListingPrice(client,input.gameId,input.legacyPriceVersionId,asOf,tables);
+    return {model:price.pricingModel,asOf};
   }
   const current=await readEffectivePricingMode(client,input.gameId,asOf);
   if(!current)throw conflict("当前尚未配置新账号抽成模式");

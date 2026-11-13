@@ -1,3 +1,4 @@
+import { readNewListingPrice } from "./pricing-policy-schedule";
 import { effectiveRuleRelease } from "./effective-rule-release";
 import type { Pool, PoolClient } from "pg";
 
@@ -910,14 +911,24 @@ export async function readPublicCatalog(
     catalogRevision: string;
     currentReleaseId: string | null;
     coverMediaId: string | null;
+    basePriceVersionId: string | null;
+    evaluatedAt: string;
   }>(
     `SELECT "id", "code", "name", "description", "catalog_revision"::text AS "catalogRevision",
-            ${effectiveRuleRelease("g")} AS "currentReleaseId", "cover_media_id" AS "coverMediaId"
+            ${effectiveRuleRelease("g")} AS "currentReleaseId", "cover_media_id" AS "coverMediaId",
+            (SELECT r.price_version_id FROM zzsh_supply.rule_release r WHERE r.id=${effectiveRuleRelease("g")} AND r.game_id=g.id) AS "basePriceVersionId",
+            to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"
        FROM "zzsh_supply"."game" g WHERE "id" = $1 AND "enabled" = true`,
     [gameId],
   );
-  const gameRow = game.rows[0];
-  if (!gameRow) throw notFound();
+  const row = game.rows[0];
+  if (!row) throw notFound();
+  const { basePriceVersionId, evaluatedAt, ...gameRow } = row;
+  const effectivePrice = scope === "publishing" && basePriceVersionId
+    ? await readNewListingPrice(client, gameId, basePriceVersionId, evaluatedAt).catch(error => {
+      if (!(error instanceof SecurityApiError)) throw error;
+      return null;
+    }) : null;
   let lastSkinId: string | undefined;
   if (cursor !== undefined) lastSkinId = parseCursor(cursor, { gameId, revision: gameRow.catalogRevision, filters });
   if (filters.rarityCode || filters.ownerId || filters.firearmClassificationId) {
@@ -937,11 +948,11 @@ export async function readPublicCatalog(
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder",
             CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"${scope === "publishing" ? `,
-            EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
+            EXISTS (SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=$2 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
        FROM "zzsh_supply"."billable_item" i
       WHERE "game_id" = $1 AND "enabled" = true${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
-    itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
+    scope === "publishing" ? [gameId, effectivePrice?.priceVersionId ?? null] : itemSearch ? [gameId, `%${escapeLike(itemSearch)}%`] : [gameId],
   );
 
   const visibleRefs = await client.query<{ kind: SkinOwnerRef["kind"] | null; id: string | null; name: string | null; firearmClassificationId: string | null; firearmClassificationName: string | null }>(
@@ -1027,9 +1038,12 @@ export async function readPublicCatalog(
   const page = hasMore ? skins.rows.slice(0, limit) : skins.rows;
   const nextCursor = hasMore ? encodeCursor({ gameId, revision: gameRow.catalogRevision, filters }, page[page.length - 1]!.id) : null;
 
-  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')`,[gameId])).rows : [];
+  const missing = scope === "publishing" && effectivePrice ? items.rows.filter(item => item.required && item.priced !== true) : [];
   return {
-    ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
+    ...(scope === "publishing" ? {ready: Boolean(effectivePrice) && missing.length===0,
+      blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}]
+        : !effectivePrice ? [{code:"PRICING_POLICY_UNAVAILABLE",path:"rules"}]
+        : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,
     skinCategoryModel: { mode: "RETIRED", legacyReferencesReadOnly: false },
     items: items.rows.filter(item => !isRetiredDeltaInsurance(String(item.code))),

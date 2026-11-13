@@ -1,3 +1,5 @@
+import { readNewListingPrice } from "./pricing-policy-schedule";
+import { candidateMarketPrice, LISTING_ATTRIBUTES_SQL, PUBLIC_CANDIDATE_FROM, PUBLIC_CANDIDATE_WHERE, PUBLIC_STANDARD_TIER_GUARD } from "./listing-candidates";
 import { effectiveRuleRelease } from "./effective-rule-release";
 import { hasLegacyReadSnapshots, legacyListingSortLabel } from "./legacy-listing-read";
 import type { PoolClient } from "pg";
@@ -8,17 +10,45 @@ import { publicGradingOptions,publicGradingRankOptions,publicLoginMethodOptions,
 import { GAME_SERVICE,requirePublicGameService } from "./game-services";
 
 export async function listingCatalogContext(client:PoolClient,gameId:string) {
-  const game=(await client.query(`SELECT g.id,g.code,g.catalog_revision::text AS "catalogRevision",${effectiveRuleRelease("g")} AS "ruleReleaseId",p.haff_rule AS rule FROM zzsh_supply.game g LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1`,[gameId])).rows[0];
+  const game=(await client.query(`SELECT g.id,g.code,g.catalog_revision::text AS "catalogRevision",r.id AS "ruleReleaseId",
+    r.price_version_id AS "basePriceVersionId",to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+    FROM zzsh_supply.game g LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} AND r.game_id=g.id WHERE g.id=$1`,[gameId])).rows[0];
   if(!game || game.code!=="delta")throw notFound();
+  const current = game.basePriceVersionId ? await readNewListingPrice(client,gameId,game.basePriceVersionId,game.at).catch(error => {
+    if (!(error instanceof SecurityApiError)) throw error;
+    return null;
+  }) : null;
+  const attrs = LISTING_ATTRIBUTES_SQL;
+  const observed = game.ruleReleaseId ? (await client.query<{safeBox:string|null;vitality:string|null;bear:string|null}>(`SELECT DISTINCT
+    CASE WHEN p.haff_rule->'baseBySafeBox' ? (${attrs}->>'safe_box_code') THEN ${attrs}->>'safe_box_code' END AS "safeBox",
+    CASE WHEN p.haff_rule->'vitalityDeltaByLevel' ? COALESCE(${attrs}->>'vit_level',${attrs}->>'vitLevel')
+      THEN COALESCE(${attrs}->>'vit_level',${attrs}->>'vitLevel') END AS vitality,
+    CASE WHEN p.haff_rule->'bearDeltaByLevel' ? COALESCE(${attrs}->>'bear_level',${attrs}->>'bearLevel')
+      THEN COALESCE(${attrs}->>'bear_level',${attrs}->>'bearLevel') END AS bear
+    ${PUBLIC_CANDIDATE_FROM}
+    JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id AND r.game_id=a.game_id
+    JOIN zzsh_supply.price_version p ON p.id=v.payload#>>'{quoteValues,priceVersionId}' AND p.game_id=a.game_id AND p.status='SEALED'
+    WHERE g.id=$1 AND g.enabled AND ${PUBLIC_CANDIDATE_WHERE} AND ${PUBLIC_STANDARD_TIER_GUARD}
+      AND (CASE WHEN v.schema_version=4 OR v.payload ? 'pricingPolicy' THEN
+        pub.source='OWNER_DIRECT' AND v.payload#>>'{pricingPolicy,priceVersionId}'=p.id
+        AND ${candidateMarketPrice()} IS NOT NULL
+        ELSE p.id=r.price_version_id END)`,[gameId])).rows : [];
+  const rule = current?.haffRule as Partial<Record<"baseBySafeBox"|"vitalityDeltaByLevel"|"bearDeltaByLevel",Record<string,string>>> | null;
+  const safeBoxes = [...new Set([...Object.keys(rule?.baseBySafeBox ?? {}),...observed.flatMap(row=>row.safeBox ? [row.safeBox] : [])])]
+    .filter(code=>publicSafeBoxCodes().includes(code));
+  const levels = {
+    vitality: [...new Set([...Object.keys(rule?.vitalityDeltaByLevel ?? {}),...observed.flatMap(row=>row.vitality ? [row.vitality] : [])])].map(Number),
+    bear: [...new Set([...Object.keys(rule?.bearDeltaByLevel ?? {}),...observed.flatMap(row=>row.bear ? [row.bear] : [])])].map(Number),
+  };
   const items=(await client.query<{id:string;code:string;name:string;unit:string}>(`SELECT id,code,name,unit FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY sort_order,id`,[gameId])).rows;
   const categories: {id:string;parentId:string|null;name:string}[]=[];
-  return {game,items,categories};
+  return {game,items,categories,safeBoxes,levels, pricingAvailable: current !== null};
 }
 type Catalog=Awaited<ReturnType<typeof listingCatalogContext>>;
 type CodeField={key:string;options?:ReadonlyArray<{value:string}>};
 function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
   if(field.key==="safeBoxCodes"){
-    const priced=Object.keys(c.game.rule?.baseBySafeBox??{});
+    const priced=c.safeBoxes;
     if(!legacy)return priced;
     // Mixed/legacy reads keep configured historical display codes next to the
     // current rule codes; unknown codes stay rejected everywhere.
@@ -27,7 +57,7 @@ function allowedCodes(c:Catalog,field:CodeField,legacy=false):string[] {
   }
   return (field.key==="gradingCodes"?publicGradingOptions():field.key==="gradingRanks"?publicGradingRankOptions():publicLoginMethodOptions()).map(o=>o.code);
 }
-function allowedLevels(c:Catalog,key:string):number[]{return Object.keys(c.game.rule?.[key==="vitality"?"vitalityDeltaByLevel":"bearDeltaByLevel"]??{}).map(Number);}
+function allowedLevels(c:Catalog,key:string):number[]{return key==="vitality"?c.levels.vitality:c.levels.bear;}
 export function validateConfigCatalog(config:FilterConfig,c:Catalog,legacy=false,purpose:"READ"|"WRITE"="READ") {
   for(const f of config.fields) {
     if(f.key==="skinGroups"&&f.categoryIds!==undefined)throw retiredSkinCategory();
@@ -94,5 +124,5 @@ export function publicFilterMetadata(state:Awaited<ReturnType<typeof readListing
   const sorts=config?.sorts.filter(s=>s.enabled).map(s=>({...s,...(legacy?{label:legacyListingSortLabel(s.key,s.label)}:{}),...(s.itemIds?{itemIds:s.itemIds.filter(id=>c.items.some(i=>i.id===id&&i.unit==="HAFF_BASE"))}:{})})).sort((a,b)=>a.order-b.order)||[];
   const shared={gameId:c.game.id,queryVersion:2 as const,...(skinGrouping==="TYPE"?{skinGrouping:"TYPE" as const}:{}),filterRevision:state.filterRevision,catalogRevision:state.catalogRevision,fields,sorts,directions:["ASC","DESC"] as Array<"ASC"|"DESC">,items:c.items.filter(i=>fields.some(f=>f.items?.some(r=>r.itemId===i.id))||config?.sorts.some(s=>s.itemIds?.includes(i.id))),categories:c.categories.filter(a=>fields.some(f=>f.categoryIds?.includes(a.id))),skinCatalogUrl:`/api/v1/supply/games/${checkedId(c.game.id,"gameId")}/catalog`,limits:{urlBytes:8192,resources:16,skinGroups:8,skinIds:50,enumValues:50,regions:20,limit:50,scanBudget:200},livePages:true};
   if(legacy)return {...shared,available:Boolean(config&&signingReady),readMode:"LEGACY_READ_ONLY" as const,reasonCode:!config?"FILTERS_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:null,defaultSort:{sort:"latest",direction:"DESC" as const,label:"更新时间"}};
-  return {...shared,available:Boolean(config&&state.ruleReleaseId&&signingReady),reasonCode:!config?"FILTERS_UNCONFIGURED":!state.ruleReleaseId?"RULES_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null,resourceQuantityRange:true,ruleReleaseId:state.ruleReleaseId,defaultSort:{sort:"latest",direction:"DESC" as const,label:"最新发布"}};
+  return {...shared,available:Boolean(config&&state.ruleReleaseId&&signingReady),reasonCode:!config?"FILTERS_UNCONFIGURED":!state.ruleReleaseId?"RULES_UNCONFIGURED":!signingReady?"SIGNING_UNCONFIGURED":null, newListingPricingAvailable:c.pricingAvailable,resourceQuantityRange:true,ruleReleaseId:state.ruleReleaseId,defaultSort:{sort:"latest",direction:"DESC" as const,label:"最新发布"}};
 }

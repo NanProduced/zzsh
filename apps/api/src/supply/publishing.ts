@@ -58,7 +58,7 @@ import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
 import { validateFixedFeeTimeline } from "../auth/fixed-fee-policy-timeline";
-import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
+import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readNewListingPrice, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -1075,11 +1075,12 @@ export async function resolveIncomePreviewRelease(client:PoolClient,gameId:strin
   const tables=(await client.query<{modes:boolean;prices:boolean}>(`SELECT to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
     to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices`)).rows[0];
   if(!tables||typeof tables.modes!=="boolean"||typeof tables.prices!=="boolean")return {available:false as const,reason:"RULE_UNCONFIGURED"};
-  if(!tables.modes&&!tables.prices)return {available:true as const,release:base};
+  if(!tables.modes&&!tables.prices) return base.haffRule?.schema === "haff-ratio-v3"
+    ? {available:false as const,reason:"RULE_UNCONFIGURED"} : {available:true as const,release:base};
   if(!tables.modes||!tables.prices||!context)return {available:false as const,reason:"PRICING_CONTEXT_REQUIRED"};
   const selected=context.accountId
-    ? await readListingPricingModel(client,{accountId:context.accountId,ownerUserId:context.ownerUserId!,gameId,asOf:context.asOf})
-    : await readEffectivePricingMode(client,gameId,context.asOf).then(value=>value?{model:value.pricingModel}:null);
+    ? await readListingPricingModel(client,{accountId:context.accountId,ownerUserId:context.ownerUserId!,gameId,asOf:context.asOf,legacyPriceVersionId:base.priceVersionId})
+    : await readNewListingPrice(client,gameId,base.priceVersionId,context.asOf).then(value=>({model:value.pricingModel}));
   if(!selected)return {available:false as const,reason:"RULE_UNCONFIGURED"};
   if(selected.model==="FIXED_FEE"){
     // The ordinary rate is used only to read the common version when the form has no mode yet.
@@ -1220,7 +1221,9 @@ export async function quoteListing(
   let priceRule=release.haff_rule,priceRounding:string=release.rounding_policy,commissionRate:string|null=release.commission_rate;
   let pricingPolicy:ContentPayloadInput["pricingPolicy"];
   if(!legacyQuote){
-    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,asOf:release.evaluatedAt});
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,asOf:release.evaluatedAt,legacyPriceVersionId:release.price_version_id});
+    if (!selected && release.haff_rule?.schema === "haff-ratio-v3")
+      throw conflict("当前尚未配置固定手续费价格政策");
     if(selected?.model==="FIXED_FEE"){
       const rentalMode=normalizeRentalPricing(d.attributes.rentalPricing).rentalMode;
       const effective=await readEffectiveFixedFeePrice(client,a.game_id,rentalMode,selected.asOf);
@@ -1507,8 +1510,10 @@ export async function assertCurrentRelease(
 ): Promise<void> {
   const game = (await client.query(
     `SELECT ${effectiveRuleRelease("g", "COALESCE($2::timestamptz, transaction_timestamp())")} AS current_release_id,catalog_revision::text,
+      (SELECT r.price_version_id FROM zzsh_supply.rule_release r WHERE r.id=v.release_id) AS "basePriceVersionId",
       to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"
-      FROM zzsh_supply.game g WHERE id=$1 FOR SHARE OF g`,
+      FROM zzsh_supply.game g CROSS JOIN LATERAL (SELECT ${effectiveRuleRelease("g", "COALESCE($2::timestamptz, transaction_timestamp())")} AS release_id) v
+      WHERE g.id=$1 FOR SHARE OF g`,
     [a.game_id, asOf ?? null],
   )).rows[0];
   if (game?.current_release_id !== v.rule_release_id ||
@@ -1516,7 +1521,7 @@ export async function assertCurrentRelease(
     throw conflict("规则已更新，请在原草稿重新核价并确认");
   if(v.review_state==="DRAFT"&&v.origin==="NATIVE"&&v.payload&&v.payload.schemaVersion!==3){
     const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,
-      asOf: asOf ?? game.evaluatedAt});
+      asOf: asOf ?? game.evaluatedAt,legacyPriceVersionId:game.basePriceVersionId});
     if(selected&&selected.model!=="LEGACY_PERCENT"&&selected.model!=="LEGACY_SPREAD"){
       const policy=v.payload.pricingPolicy;
       if(!policy||policy.pricingModel!==selected.model)throw conflict("抽成模式已更新，请重新核价并确认");
