@@ -58,7 +58,8 @@ import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwner
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
-import { assertFixedFeeTestListingAdmission, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
+import { assertFixedFeeTestListingAdmission, readFixedFeeDemoAccounts, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { validateFixedFeeTimeline } from "../auth/fixed-fee-policy-timeline";
 import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readNewListingPrice, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
@@ -353,6 +354,8 @@ export type ListingDetailPrefetch = {
   version?: ListingVersion | null;
   /** Answer to the publication probe, already resolved for this page. */
   hasPublication?: boolean;
+  fixedFeeDemo?: DemoFinanceResource;
+  fixedFeeDemoAccount?: boolean;
   shared?: ListingPageShared;
   /** This request's public projection of one account. The admin detail path and
    *  the supervision facts path need the same account's public listing, and the
@@ -367,16 +370,22 @@ export type ListingDetailPrefetch = {
  *  probe are read a window at a time instead of one round trip per candidate.
  *  The window is the caller's own page size, so a small limit never loads rows it
  *  will not project, and a rejected candidate just moves the window forward. */
-export function listingCandidatePage(client: PoolClient) {
+export function listingCandidatePage(client: PoolClient, fixedFeeDemo?: { resource: DemoFinanceResource; accountIds: readonly string[] }) {
   const shared = listingPageShared(client);
   const accounts = new Map<string, PublishingAccount | undefined>();
   const versions = new Map<string, ListingVersion | null>();
   const published = new Set<string>();
+  let demoAccounts: Promise<Set<string>> | undefined;
   return {
     shared,
     has: (id: string) => accounts.has(id),
     account: (id: string) => accounts.get(id),
     version: (id: string) => versions.get(id) ?? null,
+    fixedFeeDemoAccount: async (id: string) => {
+      if (!fixedFeeDemo || versions.get(id)?.payload?.schemaVersion !== 4) return false;
+      demoAccounts ??= readFixedFeeDemoAccounts(client, fixedFeeDemo.resource, fixedFeeDemo.accountIds, "READ");
+      return (await demoAccounts).has(id);
+    },
     /** Only meaningful for ids covered by a load() that asked for publications. */
     hasPublication: (id: string) => published.has(id),
     async load(ids: readonly string[], withPublications = false): Promise<void> {
@@ -1695,6 +1704,7 @@ export async function submitListing(
   body: Record<string, unknown>,
   gate: SupplyGateReader,
   fixedFeeTestAdmission?: FixedFeeTestListingAdmission,
+  fixedFeeDemo?: DemoFinanceResource,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
   if (a.lifecycle !== "ACTIVE") throw conflict("账号已结束出租，不能再次上架");
@@ -1704,9 +1714,14 @@ export async function submitListing(
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
   if (v.payload?.schemaVersion === 4) {
-    if (!fixedFeeTestAdmission) throw conflict("固定手续费订单结算暂未就绪");
-    await assertFixedFeeTestListingAdmission(client, fixedFeeTestAdmission, { role: "OWNER", actorId, ownerUserId: a.owner_user_id,
-      accountId: a.id, listingVersionId: v.id, listingHash: v.content_hash });
+    if (fixedFeeDemo) {
+      if (!(await readFixedFeeDemoAccounts(client, fixedFeeDemo, [a.id], "WRITE")).has(a.id))
+        throw conflict("此账号未获准进行固定手续费模拟交易");
+    } else {
+      if (!fixedFeeTestAdmission) throw conflict("固定手续费订单结算暂未就绪");
+      await assertFixedFeeTestListingAdmission(client, fixedFeeTestAdmission, { role: "OWNER", actorId, ownerUserId: a.owner_user_id,
+        accountId: a.id, listingVersionId: v.id, listingHash: v.content_hash });
+    }
   }
   if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
   await assertCurrentRelease(client, a, v);
@@ -2347,7 +2362,11 @@ export async function listingDetail(
     let priceReason: string | null = null;
     if (payload.schemaVersion === 4 || payload.pricingPolicy) {
       if (publication?.source !== "OWNER_DIRECT" || !boundListingPricingPolicy(payload, publication.publishedAtExact ?? publication.published_at)) quote = null;
-      if (availability === "RENTABLE" && (!quote || payload.schemaVersion === 4 || !SCHEDULED_SPREAD_ORDER_ENABLED)) {
+      const tradeEnabled = payload.schemaVersion === 4
+        ? prefetch?.fixedFeeDemoAccount ?? Boolean(prefetch?.fixedFeeDemo
+          && (await readFixedFeeDemoAccounts(client, prefetch.fixedFeeDemo, [a.id], "READ")).has(a.id))
+        : SCHEDULED_SPREAD_ORDER_ENABLED;
+      if (availability === "RENTABLE" && (!quote || !tradeEnabled)) {
         availability = quote ? "UNAVAILABLE" : "UNKNOWN";
         priceReason = quote ? "TRADE_NOT_ENABLED" : "PRICING_UNAVAILABLE";
       }

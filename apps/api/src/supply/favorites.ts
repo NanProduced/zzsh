@@ -96,7 +96,7 @@ export async function handleFavorites(
         // window so the page costs a fixed number of round trips, not one chain
         // per row. Losing public eligibility still yields UNAVAILABLE with no
         // private facts, and the saved id is never replaced by a detail.
-        const page = listingCandidatePage(client);
+        const page = listingCandidatePage(client, options.fixedFeeDemo && { resource: options.fixedFeeDemo, accountIds: rows.map(row => row.account_id) });
         await page.load(rows.map((row) => row.account_id), true);
         for (const row of rows) {
           const account = page.account(row.account_id);
@@ -124,6 +124,7 @@ export async function handleFavorites(
                 version: page.version(row.account_id),
                 hasPublication: page.hasPublication(row.account_id),
                 shared: page.shared,
+                fixedFeeDemoAccount: await page.fixedFeeDemoAccount(row.account_id),
               },
             );
           } catch (error) {

@@ -3,6 +3,7 @@ import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "..
 import { accountNumberCandidates, parsePublicAccountNumber } from "./account-number";
 import { readPublicListingSnapshot, readPublishingAccount, type SupplyGateReader } from "./publishing";
 import { projectPublicListingImages } from "./legacy-path-projection";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import type { AccountImageCdn } from "./account-image-cdn";
 import { conflict, invalid, notFound } from "./supply-util";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
@@ -15,7 +16,7 @@ export function parseNumberLookupQuery(query: URLSearchParams) {
   return { number: parsePublicAccountNumber(query.get("number")), gameId };
 }
 
-export async function lookupPublicListing(client: PoolClient, query: { number: string; gameId: string | null }, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, cdn?: AccountImageCdn) {
+export async function lookupPublicListing(client: PoolClient, query: { number: string; gameId: string | null }, gate: SupplyGateReader, admission?: LegacyPublicAdmission, detailIndex?: LegacyPublicAdmissionDetailIndex, cdn?: AccountImageCdn, fixedFeeDemo?: DemoFinanceResource) {
   if (query.gameId) await requirePublicGameService(client, query.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
   const candidates = await accountNumberCandidates(client, query.number, query.gameId, false);
   // Visibility must not silently resolve an ambiguous canonical number to
@@ -23,6 +24,6 @@ export async function lookupPublicListing(client: PoolClient, query: { number: s
   if (candidates.length > 1) throw conflict("账号编号暂无法唯一核定");
   const accountId = candidates[0];
   if (!accountId) throw notFound();
-  const listing = await readPublicListingSnapshot(client, await readPublishingAccount(client, accountId), gate, admission, false, "DETAIL", detailIndex);
+  const listing = await readPublicListingSnapshot(client, await readPublishingAccount(client, accountId), gate, admission, false, "DETAIL", detailIndex, { fixedFeeDemo });
   return (await projectPublicListingImages(client, [listing], cdn))[0]!;
 }

@@ -280,7 +280,7 @@ export async function handlePublishingRoute(
     : ACCOUNT_ROUTE.exec(path);
   if (!admin && method === "GET" && path === "/listings/lookup") {
     const lookup = parseNumberLookupQuery(query);
-    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail, options.mediaStorage?.accountImageCdn));
+    const result = await withPublicListingSnapshot(options.pool, client => lookupPublicListing(client, lookup, gate, options.legacyPublicAdmission, options.legacyPublicAdmissionDetail, options.mediaStorage?.accountImageCdn, options.fixedFeeDemo));
     sendJson(response, 200, result, requestId);
     return true;
   }
@@ -295,7 +295,7 @@ export async function handlePublishingRoute(
         options.pool,
         async (client) => {
           const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await readPublicListingSnapshot(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail);
+          const detail = await readPublicListingSnapshot(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail, { fixedFeeDemo: options.fixedFeeDemo });
           if (!publicMatch[2]) return { detail: (await projectPublicListingImages(client, [detail], options.mediaStorage?.accountImageCdn))[0]! };
           if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
           const asset = await loadMediaAsset(client, publicMatch[2]);
@@ -395,7 +395,7 @@ export async function handlePublishingRoute(
         const items: PublicListingProjection[] = [];
         let last = cursor;
         let hasMore = false;
-        const page = listingCandidatePage(client);
+        const page = listingCandidatePage(client, options.fixedFeeDemo && { resource: options.fixedFeeDemo, accountIds: rows.map(row => row.id) });
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
           // The page is full and candidates remain unscanned: the caller still
@@ -420,7 +420,7 @@ export async function handlePublishingRoute(
                 undefined,
                 false,
                 "RENTABLE",
-                { version: page.version(row.id), shared: page.shared },
+                { version: page.version(row.id), shared: page.shared, fixedFeeDemoAccount: await page.fixedFeeDemoAccount(row.id) },
               ),
             );
           } catch (error) {
@@ -716,7 +716,7 @@ export async function handlePublishingRoute(
         else if (action === "accept-rules")
           await acceptListingRules(client, a, body);
         else if (action === "submit")
-          await submitListing(client, a, actorId, body, gate, options.fixedFeeTestAdmission);
+          await submitListing(client, a, actorId, body, gate, options.fixedFeeTestAdmission, options.fixedFeeDemo);
         else if (action === "withdraw") await withdrawListing(client, a, body);
         else if (action === "delist")
           delisting = await delistListing(client, a, body, {userId:actorId,sessionId:context.sessionId,requestId});

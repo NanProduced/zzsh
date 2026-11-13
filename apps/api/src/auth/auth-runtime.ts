@@ -37,7 +37,7 @@ import { mountPersonalOrders } from "../order/personal-order-routes";
 import { mountCreditGuaranteeRoutes } from "../credit/credit-guarantee-routes";
 import { readCreditGuaranteeEnabled, preflightCreditGuarantee } from "../credit/credit-guarantee-runtime";
 import { ensureCreditAccount } from "../credit/credit-guarantee";
-import type { ConfirmationKey } from "../order/confirmation-token";
+import { requireConfirmationKey, type ConfirmationKey } from "../order/confirmation-token";
 import type { ConfirmationFundingReader } from "../order/personal-confirmation";
 import { readPublicListing, readPublishingAccount, unknownSupplyGate, type SupplyGateReader } from "../supply/publishing";
 import { createProductionConfirmationFundingReader, createProductionSupplyGateReader, readFormalSupplyGate } from "../supply/funding-authority";
@@ -961,7 +961,7 @@ export async function mountAuthHandlers(
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
   // Validate the whole scope before any optional channel lifecycle can start.
-  if (options.fixedFeeTestListingAdmission && (!options.testOperationsEnabled || process.env.NODE_ENV === "production")) {
+  if (options.fixedFeeTestListingAdmission && (!options.testOperationsEnabled || options.ecsTestDemo || process.env.NODE_ENV === "production")) {
     throw new ConfigurationError("Fixed-fee listing admission requires test operations capability");
   }
   assertLocalNativeDistributionRegistrationAssembly(options.distributionRegistrationScope, options.distributionReadScope);
@@ -1510,7 +1510,11 @@ export async function mountAuthHandlers(
     } : {}),
   });
   const fixedFeeTestAdmission = options.fixedFeeTestListingAdmission;
-  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey,fixedFeeTestAdmission});
+  const fixedFeeDemo = options.ecsTestDemo && settlementRecordingEnabled && options.creditGuaranteeEnabled === true
+    && membershipGrowthEnabled() && options.confirmationKey && Number.isSafeInteger(orderHoldSeconds) && orderHoldSeconds! > 0
+    ? options.ecsTestDemo.demo : undefined;
+  if (fixedFeeDemo) requireConfirmationKey(options.confirmationKey);
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey,fixedFeeTestAdmission,fixedFeeDemo});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
@@ -1519,6 +1523,7 @@ export async function mountAuthHandlers(
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
     fixedFeeTestAdmission,
+    fixedFeeDemo,
   });
   mountProfileAvatarHandlers(app, { ...securityOptions, mediaStorage });
   mountLegalHandlers(app, securityOptions);
@@ -1558,7 +1563,7 @@ export async function mountAuthHandlers(
   const membershipGrowthReader = membershipGrowthEnabled()
     ? readMembershipGrowthQuoteCandidates
     : async () => ({ knowledge: "UNKNOWN" as const, reason: "MEMBERSHIP_FEATURE_DISABLED" });
-  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, membershipGrowthReader, fixedFeeTestAdmission };
+  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, membershipGrowthReader, fixedFeeTestAdmission, fixedFeeDemo };
   mountPersonalConfirmations(app, securityOptions, personalConfirmationOptions);
   mountPersonalOrders(app, securityOptions, { ...personalConfirmationOptions, holdSeconds: orderHoldSeconds });
   if (options.orderTeams) {
