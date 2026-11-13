@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
-import {bindReviewedStoredOpeningAdmission,bindReviewedFinanceOpeningAdmission,planFinanceOpening,importReviewedStoredOpeningBatch,recoverReviewedStoredOpeningBatch,type StoredOpeningInput,type StoredOpeningReview} from '../src/finance/personal-finance-maintenance';
+import {bindReviewedStoredOpeningAdmission,bindReviewedStoredOpeningAdmissionBatch,bindReviewedFinanceOpeningAdmission,planFinanceOpening,openingPlanCore,importReviewedStoredOpeningBatch,importReviewedStoredOpeningBatchOn,recoverReviewedStoredOpeningBatch,type StoredOpeningInput,type StoredOpeningReview} from '../src/finance/personal-finance-maintenance';
+import {fingerprintRequest} from '../src/supply/supply-util';
 import {prepareFrozenFinanceObservation,prepareStoredOpeningCandidate} from '../src/finance/legacy-finance-source-preparation';
 const sha=(s:unknown)=>createHash('sha256').update(typeof s==='string'?s:canonicalize(s)).digest('hex');
 const actor={userId:'fixture-boss',sessionId:'fixture-session',requestId:'fixture-request'};
@@ -60,6 +61,24 @@ function fixture(){
  return{state,client:client as any,pool:{connect:async()=>client} as any};
 }
 async function prepare(i=input(),mode?:'recover'){const f=fixture(),r=review(i),scope=await bindReviewedStoredOpeningAdmission(f.client,actor,r,mode);return{...f,i,r,scope};}
+
+test('stored opening batch refuses changed original receipts and orphan bases before writing',async()=>{
+ for(const mode of ['fingerprint','publish','orphan'] as const){
+  const f=fixture(),i=input(),r=review(i),plan=openingPlanCore(i),original=f.client.query.bind(f.client),writes:string[]=[];
+  f.client.query=async(sql:string,args:any[]=[])=>{
+   if(/^\s*INSERT/i.test(sql))writes.push(sql);
+   if(sql.includes('batch window head')||sql.includes('batch window tail'))return{rows:[{at:f.state.now}],rowCount:1};
+   if(sql.includes('opening batch subject locks'))return{rows:[{id:i.proof.userId}],rowCount:1};
+   if(sql.includes('opening batch source identities')||sql.includes('opening batch existing observations'))return{rows:[],rowCount:0};
+   if(sql.includes('opening batch original receipts'))return{rows:mode==='orphan'?[]:[{key:plan.key,request_fingerprint:mode==='fingerprint'?'0'.repeat(64):fingerprintRequest('finance.opening.import',i.proof.userId,i),response_status:200,publish_required:mode==='publish',response_body:{eventId:plan.eventId,subjectId:i.proof.userId,bodyDigest:plan.bodyDigest}}]};
+   if(sql.includes('opening batch orphan basis'))return{rows:[{id:plan.basisId}],rowCount:1};
+   return original(sql,args);
+  };
+  const scopes=await bindReviewedStoredOpeningAdmissionBatch(f.client,actor,[r]);
+  await assert.rejects(importReviewedStoredOpeningBatchOn(f.client,actor,[i],scopes),mode==='orphan'?/existing basis has no original receipt/:/original receipt differs/);
+  assert.equal(writes.length,0);
+ }
+});
 
 test('stored review is distinct from original one-root admission, and original stored amount wins over log residual',async()=>{
  const f=await prepare(),p=await planFinanceOpening(f.client,actor,f.i,f.scope);assert.equal(p.observations[0]!.includedInOpening,true);

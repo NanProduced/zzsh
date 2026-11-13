@@ -401,12 +401,24 @@ export async function importReviewedStoredOpeningBatchOn(client:PoolClient,actor
   [JSON.stringify(plans.map(p=>({user_id:p.input.proof.userId,legacy_user_id:p.input.proof.source.sourceId,identity_digest:p.input.proof.source.identityDigest})))]);
  if(identity.rows.length)throw conflict('Opening batch original source identity changed');
  const revisions=new Map<string,string>((await client.query(`/* opening batch wallet revisions */ SELECT user_id,ledger_revision::text AS revision FROM zzsh_order.wallet_revision WHERE user_id=ANY($1::text[])`,[subjects])).rows.map((r:any)=>[r.user_id,r.revision]));
- const receipts=await client.query(`/* opening batch original receipts */ SELECT key,request_fingerprint,response_status,response_body FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,plans.map(p=>p.plan.key)]);
+ const receipts=await client.query(`/* opening batch original receipts */ SELECT key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[]) FOR UPDATE`,[scopeKey,plans.map(p=>p.plan.key)]);
  const receiptByKey=new Map<string,any>(receipts.rows.map((r:any)=>[r.key,r]));
+ for(const {input,plan,scope} of plans){
+  const receipt=receiptByKey.get(plan.key);if(!receipt)continue;
+  const body={eventId:plan.eventId,subjectId:input.proof.userId,bodyDigest:plan.bodyDigest};
+  if(receipt.request_fingerprint!==fingerprintRequest('finance.opening.import',input.proof.userId,input)||receipt.response_status!==200
+    ||receipt.publish_required!==false||canonicalize(receipt.response_body)!==canonicalize(body))throw conflict('Opening batch original receipt differs');
+  if((await recoverReviewedFinanceOpeningBatch(client,actor,[input],scope)).knowledge!=='KNOWN')throw conflict('Opening batch original receipt is unavailable');
+ }
  const reused=new Set<string>((await client.query(`/* opening batch existing observations */ SELECT o.source_entity,o.source_id FROM unnest($2::text[],$3::text[]) AS requested(source_entity,source_id)
    JOIN zzsh_order.personal_finance_observation o ON o.source_type='LEGACY_MYSQL' AND o.source_system=$1 AND o.source_entity=requested.source_entity AND o.source_id=requested.source_id`,
   [plans[0]!.input.proof.source.sourceSystem,plans.flatMap(p=>p.plan.observations.map(o=>o.sourceEntity)),plans.flatMap(p=>p.plan.observations.map(o=>o.sourceId))])).rows.map((r:any)=>r.source_entity+':'+r.source_id));
  const fresh=plans.filter(p=>!receiptByKey.has(p.plan.key));
+ if(fresh.length){
+  const prior=await client.query(`/* opening batch orphan basis */ SELECT id FROM zzsh_order.finance_opening_basis WHERE id=ANY($1::text[]) OR user_id=ANY($2::text[]) LIMIT 1`,
+   [fresh.map(p=>p.plan.basisId),fresh.map(p=>p.input.proof.userId)]);
+  if(prior.rows.length)throw conflict('Opening batch existing basis has no original receipt');
+ }
  const basisRows:any[]=[],reviewRows:any[]=[],coveredRows:any[]=[],rootRows:any[]=[],eventRows:any[]=[],entryRows:any[]=[],admissionRows:any[]=[],observationRows:any[]=[],auditRows:any[]=[],receiptRows:any[]=[];
  for(const {input,plan,stored,scope} of fresh){
   const p=input.proof,amount=BigInt(p.availableCents),rev=revisions.get(p.userId)??'0';
