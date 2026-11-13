@@ -1046,6 +1046,7 @@ test("unquoted summary distinguishes missing pricing from a zero income", async 
   const p=await probe();
   try {
     await p.render();
+    await previewTick();
     const rail=p.host.querySelector('#publish-quote');
     assert.equal(rail.dataset.quoted,'false');
     assert.equal(rail.querySelector('[aria-label="预计收入合计"]'),null);

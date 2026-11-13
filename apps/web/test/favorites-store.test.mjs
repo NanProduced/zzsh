@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FavoritesStore } from '../src/lib/favorites-store.ts';
 import { SupplyRequestError } from '../src/lib/supply-client.ts';
+import { favoriteFailureText, newFavoriteKey } from '../src/lib/favorites.ts';
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 function deferred() {
@@ -474,3 +475,13 @@ test("shared identity pause hides state and preserves same-user pending mutation
   await store.confirmIdentity({userId:"shared-b"});
   assert.equal(store.statusOf("account-x"), "unsaved");
 });
+
+test('favorite failures map to stable user messages and keys stay request-scoped', () => {
+  assert.match(favoriteFailureText(new SupplyRequestError(401, null), true), /登录状态已失效/);
+  assert.match(favoriteFailureText(new SupplyRequestError(404, null), true), /当前不可收藏/);
+  assert.match(favoriteFailureText(new Error('network'), false), /取消收藏未完成/);
+  const key = newFavoriteKey();
+  assert.match(key, /^fav_[a-z0-9]+$/);
+  assert.notEqual(key, newFavoriteKey());
+});
+
