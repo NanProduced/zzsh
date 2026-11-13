@@ -100,7 +100,9 @@ export async function readAdminSupplyOperationResult(client: PoolClient, actorId
   if (!target || (definition.platformMedia && target.ownershipKind !== "PLATFORM_CATALOG")) throw notFound();
   await assertGameScope(client, actorId, access.isBoss, target.gameId);
   const result: Record<string, string | number | boolean | null> = {};
-  const fields = isSchedule ? [...safeFields, "pricingModel", "priceVersionId", "announcementVersionId", "effectiveAt"] : safeFields;
+  const isReleasePlan = definition.table === "rule_release" && typeof body.effectiveAt === "string";
+  if (isReleasePlan && resourceId !== target.gameId) throw notFound();
+  const fields = isSchedule || isReleasePlan ? [...safeFields, "pricingModel", "priceVersionId", "announcementVersionId", "effectiveAt"] : safeFields;
   for (const name of fields) {
     const value = body[name];
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length <= 160)) result[name] = value;

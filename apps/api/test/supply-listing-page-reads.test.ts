@@ -110,7 +110,7 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
     else if (sql.includes("zzsh_supply.listing_publication")) rows = pick(versions).map((v) => byAccount.get(v.account_id)!.publication());
     else if (sql.includes('SELECT u.suspended')) { const f = fixtures.find((x) => x.owner === args[0])!; rows = [{ suspended: f.state.suspended, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]; }
     else if (sql.includes("game_service_operation")) rows = [{ id: "service-a", gameId: GAME, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-new", catalog_revision: "1" }];
+    else if (sql.includes("FROM zzsh_supply.game g WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-new", catalog_revision: "1" }];
     else if (sql.includes("funding_policy AS policy")) rows = [{ policy: null }];
     else if (sql.includes("rule_acceptance")) rows = pick(accounts).some((a) => byAccount.get(a.id)!.state.accepted) ? [{}] : [];
     else if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = media.filter((m) => pick(versions).some((v) => `media-${v.account_id}` === m.id));
@@ -180,7 +180,7 @@ test("a native market page reads each shared dimension once, not once per candid
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.rental_account WHERE id=$1"), 0, "no per-candidate account read");
   assert.equal(countOf(queries, "SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2"), 0, "no per-candidate version read");
   // Request-invariant dimensions are memoized for the whole page.
-  assert.equal(countOf(queries, "FROM zzsh_supply.game WHERE id="), 1, "one game row per page");
+  assert.equal(countOf(queries, "FROM zzsh_supply.game g WHERE id="), 1, "one game row per page");
   assert.equal(countOf(queries, "game_service_operation"), 1, "one rental service row per page");
   assert.equal(countOf(queries, "funding_policy AS policy"), 1, "one release policy per page");
   // The two reads of one candidate's media collapsed into one.

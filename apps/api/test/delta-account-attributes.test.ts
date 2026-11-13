@@ -192,7 +192,10 @@ function publishingFixture(attributes: Record<string, unknown>, submitted = fals
     if (sql.includes('user_identity_state')) return { rows: [] };
     if (sql.includes('"game_service_operation"')) return { rows: [{ id: "service", gameCode: "delta", gameEnabled: true, enabled: true }] };
     if (sql.includes("SELECT * FROM zzsh_supply.listing_version")) return { rows: [version] };
-    if (sql.includes("SELECT current_release_id,catalog_revision")) return { rows: [{ current_release_id: "release", catalog_revision: "1" }] };
+    if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
+    if (sql.includes("SELECT 1 FROM zzsh_supply.listing_publication WHERE account_id")) return { rows: [], rowCount: 0 };
+    if (sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")) return { rows: [{ modes: false, prices: false }], rowCount: 1 };
+    if (sql.includes("AS current_release_id,catalog_revision") && sql.includes("FOR SHARE OF g")) return { rows: [{ current_release_id: "release", catalog_revision: "1" }] };
     if (sql.includes("SELECT item_id AS") || sql.includes("SELECT skin_id FROM") || sql.includes("SELECT entitlement_id AS") || sql.includes("SELECT m.asset_id AS")) return { rows: [] };
     throw Error("AFTER_ATTRIBUTE_VALIDATION");
   } };
@@ -244,7 +247,7 @@ test("supplements: quote, acceptance, direct submit and review reject custom20/3
     f.client.query = async (sql: string) => {
       if (sql.includes("FROM zzsh_supply.term_option") || sql.includes("JOIN zzsh_supply.term_option")) { f.calls.push(sql); return { rows: [{ code: "daily-10m", dailyConsumption }], rowCount: 1 }; }
       if (sql.includes("SELECT 1 FROM zzsh_supply.billable_item")) { f.calls.push(sql); return { rows: [], rowCount: 0 }; }
-      if (sql.includes("SELECT r.*,g.catalog_revision")) { f.calls.push(sql); return { rows: [{ id: "release", term_version_id: "term" }], rowCount: 1 }; }
+      if (sql.includes("SELECT r.*,to_char(transaction_timestamp()")) { f.calls.push(sql); return { rows: [{ id: "release", term_version_id: "term" }], rowCount: 1 }; }
       return read(sql);
     };
     const body = { expectedRevision: "1", versionId: "version", releaseId: "release", contentHash: f.version.content_hash, decision: "APPROVE", reason: "reviewed" };

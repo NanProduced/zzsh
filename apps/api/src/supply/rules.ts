@@ -1,3 +1,6 @@
+import { assertPublishedPricingAnnouncement } from "./pricing-announcement";
+import { effectiveRuleRelease } from "./effective-rule-release";
+import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 
@@ -52,8 +55,8 @@ export async function listRules(
 ): Promise<Record<string, unknown>> {
   await assertGameScope(client, adminUserId, isBoss, gameId);
   const game = await client.query(
-    `SELECT "id", "code", "name", "catalog_revision"::text AS "catalogRevision", "current_release_id" AS "currentReleaseId"
-       FROM "zzsh_supply"."game" WHERE "id" = $1`,
+    `SELECT "id", "code", "name", "catalog_revision"::text AS "catalogRevision", ${effectiveRuleRelease("g")} AS "currentReleaseId"
+       FROM "zzsh_supply"."game" g WHERE "id" = $1`,
     [gameId],
   );
   if (game.rows.length === 0) throw notFound();
@@ -67,6 +70,17 @@ export async function listRules(
     [gameId, game.rows[0].currentReleaseId],
   );
   const current = release.rows[0];
+  const ruleScheduling = (await client.query(`SELECT EXISTS (SELECT 1 FROM pg_attribute
+    WHERE attrelid='zzsh_supply.rule_release'::regclass AND attname='effective_at' AND NOT attisdropped) AS available,
+    to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOf"`)).rows[0];
+  const plans = ruleScheduling?.available ? (await client.query(`SELECT id, generation::text,
+    price_version_id AS "priceVersionId", term_version_id AS "termVersionId", agreement_version_id AS "agreementVersionId",
+    to_char(effective_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "effectiveAt",
+    announcement_version_id AS "announcementVersionId"
+    FROM zzsh_supply.rule_release WHERE game_id=$1 AND effective_at>transaction_timestamp()
+    ORDER BY effective_at LIMIT 101`, [gameId])).rows : [];
+  const generation = (await client.query(`SELECT COALESCE(MAX(generation),0)::text AS generation
+    FROM zzsh_supply.rule_release WHERE game_id=$1`, [gameId])).rows[0]?.generation ?? "0";
   const priceVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."mode", v."status", v."commission_rate"::text AS "commissionRate",
             v."haff_rule" AS "haffRule", to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
@@ -114,6 +128,7 @@ export async function listRules(
   return {
     game: game.rows[0],
     release: current ?? null,
+    ruleScheduling: { ...ruleScheduling, generation, plans: plans.slice(0,100), truncated: plans.length>100 },
     priceVersions: priceVersions.rows,
     priceLines: priceLines.rows,
     termVersions: termVersions.rows,
@@ -428,7 +443,7 @@ export async function updateFullPayoutTermsDraft(client: PoolClient, adminUserId
   await client.query(`UPDATE zzsh_supply.full_payout_terms_version SET title=$1,body=$2,disclosure_version=$3,digest=$4,revision=revision+1,updated_at=clock_timestamp() WHERE id=$5`,[v.title,v.body,v.disclosureVersion,v.digest,id]);
 }
 
-export type ActivationResult = { releaseId: string; generation: string; affectedCount: number };
+export type ActivationResult = { releaseId: string; generation: string; effectiveAt: string; announcementVersionId: string };
 
 type SettlementResourcePrice = { name:string; unit:string; pricingKind:string|null; unitQuantity:string|null; buyerUnitAmount:string|null; ownerUnitAmount:string|null };
 export function assertSettlementResourcePrices(mode:unknown,rows:readonly SettlementResourcePrice[]) {
@@ -476,6 +491,40 @@ export async function assertScheduledTermCompatibility(client: PoolClient, termV
   }
 }
 
+/** Check the effective default at every combination, price or mode boundary in the changed interval. */
+export async function assertRulePricingTimeline(client: PoolClient, gameId: string, from: string) {
+  const ready = (await client.query(`SELECT to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
+    to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes`)).rows[0];
+  if (!ready?.prices || !ready?.modes) throw conflict("价格和模式排期尚未安装");
+  const pairs = (await client.query<{ termId: string | null; mode: "PERCENT" | "SPREAD"; haffRule: unknown; priceId: string | null; scheduled: boolean }>(`
+    WITH boundaries AS (
+      SELECT $2::timestamptz AS at
+      UNION SELECT r.activated_at FROM zzsh_supply.rule_release r
+        WHERE r.game_id=$1 AND to_jsonb(r)->>'effective_at' IS NOT NULL AND r.activated_at>=$2::timestamptz
+      UNION SELECT effective_at FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 AND effective_at>=$2::timestamptz
+      UNION SELECT effective_at FROM zzsh_supply.pricing_mode_schedule WHERE game_id=$1 AND effective_at>=$2::timestamptz
+    )
+    SELECT DISTINCT r.term_version_id AS "termId", p.mode, p.haff_rule AS "haffRule", p.id AS "priceId",
+      (m.pricing_model IS NOT NULL) AS scheduled
+    FROM boundaries b JOIN zzsh_supply.game g ON g.id=$1
+    LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g", "b.at")} AND r.game_id=g.id
+    LEFT JOIN LATERAL (SELECT pricing_model FROM zzsh_supply.pricing_mode_schedule WHERE game_id=g.id AND effective_at<=b.at
+      ORDER BY effective_at DESC,generation DESC LIMIT 1) m ON true
+    LEFT JOIN LATERAL (SELECT price_version_id FROM zzsh_supply.pricing_policy_schedule
+      WHERE game_id=g.id AND pricing_model=m.pricing_model AND effective_at<=b.at
+      ORDER BY effective_at DESC,generation DESC LIMIT 1) q ON true
+    LEFT JOIN zzsh_supply.price_version p ON p.game_id=g.id AND p.status='SEALED'
+      AND p.id=CASE WHEN m.pricing_model IS NULL THEN r.price_version_id ELSE q.price_version_id END
+      AND (m.pricing_model IS NULL OR (m.pricing_model='FIXED_FEE' AND p.mode='PERCENT' AND p.fixed_fee_rates IS NOT NULL)
+        OR (m.pricing_model='SPREAD' AND p.mode='SPREAD' AND p.fixed_fee_rates IS NULL))`, [gameId,from])).rows;
+  for (const pair of pairs) {
+    if (!pair.termId || !pair.priceId) throw conflict("生效时点缺少可用租期或价目");
+    const schema = (pair.haffRule as { schema?: unknown } | null)?.schema;
+    if (pair.scheduled || schema === "haff-ratio-v2" || schema === "haff-ratio-v3")
+      await assertScheduledTermCompatibility(client, pair.termId, [pair]);
+  }
+}
+
 export async function activateRelease(
   client: PoolClient,
   adminUserId: string,
@@ -485,21 +534,35 @@ export async function activateRelease(
   termVersionId: string,
   agreementVersionId: string,
   expectedGeneration: string,
+  schedule?: { effectiveAt: string; announcementVersionId: string },
 ): Promise<ActivationResult> {
   if (!/^(0|[1-9]\d*)$/.test(expectedGeneration)) throw invalid("Expected generation is required");
   if (!isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Only a boss can activate a rule release");
+  if (!schedule) throw invalid("规则组合须绑定公告和未来生效时间");
+  let effectiveAt: string | null;
+  try { effectiveAt = normalizeTime(schedule.effectiveAt); }
+  catch { throw invalid("规则组合生效时间无效"); }
+  if (!effectiveAt) throw invalid("规则组合生效时间无效");
+  const ready = (await client.query(`SELECT EXISTS (SELECT 1 FROM pg_attribute
+    WHERE attrelid='zzsh_supply.rule_release'::regclass AND attname='effective_at' AND NOT attisdropped) AS available`)).rows[0];
+  if (!ready?.available) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "规则组合排期尚未安装");
+  await lockFixedFeePolicyChange(client);
   const locked = await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`, [gameId]);
   if (!locked.rows.length) throw notFound();
   // Read the joined versions after acquiring the lock, including when the lock had to wait.
   const game = (await client.query<{ id: string; priceVersionId: string | null; termVersionId: string | null; agreementVersionId: string | null; fixedFee: boolean }>(
     `SELECT g.id, r.price_version_id AS "priceVersionId", r.term_version_id AS "termVersionId", r.agreement_version_id AS "agreementVersionId",
       to_jsonb(p)->>'fixed_fee_rates' IS NOT NULL AS "fixedFee"
-      FROM "zzsh_supply"."game" g LEFT JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
+      FROM "zzsh_supply"."game" g LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g", "$2::timestamptz")} AND r.game_id=g.id
       LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=g.id
-      WHERE g.id=$1`, [gameId])).rows[0];
+      WHERE g.id=$1`, [gameId, effectiveAt])).rows[0];
   if (!game) throw notFound();
   if (game.fixedFee && priceVersionId !== game.priceVersionId) throw conflict("当前固定手续费价目必须保留，价格变动请使用调价排期");
   await assertGameScope(client, adminUserId, isBoss, gameId);
+  const now = (await client.query(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+  if (!now || effectiveAt <= now) throw invalid("规则组合生效时间必须晚于当前时间");
+  const conflictTime = await client.query(`SELECT 1 FROM zzsh_supply.rule_release WHERE game_id=$1 AND effective_at=$2::timestamptz`, [gameId,effectiveAt]);
+  if (conflictTime.rows.length) throw conflict("该时点已有规则组合排期");
   const versions = await client.query<{ id: string; status: string; gameId: string }>(
     `SELECT "id", "status", "game_id" AS "gameId" FROM "zzsh_supply"."price_version" WHERE "id" = $1
      UNION ALL SELECT "id", "status", "game_id" AS "gameId" FROM "zzsh_supply"."term_version" WHERE "id" = $2
@@ -511,8 +574,8 @@ export async function activateRelease(
     if (row.gameId !== gameId) throw invalid("Rule versions must belong to this game");
     if (row.status !== "SEALED") throw conflict("Rule versions must be sealed before activation");
   }
-  const priceMeta = (await client.query<{ policy: unknown | null;mode:string;fixedFeeRates:unknown | null;haffRule:unknown }>(
-    `SELECT "funding_policy" AS policy,mode,to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates", haff_rule AS "haffRule" FROM "zzsh_supply"."price_version" v WHERE "id" = $1`, [priceVersionId],
+  const priceMeta = (await client.query<{ policy: unknown | null;mode:string;fixedFeeRates:unknown | null }>(
+    `SELECT "funding_policy" AS policy,mode,to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates" FROM "zzsh_supply"."price_version" v WHERE "id" = $1`, [priceVersionId],
   )).rows[0];
   if(!priceMeta)throw invalid('价格规则不存在');
   if (priceMeta.fixedFeeRates != null && (!game.fixedFee || game.priceVersionId !== priceVersionId))
@@ -523,42 +586,23 @@ export async function activateRelease(
   );
   const generation = nextGeneration.rows[0]!.generation;
   if (BigInt(generation) - 1n !== BigInt(expectedGeneration)) throw conflict("Rule release changed; reload before confirming activation");
-  if (priceMeta.fixedFeeRates != null) {
-    if (termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
-      throw conflict("租期和协议均未变化");
-  } else {
+  if (priceVersionId === game.priceVersionId && termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
+    throw conflict("规则组合没有变化");
+  if (priceMeta.fixedFeeRates == null) {
     await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
-  }
-  if (termVersionId !== game.termVersionId) {
-    const scheduleReady = (await client.query<{ ready: boolean }>(
-      "SELECT to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS ready")).rows[0]?.ready;
-    const scheduled = scheduleReady ? (await client.query<{ mode: "PERCENT" | "SPREAD"; haffRule: unknown }>(`WITH relevant AS (
-      (SELECT DISTINCT ON (pricing_model) price_version_id, pricing_model FROM zzsh_supply.pricing_policy_schedule
-       WHERE game_id=$1 AND effective_at<=statement_timestamp() ORDER BY pricing_model, effective_at DESC, generation DESC)
-      UNION SELECT price_version_id, pricing_model FROM zzsh_supply.pricing_policy_schedule
-       WHERE game_id=$1 AND effective_at>statement_timestamp()
-    ) SELECT CASE WHEN s.pricing_model='FIXED_FEE' THEN 'PERCENT' ELSE 'SPREAD' END AS mode,p.haff_rule AS "haffRule"
-      FROM relevant s LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=$1 AND p.status='SEALED'`, [gameId])).rows : [];
-    if (priceMeta.fixedFeeRates != null) scheduled.push({ mode: "PERCENT", haffRule: priceMeta.haffRule });
-    if (scheduled.length) await assertScheduledTermCompatibility(client, termVersionId, scheduled);
   }
   const pricePolicy=priceMeta.policy;
   if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
+  await assertPublishedPricingAnnouncement(client, gameId, schedule.announcementVersionId, effectiveAt);
   const releaseId = newSupplyId("release");
   await client.query(
-    `INSERT INTO "zzsh_supply"."rule_release" ("id", "game_id", "price_version_id", "term_version_id", "agreement_version_id", "generation", "activated_by_admin_id")
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [releaseId, gameId, priceVersionId, termVersionId, agreementVersionId, generation, adminUserId],
+    `INSERT INTO zzsh_supply.rule_release(id, game_id, price_version_id, term_version_id, agreement_version_id,
+      generation, activated_by_admin_id, activated_at, effective_at, announcement_version_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::timestamptz,$8::timestamptz,$9)`,
+    [releaseId, gameId, priceVersionId, termVersionId, agreementVersionId, generation, adminUserId, effectiveAt, schedule.announcementVersionId],
   );
-  await client.query(`UPDATE "zzsh_supply"."game" SET "current_release_id" = $1, "updated_at" = clock_timestamp() WHERE "id" = $2`, [releaseId, gameId]);
-  const affected = await client.query<{ count: string }>(
-    `SELECT count(*)::text AS count FROM "zzsh_supply"."rental_account" a
-      WHERE a."game_id" = $1 AND a."lifecycle" = 'ACTIVE'
-        AND NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication pub WHERE pub.account_id=a.id)
-        AND NOT EXISTS (SELECT 1 FROM "zzsh_supply"."rule_acceptance" r WHERE r."account_id" = a."id" AND r."rule_release_id" = $2)`,
-    [gameId, releaseId],
-  );
-  return { releaseId, generation, affectedCount: Number(affected.rows[0]?.count ?? "0") };
+  await assertRulePricingTimeline(client, gameId, effectiveAt);
+  return { releaseId, generation, effectiveAt, announcementVersionId: schedule.announcementVersionId };
 }
 
 /** 试算回执绑定：调用方据此判定结果是否仍对应当前选择的草稿修订、模式、B 与库存。 */

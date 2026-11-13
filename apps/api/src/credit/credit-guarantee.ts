@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "../supply/effective-rule-release";
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
@@ -553,10 +554,10 @@ export async function readGuaranteeContext(client: PoolClient, accountId: string
             r.id AS "releaseId",v.payload,p.status AS "policyStatus",pub.id AS "publicationId",pub.credit_guarantee_waived AS "publicationWaived",
             pub.credit_guarantee_waived_revision::text AS "publicationWaivedRevision",CASE WHEN v.review_state IN ('DRAFT','PUBLISHED','APPROVED') THEN ${OTHER_OUTSTANDING_GUARANTEE_SQL} ELSE NULL END AS "otherOutstandingRequirementId"
        FROM zzsh_supply.rental_account a
-       JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
+       JOIN zzsh_supply.game g ON g.id=a.game_id AND ${effectiveRuleRelease("g")} IS NOT NULL
        LEFT JOIN zzsh_supply.listing_version v ON v.id=COALESCE($3,a.current_version_id) AND v.account_id=a.id
-         AND (v.review_state IN ('PUBLISHED','APPROVED') OR v.rule_release_id=g.current_release_id)
-       JOIN zzsh_supply.rule_release r ON r.id=CASE WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE g.current_release_id END AND r.game_id=a.game_id
+         AND (v.review_state IN ('PUBLISHED','APPROVED') OR v.rule_release_id=${effectiveRuleRelease("g")})
+       JOIN zzsh_supply.rule_release r ON r.id=CASE WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE ${effectiveRuleRelease("g")} END AND r.game_id=a.game_id
        JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
        LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id AND pub.owner_user_id=a.owner_user_id
          AND pub.game_id=a.game_id AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash
@@ -634,10 +635,10 @@ export async function readGuaranteeContextsBatch(client: PoolClient, ownerUserId
             r.id AS "releaseId",v.payload,p.status AS "policyStatus",pub.id AS "publicationId",pub.credit_guarantee_waived AS "publicationWaived",
             pub.credit_guarantee_waived_revision::text AS "publicationWaivedRevision",CASE WHEN v.review_state IN ('DRAFT','PUBLISHED','APPROVED') THEN ${OTHER_OUTSTANDING_GUARANTEE_SQL} ELSE NULL END AS "otherOutstandingRequirementId"
        FROM zzsh_supply.rental_account a
-       JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
+       JOIN zzsh_supply.game g ON g.id=a.game_id AND ${effectiveRuleRelease("g")} IS NOT NULL
        LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
-         AND (v.review_state IN ('PUBLISHED','APPROVED') OR v.rule_release_id=g.current_release_id)
-       JOIN zzsh_supply.rule_release r ON r.id=CASE WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE g.current_release_id END AND r.game_id=a.game_id
+         AND (v.review_state IN ('PUBLISHED','APPROVED') OR v.rule_release_id=${effectiveRuleRelease("g")})
+       JOIN zzsh_supply.rule_release r ON r.id=CASE WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE ${effectiveRuleRelease("g")} END AND r.game_id=a.game_id
        JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
        LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id AND pub.owner_user_id=a.owner_user_id
          AND pub.game_id=a.game_id AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash

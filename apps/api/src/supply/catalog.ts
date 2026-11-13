@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import type { Pool, PoolClient } from "pg";
 
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
@@ -477,7 +478,7 @@ export async function listGames(client: PoolClient): Promise<{ games: GameRow[] 
   // filters business data, not the game picker); per-game reads stay scoped.
   const result = await client.query<GameRow>(
     `SELECT g."id", g."code", g."name", g."description", g."enabled",
-            g."catalog_revision"::text AS "catalogRevision", g."current_release_id" AS "currentReleaseId",
+            g."catalog_revision"::text AS "catalogRevision", ${effectiveRuleRelease("g")} AS "currentReleaseId",
             g."cover_media_id" AS "coverMediaId", g."created_at" AS "createdAt", g."updated_at" AS "updatedAt"
        FROM "zzsh_supply"."game" g
       WHERE true
@@ -911,8 +912,8 @@ export async function readPublicCatalog(
     coverMediaId: string | null;
   }>(
     `SELECT "id", "code", "name", "description", "catalog_revision"::text AS "catalogRevision",
-            "current_release_id" AS "currentReleaseId", "cover_media_id" AS "coverMediaId"
-       FROM "zzsh_supply"."game" WHERE "id" = $1 AND "enabled" = true`,
+            ${effectiveRuleRelease("g")} AS "currentReleaseId", "cover_media_id" AS "coverMediaId"
+       FROM "zzsh_supply"."game" g WHERE "id" = $1 AND "enabled" = true`,
     [gameId],
   );
   const gameRow = game.rows[0];
@@ -936,7 +937,7 @@ export async function readPublicCatalog(
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder",
             CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"${scope === "publishing" ? `,
-            EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
+            EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
        FROM "zzsh_supply"."billable_item" i
       WHERE "game_id" = $1 AND "enabled" = true${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
@@ -1026,7 +1027,7 @@ export async function readPublicCatalog(
   const page = hasMore ? skins.rows.slice(0, limit) : skins.rows;
   const nextCursor = hasMore ? encodeCursor({ gameId, revision: gameRow.catalogRevision, filters }, page[page.length - 1]!.id) : null;
 
-  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')`,[gameId])).rows : [];
+  const missing = scope === "publishing" ? (await client.query(`SELECT id,name FROM zzsh_supply.billable_item i WHERE game_id=$1 AND enabled AND required AND NOT EXISTS (SELECT 1 FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_line p ON p.price_version_id=r.price_version_id WHERE g.id=$1 AND p.item_id=i.id AND p.customer_tier='STANDARD')`,[gameId])).rows : [];
   return {
     ...(scope === "publishing" ? {ready: Boolean(gameRow.currentReleaseId) && missing.length===0, blockers: !gameRow.currentReleaseId ? [{code:"RULE_UNCONFIGURED",path:"rules"}] : missing.map(i=>({code:"REQUIRED_ITEM_UNPRICED",path:"inventory",itemId:i.id,name:i.name})), inputScale:0} : {}),
     game: gameRow,
@@ -1054,8 +1055,8 @@ export async function readAdminCatalog(
   await assertGameScope(client, adminUserId, isBoss, gameId);
   const game = await client.query(
     `SELECT "id", "code", "name", "description", "enabled", "catalog_revision"::text AS "catalogRevision",
-            "current_release_id" AS "currentReleaseId", "cover_media_id" AS "coverMediaId"
-       FROM "zzsh_supply"."game" WHERE "id" = $1`,
+            ${effectiveRuleRelease("g")} AS "currentReleaseId", "cover_media_id" AS "coverMediaId"
+       FROM "zzsh_supply"."game" g WHERE "id" = $1`,
     [gameId],
   );
   if (game.rows.length === 0) throw notFound();

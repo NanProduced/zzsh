@@ -191,7 +191,9 @@ test("takeover submits an empty submitted_at through the real review, while wron
     f.client.query = (async (sql: string, values: unknown[] = []) => {
       const result = (rows: unknown[] = [], rowCount = rows.length) => { f.queries.push({ sql, values }); return { rows, rowCount }; };
       if (sql.includes("SELECT * FROM zzsh_supply.listing_version WHERE id=$1")) return result(values[0] === f.version.id && values[1] === f.account.id ? [f.version] : []);
-      if (sql.includes("SELECT current_release_id,catalog_revision")) return result([{ current_release_id: mode === "wrong-release" ? "another_release" : f.version.rule_release_id, catalog_revision: "1" }]);
+      if (sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")) return { rows: [{ modes: false, prices: false }], rowCount: 1 };
+      if (sql.includes("AS current_release_id,catalog_revision") && sql.includes("FOR SHARE OF g")) return result([{ current_release_id: mode === "wrong-release" ? "another_release" : f.version.rule_release_id, catalog_revision: "1" }]);
+      if (sql.includes('to_char(clock_timestamp()') && sql.includes('AS at')) return result([{ at: "2026-10-24T00:00:00.000000Z" }]);
       if (sql.includes("INSERT INTO zzsh_supply.rule_acceptance")) { acceptance = [values[2], values[3], values[4], values[5], values[1]]; return result([], 1); }
       if (sql.includes("SELECT 1 FROM zzsh_supply.rule_acceptance")) return result(canonicalize(values) === canonicalize(acceptance) ? [{}] : []);
       if (sql.startsWith("UPDATE zzsh_supply.listing_version SET review_state='SUBMITTED'")) {
@@ -200,7 +202,7 @@ test("takeover submits an empty submitted_at through the real review, while wron
         Object.assign(f.version, { review_state: "SUBMITTED", submitted_at: submittedAt }); return result([], 1);
       }
       if (sql.includes("SELECT u.suspended")) return result([{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]);
-      if (sql.includes("SELECT id,code,name,enabled,current_release_id")) return result([{ enabled: true, current_release_id: f.version.rule_release_id, catalog_revision: "1" }]);
+      if (sql.includes("SELECT id,code,name,enabled,") && sql.includes("AS current_release_id,catalog_revision")) return result([{ enabled: true, current_release_id: f.version.rule_release_id, catalog_revision: "1" }]);
       if (sql.includes("game_service_operation")) return result([{ id: "fixture_service", gameCode: "delta", gameEnabled: true, enabled: true }]);
       if (sql.includes("current-trade-resources")) return result(catalog().filter(item => (values[1] as string[]).includes(item.id)).map(item => ({ ...item, enabled: true })));
       if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) return result([{ id: f.asset.id, purpose: f.asset.purpose, ownership_kind: "USER_SUPPLY", account_id: f.asset.accountId, owner_user_id: f.asset.ownerUserId, game_id: f.asset.gameId, content_hash: f.asset.contentHash, review_state: f.asset.reviewState, technical_state: "READY", public_storage_key: f.asset.publicStorageKey, access_class: f.asset.accessClass }]);
@@ -216,7 +218,12 @@ test("takeover submits an empty submitted_at through the real review, while wron
     }) as any;
     if (mode === "wrong-media") f.asset.contentHash = "c".repeat(64);
     if (mode === "valid") {
-      const result = await takeoverLegacyTrade(f.client, f.actor, final, f.gate);
+      const gate: typeof f.gate = async (...args) => ({ ...await f.gate(...args), creditGuarantee: {
+        status: "NOT_REQUIRED", accountId: f.account.id, ownerUserId: f.account.owner_user_id, gameId: f.account.game_id,
+        listingVersionId: f.version.id, priceVersionId: f.version.payload.ruleRefs.priceVersionId,
+        releaseId: f.version.rule_release_id, creditRevision: "1", coverageRevision: null, requiredCents: "0", reference: "FIXTURE_ONLY",
+      } });
+      const result = await takeoverLegacyTrade(f.client, f.actor, final, gate);
       assert.equal((result.body as any).state, "PUBLISHED"); assert.equal(f.version.review_state, "APPROVED");
       assert(f.version.submitted_at instanceof Date); assert.equal(publications, 1);
     } else {
@@ -720,7 +727,8 @@ test("ordinary draft chain saves the converted declaration without a quote and a
       if (sql.includes("FROM zzsh_supply.term_option")) return { rows: [{ code: declaration.termOptionCode, dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }], rowCount: 1 };
       if (sql.includes("FROM zzsh_supply.inventory_line l JOIN zzsh_supply.billable_item i")) return { rows: [{ itemId: catalog[0]!.id, code: catalog[0]!.code, quantity: "1", unit: catalog[0]!.unit, name: "x", enabled: true, pricingKind: null, unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null }], rowCount: 1 };
       if (sql.includes("zzsh_supply.inventory_line WHERE version_id")) return { rows: [{ itemId: catalog[0]!.id, quantity: "1" }], rowCount: 1 };
-      if (sql.includes("JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id")) return { rows: [{ id: "fixture_release", price_version_id: "fixture_price", term_version_id: "fixture_term", agreement_version_id: "fixture_agreement", mode: "SPREAD", commission_rate: null, haff_rule: {}, rounding_policy: "HALF_UP_CENT_V1", catalogRevision: "1", digest: "d".repeat(64) }], rowCount: 1 };
+      if (sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")) return { rows: [{ modes: false, prices: false }], rowCount: 1 };
+      if (sql.includes("JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id")) return { rows: [{ id: "fixture_release", price_version_id: "fixture_price", term_version_id: "fixture_term", agreement_version_id: "fixture_agreement", mode: "SPREAD", commission_rate: null, haff_rule: {}, rounding_policy: "HALF_UP_CENT_V1", catalogRevision: "1", digest: "d".repeat(64) }], rowCount: 1 };
       if (sql.includes("zzsh_supply.listing_skin")) return { rows: [], rowCount: 0 };
       if (sql.includes("zzsh_supply.listing_entitlement")) return { rows: [], rowCount: 0 };
       if (sql.includes("zzsh_supply.listing_media")) return { rows: [], rowCount: 0 };
@@ -917,6 +925,7 @@ test("submit and review stop on a placeholder title before any publication write
     if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
     if (sql.includes("SELECT enabled,current_release_id")) return { rows: [{ enabled: true, current_release_id: "fixture_release", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")) return { rows: [{ modes: false, prices: false }], rowCount: 1 };
     if (sql.includes("current_release_id,catalog_revision")) return { rows: [{ current_release_id: "fixture_release", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: account.game_id, gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
     if (sql.includes("SELECT * FROM zzsh_supply.listing_version")) return { rows: [version], rowCount: 1 };

@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
@@ -184,10 +185,10 @@ export async function handlePublishingRoute(
         `SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",
           g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",
           p.status AS "priceStatus",p.haff_rule AS "haffRule",ag.id AS agreement_id,ag.title,ag.body,ag.digest
-         FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
+         FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
          JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,[gameId])).rows[0];
       if(!release)throw notFound();
-      const asOf=(await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+      const asOf=(await client.query<{at:string}>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
       if(!asOf)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架规则暂不可用");
       const resolved=await resolveIncomePreviewRelease(client,gameId,release,{asOf,...(context&&accountId?{accountId,ownerUserId:context.userId}:{})});
       if(!resolved.available)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架计价规则暂不可用");

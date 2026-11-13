@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
@@ -80,7 +81,7 @@ const accountFundingPolicyFrom = `FROM zzsh_supply.rental_account a JOIN zzsh_su
   LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id
     AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash
   JOIN zzsh_supply.rule_release r ON r.game_id=a.game_id AND r.id=CASE
-    WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE g.current_release_id END
+    WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE ${effectiveRuleRelease("g")} END
   JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=a.game_id`;
 const accountFundingPolicyBound = `(v.id IS NULL OR v.review_state NOT IN ('PUBLISHED','APPROVED')
   OR (v.review_state='PUBLISHED' AND pub.source='OWNER_DIRECT')

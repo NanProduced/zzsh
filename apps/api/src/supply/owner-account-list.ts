@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
 import { requireListingCursorKey, type ListingCursorKey } from "./listing-cursor";
@@ -73,7 +74,7 @@ const utc = (c: string) => `CASE WHEN ${c} IS NULL THEN NULL ELSE to_char(${c} A
 const ownerAccountListSql = (continuationReady: boolean) => `SELECT /* owner-account-list */ * FROM (
  SELECT a.id,a.display_no,a.game_id,a.revision::text,a.owner_paused,a.staff_restricted,v.id AS version_id,v.origin AS version_origin,v.title,v.review_state,v.sequence::text,
    u.name AS owner_name,g.name AS game_name,v.payload,v.presentation->'items' AS presentation_items,(${retiredLegacySql}) AS retired_legacy,
-   (v.rule_release_id IS NOT DISTINCT FROM g.current_release_id OR
+   (v.rule_release_id IS NOT DISTINCT FROM ${effectiveRuleRelease("g")} OR
      COALESCE(${effectivePublicationStateSql("v", "p")} AND p.owner_user_id=a.owner_user_id
        AND p.game_id=a.game_id AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash,false)) AS rule_current,
    CASE WHEN ao.id IS NOT NULL AND lo.occupied THEN NULL ELSE COALESCE(ao.id,lo.id) END AS ao_id,

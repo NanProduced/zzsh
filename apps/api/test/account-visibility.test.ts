@@ -54,7 +54,7 @@ function nativeFixture(id = "account-a", game = "game-a") {
     if (sql.includes('SELECT u.suspended')) rows = [{ suspended: facts.suspended, account_status: facts.accountStatus, identity_status: "VERIFIED", age_status: "ADULT" }];
     else if (sql.includes('AS retired')) rows = [{ retired: false }];
     else if (sql.includes('game_service_operation')) rows = [{ id: "service-a", gameId: game, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes('FROM zzsh_supply.game WHERE id=')) rows = [{ id: game, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
+    else if (sql.includes('FROM zzsh_supply.game g WHERE id=')) rows = [{ id: game, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
     else if (sql.includes('funding_policy AS policy')) rows = [{ policy: null }];
     else if (sql.includes('rule_acceptance')) rows = facts.accepted ? [{}] : [];
     else if (sql.includes('SELECT a.* FROM zzsh_supply.listing_media')) rows = [{ id: "media-a", account_id: account.id, game_id: account.game_id, owner_user_id: account.owner_user_id,

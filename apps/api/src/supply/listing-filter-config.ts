@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import { hasLegacyReadSnapshots, legacyListingSortLabel } from "./legacy-listing-read";
 import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
@@ -7,7 +8,7 @@ import { publicGradingOptions,publicGradingRankOptions,publicLoginMethodOptions,
 import { GAME_SERVICE,requirePublicGameService } from "./game-services";
 
 export async function listingCatalogContext(client:PoolClient,gameId:string) {
-  const game=(await client.query(`SELECT g.id,g.code,g.catalog_revision::text AS "catalogRevision",g.current_release_id AS "ruleReleaseId",p.haff_rule AS rule FROM zzsh_supply.game g LEFT JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1`,[gameId])).rows[0];
+  const game=(await client.query(`SELECT g.id,g.code,g.catalog_revision::text AS "catalogRevision",${effectiveRuleRelease("g")} AS "ruleReleaseId",p.haff_rule AS rule FROM zzsh_supply.game g LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1`,[gameId])).rows[0];
   if(!game || game.code!=="delta")throw notFound();
   const items=(await client.query<{id:string;code:string;name:string;unit:string}>(`SELECT id,code,name,unit FROM zzsh_supply.billable_item WHERE game_id=$1 AND enabled ORDER BY sort_order,id`,[gameId])).rows;
   const categories: {id:string;parentId:string|null;name:string}[]=[];

@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "./effective-rule-release";
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
@@ -299,7 +300,7 @@ export function listingPageShared(client: PoolClient): ListingPageShared {
       if (!pending) {
         pending = client
           .query<ListingGameRow>(
-            `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+            `SELECT id,code,name,enabled,${effectiveRuleRelease("g")} AS current_release_id,catalog_revision::text FROM zzsh_supply.game g WHERE id=$1`,
             [gameId],
           )
           .then((result) => result.rows[0]);
@@ -565,7 +566,7 @@ export async function publicationBlockers(
     ? await shared.game(a.game_id)
     : (
         await client.query<ListingGameRow>(
-          `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+          `SELECT id,code,name,enabled,${effectiveRuleRelease("g")} AS current_release_id,catalog_revision::text FROM zzsh_supply.game g WHERE id=$1`,
           [a.game_id],
         )
       ).rows[0];
@@ -973,7 +974,7 @@ export async function readDepositRecommendation(
     throw conflict("仅可为新申报草稿查看推荐押金");
   const release = (
     await client.query<{ id: string; priceVersionId: string }>(
-      `SELECT r.id,r.price_version_id AS "priceVersionId" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id WHERE g.id=$1 AND g.enabled`,
+      `SELECT r.id,r.price_version_id AS "priceVersionId" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} WHERE g.id=$1 AND g.enabled`,
       [a.game_id],
     )
   ).rows[0];
@@ -1103,7 +1104,7 @@ export async function resolveIncomePreviewRelease(client:PoolClient,gameId:strin
 }
 
 export async function readIncomePreviewContext(client: PoolClient, gameId: string, expected: {catalogRevision: string; releaseId: string}, includeHaff = false, pricing?:PreviewPricingContext) {
-  const base = (await client.query<IncomePreviewRelease>(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",p.status AS "priceStatus",p.haff_rule AS "haffRule" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
+  const base = (await client.query<IncomePreviewRelease>(`SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",p.status AS "priceStatus",p.haff_rule AS "haffRule" FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
   if (!base) return {available:false as const,reason:"RULE_UNCONFIGURED"};
   if (base.releaseId !== expected.releaseId || base.catalogRevision !== expected.catalogRevision) throw conflict("资源规则已更新，请重新读取目录");
   const resolved=await resolveIncomePreviewRelease(client,gameId,base,pricing);
@@ -1143,7 +1144,7 @@ export async function readResourceIncomePreview(client: PoolClient, gameId: stri
   binding?: { gameId: string; releaseId: string; releaseGeneration: string; priceVersionId: string; catalogRevision: string };
 }> {
   const quantities = parseIncomePreviewInventory(inventory);
-  const asOf=(await client.query<{evaluatedAt:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]?.evaluatedAt;
+  const asOf=(await client.query<{evaluatedAt:string}>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]?.evaluatedAt;
   if(!asOf)return {available:false,reason:"RULE_UNCONFIGURED"};
   const context = await readIncomePreviewContext(client, gameId, expected,false,{asOf,...account});
   if (!context.available) return {available:false,reason:context.reason};
@@ -1209,7 +1210,7 @@ export async function quoteListing(
     throw invalid("必填物品须明确填写数量或零", "inventory");
   const release = (
     await client.query(
-      `SELECT r.*,g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text,p.haff_rule,p.rounding_policy,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled FOR SHARE OF g`,
+      `SELECT r.*,to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt",g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text,p.haff_rule,p.rounding_policy,ag.digest FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled FOR SHARE OF g`,
       [a.game_id],
     )
   ).rows[0];
@@ -1219,7 +1220,7 @@ export async function quoteListing(
   let priceRule=release.haff_rule,priceRounding:string=release.rounding_policy,commissionRate:string|null=release.commission_rate;
   let pricingPolicy:ContentPayloadInput["pricingPolicy"];
   if(!legacyQuote){
-    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id});
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,asOf:release.evaluatedAt});
     if(selected?.model==="FIXED_FEE"){
       const rentalMode=normalizeRentalPricing(d.attributes.rentalPricing).rentalMode;
       const effective=await readEffectiveFixedFeePrice(client,a.game_id,rentalMode,selected.asOf);
@@ -1505,14 +1506,17 @@ export async function assertCurrentRelease(
   asOf?: string,
 ): Promise<void> {
   const game = (await client.query(
-    `SELECT current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1 FOR SHARE`,
-    [a.game_id],
+    `SELECT ${effectiveRuleRelease("g", "COALESCE($2::timestamptz, transaction_timestamp())")} AS current_release_id,catalog_revision::text,
+      to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"
+      FROM zzsh_supply.game g WHERE id=$1 FOR SHARE OF g`,
+    [a.game_id, asOf ?? null],
   )).rows[0];
   if (game?.current_release_id !== v.rule_release_id ||
     (v.review_state === "DRAFT" && v.origin === "NATIVE" && (!v.payload?.ruleRefs.catalogRevision || v.payload.ruleRefs.catalogRevision !== game.catalog_revision)))
     throw conflict("规则已更新，请在原草稿重新核价并确认");
   if(v.review_state==="DRAFT"&&v.origin==="NATIVE"&&v.payload&&v.payload.schemaVersion!==3){
-    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,asOf});
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,
+      asOf: asOf ?? game.evaluatedAt});
     if(selected&&selected.model!=="LEGACY_PERCENT"&&selected.model!=="LEGACY_SPREAD"){
       const policy=v.payload.pricingPolicy;
       if(!policy||policy.pricingModel!==selected.model)throw conflict("抽成模式已更新，请重新核价并确认");
@@ -1668,6 +1672,13 @@ export function publicationWaiverRevision(a: PublishingAccount, v: ListingVersio
   return revision;
 }
 
+async function publicationTime(client: PoolClient): Promise<string> {
+  const at = (await client.query<{ at: string }>(
+    `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+  if (!at) throw conflict("上架时间无法核实");
+  return at;
+}
+
 export async function submitListing(
   client: PoolClient,
   a: PublishingAccount,
@@ -1694,9 +1705,7 @@ export async function submitListing(
   // The gate has locked current credit/coverage; freeze only its explicit waiver.
   const waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
   a.display_no = await assignAccountNumber(client, a.id);
-  const publishedAt = (await client.query<{ at: string }>(
-    `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
-  if (!publishedAt) throw conflict("上架时间无法核实");
+  const publishedAt = await publicationTime(client);
   await assertCurrentRelease(client, a, v, publishedAt);
   await client.query(
     `INSERT INTO zzsh_supply.listing_publication
@@ -1759,6 +1768,7 @@ export async function reviewListing(
     waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
     a.display_no = await assignAccountNumber(client, a.id);
   }
+  if (body.decision === "APPROVE") await assertCurrentRelease(client, a, v, await publicationTime(client));
   await client.query(
     `INSERT INTO zzsh_supply.review_decision(id,version_id,release_id,content_hash,decision,reason,reviewer_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7)`,
     [
@@ -2001,7 +2011,7 @@ async function readInventoryCatalogLabels(
       `SELECT i.id, i.code, i.name, i.unit,
               EXISTS (
                 SELECT 1 FROM zzsh_supply.game g
-                JOIN zzsh_supply.rule_release r ON r.id = g.current_release_id
+                JOIN zzsh_supply.rule_release r ON r.id = ${effectiveRuleRelease("g")}
                 JOIN zzsh_supply.price_line p ON p.price_version_id = r.price_version_id
                  AND p.item_id = i.id AND p.customer_tier = 'STANDARD'
                 WHERE g.id = i.game_id
@@ -2345,7 +2355,7 @@ export async function listingDetail(
       ? ((await prefetch.shared.game(a.game_id)) as ListingGameRow | undefined)
       : (
           await client.query<ListingGameRow>(
-            `SELECT id,code,name,enabled,current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1`,
+            `SELECT id,code,name,enabled,${effectiveRuleRelease("g")} AS current_release_id,catalog_revision::text FROM zzsh_supply.game g WHERE id=$1`,
             [a.game_id],
           )
         ).rows[0];

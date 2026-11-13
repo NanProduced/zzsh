@@ -26,8 +26,8 @@ function fixture(amount: string | null = "10000", mode: "NOT_REQUIRED" | "FIXED_
     if (sql.startsWith("SELECT * FROM zzsh_supply.listing_version")) return result([version]);
     if (sql.startsWith('SELECT item_id AS "itemId"')) return result([{ itemId: "haff", quantity: "100000000" }]);
     if (sql.startsWith("SELECT skin_id FROM") || sql.startsWith("SELECT s.id,s.name") || sql.startsWith("SELECT entitlement_id AS") || sql.startsWith("SELECT m.asset_id AS") || sql.startsWith("SELECT 1 FROM zzsh_supply.billable_item")) return result([]);
-    if (sql.startsWith("SELECT r.*,g.catalog_revision")) return result([{ id: "release", catalogRevision: "1", price_version_id: "price", term_version_id: "term", agreement_version_id: "agreement", digest: "a".repeat(64), mode: "SPREAD", commission_rate: null, haff_rule: compatRule(), rounding_policy: "HALF_UP_CENT_V1" }]);
-    if (sql.startsWith("SELECT current_release_id,catalog_revision")) return result([{current_release_id:"release",catalog_revision:"1"}]);
+    if (sql.startsWith("SELECT r.*,to_char(transaction_timestamp()")) return result([{ id: "release", catalogRevision: "1", price_version_id: "price", term_version_id: "term", agreement_version_id: "agreement", digest: "a".repeat(64), mode: "SPREAD", commission_rate: null, haff_rule: compatRule(), rounding_policy: "HALF_UP_CENT_V1" }]);
+    if (sql.includes("AS current_release_id,catalog_revision")) return result([{current_release_id:"release",catalog_revision:"1"}]);
     if (sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')")) return result([{modes:controls.schedules,prices:controls.schedules&&!controls.incompleteSchedules,asOf:"2026-11-02T00:00:00.000000Z"}]);
     if (sql.includes("FROM zzsh_supply.listing_publication p JOIN zzsh_supply.listing_version v")) return result(controls.previous?[controls.previous]:[]);
     const {compatibility,...fixedRule}=compatRule();

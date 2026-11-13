@@ -1,3 +1,4 @@
+export { assertPublishedPricingAnnouncement } from "./pricing-announcement";
 import { updateVisibilitySql } from "../content/updates";
 import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
@@ -6,7 +7,7 @@ import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } f
 import { computeContentHash, normalizePricingPolicy, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { validateDeltaHaffRule } from "./delta-rental";
-import { assertScheduledTermCompatibility, assertPriceVersionResources } from "./rules";
+import { assertRulePricingTimeline, assertPriceVersionResources } from "./rules";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 type PriceVersion = { id: string; mode: string; status: string; haffRule: unknown; rates: unknown; roundingPolicy: string };
@@ -368,19 +369,6 @@ export async function initializeFixedFeePricing(client:PoolClient,input:{gameId:
   return {status:"INITIALIZED" as const,priceScheduleId,modeScheduleId};
 }
 
-/** Bind the planned change to an already public version, even if the announcement is edited later. */
-export async function assertPublishedPricingAnnouncement(client: PoolClient, gameId: string, versionId: string, effectiveAt: string) {
-  const now = updateVisibilitySql("at.now"), effective = updateVisibilitySql("$3");
-  const announcement = (await client.query(`WITH at AS MATERIALIZED (SELECT clock_timestamp() AS now)
-    SELECT v.id FROM zzsh_content.content_version v
-    JOIN zzsh_content.content_item i ON i.id=v.item_id CROSS JOIN at
-    WHERE v.id=$1 AND i.type='ANNOUNCEMENT' AND (i.game_id=$2 OR i.game_id IS NULL)
-      AND v.state='PUBLISHED' AND v.published_at<=at.now AND at.now<$3::timestamptz
-      AND ${now.visible} AND ${now.alive} AND ${effective.visible}
-    FOR SHARE OF v,i`, [versionId, gameId, effectiveAt])).rows[0];
-  if (!announcement) throw conflict("请先发布适用于该游戏的调价公告");
-}
-
 /** Called only inside the existing authenticated, idempotent and audited admin write transaction. */
 export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId: string; isBoss: boolean }, input: {
   gameId: string; priceVersionId: string; expectedGeneration: string; effectiveAt: string;
@@ -408,11 +396,6 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
   if (!current || current.generation !== input.expectedGeneration) throw conflict("价格政策版本已变化，请刷新后重试");
   const generation = (BigInt(current.generation) + 1n).toString();
   await assertPriceVersionResources(client,input.gameId,price.id,price.mode);
-  const currentTerms = (await client.query<{ id: string }>(`SELECT r.term_version_id AS id
-    FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
-    WHERE g.id=$1`, [input.gameId])).rows[0];
-  if (!currentTerms) throw conflict("固定手续费排期需要已生效的租期版本");
-  await assertScheduledTermCompatibility(client, currentTerms.id, [{ mode: "PERCENT", haffRule: price.haffRule }]);
   const timeline = await readFixedFeeTimeline(client, input.gameId, { from: effectiveAt, fee: { effectiveAt, generation, rates, haffRule: price.haffRule } });
   if (!timeline) throw conflict("固定手续费政策无法核实");
   const validation = validateFixedFeeTimeline(timeline);
@@ -421,6 +404,7 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
   await client.query(`INSERT INTO zzsh_supply.pricing_policy_schedule
     (id,game_id,pricing_model,price_version_id,generation,effective_at,source,created_by_admin_id)
     VALUES ($1,$2,'FIXED_FEE',$3,$4::bigint,$5::timestamptz,'ADMIN',$6)`, [id, input.gameId, price.id, generation, effectiveAt, actor.userId]);
+  await assertRulePricingTimeline(client, input.gameId, effectiveAt);
   return { id, generation, effectiveAt };
 }
 
@@ -449,16 +433,11 @@ export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string
     FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 AND pricing_model='SPREAD'`,[input.gameId])).rows[0];
   if(!current||current.generation!==input.expectedGeneration)throw conflict("价格政策版本已变化，请刷新后重试");
   await assertPriceVersionResources(client,input.gameId,price.id,"SPREAD");
-  const currentTerms = (await client.query<{ id: string }>(`SELECT r.term_version_id AS id
-    FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
-    WHERE g.id=$1`, [input.gameId])).rows[0];
-  if (!currentTerms) throw conflict("价差排期需要已生效的租期版本");
-  await assertScheduledTermCompatibility(client, currentTerms.id, [{ mode: "SPREAD", haffRule: price.haffRule }]);
-
   const generation=(BigInt(current.generation)+1n).toString(),id=newSupplyId("price_policy");
   await client.query(`INSERT INTO zzsh_supply.pricing_policy_schedule
     (id,game_id,pricing_model,price_version_id,generation,effective_at,source,created_by_admin_id)
     VALUES ($1,$2,'SPREAD',$3,$4::bigint,$5::timestamptz,'ADMIN',$6)`,[id,input.gameId,price.id,generation,effectiveAt,actor.userId]);
+  await assertRulePricingTimeline(client, input.gameId, effectiveAt);
   return {id,generation,effectiveAt};
 }
 
@@ -505,5 +484,6 @@ export async function schedulePricingMode(client: PoolClient, actor: {userId:str
   await client.query(`INSERT INTO zzsh_supply.pricing_mode_schedule
     (id,game_id,pricing_model,generation,effective_at,source,created_by_admin_id)
     VALUES ($1,$2,$3,$4::bigint,$5::timestamptz,'ADMIN',$6)`,[id,input.gameId,input.pricingModel,generation,effectiveAt,actor.userId]);
+  await assertRulePricingTimeline(client, input.gameId, effectiveAt);
   return {id,generation,effectiveAt};
 }

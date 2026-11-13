@@ -142,7 +142,7 @@ export async function readOwnerIncomePreview(client: PoolClient, context: UserCo
     const account = await readPublishingAccount(client, input.accountId);
     if (account.owner_user_id !== context.userId || account.game_id !== gameId) throw notFound();
   }
-  const evaluatedAt = (await client.query<{ evaluatedAt: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]!.evaluatedAt;
+  const evaluatedAt = (await client.query<{ evaluatedAt: string }>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"`)).rows[0]!.evaluatedAt;
   const response: OwnerIncomePreview = {
     schema: "owner-income-preview.v1", state: "UNAVAILABLE", binding: null, evaluatedAt, refreshAfter: new Date(Date.parse(evaluatedAt) + 30_000).toISOString(),
     rentalMode: input.attributes.rentalPricing?.rentalMode ?? null, ownerHaffRatioWanPerYuan: null, ratioRanges: null, termSeconds: null, lines: [], ownerHaffIncome: null,

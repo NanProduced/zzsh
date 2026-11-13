@@ -130,7 +130,7 @@ test("quote confirmation locks the game and refuses stale catalog/release withou
   const account={id:'account',owner_user_id:'owner',game_id:'g'};
   const version={rule_release_id:'r1',origin:'NATIVE',review_state:'DRAFT',payload:{schemaVersion:2,ruleRefs:{catalogRevision:'89'}}};
   await assertCurrentRelease(client as never,account as never,version as never);
-  assert.ok(queries[0]?.endsWith(' FOR SHARE'));
+  assert.ok(queries[0]?.endsWith(' FOR SHARE OF g'));
   for(const changes of [{rule_release_id:'r0'},{payload:{ruleRefs:{catalogRevision:'88'}}},{payload:{ruleRefs:{}}}])await assert.rejects(()=>assertCurrentRelease(client as never,account as never,{...version,...changes} as never));
   await assertCurrentRelease(client as never,account as never,{...version,review_state:'PUBLISHED',payload:{ruleRefs:{}}} as never);
   assert.deepEqual(version.payload.ruleRefs,{catalogRevision:'89'});
@@ -279,7 +279,7 @@ function nativeGateClient(acceptance = false, migrated = false) {
   return { query: async (sql: string) => {
     if (sql.includes("zzsh_auth_user")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }], rowCount: 1 };
     if (sql.includes("AS retired")) return { rows: [{ retired: migrated }], rowCount: 1 };
-    if (sql.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "g", code: "delta", name: "三角洲", enabled: true, current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("game_service_operation")) return { rows: [{ id: "s", gameId: "g", gameCode: "delta", gameEnabled: true, serviceCode: "ACCOUNT_RENTAL", enabled: true, revision: "1" }], rowCount: 1 };
     if (sql.includes("rule_acceptance")) return { rows: acceptance ? [{ ok: 1 }] : [], rowCount: acceptance ? 1 : 0 };
     return { rows: [], rowCount: 0 };
@@ -293,7 +293,7 @@ test("admin approval cannot publish an account that has already been published",
   const client = { query: async (sql: string) => {
     sqls.push(sql);
     if (sql.includes("FROM zzsh_supply.listing_version")) return { rows: [version], rowCount: 1 };
-    if (sql.includes("SELECT current_release_id")) return { rows: [{ current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
+    if (sql.includes("AS current_release_id,catalog_revision")) return { rows: [{ current_release_id: "rel", catalog_revision: "1" }], rowCount: 1 };
     if (sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     if (sql.includes("FROM zzsh_supply.listing_publication")) return { rows: [{}], rowCount: 1 };
     throw new Error("unexpected query");

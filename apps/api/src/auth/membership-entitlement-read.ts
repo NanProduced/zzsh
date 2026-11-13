@@ -1,3 +1,4 @@
+import { effectiveRuleRelease } from "../supply/effective-rule-release";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { ADMIN_PERMISSION, hasPermission, type EffectiveAdminAccess } from "./admin-authorization";
@@ -24,7 +25,7 @@ export async function readMembershipEntitlementOptions(client: PoolClient, viewe
   const scope = await readAdminGameScope(client, viewer.adminId);
   assertGameScopeUsable(scope, viewer.access.isBoss);
   const games = (await client.query<{ id: string; name: string }>(
-    `SELECT g.id,g.name FROM zzsh_supply.game g WHERE ${gameScopeSql("g.id", "$1", "$2")} ORDER BY (g.current_release_id IS NOT NULL) DESC,g.name,g.id`,
+    `SELECT g.id,g.name FROM zzsh_supply.game g WHERE ${gameScopeSql("g.id", "$1", "$2")} ORDER BY (${effectiveRuleRelease("g")} IS NOT NULL) DESC,g.name,g.id`,
     [viewer.adminId, viewer.access.isBoss],
   )).rows;
   return { schema: "membership-entitlement-options.v1", games, capability: { canRead, canRequest } };
