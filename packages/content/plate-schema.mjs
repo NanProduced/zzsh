@@ -208,7 +208,10 @@ export function validatePlateDocument(doc, { preset, mode = "draft" } = {}) {
   for (const [i, node] of doc.value.entries()) walk(node, `$.value[${i}]`, 1);
   if (preset === "notice" && stats.chars > NOTICE_TEXT_CHARS) add("$", "TEXT_TOO_LONG", `notice visible text ${stats.chars} chars exceeds ${NOTICE_TEXT_CHARS}`);
   if (preset === "update" || preset === "legal") {
-    const n = byteLength(stats.projection);
+    const projection = preset === "legal" && errors.length === 0
+      ? extractPlate(doc).plainText.normalize("NFC").replace(/\r\n?/g, "\n")
+      : stats.projection;
+    const n = byteLength(projection);
     if (n > PROJECTION_BYTES) add("$", "TEXT_TOO_LONG", `${preset} plain text ${n} bytes exceeds ${PROJECTION_BYTES}`);
   }
   return { ok: errors.length === 0, errors };

@@ -8,8 +8,8 @@ import { NORMAL_GROWTH_TIERS, validateBenefitPolicy, type GrowthBenefitPolicy } 
 import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "../auth/membership-unified-pricing";
 import { assertContentBootstrapBoss } from "../content/content-bootstrap";
 import { bootstrapLegalDocuments } from "../legal/legal-bootstrap";
-import { readCurrentEarlySettlementDisclosure, readReleaseEarlySettlementReference } from "../legal/legal-documents";
-import { canonicalize, normalizeTime } from "./content-hash";
+import { parseLegalPlateDocument, plateProjection, readCurrentEarlySettlementDisclosure, readReleaseEarlySettlementReference } from "../legal/legal-documents";
+import { canonicalize, humanText, normalizeTime } from "./content-hash";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, validateDeltaHaffRule } from "./delta-rental";
 import { initializeFixedFeePricing } from "./pricing-policy-schedule";
 import {
@@ -24,6 +24,27 @@ function fields(value: unknown, keys: readonly string[]) {
   ensureOnlyFields(row, keys);
   if (keys.some(key => !Object.hasOwn(row, key))) throw invalid("首次租赁配置缺少必填字段");
   return row;
+}
+
+function initialTradeDocument(value: unknown, metadata: readonly string[]) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("首次交易文书格式无效");
+  const row = value as Record<string, unknown>;
+  const rich = Object.hasOwn(row, "bodyDocument");
+  if (rich === Object.hasOwn(row, "body")) throw invalid("首次交易文书须提供 body 或 bodyDocument 其中一项");
+  const keys = [...metadata, rich ? "bodyDocument" : "body"];
+  fields(row, keys);
+  if (rich) return { ...row, bodyDocument: parseLegalPlateDocument(row.bodyDocument, "publish") };
+
+  const body = humanText(requiredString(row, "body", 20_000));
+  if (/<\/?[a-z][a-z0-9:_-]*(?:\s[^<>]*)?\s*\/?>|<!--/i.test(body))
+    throw invalid("首次交易文书含 HTML 标签，请提供 Plate bodyDocument");
+  const document = parseLegalPlateDocument({
+    format: "plate", schemaVersion: 1, preset: "legal",
+    value: body.split("\n").map(text => ({ type: "p", children: [{ text }] })),
+  }, "publish");
+  if (plateProjection(document) !== body) throw invalid("首次交易文书转换前后正文不一致");
+  const { body: _body, ...rest } = row;
+  return { ...rest, bodyDocument: document };
 }
 
 /** Called by the migration CLI in one transaction using an Owner-supplied, digest-bound package. */
@@ -48,8 +69,8 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   if (rule.schema !== "haff-ratio-v3" || terms.some(term => !Object.hasOwn(rule.dailyDeltaByTermOption, term.code))
     || !terms.some(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION))
     throw invalid("首次租期选项须有对应比例，并包含自定义出租所用的日耗");
-  const agreement = fields(input.agreement, ["title", "body"]);
-  const fullPayoutTerms = fields(input.fullPayoutTerms, ["title", "body", "policyRef", "policyVersion", "disclosureVersion"]);
+  const agreement = input.agreement;
+  const fullPayoutTerms = input.fullPayoutTerms;
   const memberDeposits = fields(input.memberDeposits, NORMAL_GROWTH_TIERS);
   const tiers = {} as GrowthBenefitPolicy["tiers"];
   for (const tier of NORMAL_GROWTH_TIERS) {
@@ -105,13 +126,15 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
     OR EXISTS (SELECT 1 FROM zzsh_supply.listing_publication WHERE game_id=$1 AND source='OWNER_DIRECT')
     OR EXISTS (SELECT 1 FROM zzsh_order.rental_order WHERE game_id=$1) AS occupied`, [gameId])).rows[0];
   if (game.releaseId !== null || existing?.occupied !== false || previous.length) throw conflict("已有租赁或会员配置，未覆盖");
+  const agreementDocument = initialTradeDocument(agreement, ["title"]);
+  const payoutDocument = initialTradeDocument(fullPayoutTerms, ["title", "policyRef", "policyVersion", "disclosureVersion"]);
   // Use the reserved Boss for version provenance. The migration creates no session or approval.
   await assertContentBootstrapBoss(client, boss);
   await bootstrapLegalDocuments(client, { actorAdminId: boss, requestId, earlySettlementOnly: true });
   const earlySettlement = await readCurrentEarlySettlementDisclosure(client);
   if (!earlySettlement) throw conflict("首次租赁配置缺少可核验的提前结算告知");
   await setSystemInitialSource(client, expectedSha256);
-  const payout = await createFullPayoutTermsDraft(client, boss, true, gameId, fullPayoutTerms);
+  const payout = await createFullPayoutTermsDraft(client, boss, true, gameId, payoutDocument);
   await sealVersion(client, boss, true, "full_payout_terms_version", payout.id, "0");
   const { id: priceVersionId } = await createPriceDraft(client, boss, true, gameId, "PERCENT", price.fixedFeeRates);
   await updatePriceDraft(client, boss, true, priceVersionId, { ...price, expectedRevision: "1" });
@@ -121,7 +144,7 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   const term = await createTermDraft(client, boss, true, gameId);
   await updateTermDraft(client, boss, true, term.id, { expectedRevision: "1", options: terms });
   await sealVersion(client, boss, true, "term_version", term.id, "2");
-  const agreementVersion = await createAgreementDraft(client, boss, true, gameId, requiredString(agreement, "title", 120), requiredString(agreement, "body", 20_000));
+  const agreementVersion = await createAgreementDraft(client, boss, true, gameId, requiredString(agreementDocument, "title", 120), undefined, agreementDocument.bodyDocument);
   await sealVersion(client, boss, true, "agreement_version", agreementVersion.id, "1");
   const releaseId = newSupplyId("release");
   await client.query(`INSERT INTO zzsh_supply.rule_release(id,game_id,price_version_id,term_version_id,agreement_version_id,generation,activated_by_admin_id,system_initial_sha256,

@@ -189,7 +189,8 @@ async function verifyRow(row: LegalDocumentVersion): Promise<LegalDocumentVersio
     if (!row.bodyDocument) throw conflict("法律文书正文与摘要不一致");
     parseLegalPlateDocument(row.bodyDocument, row.status === "DRAFT" ? "draft" : "publish");
     if (await plateDigest(row.bodyDocument) !== row.digest) throw conflict("法律文书正文与摘要不一致");
-    if (plateProjection(row.bodyDocument) !== row.body) throw conflict("法律文书正文与摘要不一致");
+    const projection = plateProjection(row.bodyDocument);
+    if (projection !== row.body && humanText(projection) !== row.body) throw conflict("法律文书正文与摘要不一致");
     return row;
   }
   if (legalDigest(row.body) !== row.digest) throw conflict("法律文书正文与摘要不一致");
@@ -213,7 +214,7 @@ export function parseLegalPlateDocument(value: unknown, mode: "draft" | "publish
       checked.errors.slice(0, 5).map(issue => ({ path: `bodyDocument${issue.path.slice(1)}`, code: "PLATE_INVALID" as const })));
   }
   const projection = plateProjection(document);
-  if (!projection.trim() || Buffer.byteLength(projection, "utf8") > 20_000) throw invalid("Legal document field is invalid", "bodyDocument");
+  if (!projection.trim() || Buffer.byteLength(humanText(projection), "utf8") > 20_000) throw invalid("Legal document field is invalid", "bodyDocument");
   return document;
 }
 
@@ -261,7 +262,7 @@ async function draftContent(body: Record<string, unknown>, current?: LegalDocume
     if (body.body !== undefined) throw invalid("Plate legal document body is derived from bodyDocument", "body");
     if (body.bodyDocument === undefined && !current) throw invalid("Legal document plate payload is invalid", "bodyDocument");
     const document = body.bodyDocument === undefined ? current!.bodyDocument! : parseLegalPlateDocument(body.bodyDocument, "draft");
-    return { title, bodyFormat: "plate", bodyDocument: document, documentBody: plateProjection(document), digest: await plateDigest(document) };
+    return { title, bodyFormat: "plate", bodyDocument: document, documentBody: humanText(plateProjection(document)), digest: await plateDigest(document) };
   }
 
   if (body.body === undefined && !current) throw invalid("Legal document field is invalid", "body");
