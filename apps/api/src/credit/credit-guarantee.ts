@@ -6,7 +6,6 @@ import { SecurityApiError } from "../auth/security-core";
 import { gameScopeSql } from "../auth/admin-scope";
 import { validateIdempotencyKey } from "../contracts/api-v1";
 import type { UserObligationReader } from "../auth/user-identity";
-import { ORDER_COMPENSATION_OPERATION } from "../finance/order-compensation-contract";
 import { canonicalize } from "../supply/content-hash";
 import { parseNonNegativeDecimal } from "../supply/decimal";
 import { validateFundingPolicy, type FundingPolicy } from "../supply/funding-policy";
@@ -1009,12 +1008,9 @@ export const AUTOMATIC_GUARANTEE_REFUND_HAS_ISSUE = `a.staff_restricted
     OR EXISTS(SELECT 1 FROM zzsh_credit.credit_event e WHERE e.user_id=a.owner_user_id AND e.subject_role='OWNER'
       AND e.event_type='BREACH_CONFIRMED' AND ((e.source_type='ACCOUNT' AND e.source_id=a.id)
         OR (e.source_type='ORDER' AND EXISTS(SELECT 1 FROM zzsh_order.rental_order o WHERE o.id=e.source_id AND o.account_id=a.id)))
-      AND NOT EXISTS(SELECT 1 FROM zzsh_credit.credit_event reversal WHERE reversal.reversal_of_id=e.id))
-    OR EXISTS(SELECT 1 FROM zzsh_iam.approval_request r JOIN zzsh_order.rental_order o ON o.id=r.operation_payload->>'orderId'
-      WHERE o.account_id=a.id AND o.owner_user_id=a.owner_user_id AND r.operation_code='${ORDER_COMPENSATION_OPERATION}'
-        AND r.operation_payload->>'origin'='NATIVE' AND r.status IN ('PENDING','APPROVED','EXECUTION_FAILED'))`;
+      AND NOT EXISTS(SELECT 1 FROM zzsh_credit.credit_event reversal WHERE reversal.reversal_of_id=e.id))`;
 
-/** Caller holds the account lock, which also serializes new aftersales and compensation requests. */
+/** Caller holds the account lock, which also serializes new aftersales. */
 export async function automaticGuaranteeRefundIssue(client: PoolClient, accountId: string, ownerUserId: string): Promise<string | null> {
   const credit = await client.query(`SELECT user_id FROM zzsh_credit.user_credit_state WHERE user_id=$1 FOR SHARE`, [ownerUserId]);
   if (credit.rowCount !== 1) return "CREDIT_BASIS_UNAVAILABLE";

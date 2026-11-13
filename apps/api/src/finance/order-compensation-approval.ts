@@ -51,12 +51,6 @@ export async function validateCompensationSubmission(client: PoolClient, value: 
   const basis = await compensationOrderBasis(client,payload.origin,payload.orderId);
   if (!basis || basis.gameId !== payload.gameId || basis.ownerUserId !== payload.ownerUserId || basis.sourceDigest !== payload.sourceDigest) return unavailable('订单或保障依据已变化，请重新核对');
   if (basis.state !== 'SELECTED' && basis.state !== 'LEGACY_REVIEW') return unavailable('未取得本单有效的全额包赔依据');
-  if (checkDuplicate && payload.origin === 'NATIVE') {
-    // Hold the account through approval creation so guarantee release sees the pending case.
-    const account = await client.query(`SELECT a.id FROM zzsh_supply.rental_account a JOIN zzsh_order.rental_order o ON o.account_id=a.id
-      WHERE o.id=$1 AND a.owner_user_id=$2 FOR SHARE OF a`, [payload.orderId, payload.ownerUserId]);
-    if (account.rowCount !== 1) return unavailable('订单或保障依据已变化，请重新核对');
-  }
   if (checkDuplicate && (await client.query(`SELECT 1 FROM zzsh_iam.approval_request WHERE operation_code=$1 AND operation_payload->>'origin'=$2
     AND operation_payload->>'orderId'=$3 AND lower(operation_payload->>'caseRef')=lower($4) AND status IN('PENDING','APPROVED','EXECUTED','EXECUTION_FAILED') LIMIT 1`,
     [ORDER_COMPENSATION_OPERATION,payload.origin,payload.orderId,payload.caseRef])).rowCount) return unavailable('此事故已有赔偿申请，请先核对原申请');
