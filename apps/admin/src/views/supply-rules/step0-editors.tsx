@@ -61,6 +61,7 @@ export function HelpTip({
 const currentPrice = (rules: RulesResponse) => rules.priceVersions.find(v => v.id === rules.release?.priceVersionId);
 /** 比例与加减值：可为负，最多两位小数。 */
 const DECIMAL = /^-?\d+(\.\d{1,2})?$/;
+const EXACT_RATIO = /^-?\d+(\.\d{1,8})?$/;
 /** 物资新单价：非负，最多两位小数。 */
 const MONEY = /^\d{1,16}(\.\d{1,2})?$/;
 /** 服务端要求这三项的计费数量为 1。见 delta-rental DELTA_RESOURCE_UNITS。 */
@@ -160,39 +161,49 @@ const MAP_LABEL: Record<MapKey, { title: string; key: string }> = {
   bearDeltaByLevel: { title: "负重等级加减", key: "负重等级" },
   dailyDeltaByTermOption: { title: "按每日消耗档加减比例", key: "每日消耗档" },
 };
+type FixedHaff = Pick<HaffV2, MapKey> & { schema: "haff-ratio-v3"; fixedModes: Record<"ordinary" | "custom" | "fast", { enabled: boolean; min?: { base: "C" | "ABSOLUTE"; value: string }; max?: { base: "C" | "ABSOLUTE"; value: string } }> };
+const fixedHaff = (price: PriceVersionRecord | undefined) => price?.haffRule?.schema === "haff-ratio-v3" ? price.haffRule as FixedHaff : null;
+const effectivePrice = (rules: RulesResponse) => rules.newListingPrice === undefined ? currentPrice(rules) : rules.priceVersions.find(v => v.id === rules.newListingPrice?.priceVersionId);
+const fixedModeNames = { ordinary: "普通", custom: "自定义", fast: "极速" } as const;
 type HaffForm = { maps: Partial<Record<MapKey, Record<string, string>>>; spreadDelta?: string };
 
 export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyChange, ensureDraft, part }: EditorProps & { part: "base" | "term" }) {
   const selected = rules.priceVersions.find(v => v.id === draftId);
-  const current = currentPrice(rules);
-  const currentHaff = asHaffV2(current?.haffRule);
+  const current = effectivePrice(rules);
+  const fixed = Boolean(fixedHaff(effectivePrice(rules)) || fixedHaff(selected));
+  const currentHaff = fixed ? fixedHaff(effectivePrice(rules)) : asHaffV2(current?.haffRule);
   // 未选草稿时用当前生效值只读展示（先看后改）。
-  const sourceHaff = selected ? asHaffV2(selected.haffRule) ?? (selected.haffRule === null ? currentHaff : null) : currentHaff;
+  const sourceHaff = selected ? (fixed ? fixedHaff(selected) : asHaffV2(selected.haffRule)) ?? (selected.haffRule === null ? currentHaff : null) : currentHaff;
   const keys: MapKey[] = part === "base" ? ["baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel"] : ["dailyDeltaByTermOption"];
-  const initial = useMemo<HaffForm>(() => sourceHaff ? { maps: Object.fromEntries(keys.map(k => [k, { ...sourceHaff[k] }])), ...(part === "base" ? { spreadDelta: sourceHaff.compatibility.ordinary.spreadDelta } : {}) } : { maps: {} }, [JSON.stringify(sourceHaff), part]); // eslint-disable-line react-hooks/exhaustive-deps
+  const initial = useMemo<HaffForm>(() => sourceHaff ? { maps: Object.fromEntries(keys.map(k => [k, { ...sourceHaff[k] }])), ...(part === "base" && "compatibility" in sourceHaff ? { spreadDelta: sourceHaff.compatibility.ordinary.spreadDelta } : {}) } : { maps: {} }, [JSON.stringify(sourceHaff), part]); // eslint-disable-line react-hooks/exhaustive-deps
   const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false) || !sourceHaff; const sealedView = !!selected && selected.status !== "DRAFT";
   const form = useDirty(initial, command.locked, onDirtyChange);
   const save = useSave(command);
-  const invalid = Object.values(form.value.maps).some(map => Object.values(map ?? {}).some(v => !DECIMAL.test(v.trim()))) || (form.value.spreadDelta !== undefined && !DECIMAL.test(form.value.spreadDelta.trim()));
+  const ratioPattern = fixed ? EXACT_RATIO : DECIMAL;
+  const invalid = Object.values(form.value.maps).some(map => Object.values(map ?? {}).some(v => !(fixed && !v.trim()) && !ratioPattern.test(v.trim()))) || (form.value.spreadDelta !== undefined && !DECIMAL.test(form.value.spreadDelta.trim()));
   const submit = () => {
     if (!sourceHaff || locked || invalid) return;
     void save.run(async () => {
       const t = await ensureDraft(); if (!t) return null;
       // 以服务端最新草稿规则为底，只覆盖本页签字段；会员档位折扣等隐藏字段原样保留。
-      const next: HaffV2 = JSON.parse(JSON.stringify(sourceHaff));
-      for (const k of keys) next[k] = Object.fromEntries(Object.entries(form.value.maps[k] ?? {}).map(([key, v]) => [key, v.trim()]));
-      if (form.value.spreadDelta !== undefined) next.compatibility.ordinary.spreadDelta = form.value.spreadDelta.trim();
+      const next = structuredClone((fixed ? fixedHaff(t.draft) : asHaffV2(t.draft.haffRule)) ?? sourceHaff);
+      for (const k of keys) next[k] = Object.fromEntries(Object.entries(form.value.maps[k] ?? {}).filter(([, value]) => !fixed || value.trim() !== "").map(([key, v]) => [key, v.trim()]));
+      if (form.value.spreadDelta !== undefined && "compatibility" in next) next.compatibility.ordinary.spreadDelta = form.value.spreadDelta.trim();
       return draftCommand(t.rules.game.id, "price", "update", priceSaveBody(t.rules, t.draft, { haffRule: next }), t.draft.id);
     }, part === "base" ? "基础计价已保存到草稿。" : "租期每日消耗已保存到草稿。", form.markSaved);
   };
   const setCell = (k: MapKey, key: string, v: string) => form.setValue(prev => ({ ...prev, maps: { ...prev.maps, [k]: { ...prev.maps[k], [key]: v } } }));
   const title = part === "base" ? "基础计价" : "租期每日消耗";
+  const configuredKeys: Partial<Record<MapKey, string[]>> = fixed ? {
+    baseBySafeBox: ["safe_box_1x2", "safe_box_2x2", "safe_box_2x3", "safe_box_3x3"],
+    dailyDeltaByTermOption: rules.termOptions.map(term => term.code),
+  } : {};
   const keyLabel = (k: MapKey, key: string) => k === "baseBySafeBox" ? `${safeBoxLabel(key)} 保险箱` : k === "dailyDeltaByTermOption" ? rules.termOptions.find(o => o.code === key && o.versionId === rules.release?.termVersionId)?.name ?? key : `${key} 级`;
-  const example = useMemo(() => haffExample(rules, currentHaff), [rules, currentHaff]);
+  const example = useMemo(() => haffExample(rules, currentHaff && "compatibility" in currentHaff ? currentHaff : null), [rules, currentHaff]);
   return <Panel
     title={title}
     note={
-      part === "base" ? (
+      fixed ? "租客与号主使用同一哈夫币比例，比例单位为万哈夫币/元。" : part === "base" ? (
         <div className="flex flex-wrap items-center gap-1.5">
           <span>号主比例＝保险箱基础＋体力＋负重＋每日消耗档；租客比例＝号主比例－利润点。</span>
           <HelpTip label="基础比例规则说明">
@@ -208,7 +219,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
         </div>
       )
     }
-    more={part === "base" ? "比例＝1 元换多少万哈夫币，比例越大哈夫币越便宜。左列是线上值，右列可改，改过的格子会高亮。会员优惠按总价折扣另算。" : undefined}
+    more={!fixed && part === "base" ? "比例＝1 元换多少万哈夫币，比例越大哈夫币越便宜。左列是线上值，右列可改，改过的格子会高亮。会员优惠按总价折扣另算。" : undefined}
   >
     <DraftLine selected={selected} locked={command.locked} />
     {selected && !sourceHaff ? <div className="space-y-2"><p role="status" className="text-xs text-muted-foreground">这份草稿的哈夫币规则是旧写法，这里只能查看。</p><pre className="max-h-64 overflow-auto rounded-md border border-border p-2 text-xs">{JSON.stringify(selected.haffRule, null, 2)}</pre></div> : null}
@@ -221,7 +232,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
           </HelpTip>
         </div>
         <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left"><Table><TableHeader><TableRow><TableHead className="font-medium text-foreground">{MAP_LABEL[k].key}</TableHead><TableHead className="text-right">当前生效</TableHead><TableHead className="text-right font-medium text-foreground">{sealedView ? "待生效" : "草稿"}</TableHead></TableRow></TableHeader><TableBody>
-          {Object.keys(form.value.maps[k] ?? {}).map(key => {
+          {[...new Set([...Object.keys(form.value.maps[k] ?? {}), ...(configuredKeys[k] ?? [])])].map(key => {
             const before = currentHaff?.[k]?.[key];
             const after = form.value.maps[k]?.[key] ?? "";
             const changed = before !== undefined && before !== after.trim();
@@ -235,7 +246,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
                     inputMode="decimal"
                     value={after}
                     disabled={locked}
-                    aria-invalid={!DECIMAL.test(after.trim())}
+                    aria-invalid={!(fixed && !after.trim()) && !ratioPattern.test(after.trim())}
                     className={`text-right tabular-nums transition-colors ${changed ? "border-primary bg-primary/[0.04] font-medium ring-1 ring-primary/30" : ""}`}
                     onChange={e => setCell(k, key, e.target.value)}
                   />
@@ -254,7 +265,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
             </HelpTip>
           </div>
           <div className="grid grid-cols-2 items-center gap-3 text-sm">
-            <span className="text-xs text-muted-foreground">当前生效：<b className="font-semibold tabular-nums text-foreground">{currentHaff?.compatibility.ordinary.spreadDelta ?? "—"}</b></span>
+            <span className="text-xs text-muted-foreground">当前生效：<b className="font-semibold tabular-nums text-foreground">{currentHaff && "compatibility" in currentHaff ? currentHaff.compatibility.ordinary.spreadDelta : "—"}</b></span>
             <div className="flex items-center justify-end gap-2">
               <span className="text-xs text-muted-foreground">{sealedView ? "待生效" : "草稿"}</span>
               <Input
@@ -263,7 +274,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
                 value={form.value.spreadDelta}
                 disabled={locked}
                 aria-invalid={!DECIMAL.test(form.value.spreadDelta.trim())}
-                className={`w-28 text-right tabular-nums ${currentHaff?.compatibility.ordinary.spreadDelta !== form.value.spreadDelta.trim() ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
+                className={`w-28 text-right tabular-nums ${currentHaff && "compatibility" in currentHaff && currentHaff.compatibility.ordinary.spreadDelta !== form.value.spreadDelta.trim() ? "border-primary bg-primary/[0.04] font-medium" : ""}`}
                 onChange={e => form.setValue(prev => ({ ...prev, spreadDelta: e.target.value }))}
               />
             </div>
@@ -271,10 +282,60 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
         </div>
       ) : null}
     </div> : null}
-    {invalid ? <p role="status" className="flex items-center gap-1 text-xs text-destructive"><CircleAlert className="size-3.5 shrink-0" />请填写有效数字（可为负数），最多两位小数。</p> : null}
+    {invalid ? <p role="status" className="flex items-center gap-1 text-xs text-destructive"><CircleAlert className="size-3.5 shrink-0" />请填写有效数字（可为负数），最多{fixed ? "八" : "两"}位小数。</p> : null}
     {example ? <HaffExample example={example} part={part} /> : null}
     {save.messages}
     {canEdit && sourceHaff && !sealedView ? <div className="flex flex-wrap gap-2"><Button type="button" disabled={locked || !form.dirty || invalid} onClick={submit}>保存{title}</Button>{form.dirty ? <Button type="button" variant="ghost" onClick={form.reset}>放弃本次输入</Button> : null}</div> : null}
+  </Panel>;
+}
+
+export function FixedRentalModeEditor({ rules, command, draftId, canEdit, ensureDraft, onDirtyChange }: EditorProps) {
+  const selected = rules.priceVersions.find(v => v.id === draftId);
+  const basis = selected ?? effectivePrice(rules);
+  const rule = fixedHaff(basis);
+  const initial = useMemo(() => ({ rates: basis?.fixedFeeRates ?? { ordinary: "", custom: "", fast: "" },
+    modes: rule?.fixedModes }), [basis, rule]);
+  const form = useDirty(initial, command.locked, onDirtyChange);
+  const save = useSave(command);
+  const locked = !canEdit || command.locked || selected?.status === "SEALED";
+  const modes = form.value.modes;
+  if (!modes) return <p role="status">固定手续费出租规则暂无法核实。</p>;
+  const valid = Object.values(form.value.rates).every(rate => /^0(?:[.]\d{1,8})?$/.test(rate))
+    && Object.values(modes).some(mode => mode.enabled);
+  const submit = () => void save.run(async () => {
+    const target = await ensureDraft();
+    const draftRule = fixedHaff(target?.draft);
+    if (!target || !draftRule) return null;
+    return draftCommand(target.rules.game.id, "price", "update", {
+      expectedRevision: target.draft.revision, fixedFeeRates: form.value.rates, haffRule: { ...draftRule, fixedModes: modes },
+    }, target.draft.id);
+  }, "手续费和出租方式已保存到草稿。", form.markSaved);
+  return <Panel title="固定手续费率与出租方式" note="输入小数费率，例如 0.10 代表 10%。包赔订单的普通手续费率上限为 92%。">
+    <DraftLine selected={selected} locked={command.locked} />
+    <div className="grid gap-3 lg:grid-cols-3">{(Object.keys(fixedModeNames) as (keyof typeof fixedModeNames)[]).map(key => {
+      const name = fixedModeNames[key], mode = modes[key];
+      const setMode = (value: typeof mode) => form.setValue({ ...form.value, modes: { ...modes, [key]: value } });
+      return <fieldset key={key} className="space-y-3 rounded-md border border-border px-3 pb-3" disabled={locked}>
+        <legend className="px-1 font-medium">{name}</legend>
+        <Field label={name + "手续费率"}><Input inputMode="decimal" value={form.value.rates[key]}
+          onChange={e => form.setValue({ ...form.value, rates: { ...form.value.rates, [key]: e.target.value } })} /></Field>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={mode.enabled}
+          onChange={e => setMode({ ...mode, enabled: e.target.checked })} />启用{name}出租</label>
+        {key !== "ordinary" && mode.enabled ? (["min", "max"] as const).map(bound => {
+          const label = name + (bound === "min" ? "比例下限" : "比例上限"), value = mode[bound];
+          return <div key={bound} className="space-y-1">
+            <SupplySelect label={label + "基准"} value={value?.base ?? ""} onValueChange={base => {
+              if (base === "") { const next = { ...mode }; delete next[bound]; setMode(next); }
+              else if (base === "C" || base === "ABSOLUTE") setMode({ ...mode, [bound]: { base, value: value?.value ?? "" } });
+            }} options={[{ value: "", label: "未设置" }, { value: "C", label: "相对基准比例" }, { value: "ABSOLUTE", label: "固定比例" }]} disabled={locked} />
+            {value ? <Field label={label}><Input inputMode="decimal" value={value.value}
+              onChange={e => setMode({ ...mode, [bound]: { ...value, value: e.target.value } })} /></Field> : null}
+          </div>;
+        }) : null}
+      </fieldset>;
+    })}</div>
+    {save.messages}
+    {canEdit && <Button type="button" disabled={locked || !valid || !form.dirty} onClick={submit}>保存手续费与出租方式</Button>}
   </Panel>;
 }
 
@@ -293,7 +354,8 @@ const ML = "max-sm:before:mb-1 max-sm:before:block max-sm:before:text-[11px] max
 
 export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChange, ensureDraft }: EditorProps) {
   const selected = rules.priceVersions.find(v => v.id === draftId);
-  const current = currentPrice(rules);
+  const current = effectivePrice(rules);
+  const fixed = Boolean(selected?.fixedFeeRates ?? current?.fixedFeeRates);
   const std = (versionId: string | undefined) => rules.priceLines.filter(l => l.priceVersionId === versionId && (l.customerTier ?? "STANDARD") === "STANDARD");
   const hasDraftLines = Boolean(selected && draftHasLines(rules, selected.id));
   const basis = hasDraftLines ? std(selected?.id) : std(current?.id);
@@ -328,7 +390,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
   const itemsInvalid = form.value.some(r => { const m = rowIssue(r); return m !== "" && !m.startsWith("号主价高于"); });
   return <Panel
     title="物资价目"
-    note={
+    note={fixed ? "租客与号主使用统一单价，手续费在结算时另计。" :
       <div className="flex flex-wrap items-center gap-1.5">
         <span>按「每 N 个多少钱」计价：租客付 <b>数量÷N×租客价</b>，号主得 <b>数量÷N×号主价</b>，差额归平台收益。</span>
         <HelpTip label="物资计费规则说明">
@@ -336,7 +398,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
         </HelpTip>
       </div>
     }
-    more="例：六级子弹每 60 发租客 ¥10.00、号主 ¥4.00，租 120 发 → 租客付 ¥20.00、号主得 ¥8.00。金额四舍五入到分；会员优惠按总价折扣另算。"
+    more={fixed ? undefined : "例：六级子弹每 60 发租客 ¥10.00、号主 ¥4.00，租 120 发 → 租客付 ¥20.00、号主得 ¥8.00。金额四舍五入到分；会员优惠按总价折扣另算。"}
   >
     <DraftLine selected={selected} locked={command.locked} />
     {basis.some(line => hasSubCent(line.buyerUnitAmount) || hasSubCent(line.ownerUnitAmount)) ? <p role="note" className="text-xs text-muted-foreground">原价有不足一分的精度，未修改时沿用原值；调整后的单价最多两位小数。</p> : null}
@@ -349,8 +411,8 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
             <TableHead className="w-44">
               <span className="inline-flex items-center gap-1">计价基数 N <HelpTip label="计费基数说明">物资按每 N 个单位单次计价与结算</HelpTip></span>
             </TableHead>
-            <TableHead className="text-right">当前租客单价</TableHead>
-            <TableHead className="text-right font-semibold text-foreground">{sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>
+            <TableHead className="text-right">{fixed ? "当前统一单价" : "当前租客单价"}</TableHead>
+            <TableHead className="text-right font-semibold text-foreground">{fixed ? "统一单价（元）" : sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>
             {mode === "SPREAD" ? (
               <>
                 <TableHead className="text-right">当前号主单价</TableHead>

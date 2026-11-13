@@ -156,7 +156,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
   const pendingSkinV2 = pendingSealedPrice(rules)?.fundingPolicy?.recommendation.schema === "deposit-recommendation-v2";
   const liveSkinV2 = rules.priceVersions.find(v => v.id === release?.priceVersionId)?.fundingPolicy?.recommendation.schema === "deposit-recommendation-v2";
   const skinV2Ready = pendingSkinV2 || liveSkinV2;
-  const curPrice = release ? rules.priceVersions.find((v) => v.id === release.priceVersionId) : undefined;
+  const fundingPrice = rules.priceVersions.find(v => v.id === release?.priceVersionId);
+  const curPrice = rules.priceVersions.find(v => v.id === (rules.newListingPrice === undefined ? release?.priceVersionId : rules.newListingPrice?.priceVersionId));
   const curTerm = release ? rules.termVersions.find((v) => v.id === release.termVersionId) : undefined;
   const curAgreement = release ? rules.agreementVersions.find((v) => v.id === release.agreementVersionId) : undefined;
   const fixedFee = Boolean(curPrice?.fixedFeeRates);
@@ -168,7 +169,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
   const termChanged = Boolean(latestTerm && latestTerm.id !== curTerm?.id);
   const agreementChanged = Boolean(latestAgreement && latestAgreement.id !== curAgreement?.id);
   const haff = asHaffV2(curPrice?.haffRule);
-  const policy = curPrice?.fundingPolicy ?? null;
+  const policy = fundingPrice?.fundingPolicy ?? null;
   const [dialog, setDialog] = useState<"none" | "confirm" | "agreement" | "compare">("none");
   const [compareRows, setCompareRows] = useState<RuleDiffRow[]>([]);
   const [chartOpen, setChartOpen] = useState(false);
@@ -229,13 +230,16 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
             {canActivate ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认排期</Button> : null}
           </div>
         </div>
+        {rules.newListingPrice ? <p className="mt-3 break-words text-sm">新上架实际价目 {rules.newListingPrice.priceVersionId} · {fixedFee ? "固定手续费" : rules.newListingPrice.pricingModel.includes("SPREAD") ? "价差" : "历史抽成"}{rules.newListingPrice.priceEffectiveAt ? ' · 价目生效于 ' + formatDate(rules.newListingPrice.priceEffectiveAt) : " · 沿用规则组合"}{rules.newListingPrice.modeEffectiveAt ? ' · 模式生效于 ' + formatDate(rules.newListingPrice.modeEffectiveAt) : ""}</p>
+          : rules.newListingPrice === null ? <p role="status" className="mt-3 text-sm">新上架实际价目暂无法核实。</p> : null}
+        {fundingPrice ? <p className="mt-2 break-words text-sm text-muted-foreground">组合资金版本 {fundingPrice.id} · 资金政策 {policy?.policyVersion ?? "待核对"}</p> : null}
         {rules.ruleScheduling?.plans.length ? <ul aria-label="待生效规则组合" className="mt-3 space-y-1 text-sm">
           {rules.ruleScheduling.plans.map(plan => <li key={plan.id}>第 {plan.generation} 版 · {formatDate(plan.effectiveAt)}（北京时间）<p className="break-all text-xs text-muted-foreground">价目 {plan.priceVersionId} · 租期 {plan.termVersionId} · 协议 {rules.agreementVersions.find(v => v.id === plan.agreementVersionId)?.title ?? plan.agreementVersionId}</p></li>)}
           {rules.ruleScheduling.truncated ? <li>仅显示最近将生效的 100 条排期。</li> : null}
         </ul> : null}
         <div className="mt-3 flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
           <Info className="size-3.5 shrink-0 text-muted-foreground" />
-          <span>这里显示新上架账号使用的规则组合。物资单价和费率的独立调整见调价排期。</span>
+          <span>组合负责租期、协议和资金政策。已上架账号使用上架时确认的规则。</span>
         </div>
       </section>
 
@@ -244,6 +248,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             {fixedFee && curPrice ? <>
               <FixedFeePriceFacts price={curPrice} part="modes" />
+              <FixedFeePriceFacts price={curPrice} part="base" />
+              <FixedFeePriceFacts price={curPrice} part="term" />
               <FixedFeeItemPrices rules={rules} priceId={curPrice.id} />
             </> : <>
             <Card
@@ -496,8 +502,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
                 {curAgreement ? (
                   <>
                     <p className="mt-1 text-sm">{curAgreement.title}</p>
-                    <p className="mt-2 text-xs text-muted-foreground">全额包赔条款：{payoutName(rules, curPrice) ?? "未设置"}</p>
-                    <MutedDetails className="mt-1"><p className="break-all">正文摘要 {curAgreement.digest ? curAgreement.digest.slice(0, 16) + "…" : "未提供"}{payoutRef(curPrice) ? ` · 条款 ${payoutRef(curPrice)}` : ""}</p></MutedDetails>
+                    <p className="mt-2 text-xs text-muted-foreground">全额包赔条款：{payoutName(rules, fundingPrice) ?? "未设置"}</p>
+                    <MutedDetails className="mt-1"><p className="break-all">正文摘要 {curAgreement.digest ? curAgreement.digest.slice(0, 16) + "…" : "未提供"}{payoutRef(fundingPrice) ? ` · 条款 ${payoutRef(fundingPrice)}` : ""}</p></MutedDetails>
                     <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => setDialog("agreement")}>查看协议正文</Button>
                   </>
                 ) : <p className="mt-1 text-sm text-muted-foreground">生效组合未提供出租协议版本，或该版本未随规则读取返回。</p>}
@@ -662,8 +668,8 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
   const isRelease = pending?.operation === RULES_RELEASE_OPERATION;
   const currentPrice = rules.priceVersions.find(price => price.id === release?.priceVersionId);
   const fixedFee = Boolean(currentPrice?.fixedFeeRates);
-  const eligiblePrices = rules.priceVersions.filter(price => fixedFee ? price.id === currentPrice?.id : !price.fixedFeeRates);
-  const [selectedPriceId, setPriceId] = useState(() => isRelease ? String(pending.body.priceVersionId) : preferred?.priceVersionId ?? (preferred?.agreementVersionId ? release?.priceVersionId ?? "" : first(eligiblePrices, release?.priceVersionId)));
+  const eligiblePrices = rules.priceVersions.filter(price => fixedFee ? Boolean(price.fixedFeeRates) : !price.fixedFeeRates);
+  const [selectedPriceId, setPriceId] = useState(() => isRelease ? String(pending.body.priceVersionId) : preferred?.priceVersionId ?? (preferred?.agreementVersionId ? release?.priceVersionId ?? "" : (fixedFee ? release?.priceVersionId ?? "" : first(eligiblePrices, release?.priceVersionId))));
 
   const [selectedTermId, setTermId] = useState(() => isRelease ? String(pending.body.termVersionId) : (preferred ? release?.termVersionId ?? "" : first(rules.termVersions, release?.termVersionId)));
   const [selectedAgreementId, setAgreementId] = useState(() => isRelease ? String(pending.body.agreementVersionId) : preferred?.agreementVersionId ?? (preferred ? release?.agreementVersionId ?? "" : first(rules.agreementVersions, release?.agreementVersionId)));
@@ -675,17 +681,17 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
   const preceding = instant === null ? undefined : plans.filter(plan => Date.parse(plan.effectiveAt) <= instant).at(-1);
   const baseline = preceding ?? release;
   const shortcutOutsideWindow = Boolean(preferred && scheduling?.truncated && preceding && preceding === plans.at(-1));
-  const priceId = isRelease ? selectedPriceId : (fixedFee || preferred?.agreementVersionId) ? baseline?.priceVersionId ?? "" : selectedPriceId;
+  const priceId = isRelease ? selectedPriceId : preferred?.agreementVersionId ? baseline?.priceVersionId ?? "" : selectedPriceId;
   const termId = !isRelease && preferred ? baseline?.termVersionId ?? "" : selectedTermId;
   const agreementId = !isRelease && preferred?.priceVersionId ? baseline?.agreementVersionId ?? "" : selectedAgreementId;
   const label = (v: { revision: string; sealedAt: string | null; id: string }, current?: string, title?: string) => `${title ? title + " · " : ""}${v.sealedAt ? formatDate(v.sealedAt) + " 提交" : "草稿"}${v.id === current ? "（当前生效）" : ""}`;
   const rows = useMemo(() => [
-    ...priceDiff(rules, baseline?.priceVersionId, priceId),
+    ...priceDiff(rules, baseline?.priceVersionId, priceId).filter(row => !fixedFee || row.group === "押金规则"),
     ...termDiff(rules, baseline?.termVersionId, termId),
     ...agreementDiff(rules, baseline?.agreementVersionId, agreementId),
-  ], [rules, baseline, priceId, termId, agreementId]);
+  ], [rules, baseline, priceId, termId, agreementId, fixedFee]);
   const same = Boolean(baseline && priceId === baseline.priceVersionId && termId === baseline.termVersionId && agreementId === baseline.agreementVersionId);
-  const unchanged = [priceId === baseline?.priceVersionId ? "价格（哈夫币、物品、押金）" : null, termId === baseline?.termVersionId ? "租期与每日消耗" : null, agreementId === baseline?.agreementVersionId ? "出租协议" : null].filter(Boolean);
+  const unchanged = [priceId === baseline?.priceVersionId ? "组合资金政策" : null, termId === baseline?.termVersionId ? "租期与每日消耗" : null, agreementId === baseline?.agreementVersionId ? "出租协议" : null].filter(Boolean);
   const curRef = payoutRef(rules.priceVersions.find((v) => v.id === baseline?.priceVersionId));
   const nextRef = payoutRef(rules.priceVersions.find((v) => v.id === priceId));
 
@@ -729,7 +735,7 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
           <>
             {pending ? <p className="rounded-md bg-muted/50 p-3 text-sm">原请求：游戏 {pending.gameId}{isRelease ? ` · 基线第 ${String(pending.body.expectedGeneration)} 版组合` : " · 高级草稿维护"}；保留原 key，不自动重发。{crossGame ? "请切回原游戏后核对。" : ""}</p> : null}
             <div className="grid grid-cols-1 gap-3 rounded-lg border border-border/70 bg-card/40 p-3.5 sm:grid-cols-3">
-              <Pick label="价格版本" value={priceId} onChange={setPriceId} disabled={command.locked || fixedFee || Boolean(preferred?.agreementVersionId)} options={sealed(eligiblePrices).map((v) => ({ value: v.id, label: label(v, release?.priceVersionId) }))} />
+              <Pick label={fixedFee ? "组合资金版本" : "价格版本"} value={priceId} onChange={setPriceId} disabled={command.locked || Boolean(preferred?.agreementVersionId) || Boolean(preferred?.priceVersionId)} options={sealed(eligiblePrices).map((v) => ({ value: v.id, label: label(v, release?.priceVersionId) }))} />
               <Pick label="租期版本" value={termId} onChange={setTermId} disabled={command.locked || Boolean(preferred)} options={sealed(rules.termVersions).map((v) => ({ value: v.id, label: label(v, release?.termVersionId) }))} />
               <Pick label="出租协议" value={agreementId} onChange={setAgreementId} disabled={command.locked || Boolean(preferred?.priceVersionId)} options={sealed(rules.agreementVersions).map((v) => ({ value: v.id, label: label(v, release?.agreementVersionId, v.title) }))} />
             </div>
@@ -768,7 +774,7 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
               <Info className="mt-0.5 size-4 shrink-0 text-amber-500" />
               <div className="space-y-0.5">
                 <p className="font-medium text-foreground">生效影响说明</p>
-                <p>生效后正式上架的账号采用新规则。会员和礼遇按下单时的权益核算。</p>
+                <p>生效后正式上架的账号采用新规则。会员和礼遇按下单时的权益核算。</p>{fixedFee ? <p>此处安排押金、包赔、租期和协议。资源单价、哈夫币比例和手续费率由「调价排期」生效。</p> : null}
                 <p>已上架账号继续使用原规则。尚未上架的草稿需按新规则重新核价并确认。</p>
                 <p>已冻结报价的订单按冻结时的报价结算。</p>
               </div>

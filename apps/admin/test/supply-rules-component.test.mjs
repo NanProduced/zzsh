@@ -159,23 +159,31 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
         assert.equal(businessWrites().length, 0);
       } finally { globalThis.fetch = original; }
     });
-    await t.test("first fixed fee release shows its funding facts and leaves price editing read-only", async () => {
+    await t.test("effective fixed fee price is shown separately from combination funding and can seed a draft", async () => {
       const funding = fundingPolicyFixture("NOT_REQUIRED");
       await mount({ section: "deposit", permissions: snapshot.permissions });
       Object.assign(model.priceVersions.find(price => price.id === "p1"), { mode: "PERCENT",
         fixedFeeRates: { ordinary: "0.10", custom: "0.08", fast: "0.12" }, haffRule: { schema: "haff-ratio-v3" }, fundingPolicy: funding });
-      model.priceVersions.find(price => price.id === "p2").fundingPolicy = {
-        ...funding, ownerDepositRules: { ...funding.ownerDepositRules, capCents: "999999" },
-      };
+      Object.assign(model.priceVersions.find(price => price.id === "p2"), { mode: "PERCENT",
+        fixedFeeRates: { ordinary: "0.11", custom: "0.08", fast: "0.12" },
+        haffRule: { schema: "haff-ratio-v3", baseBySafeBox: { "box-a": "40" }, vitalityDeltaByLevel: { "6": "0" },
+          bearDeltaByLevel: { "6": "0" }, dailyDeltaByTermOption: { "daily-10m": "0" },
+          fixedModes: { ordinary: { enabled: true }, custom: { enabled: false }, fast: { enabled: false } } },
+        fundingPolicy: { ...funding, ownerDepositRules: { ...funding.ownerDepositRules, capCents: "999999" } },
+      });
+      model.newListingPrice = { priceVersionId: "p2", pricingModel: "FIXED_FEE", priceEffectiveAt: "2026-11-13T00:00:00Z", modeEffectiveAt: null };
       await mount({ preserve: true, section: "deposit", permissions: snapshot.permissions });
-      const current = el.querySelector('[aria-label="当前押金上限（元）"]');
+      const current = el.querySelector('[aria-label="草稿押金上限（元）"]');
       assert.equal(current.value, "1000.00");
-      assert.equal(current.disabled, true);
-      assert.equal(byText("保存押金上限", el), undefined);
+      assert.equal(current.disabled, false);
+      assert.equal(byText("保存押金上限", el).disabled, true);
       assert.doesNotMatch(el.textContent, /尚无资金政策，无法配置押金上限/);
       await mount({ preserve: true, section: "overview", permissions: snapshot.permissions });
       assert.match(el.textContent, /固定手续费率与出租方式/);
       assert.match(el.textContent, /物资统一单价/);
+      assert.match(el.textContent, /新上架实际价目 p2/);
+      assert.match(el.textContent, /11%/);
+      assert.match(el.textContent, /组合资金版本 p1/);
       assert.doesNotMatch(el.textContent, /平台价差\/单位/);
       assert.equal(byText("试算一单", el).disabled, true);
       model.termVersions.unshift({ ...model.termVersions[0], id: "t2", createdAt: "2026-11-01T00:00:00Z" });
@@ -185,6 +193,15 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       assert.deepEqual(businessWrites().at(-1).body, {
         gameId: "g1", priceVersionId: "p1", termVersionId: "t2", agreementVersionId: "a2", expectedGeneration: "1", effectiveAt: "2099-01-01T01:00:00.000Z", announcementVersionId: "notice",
       });
+    });
+    await t.test("new fixed fee draft copies the actual listing price", async () => {
+      await mount();
+      Object.assign(model.priceVersions.find(price => price.id === "p2"), { mode: "PERCENT",
+        fixedFeeRates: { ordinary: "0.11", custom: "0.08", fast: "0.12" } });
+      model.newListingPrice = { priceVersionId: "p2", pricingModel: "FIXED_FEE", priceEffectiveAt: null, modeEffectiveAt: null };
+      await mount({ preserve: true, section: "items" });
+      await click("新建固定手续费草稿");
+      assert.deepEqual(businessWrites()[0].body, { gameId: "g1", mode: "PERCENT", sourcePriceVersionId: "p2" });
     });
     await t.test("an agreement-only schedule preserves the term already planned for that date", async () => {
       await mount();

@@ -647,6 +647,7 @@ export type RuleReleasePlan = {
   priceVersionId: string; termVersionId: string; agreementVersionId: string;
 };
 export type RulesResponse = {
+  newListingPrice?: { priceVersionId: string; pricingModel: "FIXED_FEE" | "SPREAD" | "LEGACY_SPREAD" | "LEGACY_PERCENT"; priceEffectiveAt: string | null; modeEffectiveAt: string | null } | null;
   ruleScheduling?: { available: boolean; asOf: string; generation: string; plans: RuleReleasePlan[]; truncated: boolean };
   game: SupplyGame;
   release: RuleReleaseRecord | null;

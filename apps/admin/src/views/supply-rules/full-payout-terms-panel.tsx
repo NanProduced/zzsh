@@ -12,7 +12,7 @@ type TermsDetail = FullPayoutTermsRecord & { body: string };
 
 export function FullPayoutTermsPanel({ gameId, versions, canEdit, isBoss = false, live = null, onReload }: {
   isBoss?: boolean;
-  /** 线上价格版本引用的条款编号与版本；条款随价格版本生效。 */
+  /** 生效规则组合引用的包赔条款。 */
   live?: { ref: string; version: string; id?: string | null } | null;
   gameId: string;
   versions: FullPayoutTermsRecord[];
@@ -82,7 +82,7 @@ export function FullPayoutTermsPanel({ gameId, versions, canEdit, isBoss = false
     setBusy("seal"); setError(undefined); setMessage(undefined);
     try {
       await adminRequest(`/supply/full-payout-terms-drafts/${encodeURIComponent(detail.id)}/seal`, { expectedRevision: revision }, "POST");
-      setMessage("已提交。下次价格发布引用它后生效。");
+      setMessage("条款已封存。请在资金政策草稿中选择该条款，再安排规则组合生效。");
       await onReload();
     } catch (failure) { setError(friendlyError(failure)); }
     finally { setBusy(null); }
