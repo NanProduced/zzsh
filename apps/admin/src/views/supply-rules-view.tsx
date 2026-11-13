@@ -18,7 +18,7 @@ import { draftCommand, isPricingScheduleOperation, RULES_RELEASE_OPERATION, useR
 import { PricingSchedulesPanel } from "./supply-rules/pricing-schedules-panel";
 import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 import { RentalModeEditor } from "./supply-rules/rental-mode-editor";
-import { BasePricingEditor, DepositCapEditor, FixedRentalModeEditor, PriceItemsEditor, type EnsureDraft } from "./supply-rules/step0-editors";
+import { BasePricingEditor, DepositCapEditor, FixedRentalModeEditor, PriceItemsEditor, fixedFeeRateValid, fixedModeNames, fixedModes, type EnsureDraft } from "./supply-rules/step0-editors";
 import { activePriceDraft, pendingSealedPrice, docStage, DocStatusRow, PublishBar } from "./supply-rules/publish-flow";
 import { sourcePriceVersion } from "./supply-rules/price-draft";
 
@@ -113,6 +113,9 @@ export function SupplyRulesView({
   const pricingVersion = rules?.newListingPrice === undefined ? currentPrice : rules.priceVersions.find(v => v.id === rules.newListingPrice?.priceVersionId);
   const fixedFee = Boolean(pricingVersion?.fixedFeeRates);
   const priceEditable = canEdit && !fixedFee && !currentPrice?.fixedFeeRates && rules?.newListingPrice !== null && (!rules?.release || Boolean(pricingVersion));
+  const [editingFixedDraft, setEditingFixedDraft] = useState(false);
+  const [createFixedOpen, setCreateFixedOpen] = useState(false);
+  const [initialRates, setInitialRates] = useState({ ordinary: "", custom: "", fast: "" });
   const [pricingTab, setPricingTab] = useState<typeof PRICING_TABS[number][0]>("base");
   const [termId, setTermId] = useState("");
   const [agreementId, setAgreementId] = useState("");
@@ -207,6 +210,7 @@ export function SupplyRulesView({
     let active = true;
     setError(undefined);
     setRules(null); setGames([]); setGamesLoaded(false); setGameId(""); setDirty(false); setFundingVersion(""); setPayoutTermsId("");
+    setEditingFixedDraft(false); setCreateFixedOpen(false); setInitialRates({ ordinary: "", custom: "", fast: "" });
     loadGames().catch((failure) => { if (active) setError(friendlyError(failure)); });
     return () => { active = false; ++gamesSeq.current; ++rulesSeq.current; };
   }, [refreshNonce, loadGames]);
@@ -301,14 +305,41 @@ export function SupplyRulesView({
   const deltaSection = ["pricing", "items", "skin", "deposit"].includes(section);
   const showSchedules = section === "pricing" && pricingTab === "schedule";
   const show = (name: RulesSection) => (section === name ? undefined : true);
-  const editorKey = `${snapshot.adminUserId}:${snapshot.session?.id}:${rules?.game.id}:${resetNonce}`;
-  // 只有一份进行中的价格草稿：自动取它；没有时显示线上值，第一次保存时自动新建。
+  const editorKey = `${snapshot.adminUserId}:${snapshot.session?.id}:${rules?.game.id}:${resetNonce}:${editingFixedDraft}`;
   const fixedDraft = rules?.priceVersions.find(v => v.status === "DRAFT" && v.fixedFeeRates);
-  const draftId = fixedFee ? fixedDraft?.id ?? "" : rules && priceEditable ? activePriceDraft(rules)?.id ?? pendingSealedPrice(rules)?.id ?? "" : "";
+  const fixedEditor = fixedFee || Boolean(editingFixedDraft && fixedDraft);
+  const draftId = fixedEditor ? fixedDraft?.id ?? "" : rules && priceEditable ? activePriceDraft(rules)?.id ?? pendingSealedPrice(rules)?.id ?? "" : "";
+  const canCreateFixed = !fixedFee && Boolean(rules?.newListingPrice && rules.ruleScheduling?.available);
+  const fixedDraftComplete = Boolean(fixedDraft?.haffRule && fixedDraft.fundingPolicy && rules?.items.every(item =>
+    rules.priceLines.some(line => line.priceVersionId === fixedDraft.id && line.itemId === item.id && line.customerTier === "STANDARD")));
+  const changeFixedEditor = (enabled: boolean) => {
+    if (priceDirty || command.locked) return;
+    setEditingFixedDraft(enabled);
+    if (enabled) setPricingTab("mode");
+  };
+  const openFixedDraft = () => {
+    if (priceDirty || command.locked) return;
+    if (fixedDraft) { changeFixedEditor(true); return; }
+    setInitialRates({ ordinary: "", custom: "", fast: "" }); setCreateFixedOpen(true);
+  };
+  const recoverRulesWrite = async () => {
+    const result = await command.recover();
+    const recoveredDraft = result?.fresh.priceVersions.find(version => version.id === result.receipt.id && version.status === "DRAFT" && version.fixedFeeRates);
+    if (createFixedOpen && recoveredDraft) { setCreateFixedOpen(false); setEditingFixedDraft(true); setPricingTab("mode"); }
+  };
+  const createFixedDraft = async () => {
+    if (!rules || !canCreateFixed || fixedDraft || priceDirty || !Object.values(initialRates).every(fixedFeeRateValid)) return;
+    setError(undefined);
+    try {
+      const result = await command.write(draftCommand(rules.game.id, "price", "create", { gameId: rules.game.id, mode: "PERCENT", fixedFeeRates: initialRates }));
+      if (result) { setCreateFixedOpen(false); setEditingFixedDraft(true); setPricingTab("mode"); }
+    } catch (failure) { setError(friendlyError(failure)); }
+  };
   const ensureDraft: EnsureDraft = async () => {
     if (!rules || !canEdit) return null;
-    if (fixedFee && pricingVersion) {
+    if (fixedEditor) {
       if (fixedDraft) return { rules, draft: fixedDraft };
+      if (!fixedFee || !pricingVersion) return null;
       const result = await command.write(draftCommand(rules.game.id, "price", "create", { gameId: rules.game.id, mode: "PERCENT", sourcePriceVersionId: pricingVersion.id }));
       const draft = result?.fresh.priceVersions.find(v => v.id === result.receipt.id);
       return result && draft ? { rules: result.fresh, draft } : null;
@@ -321,16 +352,16 @@ export function SupplyRulesView({
     const draft = result?.fresh.priceVersions.find(v => v.id === result.receipt.id);
     return result && draft ? { rules: result.fresh, draft } : null;
   };
-  const editorProps = rules ? { rules, command, draftId, canEdit: priceEditable || fixedFee && canEdit, ensureDraft } : null;
+  const editorProps = rules ? { rules, command, draftId, canEdit: fixedEditor ? canEdit : priceEditable, ensureDraft } : null;
   const sealedFixed = rules?.priceVersions.find(v => v.status === "SEALED" && v.fixedFeeRates
     && v.id !== pricingVersion?.id && v.id !== currentPrice?.id
     && (v.sealedAt ?? "") > (pricingVersion?.sealedAt ?? ""));
   const saveFunding = async () => {
-    if (!rules || !fixedFee || !fundingVersion.trim()) return;
+    if (!rules || !fixedEditor || !fundingVersion.trim()) return;
     const target = await ensureDraft();
-    const policy = target?.draft.fundingPolicy;
+    const policy = target?.draft.fundingPolicy ?? currentPrice?.fundingPolicy;
     const terms = (rules.fullPayoutTermsVersions ?? []).find(version => version.id === payoutTermsId && version.status === "SEALED");
-    if (!target || !policy || !fundingVersion.trim() || fundingVersion.trim() === policy.policyVersion || (payoutTermsId && !terms)) return;
+    if (!target || !policy || fundingVersion.trim() === policy.policyVersion || (payoutTermsId && !terms)) return;
     const result = await command.write(draftCommand(rules.game.id, "price", "update", {
       expectedRevision: target.draft.revision,
       fundingPolicy: { ...policy, policyVersion: fundingVersion.trim(), ...(terms ? {
@@ -340,11 +371,11 @@ export function SupplyRulesView({
     if (result) { setFundingVersion(""); setPayoutTermsId(""); }
   };
   const sealFixed = async () => {
-    if (!fixedDraft || !rules) return;
+    if (!fixedDraft || !rules || !fixedDraftComplete || anyDirty) return;
     setError(undefined);
     try {
       const result = await command.write(draftCommand(rules.game.id, "price", "seal", { expectedRevision: fixedDraft.revision }, fixedDraft.id));
-      if (result) setSuccess("固定手续费价目已封存，可安排生效。");
+      if (result) { setEditingFixedDraft(false); setSuccess("固定手续费价目已封存，可安排生效。"); }
     } catch (failure) { setError(friendlyError(failure)); }
   };
   const commitSwitch = () => {
@@ -370,7 +401,7 @@ export function SupplyRulesView({
               <p>{command.state.kind === "blocked" ? command.state.message : command.pending?.receipt ? command.state.message ?? "已收到原写入回执，规则回读尚未完成；不能再次提交。" : command.state.kind === "busy" ? "正在提交规则请求，原 key 与版本已保留。" : command.state.message ?? "原规则写入结果尚未核清，已保留原 key 与输入，暂停新的写入。"}</p>
               {command.pending && command.pending.gameId !== gameId ? <p>原请求属于游戏 {command.pending.gameId}，请切回该游戏核对。</p> : null}
             </AlertDescription>
-            <AlertAction><Button type="button" variant="outline" size="sm" disabled={!command.pending || command.pending.gameId !== gameId || ["busy", "recovering"].includes(command.state.kind)} onClick={() => void command.recover()}>核对原写入回执</Button></AlertAction>
+            <AlertAction><Button type="button" variant="outline" size="sm" disabled={!command.pending || command.pending.gameId !== gameId || ["busy", "recovering"].includes(command.state.kind)} onClick={() => void recoverRulesWrite()}>核对原写入回执</Button></AlertAction>
           </Alert>
         ) : null}
         {command.state.kind === "conflict" ? (
@@ -403,22 +434,33 @@ export function SupplyRulesView({
 
       {rules && editorProps && rules.game.id === gameId ? (
         <div className="space-y-6">
-          {deltaSection && !showSchedules && priceEditable ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={canSchedule} onSchedule={priceVersionId => setScheduleAsk({ priceVersionId })} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
-          {fixedFee && deltaSection && !showSchedules ? <section className="section-panel space-y-2" aria-label="固定手续费价目草稿">
+          {deltaSection && !showSchedules && priceEditable && !fixedEditor ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={canSchedule} onSchedule={priceVersionId => setScheduleAsk({ priceVersionId })} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
+          {(fixedEditor && deltaSection && !showSchedules || canCreateFixed && section === "pricing" && !showSchedules) ? <section className="section-panel space-y-2" aria-label="固定手续费价目草稿">
             <h3 className="font-semibold">固定手续费价目草稿</h3>
-            <p className="text-sm text-muted-foreground">保存后封存版本。资源单价和费率在「调价排期」安排，押金和包赔在「规则总览」安排。</p>
+            {!fixedFee ? <p className="text-sm text-muted-foreground">当前生效：{pricingVersion?.mode === "SPREAD" ? "价差" : "原比例费率"}。{fixedEditor ? "正在编辑固定手续费草稿。" : "新建草稿后可填写固定手续费价目。"}</p> : null}
+            {fixedEditor ? <p className="text-sm text-muted-foreground">封存后由 Boss 在「调价排期」安排价目和默认模式。押金与包赔通过规则组合安排。</p> : null}
             <div className="flex flex-wrap gap-2">
-              {fixedDraft ? <Button type="button" disabled={command.locked || anyDirty} onClick={() => void sealFixed()}>封存固定手续费价目</Button>
-                : <Button type="button" variant="outline" disabled={command.locked || priceDirty} onClick={() => void ensureDraft().catch(failure => setError(friendlyError(failure)))}>新建固定手续费草稿</Button>}
-              {sealedFixed && canSchedule ? <Button type="button" variant="outline" disabled={command.locked || priceDirty} onClick={() => setScheduleAsk({ priceVersionId: sealedFixed.id })}>安排资金政策生效</Button> : null}
+              {fixedEditor && fixedDraft ? <Button type="button" disabled={command.locked || anyDirty || !fixedDraftComplete}
+                onClick={() => void guard(sealFixed)}>封存固定手续费价目</Button>
+                : <Button type="button" variant="outline" disabled={command.locked || priceDirty} onClick={() => fixedFee
+                  ? void guard(async () => { await ensureDraft().catch(failure => setError(friendlyError(failure))); })
+                  : openFixedDraft()}>{!fixedFee && fixedDraft ? "编辑固定手续费草稿" : "新建固定手续费草稿"}</Button>}
+              {fixedEditor && !fixedFee ? <Button type="button" variant="outline" disabled={command.locked || priceDirty} onClick={() => changeFixedEditor(false)}>返回当前价目</Button> : null}
+              {sealedFixed && canSchedule ? <Button type="button" variant="outline" disabled={command.locked || priceDirty}
+                onClick={() => fixedFee ? setScheduleAsk({ priceVersionId: sealedFixed.id }) : setPricingTab("schedule")}>{fixedFee ? "安排资金政策生效" : "前往调价排期"}</Button> : null}
             </div>
+            {fixedEditor && fixedDraft && !fixedDraftComplete
+              ? <p role="status" className="text-sm text-muted-foreground">先保存出租方式、哈夫币比例、全部物资价目和资金政策，再封存。</p> : null}
           </section> : null}
           <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={priceEditable} canActivate={canSchedule} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
           <div hidden={show("deposit")} className="space-y-4">
             <DepositCapEditor key={`cap:${editorKey}`} {...editorProps} onDirtyChange={setCapDirty} />
-            {fixedFee && (fixedDraft?.fundingPolicy ?? currentPrice?.fundingPolicy) ? <section className="section-panel space-y-3" aria-label="固定手续费资金版本">
+            {fixedEditor && (fixedDraft?.fundingPolicy ?? currentPrice?.fundingPolicy) ? <section className="section-panel space-y-3" aria-label="固定手续费资金版本">
               <h3 className="font-semibold">资金政策与包赔条款</h3>
-              <p className="text-sm text-muted-foreground">当前草稿依据 {(fixedDraft?.fundingPolicy ?? currentPrice?.fundingPolicy)?.policyVersion}。修改押金或包赔后填写新的资金政策版本。</p>
+              <p className="text-sm text-muted-foreground">{fixedDraft?.fundingPolicy ? "草稿资金政策" : "生效资金政策参考"} {(fixedDraft?.fundingPolicy ?? currentPrice?.fundingPolicy)?.policyVersion}。修改押金或包赔后填写新的资金政策版本。</p>
+              {fixedDraft && !fixedDraft.fundingPolicy && currentPrice?.fundingPolicy ? <Button type="button" variant="outline" disabled={command.locked} onClick={() => void guard(async () => {
+                await command.write(draftCommand(gameId, "price", "update", { expectedRevision: fixedDraft.revision, fundingPolicy: currentPrice.fundingPolicy }, fixedDraft.id));
+              })}>沿用生效资金政策</Button> : null}
               <Field label="新资金政策版本"><Input value={fundingVersion} disabled={command.locked} maxLength={160} onChange={event => setFundingVersion(event.target.value)} /></Field>
               <SupplySelect label="已封存包赔条款" value={payoutTermsId} onValueChange={setPayoutTermsId} disabled={command.locked}
                 options={[{value:"",label:"沿用草稿条款"}, ...(rules.fullPayoutTermsVersions ?? []).filter(v => v.status === "SEALED").map(v => ({value:v.id,label:`${v.title} · ${v.policyVersion}`}))]} />
@@ -439,7 +481,7 @@ export function SupplyRulesView({
             <div role="tablist" aria-label="租赁定价" className="flex flex-wrap gap-2">{PRICING_TABS.map(([value, label]) => <Button key={value} type="button" role="tab" aria-selected={pricingTab === value} variant={pricingTab === value ? "secondary" : "ghost"} onClick={() => setPricingTab(value)}>{label}</Button>)}</div>
             <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${snapshot.adminUserId}:${snapshot.session?.id}:${gameId}`} gameId={gameId} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
             <div hidden={pricingTab !== "base" || undefined}><BasePricingEditor key={`base:${editorKey}`} {...editorProps} part="base" onDirtyChange={setBaseDirty} /></div>
-            <div hidden={pricingTab !== "mode" || undefined}>{fixedFee ? <FixedRentalModeEditor key={`mode:${editorKey}`} {...editorProps} onDirtyChange={setModeDirty} /> : <RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={priceEditable} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} />}</div>
+            <div hidden={pricingTab !== "mode" || undefined}>{fixedEditor ? <FixedRentalModeEditor key={`mode:${editorKey}`} {...editorProps} onDirtyChange={setModeDirty} /> : <RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={priceEditable} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} />}</div>
             <div hidden={pricingTab !== "term" || undefined} className="space-y-6"><BasePricingEditor key={`daily:${editorKey}`} {...editorProps} part="term" onDirtyChange={setDailyDirty} />
         <section className="section-panel">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -485,7 +527,7 @@ export function SupplyRulesView({
             </div>
           </div>
           <div hidden={show("items")}><PriceItemsEditor key={`items:${editorKey}`} {...editorProps} onDirtyChange={setItemsDirty} /></div>
-          <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} readOnly={!(priceEditable || fixedFee && canEdit)} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
+          <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} readOnly={!(priceEditable || fixedEditor && canEdit)} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
           <div hidden={show("agreement")} className="space-y-6">
             <section className="section-panel space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -510,6 +552,24 @@ export function SupplyRulesView({
           </div>
         </div>
       ) : null}
+      <Dialog open={createFixedOpen} onOpenChange={open => { if (!command.locked) setCreateFixedOpen(open); }}>
+        <DialogContent closeLabel="取消" showCloseButton={!command.locked}>
+          <DialogHeader><DialogTitle>新建固定手续费草稿</DialogTitle><DialogDescription>三档费率均需填写。创建后可配置统一单价及哈夫币比例，生效时间由 Boss 另行安排。</DialogDescription></DialogHeader>
+          <form className="space-y-4" onSubmit={event => { event.preventDefault(); void guard(createFixedDraft); }}>
+            <div className="grid gap-3 sm:grid-cols-3">
+              {fixedModes.map(mode => <Field key={mode} label={fixedModeNames[mode] + "手续费率"} required>
+                <Input inputMode="decimal" value={initialRates[mode]} disabled={command.locked}
+                  onChange={event => setInitialRates(previous => ({ ...previous, [mode]: event.target.value.trim() }))} />
+              </Field>)}
+            </div>
+            <p className="text-sm text-muted-foreground">小数费率，例如 0.10 代表 10%，上限 92%。</p>
+            {command.state.message ? <StatusMessage error={command.state.message} /> : null}
+            <DialogFooter><Button type="button" variant="outline" disabled={command.locked} onClick={() => setCreateFixedOpen(false)}>取消</Button>
+              {command.pending ? <Button type="button" disabled={["busy", "recovering"].includes(command.state.kind)} onClick={() => void recoverRulesWrite()}>核对原写入回执</Button>
+                : <Button type="submit" disabled={command.locked || !canCreateFixed || Boolean(fixedDraft) || !Object.values(initialRates).every(fixedFeeRateValid)}>创建草稿</Button>}</DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
       {scheduleAsk && rules && canSchedule ? <ConfirmDialog rules={rules} command={command} preferred={scheduleAsk}
         onClose={() => { setScheduleAsk(null); command.dismissResult(); }} /> : null}
       <Dialog open={sealAsk !== null} onOpenChange={(open) => { if (!open) setSealAsk(null); }}><DialogContent closeLabel="取消"><DialogHeader><DialogTitle>提交这个版本？</DialogTitle><DialogDescription>{sealAsk ? `${sealAsk.label}。提交后锁定，Boss 确认生效后才替换线上。` : ""}</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setSealAsk(null)}>取消</Button><Button type="button" onClick={() => { const ask = sealAsk; setSealAsk(null); if (ask) void guard(() => seal(ask.kind, ask.id, ask.revision)); }}>确认提交</Button></DialogFooter></DialogContent></Dialog>

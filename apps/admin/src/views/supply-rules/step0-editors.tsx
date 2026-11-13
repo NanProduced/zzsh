@@ -164,16 +164,19 @@ const MAP_LABEL: Record<MapKey, { title: string; key: string }> = {
 type FixedHaff = Pick<HaffV2, MapKey> & { schema: "haff-ratio-v3"; fixedModes: Record<"ordinary" | "custom" | "fast", { enabled: boolean; min?: { base: "C" | "ABSOLUTE"; value: string }; max?: { base: "C" | "ABSOLUTE"; value: string } }> };
 const fixedHaff = (price: PriceVersionRecord | undefined) => price?.haffRule?.schema === "haff-ratio-v3" ? price.haffRule as FixedHaff : null;
 const effectivePrice = (rules: RulesResponse) => rules.newListingPrice === undefined ? currentPrice(rules) : rules.priceVersions.find(v => v.id === rules.newListingPrice?.priceVersionId);
-const fixedModeNames = { ordinary: "普通", custom: "自定义", fast: "极速" } as const;
+export const fixedModeNames = { ordinary: "普通", custom: "自定义", fast: "极速" } as const;
+export const fixedModes = Object.keys(fixedModeNames) as (keyof typeof fixedModeNames)[];
+const haffMapKeys: MapKey[] = ["baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel", "dailyDeltaByTermOption"];
+export const fixedFeeRateValid = (rate: string) => /^0(?:\.\d{1,8})?$/.test(rate) && Number(rate) <= 0.92;
 type HaffForm = { maps: Partial<Record<MapKey, Record<string, string>>>; spreadDelta?: string };
 
 export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyChange, ensureDraft, part }: EditorProps & { part: "base" | "term" }) {
   const selected = rules.priceVersions.find(v => v.id === draftId);
   const current = effectivePrice(rules);
-  const fixed = Boolean(fixedHaff(effectivePrice(rules)) || fixedHaff(selected));
-  const currentHaff = fixed ? fixedHaff(effectivePrice(rules)) : asHaffV2(current?.haffRule);
+  const fixed = Boolean(selected?.fixedFeeRates ?? current?.fixedFeeRates);
+  const currentHaff = fixedHaff(current) ?? asHaffV2(current?.haffRule);
   // 未选草稿时用当前生效值只读展示（先看后改）。
-  const sourceHaff = selected ? (fixed ? fixedHaff(selected) : asHaffV2(selected.haffRule)) ?? (selected.haffRule === null ? currentHaff : null) : currentHaff;
+  const sourceHaff = selected ? (fixed ? fixedHaff(selected) : asHaffV2(selected.haffRule)) ?? (!fixed && selected.haffRule === null ? currentHaff : null) : currentHaff;
   const keys: MapKey[] = part === "base" ? ["baseBySafeBox", "vitalityDeltaByLevel", "bearDeltaByLevel"] : ["dailyDeltaByTermOption"];
   const initial = useMemo<HaffForm>(() => sourceHaff ? { maps: Object.fromEntries(keys.map(k => [k, { ...sourceHaff[k] }])), ...(part === "base" && "compatibility" in sourceHaff ? { spreadDelta: sourceHaff.compatibility.ordinary.spreadDelta } : {}) } : { maps: {} }, [JSON.stringify(sourceHaff), part]); // eslint-disable-line react-hooks/exhaustive-deps
   const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false) || !sourceHaff; const sealedView = !!selected && selected.status !== "DRAFT";
@@ -199,7 +202,7 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
     dailyDeltaByTermOption: rules.termOptions.map(term => term.code),
   } : {};
   const keyLabel = (k: MapKey, key: string) => k === "baseBySafeBox" ? `${safeBoxLabel(key)} 保险箱` : k === "dailyDeltaByTermOption" ? rules.termOptions.find(o => o.code === key && o.versionId === rules.release?.termVersionId)?.name ?? key : `${key} 级`;
-  const example = useMemo(() => haffExample(rules, currentHaff && "compatibility" in currentHaff ? currentHaff : null), [rules, currentHaff]);
+  const example = useMemo(() => haffExample(rules, !fixed && currentHaff && "compatibility" in currentHaff ? currentHaff : null), [rules, currentHaff, fixed]);
   return <Panel
     title={title}
     note={
@@ -222,7 +225,8 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
     more={!fixed && part === "base" ? "比例＝1 元换多少万哈夫币，比例越大哈夫币越便宜。左列是线上值，右列可改，改过的格子会高亮。会员优惠按总价折扣另算。" : undefined}
   >
     <DraftLine selected={selected} locked={command.locked} />
-    {selected && !sourceHaff ? <div className="space-y-2"><p role="status" className="text-xs text-muted-foreground">这份草稿的哈夫币规则是旧写法，这里只能查看。</p><pre className="max-h-64 overflow-auto rounded-md border border-border p-2 text-xs">{JSON.stringify(selected.haffRule, null, 2)}</pre></div> : null}
+    {selected?.fixedFeeRates && !sourceHaff ? <p role="status" className="text-sm text-muted-foreground">请在「出租模式」保存首版哈夫币比例。</p> : null}
+    {selected && !fixed && !sourceHaff ? <div className="space-y-2"><p role="status" className="text-xs text-muted-foreground">这份草稿的哈夫币规则是旧写法，这里只能查看。</p><pre className="max-h-64 overflow-auto rounded-md border border-border p-2 text-xs">{JSON.stringify(selected.haffRule, null, 2)}</pre></div> : null}
     {sourceHaff ? <div className="grid gap-4 lg:grid-cols-2">
       {keys.map(k => <div key={k} className="min-w-0 space-y-2">
         <div className="flex items-center gap-1.5">
@@ -293,31 +297,70 @@ export function FixedRentalModeEditor({ rules, command, draftId, canEdit, ensure
   const selected = rules.priceVersions.find(v => v.id === draftId);
   const basis = selected ?? effectivePrice(rules);
   const rule = fixedHaff(basis);
-  const initial = useMemo(() => ({ rates: basis?.fixedFeeRates ?? { ordinary: "", custom: "", fast: "" },
-    modes: rule?.fixedModes }), [basis, rule]);
+  const setup = Boolean(selected?.fixedFeeRates && !rule);
+  const releaseTermId = rules.release?.termVersionId;
+  const currentHaff = asHaffV2(effectivePrice(rules)?.haffRule);
+  const initial = useMemo(() => {
+    const blanks = (keys: string[]) => Object.fromEntries([...new Set(keys)].map(key => [key, ""]));
+    return {
+      rates: basis?.fixedFeeRates ?? { ordinary: "", custom: "", fast: "" },
+      modes: rule?.fixedModes ?? (setup ? { ordinary: { enabled: false }, custom: { enabled: false }, fast: { enabled: false } } as FixedHaff["fixedModes"] : undefined),
+      maps: setup ? {
+        baseBySafeBox: blanks(["safe_box_1x2", "safe_box_2x2", "safe_box_2x3", "safe_box_3x3"]),
+        vitalityDeltaByLevel: blanks(["4", "5", "6", "7"]),
+        bearDeltaByLevel: blanks(["4", "5", "6", "7"]),
+        dailyDeltaByTermOption: blanks(rules.termOptions.filter(term => term.versionId === releaseTermId).map(term => term.code)),
+      } : undefined,
+    };
+  }, [basis, rule, setup, rules.termOptions, releaseTermId]);
   const form = useDirty(initial, command.locked, onDirtyChange);
   const save = useSave(command);
   const locked = !canEdit || command.locked || selected?.status === "SEALED";
   const modes = form.value.modes;
   if (!modes) return <p role="status">固定手续费出租规则暂无法核实。</p>;
-  const valid = Object.values(form.value.rates).every(rate => /^0(?:[.]\d{1,8})?$/.test(rate))
-    && Object.values(modes).some(mode => mode.enabled);
+  const maps = form.value.maps;
+  const mapsReady = !setup || Boolean(maps && haffMapKeys.every(key => Object.keys(maps[key]).length > 0
+    && Object.values(maps[key]).every(value => EXACT_RATIO.test(value.trim()) && (key !== "baseBySafeBox" || Number(value) > 0))));
+  const valid = mapsReady && Object.values(form.value.rates).every(fixedFeeRateValid) && Object.values(modes).some(mode => mode.enabled)
+    && (["custom", "fast"] as const).every(key => !modes[key].enabled || (modes[key].min && EXACT_RATIO.test(modes[key].min.value)
+      && (!modes[key].max || EXACT_RATIO.test(modes[key].max.value))));
   const submit = () => void save.run(async () => {
     const target = await ensureDraft();
-    const draftRule = fixedHaff(target?.draft);
-    if (!target || !draftRule) return null;
-    return draftCommand(target.rules.game.id, "price", "update", {
-      expectedRevision: target.draft.revision, fixedFeeRates: form.value.rates, haffRule: { ...draftRule, fixedModes: modes },
-    }, target.draft.id);
+    if (!target) return null;
+    const draftRule = fixedHaff(target.draft);
+    if (!draftRule && (!setup || !maps)) return null;
+    const savedMaps = maps ? Object.fromEntries(haffMapKeys.map(key => [key,
+      Object.fromEntries(Object.entries(maps[key]).map(([name, value]) => [name, value.trim()]))])) : {};
+    const haffRule = { ...draftRule, ...savedMaps, schema: "haff-ratio-v3", fixedModes: modes };
+    return draftCommand(target.rules.game.id, "price", "update", priceSaveBody(target.rules, target.draft, {
+      fixedFeeRates: form.value.rates, haffRule,
+    }), target.draft.id);
   }, "手续费和出租方式已保存到草稿。", form.markSaved);
-  return <Panel title="固定手续费率与出租方式" note="输入小数费率，例如 0.10 代表 10%。包赔订单的普通手续费率上限为 92%。">
+  return <Panel title="固定手续费率与出租方式" note="输入小数费率，例如 0.10 代表 10%。三档手续费率均不得超过 92%。">
     <DraftLine selected={selected} locked={command.locked} />
-    <div className="grid gap-3 lg:grid-cols-3">{(Object.keys(fixedModeNames) as (keyof typeof fixedModeNames)[]).map(key => {
+    {setup ? <p className="text-sm text-muted-foreground">填写哈夫币比例和各档加减项，再启用需要的出租方式。</p> : null}
+    {setup && maps ? <div className="grid gap-4 sm:grid-cols-2">
+      {haffMapKeys.map(key => <fieldset key={key} disabled={locked} className="space-y-2">
+        <legend className="mb-2 text-sm font-semibold">{MAP_LABEL[key].title}</legend>
+        {Object.entries(maps[key]).map(([name, value]) => {
+          const label = key === "baseBySafeBox" ? safeBoxLabel(name)
+            : key === "dailyDeltaByTermOption" ? rules.termOptions.find(term => term.versionId === releaseTermId && term.code === name)?.name ?? name
+            : name + " 级";
+          const current = currentHaff?.[key][name];
+          return <Field key={name} label={label} hint={current === undefined ? undefined : "生效价差参考 " + current}>
+            <Input inputMode="decimal" value={value} onChange={event => form.setValue(previous => ({
+              ...previous, maps: { ...maps, [key]: { ...maps[key], [name]: event.target.value } },
+            }))} />
+          </Field>;
+        })}
+      </fieldset>)}
+    </div> : null}
+    <div className="grid gap-3 lg:grid-cols-3">{fixedModes.map(key => {
       const name = fixedModeNames[key], mode = modes[key];
       const setMode = (value: typeof mode) => form.setValue({ ...form.value, modes: { ...modes, [key]: value } });
       return <fieldset key={key} className="space-y-3 rounded-md border border-border px-3 pb-3" disabled={locked}>
         <legend className="px-1 font-medium">{name}</legend>
-        <Field label={name + "手续费率"}><Input inputMode="decimal" value={form.value.rates[key]}
+        <Field label={name + "手续费率"} error={!fixedFeeRateValid(form.value.rates[key]) ? "请输入 0 到 0.92，最多八位小数。" : undefined}><Input inputMode="decimal" value={form.value.rates[key]}
           onChange={e => form.setValue({ ...form.value, rates: { ...form.value.rates, [key]: e.target.value } })} /></Field>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={mode.enabled}
           onChange={e => setMode({ ...mode, enabled: e.target.checked })} />启用{name}出租</label>
@@ -334,8 +377,9 @@ export function FixedRentalModeEditor({ rules, command, draftId, canEdit, ensure
         }) : null}
       </fieldset>;
     })}</div>
+    {form.dirty && !valid ? <p role="status" className="text-sm text-muted-foreground">请核对费率，填齐比例，并为已启用的自定义或极速出租填写下限。</p> : null}
     {save.messages}
-    {canEdit && <Button type="button" disabled={locked || !valid || !form.dirty} onClick={submit}>保存手续费与出租方式</Button>}
+    {canEdit && <Button type="button" disabled={locked || !valid || !form.dirty} onClick={submit}>{setup ? "保存费率、出租方式与比例" : "保存手续费与出租方式"}</Button>}
   </Panel>;
 }
 
@@ -358,8 +402,8 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
   const fixed = Boolean(selected?.fixedFeeRates ?? current?.fixedFeeRates);
   const std = (versionId: string | undefined) => rules.priceLines.filter(l => l.priceVersionId === versionId && (l.customerTier ?? "STANDARD") === "STANDARD");
   const hasDraftLines = Boolean(selected && draftHasLines(rules, selected.id));
-  const basis = hasDraftLines ? std(selected?.id) : std(current?.id);
-  const initial = useMemo<ItemRow[]>(() => rules.items.map(item => { const l = basis.find(x => x.itemId === item.id); return { itemId: item.id, pricingKind: l?.pricingKind ?? (item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT"), unitQuantity: LOCKED_UNIT_QUANTITY.has(item.code) ? "1" : (l?.unitQuantity ?? "1"), buyerUnitAmount: unitPriceInput(l?.buyerUnitAmount), ownerUnitAmount: unitPriceInput(l?.ownerUnitAmount) }; }), [JSON.stringify(basis), rules.items]); // eslint-disable-line react-hooks/exhaustive-deps
+  const basis = hasDraftLines ? std(selected?.id) : fixed && selected ? [] : std(current?.id);
+  const initial = useMemo<ItemRow[]>(() => rules.items.map(item => { const l = basis.find(x => x.itemId === item.id); return { itemId: item.id, pricingKind: l?.pricingKind ?? (item.unit === "HAFF_BASE" ? "HAFF_RATIO" : "FIXED_UNIT"), unitQuantity: LOCKED_UNIT_QUANTITY.has(item.code) ? "1" : (l?.unitQuantity ?? (fixed && selected && item.unit !== "HAFF_BASE" ? "" : "1")), buyerUnitAmount: unitPriceInput(l?.buyerUnitAmount), ownerUnitAmount: unitPriceInput(l?.ownerUnitAmount) }; }), [JSON.stringify(basis), rules.items, fixed, selected]); // eslint-disable-line react-hooks/exhaustive-deps
   const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false); const sealedView = !!selected && selected.status !== "DRAFT";
   const [changedPrices, setChangedPrices] = useState<Set<string>>(() => new Set());
   const form = useDirty(initial, command.locked, onDirtyChange, changedPrices.size > 0);

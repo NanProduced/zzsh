@@ -31,7 +31,7 @@ export function draftHasLines(rules: RulesResponse, id: string): boolean {
 export function priceSaveBody(rules: RulesResponse, target: PriceVersionRecord, patch: Record<string, unknown>): Record<string, unknown> {
   const body: Record<string, unknown> = { expectedRevision: target.revision, ...patch };
   const source = sourcePriceVersion(rules);
-  if (!draftHasLines(rules, target.id) && !("lines" in patch)) {
+  if (!target.fixedFeeRates && !draftHasLines(rules, target.id) && !("lines" in patch)) {
     const lines = source ? rules.priceLines.filter(line => line.priceVersionId === source.id) : [];
     if (!source || !lines.length) throw new Error("缺少可复用的价格行，请先在「物资价目」中填写并保存价目。");
     const mode = (patch.mode as PriceVersionRecord["mode"] | undefined) ?? source.mode;
@@ -39,8 +39,8 @@ export function priceSaveBody(rules: RulesResponse, target: PriceVersionRecord, 
     body.lines = standardLineBodies(lines, mode);
   }
   if (source) {
-    if (target.haffRule === null && !("haffRule" in patch) && source.haffRule) body.haffRule = source.haffRule;
-    if (!target.fundingPolicy && !("fundingPolicy" in patch) && source.fundingPolicy) body.fundingPolicy = source.fundingPolicy;
+    if (target.haffRule === null && !("haffRule" in patch) && source.haffRule && !target.fixedFeeRates) body.haffRule = source.haffRule;
+    if (!target.fixedFeeRates && !target.fundingPolicy && !("fundingPolicy" in patch) && source.fundingPolicy) body.fundingPolicy = source.fundingPolicy;
     if (!("roundingPolicy" in patch) && !target.roundingPolicy && source.roundingPolicy) body.roundingPolicy = source.roundingPolicy;
   }
   return body;
