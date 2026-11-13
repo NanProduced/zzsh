@@ -71,7 +71,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   const fresh = () => {
     const haffRule = { schema: "haff-ratio-v2", baseBySafeBox: { "box-a": "50" }, vitalityDeltaByLevel: { "6": "0", "7": "-1" }, bearDeltaByLevel: { "6": "0" }, dailyDeltaByTermOption: { d10: "0" }, compatibility: { ordinary: { spreadDelta: "8", discounts: { STANDARD: "0", VIP: "1", SVIP: "2", DISCOUNT_USER: "1" } }, fast: { spreadDelta: "12", discounts: { STANDARD: "0" } }, modes: { ordinary: { enabled: true }, custom: { enabled: true, min: { base: "C", value: "-3" }, max: { base: "C", value: "-1" } }, fast: { enabled: true, min: { base: "C", value: "6" }, max: { base: "ABSOLUTE", value: "99" } } } } };
     const price = { id: "p1", gameId: "g1", mode: "SPREAD", status: "SEALED", revision: "2", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z", commissionRate: null, compensationPolicyRef: null, roundingPolicy: "HALF_UP_CENT_V1", haffRule, fundingPolicy: null };
-    return { game: { id: "g1", name: "三角洲行动", code: "delta", enabled: true, catalogRevision: "1" }, release: { id: "r1", gameId: "g1", priceVersionId: "p1", termVersionId: "t1", agreementVersionId: "a1", generation: "1", activatedAt: "2026-10-01T00:00:00Z" }, priceVersions: [{ ...structuredClone(price), id: "p2", revision: "3" }, price], priceLines: ["p1", "p2"].flatMap(priceVersionId => [{ priceVersionId, customerTier: "STANDARD", itemId: "haff", pricingKind: "HAFF_RATIO", unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null }, { priceVersionId, customerTier: "STANDARD", itemId: "piece", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1" }]), termVersions: [{ id: "t1", gameId: "g1", status: "SEALED", revision: "1", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z" }], termOptions: [{ versionId: "t1", code: "d10", name: "10M/天", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }], agreementVersions: [{ id: "a1", gameId: "g1", title: "协议", body: "协议正文", digest: "hash", status: "SEALED", revision: "1", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z" }], items: [{ id: "haff", code: "haff", name: "哈夫币", unit: "HAFF_BASE", quantityScale: 0, enabled: true }, { id: "piece", code: "piece", name: "物品", unit: "PIECE", quantityScale: 0, enabled: true }] };
+    return { ruleScheduling: { available: true, asOf: "2026-11-13T00:00:00.000000Z", generation: "1", plans: [] }, game: { id: "g1", name: "三角洲行动", code: "delta", enabled: true, catalogRevision: "1" }, release: { id: "r1", gameId: "g1", priceVersionId: "p1", termVersionId: "t1", agreementVersionId: "a1", generation: "1", activatedAt: "2026-10-01T00:00:00Z" }, priceVersions: [{ ...structuredClone(price), id: "p2", revision: "3" }, price], priceLines: ["p1", "p2"].flatMap(priceVersionId => [{ priceVersionId, customerTier: "STANDARD", itemId: "haff", pricingKind: "HAFF_RATIO", unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null }, { priceVersionId, customerTier: "STANDARD", itemId: "piece", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "2", ownerUnitAmount: "1" }]), termVersions: [{ id: "t1", gameId: "g1", status: "SEALED", revision: "1", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z" }], termOptions: [{ versionId: "t1", code: "d10", name: "10M/天", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" }], agreementVersions: [{ id: "a1", gameId: "g1", title: "协议", body: "协议正文", digest: "hash", status: "SEALED", revision: "1", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z" }], items: [{ id: "haff", code: "haff", name: "哈夫币", unit: "HAFF_BASE", quantityScale: 0, enabled: true }, { id: "piece", code: "piece", name: "物品", unit: "PIECE", quantityScale: 0, enabled: true }] };
   };
   const quote = amount => ({ quotable: true, quote: { lines: [{ itemId: "haff", quantity: "100000000", buyerAmount: { amount }, ownerAmount: { amount: "200.00" } }], termSeconds: "864000", ownerHaffRatio: "50" } });
   const buttons = (scope = document) => [...scope.querySelectorAll("button")];
@@ -88,6 +88,8 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       reads.push({ path, search: url.search, headers: init.headers });
       if (path.endsWith("/supply/games")) return Response.json({ games: [model.game] });
       if (path.includes("operation-result")) return Response.json(recovery);
+      if (path.endsWith("/pricing-schedules")) return Response.json({ available: true, announcements: [{ id: "notice", title: "合成规则公告" }] });
+      if (path.includes("/rule-release-schedules/") && policy !== "readback-fail") return Response.json(model.ruleScheduling.plans[0]);
       if (policy === "readback-fail" && businessWrites().length) throw new Error("readback failed");
       if (policy === "readback-delay" && businessWrites().length) { const original = structuredClone(model); return new Promise(resolve => { readResume = () => resolve(Response.json(original)); }); }
       return Response.json(model);
@@ -95,8 +97,11 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     const body = JSON.parse(init.body); writes.push({ path, body, method: init.method, key: init.headers["idempotency-key"] });
     if (path.endsWith("quote-preview")) { if (policy === "quote-delay") return new Promise(resolve => quotes.push(amount => resolve(Response.json(quote(amount))))); return Response.json(quote("238.10")); }
     if (policy === "conflict") return Response.json({ error: { code: "CONFLICT" } }, { status: 409 });
-    const receipt = path.endsWith("releases") ? { releaseId: "r2", generation: "2", affectedCount: 4 } : { id: "pnew" };
-    if (path.endsWith("releases")) model.release = { ...model.release, id: "r2", generation: "2", priceVersionId: body.priceVersionId, termVersionId: body.termVersionId, agreementVersionId: body.agreementVersionId };
+    const receipt = path.endsWith("releases") ? { releaseId: "r2", generation: "2", effectiveAt: "2099-01-01T01:00:00.000000Z", announcementVersionId: "notice" } : { id: "pnew" };
+    if (path.endsWith("releases")) model.ruleScheduling = { ...model.ruleScheduling, generation: "2", plans: [{
+      id: receipt.releaseId, generation: receipt.generation, effectiveAt: receipt.effectiveAt, announcementVersionId: receipt.announcementVersionId,
+      priceVersionId: body.priceVersionId, termVersionId: body.termVersionId, agreementVersionId: body.agreementVersionId,
+    }] };
     else if (path.endsWith("price-drafts")) model.priceVersions.unshift({ ...model.priceVersions[0], id: "pnew", status: "DRAFT", revision: "1", sealedAt: null }), model.priceLines.push(...model.priceLines.filter(line => line.priceVersionId === "p2").map(line => ({ ...line, priceVersionId: "pnew" })));
     else if (path.endsWith("/seal")) model.priceVersions.find(version => version.id === "pnew").status = "SEALED";
     if (policy === "lost") throw new Error("response lost");
@@ -114,7 +119,23 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     await act(async () => root.render(createElement(View, { snapshot: { ...snapshot, permissions }, onDirtyChange: () => undefined, section, draft, onOpenPath })));
     await wait(0);
   }
-  const activate = async () => { await click("选择版本并确认生效"); await click("确认生效"); };
+  const setScheduleInputs = async () => {
+    await act(async () => {
+      const select = document.querySelector('select[data-slot="input"]');
+      assert(select && !select.disabled);
+      select.value = "notice"; select.dispatchEvent(new browser.Event("change", { bubbles: true }));
+      const input = document.querySelector('input[type="datetime-local"]');
+      Object.getOwnPropertyDescriptor(browser.HTMLInputElement.prototype,"value").set.call(input,"2099-01-01T09:00");
+      input.dispatchEvent(new browser.Event("input",{bubbles:true}));
+      input.dispatchEvent(new browser.Event("change",{bubbles:true}));
+    });
+  };
+  const activate = async () => {
+    await click("选择版本并确认排期");
+    await setScheduleInputs();
+    assert.equal(byText("确认排期").disabled, false);
+    await click("确认排期");
+  };
   try {
     ({ SupplyRulesView: View } = await vite.ssrLoadModule("/src/views/supply-rules-view.tsx"));
     await t.test("pricing schedules open lazily and show an uninstalled policy without write controls", async () => {
@@ -162,14 +183,29 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
       await mount({ preserve: true, section: "overview", permissions: snapshot.permissions });
       await activate();
       assert.deepEqual(businessWrites().at(-1).body, {
-        gameId: "g1", priceVersionId: "p1", termVersionId: "t2", agreementVersionId: "a2", expectedGeneration: "1",
+        gameId: "g1", priceVersionId: "p1", termVersionId: "t2", agreementVersionId: "a2", expectedGeneration: "1", effectiveAt: "2099-01-01T01:00:00.000Z", announcementVersionId: "notice",
       });
+    });
+    await t.test("an agreement-only schedule preserves the term already planned for that date", async () => {
+      await mount();
+      model.termVersions.unshift({ ...model.termVersions[0], id: "t2" });
+      model.agreementVersions.unshift({ ...model.agreementVersions[0], id: "a2", title: "新版协议", sealedAt: "2026-11-14T00:00:00Z" });
+      model.ruleScheduling.generation = "2";
+      model.ruleScheduling.plans = [{ id: "term-plan", generation: "2", effectiveAt: "2098-01-01T01:00:00.000000Z",
+        announcementVersionId: "notice", priceVersionId: "p1", termVersionId: "t2", agreementVersionId: "a1" }];
+      await mount({ preserve: true, section: "agreement" });
+      await click("安排生效");
+      await setScheduleInputs();
+      await click("确认排期");
+      assert.equal(businessWrites().at(-1).body.termVersionId, "t2");
+      assert.equal(businessWrites().at(-1).body.agreementVersionId, "a2");
+      assert.equal(businessWrites().at(-1).body.expectedGeneration, "2");
     });
     await t.test("overview keeps trial and activation and does not offer an unsavable preview editor", async () => {
       await mount();
       assert.equal(byText("编辑规则（仅预览）"), undefined);
       assert.ok(byText("试算一单"));
-      assert.ok(byText("选择版本并确认生效"));
+      assert.ok(byText("选择版本并确认排期"));
       assert.doesNotMatch(el.textContent, /本轮修改不能保存|暂不能保存或提交审批/);
       assert.equal([...el.querySelectorAll('select,details,summary,textarea:not([data-slot]),button:not([data-slot]),input:not([data-slot]):not([type=hidden]):not([aria-hidden])')].filter(n => !n.closest('.rules-markdown')).length, 0, 'only the shared Markdown editor may bring its own controls');
     });
@@ -231,18 +267,18 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     await t.test("no permission starts no reads", async () => { await mount({ permissions: [] }); assert.match(el.textContent, /没有规则草稿编辑权限/); assert.equal(reads.length, 0); });
     for (const failure of ["lost", "server-error"]) await t.test("release " + failure + " stays locked after closing and unmounting", async () => {
       await mount(); policy = failure; await activate(); assert.match(document.body.textContent, /结果未知/); const key = businessWrites()[0].key;
-      await click("关闭（保留原请求）"); await click("选择版本并确认生效"); assert.ok(!byText("确认生效")); assert.equal(businessWrites().length, 1);
+      await click("关闭（保留原请求）"); await click("选择版本并确认排期"); assert.ok(!byText("确认排期")); assert.equal(businessWrites().length, 1);
       await mount({ preserve: true }); assert.match(el.textContent, /原规则写入结果尚未核清|请求可能已执行/);
       await click("核对原写入回执"); const read = reads.find(read => read.path.includes("operation-result")); assert.equal(read.headers["idempotency-key"], key); assert.ok(new URLSearchParams(read.search).get("fingerprint")); assert.equal(businessWrites().length, 1); assert.match(el.textContent, /不代表请求未执行/);
     });
-    await t.test("recorded recovery keeps omitted affected counts unknown", async () => {
-      await mount(); policy = "lost"; await activate(); await click("关闭（保留原请求）"); recovery = { receipt: "RECORDED", responseStatus: 200, operation: "supply.rules.release.activate", resourceId: "g1", result: { releaseId: "r2", generation: "2" } }; await click("核对原写入回执"); await click("选择版本并确认生效"); assert.match(document.body.textContent, /未提供受影响账号数量/); assert.equal(businessWrites().length, 1); assert.equal(browser.localStorage.length, 0);
+    await t.test("recorded recovery confirms the future schedule without replacing the current release", async () => {
+      await mount(); policy = "lost"; await activate(); await click("关闭（保留原请求）"); recovery = { receipt: "RECORDED", responseStatus: 200, operation: "supply.rules.release.activate", resourceId: "g1", result: { releaseId: "r2", generation: "2", effectiveAt: "2099-01-01T01:00:00.000000Z", announcementVersionId: "notice" } }; await click("核对原写入回执"); await click("选择版本并确认排期"); assert.match(document.body.textContent, /已核对排期/); assert.equal(model.release.id,"r1"); assert.equal(businessWrites().length, 1); assert.equal(browser.localStorage.length, 0);
     });
     await t.test("recovery echo must match the original operation and resource", async () => {
       await mount(); policy = "lost"; await activate(); await click("关闭（保留原请求）"); recovery = { receipt: "RECORDED", responseStatus: 200, operation: "supply.rules.price_draft.update", resourceId: "another", result: { releaseId: "r2", generation: "2" } }; await click("核对原写入回执"); assert.match(el.textContent, /未提供匹配的完整写入结果/); assert.ok(browser.localStorage.length); assert.equal(businessWrites().length, 1);
     });
     await t.test("accepted but failed readback is not an error or permission to submit again", async () => {
-      await mount(); policy = "readback-fail"; await activate(); assert.match(document.body.textContent, /已收到写入回执，但规则回读失败/); assert.ok(!byText("确认生效")); assert.equal(businessWrites().length, 1);
+      await mount(); policy = "readback-fail"; await activate(); assert.match(document.body.textContent, /已收到写入回执，但规则回读失败/); assert.ok(!byText("确认排期")); assert.equal(businessWrites().length, 1);
       await mount({ preserve: true }); assert.match(el.textContent, /已收到原写入回执|已收到写入回执/); assert.equal(businessWrites().length, 1);
     });
     await t.test("accepted old-scope readback cannot replace a new actor/session/game", async () => {
@@ -260,7 +296,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
     });
     await t.test("seal response cannot settle another draft's ID", async () => {
       const { buildSkinDepositPolicy, skinDepositDraft } = await vite.ssrLoadModule("/src/views/supply-rules/skin-deposit-policy.ts"); const base = fundingPolicyFixture("NOT_REQUIRED"), sd = skinDepositDraft(base); sd.policyVersion = "synthetic-v2"; sd.rules = sd.rules.map(row => ({ ...row, first: "0", subsequent: "0" }));
-      await mount({ section: "pricing", draft: "p2", draftPolicy: buildSkinDepositPolicy(base, sd) }); policy = "foreign-id"; await act(async () => buttons().find(b => b.textContent.startsWith("待发布修改")).click()); await click("提交发布"); await click("确认提交"); assert.match(el.textContent, /写入回执不完整|请求可能已执行/); const record = JSON.parse(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a")); assert.equal(record.resourceId, "p2", "the sealed draft ID is kept, not the foreign one"); assert.equal(record.operation, "supply.rules.price_draft.seal"); assert.equal(businessWrites().length, 1);
+      await mount({ section: "pricing", draft: "p2", draftPolicy: buildSkinDepositPolicy(base, sd) }); policy = "foreign-id"; await act(async () => buttons().find(b => b.textContent.startsWith("待发布修改")).click()); await click("封存版本"); await click("确认提交"); assert.match(el.textContent, /写入回执不完整|请求可能已执行/); const record = JSON.parse(browser.localStorage.getItem("zzsh.admin.rules.pending.v1:admin-a")); assert.equal(record.resourceId, "p2", "the sealed draft ID is kept, not the foreign one"); assert.equal(record.operation, "supply.rules.price_draft.seal"); assert.equal(businessWrites().length, 1);
     });
     await t.test("tampered body cannot start a receipt query with the old digest", async () => {
       await mount({ section: "pricing" }); policy = "lost"; await createDraft(); const key = "zzsh.admin.rules.pending.v1:admin-a", record = JSON.parse(browser.localStorage.getItem(key)); record.body.mode = "PERCENT"; browser.localStorage.setItem(key, JSON.stringify(record)); await mount({ preserve: true, section: "pricing" }); await click("核对原写入回执"); assert.match(el.textContent, /本地原请求与指纹不一致/); assert.equal(reads.filter(read => read.path.includes("operation-result")).length, 0); assert.equal(businessWrites().length, 1);

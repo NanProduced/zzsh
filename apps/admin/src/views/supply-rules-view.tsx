@@ -13,7 +13,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
-import { RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
+import { ConfirmDialog, RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
 import { draftCommand, isPricingScheduleOperation, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
 import { FixedFeeItemPrices, FixedFeePriceFacts } from "./supply-rules/fixed-fee-price-facts";
 import { PricingSchedulesPanel } from "./supply-rules/pricing-schedules-panel";
@@ -122,7 +122,7 @@ export function SupplyRulesView({
   const [agreementBody, setAgreementBody] = useState("");
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
-  const [activateAsk, setActivateAsk] = useState<string | null>(null);
+  const [scheduleAsk, setScheduleAsk] = useState<{ priceVersionId?: string; agreementVersionId?: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [sealAsk, setSealAsk] = useState<{ kind: "term" | "agreement"; id: string; revision: string; label: string } | null>(null);
@@ -287,18 +287,6 @@ export function SupplyRulesView({
     }
   };
 
-  const [agreementReceipt, setAgreementReceipt] = useState<{ at: string; text: string } | null>(null);
-  const activateAgreement = async (id: string) => {
-    const release = rules?.release;
-    if (!release) return;
-    setError(undefined);
-    try {
-      const r = await command.write({ operation: RULES_RELEASE_OPERATION, resourceId: gameId, gameId, path: "/supply/releases", method: "POST", body: { gameId, priceVersionId: release.priceVersionId, termVersionId: release.termVersionId, agreementVersionId: id, expectedGeneration: release.generation } });
-      if (!r) return;
-      setAgreementReceipt({ at: r.fresh.release?.activatedAt ?? new Date().toISOString(), text: "已生效。之后正式上架的账号使用这份协议。" });
-    } catch (failure) { setError(friendlyError(failure)); }
-  };
-
   const createTerm = async () => {
     try {
       const result = await command.write(draftCommand(gameId, "term", "create", { gameId }));
@@ -328,7 +316,7 @@ export function SupplyRulesView({
     try {
       const result = await command.write(draftCommand(gameId, kind, "seal", { expectedRevision: revision }, id));
       if (!result) return;
-      setSuccess(isBoss ? "已提交。核对后点“确认生效”。" : "已提交，等 Boss 确认生效。");
+      setSuccess(isBoss ? "已提交。核对后安排生效。" : "已提交，等 Boss 排期。");
     } catch (failure) {
       setError(friendlyError(failure));
     } finally {
@@ -419,8 +407,8 @@ export function SupplyRulesView({
 
       {rules && editorProps && rules.game.id === gameId ? (
         <div className="space-y-6">
-          {deltaSection && !showSchedules && priceEditable ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={isBoss} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
-          <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={priceEditable} canActivate={isBoss && hasPermission(snapshot, "supply.rules.activate")} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
+          {deltaSection && !showSchedules && priceEditable ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={canSchedule} onSchedule={priceVersionId => setScheduleAsk({ priceVersionId })} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
+          <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={priceEditable} canActivate={canSchedule} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
           <div hidden={show("deposit")}><DepositCapEditor key={`cap:${editorKey}`} {...editorProps} onDirtyChange={setCapDirty} /></div>
           <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules fixedFee={fixedFee} /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = currentPrice?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion, id: currentPrice?.fullPayoutTermsVersionId } : null; })()} onReload={reload} /></div>
           <div hidden={show("pricing")} className="space-y-4">
@@ -439,7 +427,7 @@ export function SupplyRulesView({
           ) : (
             <div className="flex flex-wrap items-center gap-2 mt-3">
               <div className="w-full sm:w-80"><RulesSelect label="租期版本" value={termId} onChange={(value) => { if (dirty && value !== termId) { setSwitchAsk({ kind: "term", id: value }); return; } applyTerm(value, rules.termOptions); }} options={rules.termVersions.map((version) => ({ value: version.id, label: `${version.id === rules.release?.termVersionId ? "当前生效" : statusLabel(version.status)}${versionTime(version) ? " · " + versionTime(version) : ""}` }))} /></div>
-              {selectedTerm?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="提交后锁定，Boss 确认生效后替换线上" busyText="提交中…" onClick={() => setSealAsk({ kind: "term", id: selectedTerm.id, revision: selectedTerm.revision, label: `租期 · 第 ${selectedTerm.revision} 次修改 · #${selectedTerm.id.slice(-6)}` })}>封存版本</BusyButton> : null}
+              {selectedTerm?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后可由 Boss 绑定公告安排生效" busyText="提交中…" onClick={() => setSealAsk({ kind: "term", id: selectedTerm.id, revision: selectedTerm.revision, label: `租期 · 第 ${selectedTerm.revision} 次修改 · #${selectedTerm.id.slice(-6)}` })}>封存版本</BusyButton> : null}
             </div>
           )}
           {selectedTerm ? (
@@ -485,10 +473,10 @@ export function SupplyRulesView({
           ) : (
             <div className="flex flex-wrap items-center gap-2 mt-3">
               <div className="w-full min-w-0 sm:w-96"><RulesSelect label="协议版本" value={agreementId} onChange={(value) => { if (dirty && value !== agreementId) { setSwitchAsk({ kind: "agreement", id: value }); return; } const record = rules.agreementVersions.find((version) => version.id === value); setAgreementId(value); setAgreementTitle(record?.title ?? ""); setAgreementBody(record?.body ?? ""); setDirty(false); }} options={rules.agreementVersions.map((version) => ({ value: version.id, label: `${version.title} · ${version.id === rules.release?.agreementVersionId ? "线上" : version.status === "DRAFT" ? "草稿" : "已提交"}${versionTime(version) ? " · " + versionTime(version) : ""}` }))} /></div>
-              {selectedAgreement?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="提交后锁定，Boss 确认生效后替换线上" busyText="提交中…" onClick={() => setSealAsk({ kind: "agreement", id: selectedAgreement.id, revision: selectedAgreement.revision, label: selectedAgreement.title })}>提交发布</BusyButton> : null}
+              {selectedAgreement?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后可由 Boss 绑定公告安排生效" busyText="提交中…" onClick={() => setSealAsk({ kind: "agreement", id: selectedAgreement.id, revision: selectedAgreement.revision, label: selectedAgreement.title })}>封存版本</BusyButton> : null}
             </div>
           )}
-          {selectedAgreement ? (() => { const live = selectedAgreement.id === rules.release?.agreementVersionId; const st = docStage(selectedAgreement, { dirty, live, after: rules.release?.activatedAt }); return <div className="mt-3"><DocStatusRow stage={st} at={live ? rules.release?.activatedAt : null} receipt={agreementReceipt} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交，等你确认生效" : "已提交，等 Boss 确认生效") : st === "live" ? "租客下单时看到的就是这份" : "旧版本，只读"}>{st === "sealed" && isBoss && hasPermission(snapshot, "supply.rules.activate") ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked || !rules.release} onClick={() => setActivateAsk(selectedAgreement.id)}>确认生效</BusyButton> : null}</DocStatusRow></div>; })() : null}
+          {selectedAgreement ? (() => { const live = selectedAgreement.id === rules.release?.agreementVersionId; const st = docStage(selectedAgreement, { dirty, live, after: rules.release?.activatedAt }); return <div className="mt-3"><DocStatusRow stage={st} at={live ? rules.release?.activatedAt : null} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交，待安排生效" : "已提交，等 Boss 排期") : st === "live" ? "当前新上架账号使用这份协议" : "旧版本，只读"}>{st === "sealed" && canSchedule ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked || !rules.release} onClick={() => setScheduleAsk({ agreementVersionId: selectedAgreement.id })}>安排生效</BusyButton> : null}</DocStatusRow></div>; })() : null}
           {selectedAgreement ? (
             <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveAgreement(event)); }} className="mt-4 space-y-3">
               <Field label="标题"><Input value={agreementTitle} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>
@@ -504,7 +492,8 @@ export function SupplyRulesView({
           </div>
         </div>
       ) : null}
-      <Dialog open={activateAsk !== null} onOpenChange={(open) => { if (!open) setActivateAsk(null); }}><DialogContent closeLabel="取消"><DialogHeader><DialogTitle>让这份协议生效？</DialogTitle><DialogDescription>确认后新订单立即使用这份协议；价格和租期不变。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setActivateAsk(null)}>取消</Button><Button type="button" onClick={() => { const id = activateAsk; setActivateAsk(null); if (id) void guard(() => activateAgreement(id)); }}>确认生效</Button></DialogFooter></DialogContent></Dialog>
+      {scheduleAsk && rules && canSchedule ? <ConfirmDialog rules={rules} command={command} preferred={scheduleAsk}
+        onClose={() => { setScheduleAsk(null); command.dismissResult(); }} /> : null}
       <Dialog open={sealAsk !== null} onOpenChange={(open) => { if (!open) setSealAsk(null); }}><DialogContent closeLabel="取消"><DialogHeader><DialogTitle>提交这个版本？</DialogTitle><DialogDescription>{sealAsk ? `${sealAsk.label}。提交后锁定，Boss 确认生效后才替换线上。` : ""}</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setSealAsk(null)}>取消</Button><Button type="button" onClick={() => { const ask = sealAsk; setSealAsk(null); if (ask) void guard(() => seal(ask.kind, ask.id, ask.revision)); }}>确认提交</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={leaveAsk !== null} onOpenChange={(open) => { if (!open) stayInSection(); }}><DialogContent closeLabel="继续编辑"><DialogHeader><DialogTitle>价格草稿还有未保存的输入</DialogTitle><DialogDescription>切换到「{leaveAsk ? RULES_SECTION_LABEL[leaveAsk] : ""}」会丢掉这些输入；已保存到草稿的内容不受影响。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={stayInSection}>继续编辑</Button><Button type="button" onClick={leaveSection}>放弃并切换</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={switchAsk !== null} onOpenChange={(open) => { if (!open) setSwitchAsk(null); }}><DialogContent closeLabel="继续编辑"><DialogHeader><DialogTitle>放弃未保存的内容并切换版本？</DialogTitle><DialogDescription>当前标题、正文或租期档位还没保存。切换后这些输入会丢掉。</DialogDescription></DialogHeader><DialogFooter><Button type="button" variant="outline" onClick={() => setSwitchAsk(null)}>继续编辑</Button><Button type="button" onClick={commitSwitch}>放弃并切换</Button></DialogFooter></DialogContent></Dialog>

@@ -642,7 +642,12 @@ export type FullPayoutTermsRecord = {
   title: string; digest: string; status: "DRAFT" | "SEALED"; revision: string;
   createdAt: string; sealedAt: string | null;
 };
+export type RuleReleasePlan = {
+  id: string; generation: string; effectiveAt: string; announcementVersionId: string;
+  priceVersionId: string; termVersionId: string; agreementVersionId: string;
+};
 export type RulesResponse = {
+  ruleScheduling?: { available: boolean; asOf: string; generation: string; plans: RuleReleasePlan[]; truncated: boolean };
   game: SupplyGame;
   release: RuleReleaseRecord | null;
   priceVersions: PriceVersionRecord[];

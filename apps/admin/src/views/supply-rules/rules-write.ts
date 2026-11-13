@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AdminApiError, adminRequest, friendlyError, type RulesResponse, type PricingScheduleRow } from "../../api";
+import { AdminApiError, adminRequest, friendlyError, type RulesResponse, type PricingScheduleRow, type RuleReleasePlan } from "../../api";
 import { SupplyWriteLockError, withSupplyWriteLock } from "../../lib/supply-write-lock";
 
 type RuleKind = "price" | "term" | "agreement";
@@ -47,6 +47,17 @@ function receiptOf(value: unknown, operation: string, resourceId?: string, body?
       || response.priceVersionId !== body.priceVersionId)) return null;
     return { id: r.id, generation: r.generation, effectiveAt: r.effectiveAt };
   }
+  if (isRelease && body?.effectiveAt !== undefined) {
+    const effective = body.effectiveAt;
+    const recorded = value as { announcementVersionId?: string };
+    if (typeof effective !== "string" || !supplyId(r.releaseId) || typeof r.generation !== "string"
+      || !/^[1-9]\d{0,18}$/.test(r.generation) || typeof body.expectedGeneration !== "string"
+      || !/^(0|[1-9]\d{0,18})$/.test(body.expectedGeneration)
+      || BigInt(r.generation) !== BigInt(body.expectedGeneration) + 1n
+      || r.effectiveAt !== effective.replace(/Z$/, "000Z")
+      || (!stored && recorded.announcementVersionId !== body.announcementVersionId)) return null;
+    return { releaseId: r.releaseId, generation: r.generation, effectiveAt: r.effectiveAt };
+  }
   if (isRelease ? typeof r.releaseId !== "string" || !r.releaseId || typeof r.generation !== "string" || !/^[1-9]\d*$/.test(r.generation) : typeof r.id !== "string" || !r.id) return null;
   if (!isRelease && resourceId !== undefined && r.id !== resourceId) return null;
   if (r.affectedCount !== undefined && (!Number.isSafeInteger(r.affectedCount) || r.affectedCount < 0)) return null;
@@ -54,6 +65,18 @@ function receiptOf(value: unknown, operation: string, resourceId?: string, body?
 }
 
 /** Saved intents are a lock, never a substitute for server authorization or an instruction to replay. */
+function ruleReleaseBody(body: Record<string, unknown>, gameId: string) {
+  const fields = ["agreementVersionId", "expectedGeneration", "gameId", "priceVersionId", "termVersionId"];
+  if (body.effectiveAt !== undefined || body.announcementVersionId !== undefined) {
+    if (typeof body.effectiveAt !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(body.effectiveAt)
+      || !supplyId(body.announcementVersionId)) return false;
+    fields.push("announcementVersionId", "effectiveAt");
+  }
+  return body.gameId === gameId && Object.keys(body).sort().join() === fields.sort().join()
+    && [body.priceVersionId, body.termVersionId, body.agreementVersionId].every(supplyId)
+    && typeof body.expectedGeneration === "string" && /^(0|[1-9]\d{0,18})$/.test(body.expectedGeneration);
+}
+
 export function parsePendingRulesWrite(raw: string | null, adminId: string): PendingRulesWrite | null {
   if (!raw) return null;
   if (raw.length > 512_000) throw new Error("规则请求恢复记录超出可用范围，请联系维护者核对原回执。");
@@ -68,7 +91,7 @@ export function parsePendingRulesWrite(raw: string | null, adminId: string): Pen
     || (p.resourceId !== undefined && !id(p.resourceId)) || (match?.[2] === "create" ? p.resourceId !== undefined : !id(p.resourceId))
     || !p.body || typeof p.body !== "object" || Array.isArray(p.body) || (p.receipt !== undefined && !receiptOf(p.receipt, p.operation, p.resourceId, p.body, true))
     || (schedule && (p.resourceId !== p.gameId || !scheduleBody(p.body, schedule)))
-    || (p.operation === RULES_RELEASE_OPERATION && (p.resourceId !== p.gameId || p.body.gameId !== p.gameId || Object.keys(p.body).sort().join() !== ["agreementVersionId", "expectedGeneration", "gameId", "priceVersionId", "termVersionId"].join() || ![p.body.priceVersionId, p.body.termVersionId, p.body.agreementVersionId].every(id) || typeof p.body.expectedGeneration !== "string" || !/^(0|[1-9]\d{0,19})$/.test(p.body.expectedGeneration)))
+    || (p.operation === RULES_RELEASE_OPERATION && (p.resourceId !== p.gameId || !ruleReleaseBody(p.body, p.gameId)))
     || (match?.[2] === "create" && p.body.gameId !== p.gameId)) throw new Error("规则请求恢复记录无法识别，请联系维护者核对原回执。");
   return p;
 }
@@ -137,9 +160,18 @@ export function useRulesWrite(adminId: string, gameId: string, onReload: () => P
         clear(original); setPending(null); setState({ kind: "done", receipt, operation: original.operation });
         return;
       }
+      const plannedRelease = original.operation === RULES_RELEASE_OPERATION && original.body.effectiveAt !== undefined;
+      if (plannedRelease) {
+        const row = await adminRequest<RuleReleasePlan>(`/supply/games/${encodeURIComponent(original.gameId)}/rule-release-schedules/${encodeURIComponent(receipt.releaseId!)}`);
+        if (!active(sequence)) return;
+        if (!row || row.id !== receipt.releaseId || row.generation !== receipt.generation || row.effectiveAt !== receipt.effectiveAt
+          || row.announcementVersionId !== original.body.announcementVersionId || row.priceVersionId !== original.body.priceVersionId
+          || row.termVersionId !== original.body.termVersionId || row.agreementVersionId !== original.body.agreementVersionId)
+          throw new Error("rule plan readback unavailable");
+      }
       const fresh = await onReload();
       if (!active(sequence)) return;
-      if (!fresh || fresh.game.id !== original.gameId || !readbackContains(fresh, original, receipt)) throw new Error("readback unavailable");
+      if (!fresh || fresh.game.id !== original.gameId || (!plannedRelease && !readbackContains(fresh, original, receipt))) throw new Error("readback unavailable");
       clear(original); setPending(null); setState({ kind: "done", receipt, operation: original.operation });
       return { receipt, fresh };
     } catch { if (active(sequence)) setState({ kind: "accepted", message: "已收到写入回执，但规则回读失败。只能核对原结果，不能再次提交。" }); }
@@ -147,6 +179,10 @@ export function useRulesWrite(adminId: string, gameId: string, onReload: () => P
   const write = async (command: Command) => {
     if (busy.current || pending || state.kind === "blocked" || !adminId || command.gameId !== gameId) return;
     const kind = scheduleKind(command.operation);
+    if (command.operation === RULES_RELEASE_OPERATION && (!ruleReleaseBody(command.body, command.gameId) || command.body.effectiveAt === undefined)) {
+      setState({ kind: "not_sent", message: "请选择已公开公告与未来生效时间。" });
+      return;
+    }
     if (kind && !scheduleBody(command.body, kind)) {
       setState({ kind: "not_sent", message: "排期输入不完整，请刷新排期后重新核对。" });
       return;
