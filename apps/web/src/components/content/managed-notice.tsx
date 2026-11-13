@@ -22,11 +22,11 @@ export function ManagedNoticeSections({ contentKey, compact = false }: { content
   </div>;
 }
 
-export function ManagedNoticeText({ contentKey }: { contentKey: string }) {
+export function ManagedNoticeText({ contentKey, fallback }: { contentKey: string; fallback?: string }) {
   const { status, resource } = usePublicContent(contentKey);
-  if (status === "loading") return <span>正在读取说明…</span>;
-  if (status === "error") return <span>说明暂时无法读取，具体条件以本次有效报价与条款为准。</span>;
+  if (status === "loading") return <span>{fallback ?? "正在读取说明…"}</span>;
+  if (status === "error") return <span>{fallback ?? "说明暂时无法读取，具体条件以本次有效报价与条款为准。"}</span>;
   const payload = resource?.payload?.kind === "notice" ? resource.payload : null;
-  if (!payload) return <span>当前说明尚未公布。</span>;
+  if (!payload) return <span>{fallback ?? "当前说明尚未公布。"}</span>;
   return <span>{extractPlate(payload.document).plainText}</span>;
 }

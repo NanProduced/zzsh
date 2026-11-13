@@ -10,7 +10,7 @@ export type PublicQuote = {
   catalogRevision?: string;
   /** Published STANDARD buyer ratio in 万哈夫币/元, before renter benefits; older APIs may omit it. */
   baseRenterHaffRatioWanPerYuan?: string | null;
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4;
   rentalMode?: "ordinary" | "custom" | "fast";
   currency: "CNY";
   ruleReleaseId: string | null;
@@ -613,7 +613,7 @@ export type MySupply = {
   };
   version: null | {
     id: string;
-    schemaVersion: 1 | 2 | 3;
+    schemaVersion: 1 | 2 | 3 | 4;
     sequence: string;
     revision?: string;
     origin?: string | null;

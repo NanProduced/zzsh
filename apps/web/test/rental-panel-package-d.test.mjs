@@ -279,7 +279,7 @@ test("D-01: autoPreview triggers GET /api/rental-price-preview, never POST /api/
       const ratioBadge = probe.host.querySelector(".account-haff-ratio-badge");
       assert.ok(ratioBadge);
       assert.equal(ratioBadge.textContent.trim(), "52万/元");
-      assert.equal(ratioBadge.getAttribute("title"), "发布版基础客价（已含平台价差，未计会员优惠）");
+      assert.equal(ratioBadge.getAttribute("title"), "发布版基础客价（未计会员优惠）");
 
       // Dock price matches preview total
       assert.match(probe.host.querySelector(".rental-dock-price strong").textContent, /¥270\.18/);

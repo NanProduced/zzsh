@@ -470,7 +470,7 @@ export function RentalPriceSummary({
                 {haffRow.ratioTag ? (
                   <span
                     className="account-haff-ratio-badge"
-                    title={reference.baseRatioReferenceOnly || quote?.quote.schemaVersion === 3 ? "基础租客比例，未计会员优惠；金额以冻结报价为准" : "发布版基础客价（已含平台价差，未计会员优惠）"}
+                    title={reference.baseRatioReferenceOnly || quote?.quote.schemaVersion === 3 ? "基础租客比例，未计会员优惠；金额以冻结报价为准" : "发布版基础客价（未计会员优惠）"}
                   >
                     {haffRow.ratioTag}
                   </span>

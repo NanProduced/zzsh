@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState, type ComponentProps, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ComponentProps, type PointerEvent, type ReactNode } from "react";
 import { Select } from "@base-ui/react/select";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
@@ -25,17 +25,129 @@ export function IntegerStepper({ label, value, onChange, disabled = false, max =
   label: string; value: string; onChange: (value: string) => void; disabled?: boolean; max?: string; unit?: string; id?: string; invalid?: boolean; describedBy?: string; required?: boolean; className?: string;
 }) {
   const valid = /^(0|[1-9]\d*)$/.test(value), limit = BigInt(max);
+  const latestRef = useRef({ value, disabled, limit, onChange });
+  latestRef.current = { value, disabled, limit, onChange };
+  const holdDelayRef = useRef<number | null>(null);
+  const holdIntervalRef = useRef<number | null>(null);
+  const didRepeatRef = useRef(false);
+
+  const stopRepeat = useCallback(() => {
+    if (holdDelayRef.current !== null) {
+      window.clearTimeout(holdDelayRef.current);
+      holdDelayRef.current = null;
+    }
+    if (holdIntervalRef.current !== null) {
+      window.clearInterval(holdIntervalRef.current);
+      holdIntervalRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => stopRepeat, [stopRepeat]);
+
   const change = (raw: string) => {
-    if(disabled)return;
+    if (disabled) return;
     if (raw === "") return onChange("");
     if (!/^\d+$/.test(raw) || BigInt(raw) > limit) return;
     onChange(BigInt(raw).toString());
   };
+
+  const stepBy = useCallback((delta: -1n | 1n): boolean => {
+    const current = latestRef.current;
+    if (current.disabled) return false;
+    const isCurrentValid = /^(0|[1-9]\d*)$/.test(current.value);
+    if (delta < 0n) {
+      if (!isCurrentValid) return false;
+      const numeric = BigInt(current.value);
+      if (numeric <= 0n || numeric > current.limit) return false;
+      const next = numeric - 1n;
+      current.onChange(next.toString());
+      return next > 0n;
+    }
+    if (current.value !== "" && !isCurrentValid) return false;
+    const numeric = isCurrentValid ? BigInt(current.value) : 0n;
+    if (numeric >= current.limit) return false;
+    const next = numeric + 1n;
+    current.onChange(next.toString());
+    return next < current.limit;
+  }, []);
+
+  const startRepeat = (delta: -1n | 1n, event: PointerEvent<HTMLButtonElement>) => {
+    if (disabled || event.button !== 0) return;
+    stopRepeat();
+    didRepeatRef.current = false;
+    holdDelayRef.current = window.setTimeout(() => {
+      holdDelayRef.current = null;
+      didRepeatRef.current = true;
+      if (!stepBy(delta)) return;
+      holdIntervalRef.current = window.setInterval(() => {
+        if (!stepBy(delta)) stopRepeat();
+      }, 80);
+    }, 360);
+  };
+
+  const minusDisabled = disabled || !valid || BigInt(value) === 0n || BigInt(value) > limit;
+  const plusDisabled = disabled || (value !== "" && !valid) || (valid && BigInt(value) >= limit);
+
   return <div className={`form-integer-stepper${className ? ` ${className}` : ""}${invalid ? " is-invalid" : ""}`} data-invalid={invalid || undefined}>
-    <button type="button" aria-label={`减少${label}`} disabled={disabled || !valid || BigInt(value) === 0n || BigInt(value)>limit} onClick={() => change((BigInt(value) - 1n).toString())}><Minus size={16} aria-hidden="true" /></button>
-    <Input id={id} inputMode="numeric" pattern="[0-9]*" maxLength={24} aria-label={label} aria-required={required || undefined} aria-invalid={invalid || undefined} aria-describedby={describedBy} value={value} disabled={disabled} onChange={event => change(event.target.value)} />
+    <button
+      type="button"
+      aria-label={`减少${label}`}
+      disabled={minusDisabled}
+      onPointerDown={(event) => startRepeat(-1n, event)}
+      onPointerUp={stopRepeat}
+      onPointerLeave={stopRepeat}
+      onPointerCancel={stopRepeat}
+      onBlur={stopRepeat}
+      onClick={(event) => {
+        if (event.detail > 0 && didRepeatRef.current) {
+          didRepeatRef.current = false;
+          return;
+        }
+        didRepeatRef.current = false;
+        stepBy(-1n);
+      }}
+    ><Minus size={16} aria-hidden="true" /></button>
+    <Input
+      id={id}
+      inputMode="numeric"
+      pattern="[0-9]*"
+      maxLength={24}
+      aria-label={label}
+      aria-required={required || undefined}
+      aria-invalid={invalid || undefined}
+      aria-describedby={describedBy}
+      value={value}
+      disabled={disabled}
+      onChange={event => change(event.target.value)}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          stepBy(1n);
+        } else if (event.key === "ArrowDown") {
+          event.preventDefault();
+          stepBy(-1n);
+        }
+      }}
+    />
     {unit ? <span className="form-integer-unit">{unit}</span> : null}
-    <button type="button" aria-label={`增加${label}`} disabled={disabled || (value !== "" && !valid) || (valid && BigInt(value) >= limit)} onClick={() => change((BigInt(value || "0") + 1n).toString())}><Plus size={16} aria-hidden="true" /></button>
+    <button
+      type="button"
+      aria-label={`增加${label}`}
+      disabled={plusDisabled}
+      onPointerDown={(event) => startRepeat(1n, event)}
+      onPointerUp={stopRepeat}
+      onPointerLeave={stopRepeat}
+      onPointerCancel={stopRepeat}
+      onBlur={stopRepeat}
+      onClick={(event) => {
+        if (event.detail > 0 && didRepeatRef.current) {
+          didRepeatRef.current = false;
+          return;
+        }
+        didRepeatRef.current = false;
+        stepBy(1n);
+      }}
+    ><Plus size={16} aria-hidden="true" /></button>
   </div>;
 }
 

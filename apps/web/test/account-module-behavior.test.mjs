@@ -631,7 +631,8 @@ test("R03: unknown delist/withdraw survives remount and recovers only the origin
     try {
       await first.render("accounts", "acc-recover");
       await first.clickDocButton(action === "delist" ? "下架账号" : "撤回审核");
-      if (action === "delist") { assert.ok(first.popup(), "下架需要二次确认"); await first.clickDocButton("确认下架"); }
+      assert.ok(first.popup(), "下架和撤回审核均需二次确认");
+      await first.clickDocButton(action === "delist" ? "确认下架" : "确认撤回审核");
       await first.waitFor(() => JSON.parse(first.window.sessionStorage.getItem(slot) ?? "null")?.uncertain === true);
       stored = first.window.sessionStorage.getItem(slot);
       assert.ok(stored, "a write responsibility must survive closing this component");
@@ -720,8 +721,10 @@ test("a cancelled in-flight legacy account requires a new account rather than ed
 });
 test("an archived account offers a new listing instead of editing an old draft", async () => {
   const supply=detailOf("acc-archived");supply.account.lifecycle="ARCHIVED";supply.version.reviewState="DRAFT";
-  const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[accountRow("acc-archived",{rentalState:"COMPLETED"})],nextCursor:null}):Response.json(supply)});
+  const p=await probe({viaFetch:async url=>url.includes("/me/accounts")?Response.json({items:[accountRow("acc-archived",{rentalState:"COMPLETED",review_state:"DRAFT"})],nextCursor:null}):Response.json(supply)});
   try {
+    await p.render("accounts");
+    assert.equal(p.host.querySelector('[data-account-row="acc-archived"] a[href^="/publish"]'),null);
     await p.render("accounts","acc-archived");
     assert.match(p.host.textContent,/已结束出租/);
     assert.ok([...p.host.querySelectorAll("a")].some(item=>item.textContent.includes("重新填写上架资料")&&item.getAttribute("href")==="/publish"));
@@ -1178,7 +1181,7 @@ test("unified account filters survive details, URL navigation and the old rented
 
 test("account status keeps simultaneous restrictions and does not label withdrawn or historical facts as drafts", async () => {
   const p=await probe({rows:[accountRow('occupied',{rentalState:'RENTED',staff_restricted:true,owner_paused:true}),accountRow('withdrawn',{rentalState:'DRAFT',review_state:'WITHDRAWN'}),accountRow('historical',{rentalState:'DRAFT',review_state:'IMPORTED_UNVERIFIED'}),accountRow('draft',{rentalState:'DRAFT',review_state:'DRAFT'})]});
-  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/原状态待核/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.equal(p.host.querySelectorAll('.mra-filter-rail .mra-chip').length,5);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
+  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/原状态待核/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.doesNotMatch(p.host.querySelector('.mra-filter-rail').textContent,/暂停接单/);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
 });
 
 test("identity page shows only server-masked name and document, and explains missing source", async () => {
@@ -1198,4 +1201,41 @@ test("identity page shows only server-masked name and document, and explains mis
     assert.match(missing.host.textContent, /实名已验证；证件信息暂未记录/);
     assert.doesNotMatch(missing.host.textContent, /张\*|110101/);
   } finally { await missing.close(); }
+});
+
+test("account detail delisting requires AlertDialog confirmation before sending POST", async () => {
+  const posts = [];
+  const supply = detailOf("acc-confirm");
+  supply.account.game_id = "game-confirm";
+  supply.account.lifecycle = "ACTIVE";
+  supply.version.id = "version-confirm";
+  supply.version.reviewState = "PUBLISHED";
+  supply.version.publication = { source: "OWNER_DIRECT" };
+  const viaFetch = async (url, init = {}) => {
+    if (init.method === "POST") {
+      posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      supply.account.lifecycle = "DELISTED";
+      supply.account.revision = "2";
+      return Response.json({ accountId: "acc-confirm", revision: "2", versionId: "version-confirm" });
+    }
+    if (url.includes("/me/accounts")) return Response.json({ items: [accountRow("acc-confirm")], nextCursor: null });
+    return Response.json(supply);
+  };
+  const p = await probe({ viaFetch });
+  try {
+    await p.render("accounts", "acc-confirm");
+    await p.waitFor(() => p.host.textContent.includes("下架账号"));
+    await p.clickDocButton("下架账号");
+    assert.ok(p.window.document.querySelector('[role="alertdialog"]'), "delisting opens ConfirmAlertDialog");
+    assert.equal(posts.length, 0, "opening dialog does not POST");
+    await p.clickDocButton("取消");
+    assert.equal(posts.length, 0, "canceling dialog sends 0 POSTs");
+    await p.clickDocButton("下架账号");
+    await p.clickDocButton("确认下架");
+    await p.waitFor(() => posts.length === 1);
+    assert.equal(posts.length, 1, "confirming dialog sends 1 POST");
+    assert.match(posts[0].url, /\/delist$/);
+  } finally {
+    await p.close();
+  }
 });
