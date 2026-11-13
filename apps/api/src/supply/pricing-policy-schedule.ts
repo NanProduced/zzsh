@@ -2,7 +2,7 @@ export { assertPublishedPricingAnnouncement } from "./pricing-announcement";
 import { updateVisibilitySql } from "../content/updates";
 import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
-import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
+import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeModeVersion, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
 import { computeContentHash, normalizePricingPolicy, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
@@ -266,14 +266,19 @@ export async function readEffectiveFixedFeePrice(client: PoolClient, gameId: str
 
 /** The caller holds the shared policy lock throughout this read and its eventual write. */
 export async function readFixedFeeTimeline(client: PoolClient, gameId: string, options: {
-  from: string; fee?: FeeRow; benefit?: BenefitRow; entitlement?: EntitlementRow; excludeEntitlementId?: string;
+  from: string; fee?: FeeRow; mode?: FixedFeeModeVersion; benefit?: BenefitRow; entitlement?: EntitlementRow; excludeEntitlementId?: string;
 }): Promise<FixedFeeTimelineInput | null> {
   const feeRows = (await client.query<FeeRow>(`SELECT ${instantSql("s.effective_at")} AS "effectiveAt",s.generation::text AS generation,
     p.haff_rule AS "haffRule",p.fixed_fee_rates AS rates FROM zzsh_supply.pricing_policy_schedule s
     LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=s.game_id AND p.status='SEALED'
     WHERE s.game_id=$1 AND s.pricing_model='FIXED_FEE'`, [gameId])).rows;
   if (options.fee) feeRows.push(options.fee);
-  if (feeRows.length === 0) return null;
+  const modes = (await client.query<FixedFeeModeVersion>(`SELECT ${instantSql("effective_at")} AS "effectiveAt",
+    generation::text AS generation,pricing_model AS "pricingModel" FROM zzsh_supply.pricing_mode_schedule
+    WHERE game_id=$1`, [gameId])).rows;
+  if (options.mode) modes.push(options.mode);
+  if (!feeRows.length && !modes.length) return null;
+  // Occupancy and staff restrictions can clear; only terminal accounts leave this protection.
   const published = (await client.query<{ mode: RentalMode; rates: unknown }>(`SELECT DISTINCT
     v.payload#>>'{declaration,attributes,rentalPricing,rentalMode}' AS mode, p.fixed_fee_rates AS rates
     FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
@@ -288,26 +293,23 @@ export async function readFixedFeeTimeline(client: PoolClient, gameId: string, o
       AND (p.fixed_fee_rates->>(v.payload#>>'{declaration,attributes,rentalPricing,rentalMode}'))::numeric =
         CASE WHEN v.payload#>>'{quoteValues,pricingInputs,commissionRate}' ~ '^0([.][0-9]{1,8})?$'
           THEN (v.payload#>>'{quoteValues,pricingInputs,commissionRate}')::numeric END
-    WHERE a.game_id=$1 AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND v.schema_version=4 AND v.review_state='PUBLISHED'`, [gameId])).rows;
+    WHERE a.game_id=$1 AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND v.schema_version=4 AND v.review_state='PUBLISHED'
+      AND NOT EXISTS (SELECT 1 FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.game g ON g.id=a.game_id
+        WHERE m.account_id=a.id AND g.code='delta' AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts')
+      AND NOT EXISTS (SELECT 1 FROM zzsh_order.rental_order o WHERE o.account_id=a.id AND o.status='COMPLETED')`, [gameId])).rows;
   const frozenFees = published.map(row => {
     try {
       if (!modeNames.includes(row.mode)) throw new Error();
       return { protectedModes: [row.mode], rates: parseFixedFeeRates(row.rates) };
     } catch { throw conflict("已上架账号的固定手续费率无法核实"); }
   });
-  const fees: FixedFeeTimelineInput["fees"][number][] = feeRows.map(row => {
-    const modes = sealedEnabledRentalModes(row.haffRule);
-    if (!modes || (row.haffRule as { schema?: unknown })?.schema !== "haff-ratio-v3") throw conflict("固定手续费出租规则无法核实");
-    let rates: ReturnType<typeof parseFixedFeeRates>;
-    try { rates = parseFixedFeeRates(row.rates); } catch { throw conflict("固定手续费率无法核实"); }
-    return { effectiveAt: row.effectiveAt, generation: row.generation, rates, protectedModes: modes };
-  });
+  const fees = feeRows.map(row => ({ effectiveAt: row.effectiveAt, generation: row.generation, rates: row.rates,
+    protectedModes: (row.haffRule as { schema?: unknown } | null)?.schema === "haff-ratio-v3"
+      ? sealedEnabledRentalModes(row.haffRule) : null }));
   let from: string;
   try {
-    const requested = normalizeTime(options.from);
-    const earliest = fees.map(row => normalizeTime(row.effectiveAt)).sort()[0];
-    if (!requested || !earliest) throw new Error("missing effective time");
-    from = requested > earliest ? requested : earliest;
+    from = normalizeTime(options.from) ?? "";
+    if (!from) throw new Error("missing effective time");
   } catch { throw conflict("固定手续费政策生效时间无法核实"); }
   // The current growth reader selects the latest approved effective version globally.
   const benefits = (await client.query<BenefitRow>(`SELECT ${instantSql("effective_at")} AS "effectiveAt",version::text AS version,policy_payload AS policy
@@ -317,7 +319,7 @@ export async function readFixedFeeTimeline(client: PoolClient, gameId: string, o
     FROM zzsh_iam.membership_entitlement WHERE game_id=$1 AND status IN ('ACTIVE','EXECUTED_PENDING_START') AND ends_at>$2::timestamptz
       AND ($3::text IS NULL OR id<>$3)`, [gameId, from, options.excludeEntitlementId ?? null])).rows;
   if (options.entitlement) entitlements.push(options.entitlement);
-  return { from, fees, frozenFees, benefits, entitlements };
+  return { from, fees, modes, frozenFees, benefits, entitlements };
 }
 
 /** Call with the shared policy lock held; membership policies currently apply across games. */
@@ -330,7 +332,8 @@ export async function assertFixedFeeMembershipChange(client: PoolClient, input: 
   if (!now || !requested) throw conflict("会员政策生效时间无法核实");
   const from = requested > now ? requested : now;
   const games = input.gameId ? [{ gameId: input.gameId }] : (await client.query<{ gameId: string }>(
-    `SELECT DISTINCT game_id AS "gameId" FROM zzsh_supply.pricing_policy_schedule WHERE pricing_model='FIXED_FEE' ORDER BY game_id`,
+    `SELECT game_id AS "gameId" FROM zzsh_supply.pricing_policy_schedule WHERE pricing_model='FIXED_FEE'
+      UNION SELECT game_id FROM zzsh_supply.pricing_mode_schedule WHERE pricing_model='FIXED_FEE' ORDER BY "gameId"`,
   )).rows;
   for (const { gameId } of games) {
     const timeline = await readFixedFeeTimeline(client, gameId, { from, benefit: input.benefit, entitlement: input.entitlement, excludeEntitlementId: input.excludeEntitlementId });
@@ -380,7 +383,7 @@ export async function initializeFixedFeePricing(client:PoolClient,input:{gameId:
   let rates:ReturnType<typeof parseFixedFeeRates>;
   try{rates=parseFixedFeeRates(price.rates);}catch{throw conflict("首次固定手续费率无法核实");}
   await assertPriceVersionResources(client,input.gameId,price.id,price.mode);
-  const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt,fee:{effectiveAt,generation:"1",rates,haffRule:price.haffRule}});
+  const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt,fee:{effectiveAt,generation:"1",rates,haffRule:price.haffRule},mode:{effectiveAt,generation:"1",pricingModel:"FIXED_FEE"}});
   if(!timeline)throw conflict("首次固定手续费政策无法核实");
   const validation=validateFixedFeeTimeline(timeline);
   if(!validation.valid)throw conflict(`固定手续费与会员或礼遇配置不兼容：${validation.reason}`);
@@ -499,13 +502,13 @@ export async function schedulePricingMode(client: PoolClient, actor: {userId:str
     const spread=await readEffectiveSpreadPrice(client,input.gameId,effectiveAt);
     if(!spread||spread.priceVersionId!==price.priceVersionId)throw conflict("价差价格政策无法核实");
   }
+  const generation=(BigInt(current.generation)+1n).toString(),id=newSupplyId("pricing_mode");
   if(input.pricingModel==="FIXED_FEE") {
-    const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt});
+    const timeline=await readFixedFeeTimeline(client,input.gameId,{from:effectiveAt,mode:{effectiveAt,generation,pricingModel:"FIXED_FEE"}});
     if(!timeline)throw conflict("固定手续费政策无法核实");
     const validation=validateFixedFeeTimeline(timeline);
     if(!validation.valid)throw conflict(`固定手续费与会员或礼遇配置不兼容：${validation.reason}`);
   }
-  const generation=(BigInt(current.generation)+1n).toString(),id=newSupplyId("pricing_mode");
   await client.query(`INSERT INTO zzsh_supply.pricing_mode_schedule
     (id,game_id,pricing_model,generation,effective_at,source,created_by_admin_id)
     VALUES ($1,$2,$3,$4::bigint,$5::timestamptz,'ADMIN',$6)`,[id,input.gameId,input.pricingModel,generation,effectiveAt,actor.userId]);

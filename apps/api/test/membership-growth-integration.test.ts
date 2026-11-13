@@ -101,7 +101,7 @@ test("grant and replace validate recipients and lock one subject before checking
         queries.push({ sql, args });
         if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
         if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
-        if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [] };
+        if (sql.includes("FROM zzsh_supply.pricing_policy_schedule") || sql.includes("FROM zzsh_supply.pricing_mode_schedule")) return { rows: [] };
         if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
         if (sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) return { rows: [{ id: "policy-approved", version: 1, policyPayload: policy, sourceRef: "synthetic-cost", ruleReleaseId: "release-1", priceVersionId: "price-v1" }] };
         if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: rule }] };
@@ -294,7 +294,7 @@ test("feature-off does not create a post-commit growth callback or approval exec
   }
 });
 
-function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }, releasePatch: Record<string, unknown> = {}) {
+function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }, releasePatch: Record<string, unknown> = {}, defaultModel: "FIXED_FEE" | "SPREAD" = "FIXED_FEE") {
   const metadata = { schema: "membership-growth-draft-v1", policy, versionNo: 1, ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: policy.sourceRef, effectiveAtUtc: policy.effectiveAt };
   const draftHash = createHash("sha256").update(canonicalize(metadata)).digest("hex");
   const inserted: Array<unknown[]> = [];
@@ -302,7 +302,16 @@ function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(),
     query: async (sql: string, args: unknown[] = []) => {
       if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
       if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
-      if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [] };
+      if (sql.includes("UNION SELECT game_id FROM zzsh_supply.pricing_mode_schedule"))
+        return { rows: releasePatch.fixedFeeRates ? [{ gameId: "game-1" }] : [] };
+      if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [{
+        effectiveAt: "2026-01-01T00:00:00.000000Z", generation: "1", haffRule: releasePatch.haffRule, rates: releasePatch.fixedFeeRates,
+      }] };
+      if (sql.includes("FROM zzsh_supply.pricing_mode_schedule")) return { rows: [{
+        effectiveAt: "2026-01-01T00:00:00.000000Z", generation: "1", pricingModel: defaultModel,
+      }] };
+      if (sql.includes("AS mode, p.fixed_fee_rates AS rates") || sql.includes("FROM zzsh_iam.membership_entitlement")
+        || sql.includes("WHERE status='APPROVED' AND effective_at IS NOT NULL")) return { rows: [] };
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
       if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: compatRule(), ...releasePatch }] };
       if (sql.includes("FROM zzsh_supply.price_line")) return { rows: [{ itemId: "item", unit: "PIECE" }] };
@@ -583,8 +592,11 @@ test("fixed-fee membership publication checks every applicable mode before writi
     assert.equal((await executeMembershipGrowthOperation(allowed.client as never, allowed.input as never, { userId: "boss" } as never, "allowed")).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
     assert.equal(allowed.inserted.length, 1);
     const deep = draftApprovalFixture(build("0.90"), release);
-    await assert.rejects(() => executeMembershipGrowthOperation(deep.client as never, deep.input as never, { userId: "boss" } as never, "deep"), /discount_exceeds_fee/);
+    await assert.rejects(() => executeMembershipGrowthOperation(deep.client as never, deep.input as never, { userId: "boss" } as never, "deep"), /BENEFIT_POLICY_INCOMPATIBLE/);
     assert.equal(deep.inserted.length, 0);
+    const spread = draftApprovalFixture(build("0.90"), release, "SPREAD");
+    assert.equal((await executeMembershipGrowthOperation(spread.client as never, spread.input as never, { userId: "boss" } as never, "spread")).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
+    assert.equal(spread.inserted.length, 1);
     const missing = draftApprovalFixture(build("0.95"), { ...release, fixedFeeRates: null });
     await assert.rejects(() => executeMembershipGrowthOperation(missing.client as never, missing.input as never, { userId: "boss" } as never, "missing"), /Fixed fee rates are unavailable/);
     assert.equal(missing.inserted.length, 0);
