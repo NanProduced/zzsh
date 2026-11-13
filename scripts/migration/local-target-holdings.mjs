@@ -35,6 +35,30 @@ export function deriveAdditionalSkinAmbiguities(dictionaryRows,types,knownRules,
   return {additionalRules,nonExactTokens};
 }
 
+export function deriveLegacySkinTokenRules(dictionaryRows,types,dynamic,fields) {
+  const tokenRules=AMBIGUOUS.map((token,index)=>{
+    const field=index===0?"knife_skin":"weapon_skin",matches=dictionaryRows.filter(row=>row.name===token&&row.value===token);
+    if(matches.length<2||matches.some(row=>!/^[1-9]\d*$/.test(row.id)||!/^[1-9]\d*$/.test(row.type_id)||!["0","1"].includes(row.is_delete)||!types.has(row.type_id)))
+      throw new Error("RETAINED_SKIN_AMBIGUITY_NOT_SOURCE_PROVED");
+    return {field,token,decision:"SOURCE_AMBIGUOUS",sources:matches.map(row=>({dictField:types.get(row.type_id).dict_type,dictTypeId:Number(row.type_id),dictDataId:Number(row.id),state:row.is_delete==="1"?"HISTORICAL_SOFT_DELETED":"CURRENT"}))};
+  });
+  if(!dynamic)return {tokenRules,nonExactTokens:new Set()};
+  const extra=deriveAdditionalSkinAmbiguities(dictionaryRows,types,tokenRules,fields);
+  tokenRules.push(...extra.additionalRules);
+  return {tokenRules,nonExactTokens:extra.nonExactTokens};
+}
+
+export function assertLegacySkinOverlaySources(mappingOverlay,dictionaryRows,types,dictionarySha256,sourceExtractSha256,dictionaryExtractSha256) {
+  if (!mappingOverlay) return;
+  if (mappingOverlay.body.sourceReceiptSha256!==dictionarySha256 || mappingOverlay.body.sourceExtractSha256!==sourceExtractSha256 || mappingOverlay.body.sourceDictionarySha256!==dictionaryExtractSha256)
+    throw new Error("HOLDING_OVERLAY_SOURCE_EXTRACT_CHANGED");
+  for (const mapping of mappingOverlay.body.mappings) {
+    const matches=dictionaryRows.filter(row=>row.name===mapping.token&&row.value===mapping.token);
+    if(matches.length!==mapping.sourceRows.length||mapping.sourceRows.some(ref=>!matches.some(row=>row.id===String(ref.dictDataId)&&row.type_id===String(ref.dictTypeId)&&types.get(row.type_id)?.dict_type===ref.dictField&&(row.is_delete==="1"?"HISTORICAL_SOFT_DELETED":"CURRENT")===ref.state)))
+      throw new Error("HOLDING_OVERLAY_SOURCE_DICTIONARY_CHANGED");
+  }
+}
+
 export function useDynamicSkinDictionaryRules(manifest,sourceReceipt,dictionaryReceipt,sourceSha256,dictionarySha256) {
   const capture=inspectLegacySkinDictionaryCapture(sourceReceipt);
   if (capture.status!=="SAME_SNAPSHOT_DYNAMIC_RULES") {
@@ -66,6 +90,7 @@ async function boundCapture(ctx, directory, expectedSha, name) {
 
 /** Four source columns remain source declarations. Names or catalog media never imply ownership. */
 export async function applyHoldingDomain(ctx, options) {
+  if (ctx.isNextMigration === true && typeof ctx.systemHoldings !== "function") throw new Error("NEXT_SYSTEM_HOLDINGS_ADAPTER_REQUIRED");
   const source = await boundCapture(ctx, options.source, options.sourceSha256, "accountDisplay");
   const dictionary = await boundCapture(ctx, options.dictionary, options.dictionarySha256, "skinDictionaryData");
   const dictionaryTypes = await boundCapture(ctx, options.dictionary, options.dictionarySha256, "skinDictionaryTypes");
@@ -101,30 +126,17 @@ export async function applyHoldingDomain(ctx, options) {
     if (types.has(row.id) || typeof row.dict_type !== "string" || !row.dict_type) throw new Error("DICTIONARY_TYPE_CONTEXT_UNBOUND");
     types.set(row.id, row);
   });
-  if (mappingOverlay) {
-    if (mappingOverlay.body.sourceReceiptSha256 !== options.dictionarySha256 || mappingOverlay.body.sourceExtractSha256 !== source.entry.sha256 || mappingOverlay.body.sourceDictionarySha256 !== dictionary.entry.sha256) throw new Error("HOLDING_OVERLAY_SOURCE_EXTRACT_CHANGED");
-    for (const mapping of mappingOverlay.body.mappings) {
-      const matches = dictionaryRows.filter(row => row.name === mapping.token && row.value === mapping.token);
-      if (matches.length !== mapping.sourceRows.length || mapping.sourceRows.some(ref => !matches.some(row => row.id === String(ref.dictDataId) && row.type_id === String(ref.dictTypeId) && types.get(row.type_id)?.dict_type === ref.dictField && (row.is_delete === "1" ? "HISTORICAL_SOFT_DELETED" : "CURRENT") === ref.state))) throw new Error("HOLDING_OVERLAY_SOURCE_DICTIONARY_CHANGED");
-    }
-  }
-  const tokenRules = AMBIGUOUS.map((token, index) => {
-    const field = index === 0 ? "knife_skin" : "weapon_skin";
-    const matches = dictionaryRows.filter(row => row.name === token && row.value === token);
-    if (matches.length < 2 || matches.some(row => !/^[1-9]\d*$/.test(row.id) || !/^[1-9]\d*$/.test(row.type_id) || !["0", "1"].includes(row.is_delete) || !types.has(row.type_id))) throw new Error("RETAINED_SKIN_AMBIGUITY_NOT_SOURCE_PROVED");
-    return { field, token, decision: "SOURCE_AMBIGUOUS", sources: matches.map(row => ({ dictField: types.get(row.type_id).dict_type, dictTypeId: Number(row.type_id), dictDataId: Number(row.id), state: row.is_delete === "1" ? "HISTORICAL_SOFT_DELETED" : "CURRENT" })) };
-  });
-  let nonExactTokens=new Set(),dynamicRules=false;
-  if (useDynamicSkinDictionaryRules(ctx.manifest,source.receipt,dictionary.receipt,options.sourceSha256,options.dictionarySha256)) {
-    const dynamic=deriveAdditionalSkinAmbiguities(dictionaryRows,types,tokenRules,modules.LEGACY_SKIN_FIELDS);
-    tokenRules.push(...dynamic.additionalRules);nonExactTokens=dynamic.nonExactTokens;dynamicRules=true;
-  }
+  assertLegacySkinOverlaySources(mappingOverlay,dictionaryRows,types,options.dictionarySha256,source.entry.sha256,dictionary.entry.sha256);
+  const dynamicRules=useDynamicSkinDictionaryRules(ctx.manifest,source.receipt,dictionary.receipt,options.sourceSha256,options.dictionarySha256);
+  const {tokenRules,nonExactTokens}=deriveLegacySkinTokenRules(dictionaryRows,types,dynamicRules,modules.LEGACY_SKIN_FIELDS);
   const gameId = ctx.state.gameBindings.delta;
   const catalogRevision = (await ctx.client.query("SELECT catalog_revision::text revision FROM zzsh_supply.game WHERE id=$1", [gameId])).rows[0]?.revision;
   if (mappingOverlay && (mappingOverlay.body.catalogRevision !== catalogRevision || mappingOverlay.body.gameId !== gameId)) throw new Error("HOLDING_OVERLAY_CATALOG_CONTEXT_CHANGED");
   const catalog = (await ctx.client.query(`SELECT id AS "skinId",game_id AS "gameId",source_field AS "sourceField",source_token AS "sourceToken",naming_state AS "namingState",enabled,form_visible AS "formVisible"${mappingOverlay ? ',source_namespace AS "sourceNamespace",name,owner_kind AS "ownerKind"' : ''} FROM zzsh_supply.skin WHERE game_id=$1 ORDER BY id`, [gameId])).rows;
   const index = modules.buildLegacySkinIndex(catalog, tokenRules, mappingOverlay?.body), catalogDigest = hash(canonical(catalog));
-  const binding = { sourceSha256: options.sourceSha256, dictionarySha256: options.dictionarySha256, catalogRevision, catalogDigest, sourceExtractSha256: source.entry.sha256, tokenRulesExtractSha256: options.dictionarySha256, tokenRulesDigest: hash(canonical(tokenRules)), ...(mappingOverlay ? { mappingOverlayFileSha256: options.mappingOverlaySha256, mappingOverlaySha256: mappingOverlay.sha256 } : {}) };
+  const binding = { sourceSha256: options.sourceSha256, dictionarySha256: options.dictionarySha256, catalogRevision, catalogDigest, sourceExtractSha256: source.entry.sha256, tokenRulesExtractSha256: options.dictionarySha256, tokenRulesDigest: hash(canonical(tokenRules)), ...(mappingOverlay ? { mappingOverlayFileSha256: options.mappingOverlaySha256, mappingOverlaySha256: mappingOverlay.sha256 } : {}),
+    ...(ctx.isNextMigration === true ? { receiptMode: "SYSTEM_ACCOUNT_V1", sourceDirectory: resolve(options.source), dictionaryDirectory: resolve(options.dictionary),
+      ...(options.mappingOverlay ? { mappingOverlayPath: resolve(options.mappingOverlay) } : {}) } : {}) };
   ctx.state.additiveInputs ??= {};
   if (ctx.state.additiveInputs.holdings && canonical(ctx.state.additiveInputs.holdings) !== canonical(binding)) throw new Error("HOLDINGS_CHECKPOINT_INPUT_CHANGED");
   ctx.state.additiveInputs.holdings = binding;
@@ -165,16 +177,23 @@ export async function applyHoldingDomain(ctx, options) {
   }
   ctx.save();
   const writer = ctx.mod("supply/legacy-observation");
-  let existing;
-  await ctx.runItems("skinHoldings", ready, async row => {
+  const prepare = row => {
     const bytes = JSON.stringify({ ...sourceContext, rows: [row.sealedRow] }), admission = writer.prepareLegacySkinHoldingsAdmission(bytes, hash(bytes));
     const prepared = writer.prepareLegacySkinHoldingsInput(admission, row.sourceId, catalog, row.evidenceRef);
-    const result = await writer.recordLegacySkinHoldings(ctx.client, prepared.accountId, prepared.input, ctx.actor, admission);
-    return { ...result, replayed: existing.has(prepared.accountId) };
-  }, 50, async batch => {
-    // This read classifies metrics only; the writer still validates the existing row.
-    existing = new Set((await ctx.client.query("SELECT account_id FROM zzsh_supply.legacy_skin_holding WHERE account_id=ANY($1::text[])", [batch.map(row => row.sealedRow.accountId)])).rows.map(row => row.account_id));
-  });
+    return { ...prepared, admission };
+  };
+  if (ctx.isNextMigration === true) {
+    await ctx.runBatches("skinHoldings", ready, batch => ctx.systemHoldings(batch.map(prepare)), 50);
+  } else {
+    let existing;
+    await ctx.runItems("skinHoldings", ready, async row => {
+      const prepared = prepare(row);
+      const result = await writer.recordLegacySkinHoldings(ctx.client, prepared.accountId, prepared.input, ctx.actor, prepared.admission);
+      return { ...result, replayed: existing.has(prepared.accountId) };
+    }, 50, async batch => {
+      existing = new Set((await ctx.client.query("SELECT account_id FROM zzsh_supply.legacy_skin_holding WHERE account_id=ANY($1::text[])", [batch.map(row => row.sealedRow.accountId)])).rows.map(row => row.account_id));
+    });
+  }
   const actual = (await ctx.client.query("SELECT count(*)::int count FROM zzsh_supply.legacy_skin_holding WHERE evidence_ref LIKE $1" + (ctx.holdingAccountIds ? " AND account_id=ANY($2::text[])" : ""), ctx.holdingAccountIds ? [ctx.manifest.sourceRef + ":skin-holdings:%", ctx.holdingAccountIds] : [ctx.manifest.sourceRef + ":skin-holdings:%"])).rows[0].count;
   const phase = ctx.state.phases.skinHoldings;
   ctx.state.skinHoldingsReconciliation = { expectedComplete: ready.length, actual, runtimeQuarantined: phase.quarantined, onlyCompleteDeclarationsAttached: true, noCatalogAliasOrIdentityChanges: true, neverRestoredTradingEligibility: true };

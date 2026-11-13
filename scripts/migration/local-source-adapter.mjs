@@ -336,6 +336,7 @@ const SYSTEM_AUDIT_DOMAINS = Object.freeze({
     users: {objectType:"user", actions:["user.legacy_owner.migrated"]},
     accounts: {objectType:"rental_account", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
     display: {objectType:"rental_account", actions:["supply.legacy.display_snapshot_recorded"]},
+    holdings: {objectType:"rental_account", actions:["supply.legacy.skin_holdings_recorded"]},
     orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
     continuation: {objectType:"rental_order", actions:["order.legacy.continuation.import"]},
     liability: {objectType:"rental_order", actions:["order.legacy.liability.import"]},

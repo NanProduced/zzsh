@@ -1527,6 +1527,13 @@
       "when": 1794456000019,
       "tag": "0217_completed_guarantee_refund",
       "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1794456000020,
+      "tag": "0218_legacy_skin_holding_source",
+      "breakpoints": true
     }
   ]
 }

@@ -960,7 +960,14 @@ export type LegacySkinHoldingsResult = {
   accountId: string;
   observationVersionId: string;
   attachedSkins: string[];
+  replayed?: boolean;
 };
+
+export function legacySkinHoldingsMigrationDigest(accountId: string, input: LegacySkinHoldingsInput, admission: LegacySkinHoldingsAdmission): string {
+  const { bindingDigest } = admittedSkinRow(admission, input.legacyId);
+  const skinIds = Array.from(new Set(input.skinIds)).sort();
+  return fingerprintRequest("supply.legacy.skin_holdings", accountId, { ...input, skinIds, sourceAdmissionDigest: bindingDigest });
+}
 
 /**
  * Controlled additive seam: attach verified legacy skin holdings to an immutable observation version.
@@ -971,7 +978,7 @@ export async function recordLegacySkinHoldings(
   client: PoolClient,
   accountId: string,
   input: LegacySkinHoldingsInput,
-  actor: LegacyImportActor,
+  actor: LegacyImportActor | SystemAccountMigrationActor,
   admission: LegacySkinHoldingsAdmission,
 ): Promise<LegacySkinHoldingsResult> {
   if (!input || typeof input !== "object") throw invalid("Invalid legacy skin holdings input");
@@ -1006,17 +1013,23 @@ export async function recordLegacySkinHoldings(
   const idempotencyKey = sha256Hex(
     JSON.stringify([operation, input.sourceSystem, input.sourceEntity, legacyId, accountIdText, input.sourceDigest]),
   );
-  const fingerprint = fingerprintRequest(operation, accountIdText, { ...input, skinIds, sourceAdmissionDigest: bindingDigest });
+  const fingerprint = legacySkinHoldingsMigrationDigest(accountIdText, input, admission);
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_ACCOUNT_MIGRATION" ? actor : null;
+  const systemSource = { operation: "HOLDINGS" as const, accountId: accountIdText, sourceSystem: input.sourceSystem,
+    sourceEntity: input.sourceEntity, legacyId, sourceDigest: input.sourceDigest, payloadDigest: fingerprint };
 
   let account: PublishingAccount | undefined;
   const result = await withIdempotency(
     client,
-    { realm: "admin", principalId: actor.id, operation, resourceId: accountIdText },
+    { realm: systemActor ? "system" : "admin", principalId: actor.id, operation, resourceId: accountIdText },
     idempotencyKey,
     fingerprint,
-    async () => {
+    async (replay) => {
       account = await lockPublishingAccount(client, accountIdText);
-      await authorizeLegacyAdmin(client, actor, account);
+      if (systemActor) {
+        if (replay?.publishRequired) throw conflict("Original system skin holding receipt differs");
+        await authorizeSystemAccountMigration(client, systemActor, systemSource);
+      } else await authorizeLegacyAdmin(client, actor as LegacyImportActor, account);
 
       // Verify immutable observation version
       const versionRow = (
@@ -1052,6 +1065,31 @@ export async function recordLegacySkinHoldings(
       if (sealedRow.accountId !== accountIdText || sealedRow.observationVersionId !== observationVersionId || sealedRow.sourceDigest !== input.sourceDigest || source.gameId !== account!.game_id)
         throw conflict("Legacy skin source target does not match the admitted map and version");
 
+      if (systemActor) {
+        const proof = (await client.query<{ base: number; baseAll: number; audits: number; allAudits: number; migrationId: string | null; manifest: string | null }>(`
+          SELECT (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='supply.publication.legacy_observed'
+            AND a.object_type='rental_account' AND a.object_id=$1 AND a.outcome='SUCCESS' AND a.actor_type='system'
+            AND a.actor_id=$2 AND a.session_id IS NULL AND a.legacy_migration_manifest_sha256=$3
+            AND a.details->>'sourceDigest'=$4 AND a.details->>'legacyId'=$5 AND a.details#>>'{after,currentVersionId}'=$6) AS base,
+          (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='supply.publication.legacy_observed'
+            AND a.object_type='rental_account' AND a.object_id=$1 AND a.outcome='SUCCESS') AS "baseAll",
+          (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='supply.legacy.skin_holdings_recorded'
+            AND a.object_type='rental_account' AND a.object_id=$1 AND a.outcome='SUCCESS' AND a.actor_type='system'
+            AND a.actor_id=$2 AND a.session_id IS NULL AND a.legacy_migration_manifest_sha256=$3
+            AND a.details->>'sourceDigest'=$4 AND a.details->>'legacyId'=$5 AND a.details->>'observationVersionId'=$6
+            AND a.details->>'holdingDigest'=$7 AND a.details->>'evidenceRef'=$8 AND a.details->'attachedSkins'=$9::jsonb
+            AND a.details->>'payloadDigest'=$10 AND a.details#>>'{sourceAdmission,bindingDigest}'=$11) AS audits,
+          (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='supply.legacy.skin_holdings_recorded'
+            AND a.object_type='rental_account' AND a.object_id=$1 AND a.outcome='SUCCESS') AS "allAudits",
+          h.created_by_migration_id AS "migrationId",h.migration_manifest_sha256 AS manifest
+          FROM (SELECT 1) x LEFT JOIN zzsh_supply.legacy_skin_holding h ON h.account_id=$1`,
+        [accountIdText, systemActor.id, systemActor.sourceDatasetSha256, input.sourceDigest, legacyId, observationVersionId,
+          input.holdingDigest, input.evidenceRef, JSON.stringify(skinIds), fingerprint, bindingDigest])).rows[0];
+        if (!proof || proof.base !== 1 || proof.baseAll !== 1 || (replay
+          ? proof.migrationId !== systemActor.id || proof.manifest !== systemActor.sourceDatasetSha256 || proof.audits !== 1 || proof.allAudits !== 1
+          : proof.migrationId !== null || proof.allAudits !== 0)) throw conflict("Original system skin holding evidence differs");
+      }
+
       // Check existing persistent holding in zzsh_supply.legacy_skin_holding
       const existing = (
         await client.query<{ holding_digest: string; skin_ids: string[]; source_digest: string; observation_version_id: string }>(
@@ -1060,6 +1098,7 @@ export async function recordLegacySkinHoldings(
         )
       ).rows[0];
       if (existing) {
+        if (systemActor && !replay) throw conflict("Original system skin holding receipt is missing");
         const existingSet = new Set(existing.skin_ids);
         const newSet = new Set(skinIds);
         const setsEqual = existingSet.size === newSet.size && skinIds.every((s) => existingSet.has(s));
@@ -1075,6 +1114,8 @@ export async function recordLegacySkinHoldings(
         // SK11-A03: Different set conflicts!
         throw conflict("Legacy skin holdings conflict with recorded holding for this account");
       }
+
+      if (systemActor && replay) throw conflict("Original system skin holding is missing");
 
       return false;
     },
@@ -1173,8 +1214,8 @@ export async function recordLegacySkinHoldings(
       await client.query(
         `INSERT INTO zzsh_supply.legacy_skin_holding(
            account_id, observation_version_id, source_system, source_entity, legacy_id,
-           source_digest, holding_digest, skin_ids, evidence_ref, created_by_admin_id
-         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+           source_digest, holding_digest, skin_ids, evidence_ref, created_by_admin_id${systemActor ? ",created_by_migration_id,migration_manifest_sha256" : ""}
+         ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10${systemActor ? ",$11,$12" : ""})`,
         [
           accountIdText,
           observationVersionId,
@@ -1185,14 +1226,15 @@ export async function recordLegacySkinHoldings(
           input.holdingDigest,
           skinIds,
           input.evidenceRef,
-          actor.id,
+          systemActor ? null : actor.id,
+          ...(systemActor ? [systemActor.id, systemActor.sourceDatasetSha256] : []),
         ],
       );
 
       await recordAudit(client, {
-        actorType: "admin",
+        actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        sessionId: actor.sessionId,
+        ...(systemActor ? { legacyMigrationManifestSha256: systemActor.sourceDatasetSha256 } : { sessionId: (actor as LegacyImportActor).sessionId }),
         requestId: actor.requestId,
         action: "supply.legacy.skin_holdings_recorded",
         objectType: "rental_account",
@@ -1200,6 +1242,9 @@ export async function recordLegacySkinHoldings(
         outcome: "SUCCESS",
         reason: "旧站账号已核实皮肤持有记录保存；关联至历史观察版本与独立持有事实表",
         details: {
+          ...(systemActor ? { sourceDatasetSha256: systemActor.sourceDatasetSha256,
+            migrationRunDigest: systemActor.id.slice("legacy-account-migration:".length), payloadDigest: fingerprint,
+            after: { observationVersionId } } : {}),
           sourceSystem: input.sourceSystem,
           sourceEntity: input.sourceEntity,
           legacyId,
@@ -1208,7 +1253,7 @@ export async function recordLegacySkinHoldings(
           observationVersionId,
           attachedSkins: skinIds,
           evidenceRef: input.evidenceRef,
-          sourceAdmission: { packageSha256: admission.packageSha256, bindingDigest, sourceExtractSha256: source.sourceExtractSha256,
+          sourceAdmission: { packageSha256: admission.packageSha256, bindingDigest, ...(systemActor ? { requestFingerprint: fingerprint } : {}), sourceExtractSha256: source.sourceExtractSha256,
             sourceCutoff: source.sourceCutoff, sourceUpdatedAtUtc: sealedRow.sourceUpdatedAtUtc, targetBindingsSha256: source.targetBindingsSha256,
             tokenRulesVersion: source.tokenRulesVersion, tokenRulesExtractSha256: source.tokenRulesExtractSha256,
             tokenRulesDigest: source.tokenRulesDigest, catalogRevision, ...(source.mappingOverlay ? { mappingOverlay: { sha256: source.mappingOverlay.sha256, version: source.mappingOverlay.body.version, reviewRef: source.mappingOverlay.body.reviewRef, sourceDictionarySha256: source.mappingOverlay.body.sourceDictionarySha256 } } : {}) },
@@ -1226,5 +1271,7 @@ export async function recordLegacySkinHoldings(
       };
     },
   );
-  return result.body as LegacySkinHoldingsResult;
+  const expected = { accountId: accountIdText, observationVersionId, attachedSkins: skinIds };
+  if (systemActor && (result.status !== 200 || canonicalize(result.body) !== canonicalize(expected))) throw conflict("Original system skin holding receipt differs");
+  return systemActor ? { ...expected, replayed: result.replayed } : result.body as LegacySkinHoldingsResult;
 }

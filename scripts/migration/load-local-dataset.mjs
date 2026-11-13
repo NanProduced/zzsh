@@ -692,6 +692,24 @@ function systemDisplayAdapter(){
       });
     };
 }
+function systemHoldingsAdapter(){
+    const module=mod('supply/legacy-observation'),writer=module.recordLegacySkinHoldings;
+    if(typeof writer!=='function'||typeof module.legacySkinHoldingsMigrationDigest!=='function')throw new Error('NEXT_SYSTEM_HOLDINGS_ADAPTER_REQUIRED');
+    return async entries=>{
+      if(!fenceHeld||!fenceEpoch||!Array.isArray(entries)||!entries.length||entries.length>50||new Set(entries.map(row=>row.accountId)).size!==entries.length)
+        throw new Error('NEXT_SYSTEM_HOLDINGS_BATCH_INVALID');
+      const epoch=fenceEpoch,admitted=new Set(entries.map(row=>JSON.stringify({operation:'HOLDINGS',accountId:row.accountId,
+        sourceSystem:row.input.sourceSystem,sourceEntity:row.input.sourceEntity,legacyId:row.input.legacyId,sourceDigest:row.input.sourceDigest,
+        payloadDigest:module.legacySkinHoldingsMigrationDigest(row.accountId,row.input,row.admission)})));
+      const holdingActor={kind:'SYSTEM_ACCOUNT_MIGRATION',id:systemAccountId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+        requestId:'core-legacy-dataset-'+expectedOid,assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');
+          await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
+        assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_HOLDINGS_SOURCE_NOT_ADMITTED');}};
+      return systemUserMigration.withSystemAccountMigrationBatch(client,holdingActor,async()=>{
+        const results=[];for(const row of entries)results.push(await writer(client,row.accountId,row.input,holdingActor,row.admission));return results;
+      });
+    };
+}
 function systemOrderEvidenceAdapter(operation){
     if(!['CONTINUATION','LIABILITY','COMPLETED_COMMISSION'].includes(operation))throw new Error('NEXT_SYSTEM_ORDER_OPERATION_INVALID');
     const writer=operation==='CONTINUATION'?mod('order/legacy-continuation-evidence').importLegacyContinuationEvidence:
@@ -841,7 +859,8 @@ try {
         }
         else if (holdingsOnly) {
             const { applyHoldingDomain } = await import("./local-target-holdings.mjs");
-            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") });
+            await applyHoldingDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event,
+              isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, systemHoldings:registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemHoldingsAdapter() : null }, { source: option("--holding-source"), sourceSha256: option("--holding-source-sha"), dictionary: option("--skin-dictionary"), dictionarySha256: option("--skin-dictionary-sha"), mappingOverlay: option("--holding-mapping-overlay"), mappingOverlaySha256: option("--holding-mapping-overlay-sha") });
             state.status = "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (openingOnly) {

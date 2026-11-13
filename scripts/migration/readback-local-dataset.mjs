@@ -4,8 +4,9 @@ import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { privatePath, readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { verifyOpeningCapture } from "./local-opening-proof.mjs";
+import { assertLegacySkinOverlaySources, deriveLegacySkinTokenRules, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { readSystemOpeningBatch } from "./system-opening-readback.mjs";
-import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readVerifiedSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
@@ -519,7 +520,103 @@ try {
       report.display.accountFullPayout = payout;
     }
     const hm = state.generatedPhases.skinHoldings, hp = JSON.parse(readFileSync(await checked(join(dirname(checkpoint), "phases"), "skinHoldings.json", hm.sha256)));
-    await compare("holdings", hp.rows, async batch => (await query("SELECT legacy_id key,account_id,observation_version_id,source_digest,holding_digest,skin_ids,evidence_ref FROM zzsh_supply.legacy_skin_holding WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts' AND legacy_id=ANY($1::text[])", [batch.map(r => r.sourceId)])).rows, (r, a) => a && a.account_id === r.sealedRow.accountId && a.observation_version_id === r.sealedRow.observationVersionId && a.source_digest === r.sealedRow.sourceDigest && a.holding_digest === r.expectedHoldingDigest && a.evidence_ref === r.evidenceRef && canonical([...a.skin_ids].sort()) === canonical([...r.expectedSkinIds].sort()), hm.rows);
+    const holdingInput=state.additiveInputs.holdings, systemHoldings=holdingInput?.receiptMode==='SYSTEM_ACCOUNT_V1';
+    if (holdingInput?.receiptMode!==undefined&&!systemHoldings || state.binding.systemAccountId&&!systemHoldings || systemHoldings&&!systemCore)
+      throw new Error('SYSTEM_HOLDINGS_RECEIPT_MODE_UNCONFIRMED');
+    let capturedHoldings,holdingWriter,holdingModule,holdingIndex,holdingNonExact;
+    if (systemHoldings) {
+      const directory=privatePath(holdingInput.sourceDirectory),receipt=readBoundSelectedSourceReceipt(directory,holdingInput.sourceSha256),entry=receipt.files?.accountDisplay;
+      if (receipt.status!=='CAPTURED_READ_ONLY'||receipt.rollbackConfirmed!==true||receipt.clientClosed!==true
+        ||receipt.containerId!==listedSourceReceipt.containerId||receipt.database!==listedSourceReceipt.database
+        ||!entry||entry.file!==basename(entry.file)||entry.sha256!==hp.sourceContext.sourceExtractSha256||entry.sha256!==holdingInput.sourceExtractSha256
+        ||hp.sourceContext.tokenRulesExtractSha256!==holdingInput.dictionarySha256
+        ||hp.sourceContext.sourceCutoff!==(manifest.sourceCutoff.endsWith('Z')?manifest.sourceCutoff:new Date(manifest.sourceCutoff).toISOString())) throw new Error('HOLDINGS_SOURCE_READBACK_UNCONFIRMED');
+      const dictionaryDirectory=privatePath(holdingInput.dictionaryDirectory),dictionaryReceipt=readBoundSelectedSourceReceipt(dictionaryDirectory,holdingInput.dictionarySha256);
+      const dictionaryEntry=dictionaryReceipt.files?.skinDictionaryData,typeEntry=dictionaryReceipt.files?.skinDictionaryTypes;
+      if(dictionaryReceipt.status!=='CAPTURED_READ_ONLY'||dictionaryReceipt.rollbackConfirmed!==true||dictionaryReceipt.clientClosed!==true
+        ||dictionaryReceipt.containerId!==listedSourceReceipt.containerId||dictionaryReceipt.database!==listedSourceReceipt.database
+        ||![dictionaryEntry,typeEntry].every(value=>value&&value.file===basename(value.file)))throw new Error('HOLDINGS_DICTIONARY_READBACK_UNCONFIRMED');
+      const dictionaryRows=[],types=new Map();
+      await readVerifiedSourceRows(privatePath(join(dictionaryDirectory,dictionaryEntry.file)),dictionaryEntry,row=>dictionaryRows.push(row));
+      await readVerifiedSourceRows(privatePath(join(dictionaryDirectory,typeEntry.file)),typeEntry,row=>{
+        if(types.has(row.id)||typeof row.dict_type!=='string'||!row.dict_type)throw new Error('DICTIONARY_TYPE_CONTEXT_UNBOUND');types.set(row.id,row);
+      });
+      holdingModule=mod('legacy-load/legacy-skin-holdings');
+      let overlay;
+      if(holdingInput.mappingOverlayPath){
+        const overlayBytes=readFileSync(privatePath(holdingInput.mappingOverlayPath));
+        if(hash(overlayBytes)!==holdingInput.mappingOverlayFileSha256)throw new Error('HOLDING_OVERLAY_FILE_CHANGED');
+        const body=holdingModule.parseLegacySkinMappingOverlay(JSON.parse(overlayBytes));overlay={sha256:hash(canonical(body)),body};
+        if(canonical(overlay)!==canonical(hp.sourceContext.mappingOverlay)||overlay.sha256!==holdingInput.mappingOverlaySha256)throw new Error('HOLDING_OVERLAY_READBACK_CHANGED');
+      }else if(hp.sourceContext.mappingOverlay||holdingInput.mappingOverlaySha256)throw new Error('HOLDING_OVERLAY_READBACK_REQUIRED');
+      assertLegacySkinOverlaySources(overlay,dictionaryRows,types,holdingInput.dictionarySha256,entry.sha256,dictionaryEntry.sha256);
+      const dynamic=useDynamicSkinDictionaryRules(manifest,receipt,dictionaryReceipt,holdingInput.sourceSha256,holdingInput.dictionarySha256);
+      const derived=deriveLegacySkinTokenRules(dictionaryRows,types,dynamic,holdingModule.LEGACY_SKIN_FIELDS);
+      if(canonical(derived.tokenRules)!==canonical(hp.sourceContext.tokenRules)||hash(canonical(derived.tokenRules))!==holdingInput.tokenRulesDigest)
+        throw new Error('HOLDINGS_TOKEN_RULES_READBACK_CHANGED');
+      if(hp.sourceContext.tokenRulesVersion!==(dynamic?'SUP-SKIN-source-dictionary-ambiguities-v2':'SUP-SKIN-020-nine-source-ambiguities-v1'))throw new Error('HOLDINGS_TOKEN_RULES_READBACK_CHANGED');
+      if(hp.sourceContext.gameId!==state.gameBindings.delta)throw new Error('HOLDINGS_GAME_READBACK_CHANGED');
+      const targetBindings=(await query("SELECT legacy_id,account_id,version_id,source_digest FROM zzsh_supply.legacy_supply_map WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts'")).rows;
+      targetBindings.sort((a,b)=>a.legacy_id<b.legacy_id?-1:a.legacy_id>b.legacy_id?1:0);
+      if(hash(canonical(targetBindings))!==hp.sourceContext.targetBindingsSha256)throw new Error('HOLDINGS_TARGET_BINDINGS_READBACK_CHANGED');
+      const game=(await query('SELECT catalog_revision::text revision FROM zzsh_supply.game WHERE id=$1',[hp.sourceContext.gameId])).rows[0];
+      if(game?.revision!==holdingInput.catalogRevision||game.revision!==hp.sourceContext.catalogRevision)throw new Error('HOLDINGS_CATALOG_READBACK_CHANGED');
+      const catalog=(await query(`SELECT id AS "skinId",game_id AS "gameId",source_field AS "sourceField",source_token AS "sourceToken",naming_state AS "namingState",enabled,form_visible AS "formVisible"${overlay?',source_namespace AS "sourceNamespace",name,owner_kind AS "ownerKind"':''} FROM zzsh_supply.skin WHERE game_id=$1 ORDER BY id`,[hp.sourceContext.gameId])).rows;
+      if(hash(canonical(catalog))!==holdingInput.catalogDigest)throw new Error('HOLDINGS_CATALOG_READBACK_CHANGED');
+      holdingIndex=holdingModule.buildLegacySkinIndex(catalog,derived.tokenRules,overlay?.body);holdingNonExact=dynamic?derived.nonExactTokens:null;
+      const wanted=new Set(hp.rows.map(row=>row.sourceId));
+      if(wanted.size!==hp.rows.length)throw new Error('HOLDINGS_SOURCE_DUPLICATE');
+      capturedHoldings=new Map();
+      await readVerifiedSourceRows(privatePath(join(directory,entry.file)),entry,row=>{
+        if(wanted.has(row.id)){if(capturedHoldings.has(row.id))throw new Error('HOLDINGS_SOURCE_DUPLICATE');capturedHoldings.set(row.id,row);}
+      });
+      holdingWriter=mod('supply/legacy-observation');
+    }
+    const holdingAttribution=systemHoldings?{expected:hm.rows,matched:0,sourceReconstructed:true}:null;
+    await compare("holdings", hp.rows, async batch => {
+      const values=(await query(`SELECT legacy_id key,account_id,observation_version_id,source_digest,holding_digest,skin_ids,evidence_ref,
+        to_jsonb(h)->>'created_by_migration_id' migration_id,to_jsonb(h)->>'migration_manifest_sha256' migration_manifest
+        FROM zzsh_supply.legacy_skin_holding h WHERE source_system='legacy_mysql_restore' AND source_entity='la_rental_accounts' AND legacy_id=ANY($1::text[])`,[batch.map(r=>r.sourceId)])).rows;
+      if(systemHoldings){
+        const ids=values.map(row=>row.account_id),audits=await readSystemMigrationAudits(query,'holdings',ids);
+        const scopes=ids.map(id=>JSON.stringify(['system',state.binding.systemAccountId,'supply.legacy.skin_holdings',id]));
+        const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required
+          FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows;
+        const grouped=Map.groupBy(receipts,row=>row.scope_key);
+        for(const row of values){row.systemAudits=audits.get(row.account_id);row.systemReceipts=grouped.get(JSON.stringify(['system',state.binding.systemAccountId,'supply.legacy.skin_holdings',row.account_id]));}
+      }
+      return values;
+    }, (r,a) => {
+      if(!a||a.account_id!==r.sealedRow.accountId||a.observation_version_id!==r.sealedRow.observationVersionId
+        ||a.source_digest!==r.sealedRow.sourceDigest||a.holding_digest!==r.expectedHoldingDigest||a.evidence_ref!==r.evidenceRef
+        ||canonical([...a.skin_ids].sort())!==canonical([...r.expectedSkinIds].sort()))return false;
+      if(systemHoldings){
+        const original=capturedHoldings.get(r.sourceId),columns=Object.fromEntries(['knife_skin','agent_skin','weapon_skin','gold_skin'].map(field=>[field,original?.[field]]));
+        if(!original||canonical(columns)!==canonical(r.sealedRow.columns)||orderRead.legacyEpochTimestamp(original.update_time)!==r.sealedRow.sourceUpdatedAtUtc)return false;
+        if(holdingNonExact&&hasNonExactSkinSourceToken(columns,holdingModule.LEGACY_SKIN_FIELDS,holdingModule.splitLegacySkinColumn,holdingNonExact))return false;
+        const mapped=holdingModule.mapLegacySkinHolding({accountKey:r.sourceId,gameId:hp.sourceContext.gameId,columns},holdingIndex,hp.sourceContext.catalogRevision);
+        const mappedIds=holdingModule.declarableLegacySkinIds(mapped);
+        if(!mappedIds||mapped.digest!==r.expectedHoldingDigest||canonical([...mappedIds].sort())!==canonical([...r.expectedSkinIds].sort()))return false;
+        const bytes=JSON.stringify({...hp.sourceContext,rows:[r.sealedRow]}),admission=holdingWriter.prepareLegacySkinHoldingsAdmission(bytes,hash(bytes));
+        const input={observationVersionId:r.sealedRow.observationVersionId,sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',legacyId:r.sourceId,
+          sourceDigest:r.sealedRow.sourceDigest,holdingDigest:r.expectedHoldingDigest,skinIds:r.expectedSkinIds,evidenceRef:r.evidenceRef,columns:r.sealedRow.columns,catalogRevision:hp.sourceContext.catalogRevision};
+        const fingerprint=holdingWriter.legacySkinHoldingsMigrationDigest(a.account_id,input,admission),scope=JSON.stringify(['system',state.binding.systemAccountId,'supply.legacy.skin_holdings',a.account_id]);
+        const key=hash(JSON.stringify(['supply.legacy.skin_holdings',input.sourceSystem,input.sourceEntity,input.legacyId,a.account_id,input.sourceDigest]));
+        const receipt=a.systemReceipts?.[0],audit=a.systemAudits?.[0];
+        if(a.migration_id!==state.binding.systemAccountId||a.migration_manifest!==state.binding.datasetSha256
+          ||!matchesSystemMigrationAudit(a.systemAudits,{objectId:a.account_id,action:'supply.legacy.skin_holdings_recorded',actorId:state.binding.systemAccountId,
+            manifestSha256:state.binding.datasetSha256,sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:r.sourceId,
+            sourceDigest:input.sourceDigest,payloadDigest:fingerprint,observationVersionId:a.observation_version_id})
+          ||audit.details?.holdingDigest!==input.holdingDigest||audit.details?.evidenceRef!==input.evidenceRef
+          ||canonical(audit.details?.attachedSkins)!==canonical([...input.skinIds].sort())||audit.details?.sourceAdmission?.packageSha256!==hash(bytes)
+          ||audit.details?.sourceAdmission?.requestFingerprint!==fingerprint||a.systemReceipts?.length!==1||receipt.scope_key!==scope||receipt.key!==key
+          ||receipt.request_fingerprint!==fingerprint||receipt.response_status!==200||receipt.publish_required!==false
+          ||canonical(receipt.response_body)!==canonical({accountId:a.account_id,observationVersionId:a.observation_version_id,attachedSkins:[...input.skinIds].sort()}))return false;
+        holdingAttribution.matched++;
+      }
+      return true;
+    }, hm.rows);
+    if(holdingAttribution)report.holdings.systemAttribution={...holdingAttribution,status:holdingAttribution.matched===holdingAttribution.expected?'VERIFIED':'MISMATCH'};
     const holdingAudits = new Map((await query("SELECT object_id,details->'sourceAdmission' admission FROM zzsh_iam.audit_event WHERE action='supply.legacy.skin_holdings_recorded' AND outcome='SUCCESS'")).rows.map(r => [r.object_id, r.admission]));
     for (const row of hp.rows) {
       const audit = holdingAudits.get(row.sealedRow.accountId);

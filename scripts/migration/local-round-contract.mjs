@@ -424,6 +424,15 @@ export function systemDisplayAttributionMatches(checkpoint,readback){
   &&phase.nextIndex===input.rows&&display?.expected===input.rows&&display.matched===input.rows
   &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
 }
+export function systemHoldingsAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemAccountId;if(id===undefined)return true;
+ const input=checkpoint?.additiveInputs?.holdings,phase=checkpoint?.phases?.skinHoldings,count=checkpoint?.generatedPhases?.skinHoldings?.rows;
+ const result=readback?.holdings,proof=result?.systemAttribution;
+ return /^legacy-account-migration:[a-f0-9]{64}$/.test(id)&&input?.receiptMode==='SYSTEM_ACCOUNT_V1'
+  &&Number.isSafeInteger(count)&&count>=0&&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===count
+  &&result?.expected===count&&result.matched===count&&proof?.status==='VERIFIED'
+  &&proof.expected===count&&proof.matched===count&&proof.sourceReconstructed===true;
+}
 export function systemContinuationAttributionMatches(checkpoint,readback){
  const id=checkpoint?.binding?.systemOrderId;if(id===undefined)return true;
  const input=checkpoint?.generatedPhases?.continuationEvidence,phase=checkpoint?.phases?.continuationEvidence;
@@ -633,6 +642,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(!systemCoreAttributionMatches(checkpoint,readback))issues.push("ROUND_SYSTEM_SOURCE_ATTRIBUTION_UNCONFIRMED");
     if(!systemInvitationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_INVITATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemDisplayAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_DISPLAY_ATTRIBUTION_UNCONFIRMED');
+    if(!systemHoldingsAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_HOLDINGS_ATTRIBUTION_UNCONFIRMED');
     if(!systemContinuationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_CONTINUATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemLiabilityAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_LIABILITY_ATTRIBUTION_UNCONFIRMED');
     if(!systemCompletedCommissionAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_COMPLETED_COMMISSION_ATTRIBUTION_UNCONFIRMED');
