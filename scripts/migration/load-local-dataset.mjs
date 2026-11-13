@@ -18,7 +18,7 @@ const args = process.argv.slice(2), option = name => { const i = args.indexOf(na
 const execute = args.includes("--execute"), recover = args.includes("--recover"), strictBatch = args.includes("--strict-round-batch");
 if (execute && recover) throw new Error("ONE_LOAD_ACTION_REQUIRED");
 if (!execute && !recover) {
-    console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression", required: ["--execute", "--dataset", "--dataset-sha", "--oid", "--nonce", "--actor-id", "--session-id", "--credentials", "--out", "--funds-source", "--funds-source-sha"], connections: 0, credentialReads: 0 }));
+    console.log(JSON.stringify({ action: "PLAN", target: "zzsh_test_regression", required: ["--execute", "--dataset", "--dataset-sha", "--oid", "--nonce", "--credentials", "--out", "--funds-source", "--funds-source-sha"], legacyActorRequired: ["--actor-id", "--session-id"], connections: 0, credentialReads: 0 }));
     process.exit(0);
 }
 if (process.version !== "v24.20.0")
@@ -113,8 +113,13 @@ if (execute && !["--enrich-display", "--import-openings", "--enrich-holdings", "
     const path=join(dataset,file.file),hashes=await preflightInvitationFile(path,file.sha256,manifest,mod("finance/legacy-invitation-facts"));
     invitationPacketCount=hashes.length;invitationSource=()=>readBoundInvitationPackets(path,file.sha256,hashes);
 }
-const actor = { id: option("--actor-id"), userId: option("--actor-id"), realm: "admin", sessionId: option("--session-id"), requestId: "core-legacy-dataset-" + expectedOid };
-if (!actor.id || !actor.sessionId)
+// Resolve the registered target before choosing a system or legacy administrator source.
+const registered = loadRegisteredTarget(option("--credentials"));
+const actorId = option("--actor-id"), sessionId = option("--session-id");
+if ((actorId !== undefined || sessionId !== undefined) && (!actorId || !sessionId))
+    throw new Error("EXISTING_MAINTENANCE_ACTOR_REQUIRED");
+const actor = actorId && sessionId ? { id: actorId, userId: actorId, realm: "admin", sessionId, requestId: "core-legacy-dataset-" + expectedOid } : null;
+if (registered.migrationProfile !== NEXT_MIGRATION_PROFILE && !actor)
     throw new Error("EXISTING_MAINTENANCE_ACTOR_REQUIRED");
 const statePath = join(output, "checkpoint.json"), eventsPath = join(output, "events.jsonl");
 function createOutput() {
@@ -126,9 +131,7 @@ function createOutput() {
     if (spawnSync("icacls", [output, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"], { encoding: "utf8", windowsHide: true }).status !== 0)
         throw new Error("OUTPUT_ACL_FAILED");
 }
-// The registered target is resolved before the checkpoint binding is built, so a checkpoint can only
-// ever be compared against the target its registry names - never against a literal in this script.
-const registered = loadRegisteredTarget(option("--credentials"));
+// Checkpoint bindings use the registered target, never an unverified database name.
 if (execute && importsCore && strictBatch && hasIdentityProfiles && registered.migrationProfile === NEXT_MIGRATION_PROFILE
     && typeof subject.recordLegacyIdentitySubjects !== "function") throw new Error("NEXT_IDENTITY_SUBJECT_BATCH_BUILD_REQUIRED");
 assertNextBusinessPopulation(population, registered.migrationProfile === NEXT_MIGRATION_PROFILE);
@@ -191,7 +194,7 @@ const systemOrderId = usesSystemOrder ? systemUserMigration.systemOrderMigration
 const systemFinanceId = usesSystemFinance ? systemUserMigration.systemFinanceMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemInvitationId = usesSystemInvitation ? systemUserMigration.systemInvitationMigrationId(sha(manifestBytes), systemUserTarget) : null;
 
-const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
+const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor?.id ?? null, sessionId: actor?.sessionId ?? null, ...keyBinding,
     ...(systemUserId ? {systemUserId} : {}),
     ...(systemAccountId ? {systemAccountId} : {}),
     ...(systemOrderId ? {systemOrderId} : {}),
@@ -821,7 +824,10 @@ try {
                 if (occupied !== false) throw new Error("ROUND_TARGET_NOT_EMPTY");
             }
         }
-        await mod("finance/personal-finance-maintenance").authorizeFinanceMaintenance(client, actor);
+        if (registered.migrationProfile === NEXT_MIGRATION_PROFILE && !actor) {
+            if (!fenceHeld || !fenceEpoch) throw new Error("TARGET_FENCE_EPOCH_LOST");
+            await assertMigrationFenceHeld(client, registered, fenceEpoch);
+        } else await mod("finance/personal-finance-maintenance").authorizeFinanceMaintenance(client, actor);
         for (const code of Object.values(manifest.gameBindings)) {
             const game = (await client.query("SELECT id,enabled FROM zzsh_supply.game WHERE code=$1", [code])).rows[0];
             if (!game || !game.enabled)

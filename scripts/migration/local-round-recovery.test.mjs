@@ -67,7 +67,7 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1, evidence: { status: { realNameBound: false } } } }, { sourceId: "102", input: { id: 2, evidence: { status: { realNameBound: false } } } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag, withoutActor = false } = {}) {
   if(migrationProfile===NEXT_MIGRATION_PROFILE && populationMode===undefined){
     populationMode='SELECTED_BUSINESS_SCOPE';selectedScope=planSelectedBusinessScope({accounts:[],orders:[],pays:[]});selectedFixture=true;
   }
@@ -114,7 +114,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   files.set("test-profile-secret", profileSecret);
   const proc = { version: "v24.20.0", env: { DB_PASSWORD_FILE: "test-secret", USER_IDENTITY_SUBJECT_HMAC_KEY_FILE: "test-secret", USER_LEGACY_IDENTITY_PROFILE_KEY_FILE: "test-profile-secret" }, argv: ["node", "script",
     recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...(failure?.startsWith("empty-coverage") ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
-    "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
+    "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, ...(withoutActor ? [] : ["--actor-id", "test-user", "--session-id", "test-session"]),
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
   let commitAck = false, diskFailed = false;
@@ -251,6 +251,11 @@ test('NEXT explicitly refuses unbound additive plans before creating output or c
 test('next-profile core batches acquire the transaction fence before writes and roll back on failure', async () => {
   const options = { instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:'LOCAL_MIGRATION_NEXT_V1', fenceFixture:true, verifiedFirst:true };
   const applied = await load(options); assert.ifError(applied.error);
+  const systemOnly = await load({ ...options, withoutActor: true }); assert.ifError(systemOnly.error);
+  assert.equal(systemOnly.state.binding.actorId, null); assert.equal(systemOnly.state.binding.sessionId, null);
+  assert(systemOnly.commands.includes('FENCE')); assert(systemOnly.commands.includes('COMMIT'));
+  const oldProfile = await load({ withoutActor: true });
+  assert.match(oldProfile.error?.message ?? '', /EXISTING_MAINTENANCE_ACTOR_REQUIRED/); assert(!oldProfile.commands.includes('LOCK'));
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));

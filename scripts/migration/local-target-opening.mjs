@@ -80,7 +80,7 @@ export async function applyOpeningDomain(ctx, directory, manifestSha256) {
   }
   ctx.state.additiveInputs.opening = reviewed;
   ctx.save();
-  const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId }, resource: openingReviewResource(ctx), notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };
+  const common = { ref: "CORE_FULL_STORED_OPENING_" + ctx.state.binding.oid, attempt: "opening-" + manifestSha256.slice(0, 16), ...(ctx.isNextMigration ? {} : { actor: { userId: ctx.actor.userId, sessionId: ctx.actor.sessionId } }), resource: openingReviewResource(ctx), notBefore: reviewed.notBefore, expiresAt: reviewed.expiresAt };
   const expected = { subjects: 0, positive: 0, zero: 0, amountCents: 0n, isolated: [] };
   async function* candidates() {
     for await (const row of (sourceProof ? readBoundSourceBatches(file,entry,sourceProof) : ctx.readRows(file))) {

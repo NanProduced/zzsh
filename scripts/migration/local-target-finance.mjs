@@ -86,7 +86,7 @@ export async function applyFinancialDomains(ctx) {
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
     const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
     const resource = openingReviewResource(ctx);
-    const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), actor: { userId: actor.userId, sessionId: actor.sessionId }, resource, ...(state.executionWindow ?? { notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString() }), cutoff: sourceCutoff };
+    const reviewCommon = { ref: "CORE_FULL_LEGACY_" + state.binding.oid, attempt: "dataset-" + state.binding.datasetSha256.slice(0, 16), ...(ctx.isNextMigration ? {} : { actor: { userId: actor.userId, sessionId: actor.sessionId } }), resource, ...(state.executionWindow ?? { notBefore: state.startedAt, expiresAt: new Date(Date.parse(state.startedAt) + 12 * 3600000).toISOString() }), cutoff: sourceCutoff };
     // Empty coverage is streamed: each 400-entry chunk is frozen to its own restricted file as soon
     // as it is complete, so a full-source round never holds one entry per subject and source kind.
     const emptyDir = join(ctx.output, "phases", "financeEmptyCoverage");
