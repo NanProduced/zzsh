@@ -4,7 +4,7 @@ import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { assertJoinpayRefundTerminalFact, type NativeRefundTerminalFact } from "../order/joinpay-refund-source";
 import { verifyPrestartRefundLiability } from "./prestart-refund-liability";
 import type { PrestartPaymentBasis } from "../order/prestart-termination";
-import { assertLocalSandboxRefundTerminalFact, persistLocalSandboxRefundTerminalFact, isEcsDemoRefundTerminalFact } from "../order/local-sandbox-refund-source";
+import { assertLocalSandboxRefundTerminalFact, persistLocalSandboxRefundTerminalFact, usesIsolatedRefundEvidenceColumn } from "../order/local-sandbox-refund-source";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,179}$/;
 const SHA = /^[a-f0-9]{64}$/;
@@ -165,7 +165,7 @@ async function consumeRentalRefundTerminal(client:PoolClient,input:{fact:NativeR
       VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`,
     [line.id, plan.eventId, line.line, line.account, line.debit, line.credit, line.subject, JSON.stringify(line.details)]);
   }
-  const evidenceColumn=local&&isEcsDemoRefundTerminalFact(fact)?'demo_terminal_evidence_id':'terminal_evidence_id';
+  const evidenceColumn=local&&usesIsolatedRefundEvidenceColumn(fact)?'demo_terminal_evidence_id':'terminal_evidence_id';
   const updated = await client.query(`UPDATE zzsh_order.channel_refund_intent SET state=$2,budget_disposition=$3,
     ${evidenceColumn}=$4,terminal_root_id=$5,terminal_event_id=$6,provider_refund_trx_no=$7,completed_at=$8,revision=revision+1
     WHERE id=$1 AND revision=$9 AND budget_disposition='ALLOCATED' AND NOT requires_review`,

@@ -3,8 +3,9 @@ import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { conflict, fingerprintRequest, invalid, notFound } from "../supply/supply-util";
-import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, demoForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
+import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, assertSandboxOriginalPayment, sandboxForChannelRequestCapability, fixedFeeRefundRegistration, demoForChannelRequestCapability, wireAmountForCents } from "./channel-payment-store";
 import { localFinancialSandboxRegistration } from "../finance/local-financial-sandbox-resource";
+import { fixedFeeTestResource } from "../finance/controlled-fixed-fee-resource";
 import { assertEcsTestDemoOrderAdmission, readEcsTestDemoRegistration } from "../finance/ecs-test-demo-resource";
 import { verifyPrestartRefundLiability } from "../finance/prestart-refund-liability";
 import type { PrestartPaymentBasis } from "./prestart-termination";
@@ -22,6 +23,7 @@ type RefundRow = {
   responsibility_version_hash: string; refund_order_no: string; amount_cents: string; currency: "CNY";
   idempotency_key: string; request_fingerprint: string; state: RefundIntentState|'SUCCEEDED'|'FAILED'; revision: string;
   budget_disposition?:'ALLOCATED'|'CONSUMED'|'RELEASED';
+  sandbox_registration_ref?: string | null;
   lease_version: string; lease_owner: string | null; due_at: string;
 };
 const COLUMNS = `id, posting_id, order_id, payment_confirmation_id, renter_user_id, payment_source, merchant_identity_id,
@@ -29,7 +31,8 @@ const COLUMNS = `id, posting_id, order_id, payment_confirmation_id, renter_user_
   amount_cents::text AS amount_cents, currency, idempotency_key, request_fingerprint, state,
   revision::text AS revision, lease_version::text AS lease_version, lease_owner,
   to_char(due_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_at,
-  COALESCE(to_jsonb(channel_refund_intent)->>'budget_disposition','ALLOCATED') AS budget_disposition`;
+  COALESCE(to_jsonb(channel_refund_intent)->>'budget_disposition','ALLOCATED') AS budget_disposition,
+  to_jsonb(channel_refund_intent)->>'sandbox_registration_ref' AS sandbox_registration_ref`;
 
 export type RefundIntent = Readonly<{
   intentId: string; postingId: string|null; orderId: string; paymentConfirmationId: string; renterUserId: string;
@@ -53,6 +56,14 @@ async function admitted(client: PoolClient, capability: unknown): Promise<void> 
   }
   const row = (await client.query(`SELECT current_setting('transaction_isolation') AS isolation`)).rows[0];
   if (row?.isolation !== "read committed") throw conflict("Refund allocation requires READ COMMITTED");
+}
+
+async function assertFixedFeeRefundRegistration(client: PoolClient, capability: unknown, reference: string, active: boolean) {
+  const proof = fixedFeeRefundRegistration(capability);
+  if (!proof || proof.reference !== reference || !(await client.query(`SELECT 1 FROM zzsh_order.fixed_fee_refund_registration
+    WHERE reference=$1 AND registration_digest=$2 AND (NOT $3::boolean OR active)`, [reference, proof.digest, active])).rows[0]) {
+    throw notFound();
+  }
 }
 const validId = (value: unknown): value is string => typeof value === "string" && ID.test(value);
 const freshId = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
@@ -122,6 +133,9 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
     WHERE posting_id=$1 AND idempotency_key=$2`, [input.postingId, key])).rows[0];
   if (original) {
     if (original.payment_source!=="CONTROLLED") throw notFound();
+    if (original.merchant_identity_id === fixedFeeTestResource.merchantScopeId && original.sandbox_registration_ref) {
+      await assertFixedFeeRefundRegistration(client, input.capability, original.sandbox_registration_ref, false);
+    }
     if (original.request_fingerprint !== fingerprint) {
       throw new SecurityApiError(409, API_V1_ERROR_CODES.IDEMPOTENCY_KEY_REUSED, "Refund key reused with different amount");
     }
@@ -130,7 +144,9 @@ export async function createNativeRefundIntent(client: PoolClient, input: {
   await assertRefundBudget(client,basis,input.postingId,input.amountCents);
   const refundNo = refundNumber(basis,input.postingId,key);
   const sandbox=sandboxForChannelRequestCapability(input.capability),demo=demoForChannelRequestCapability(input.capability),
-    reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:demo?readEcsTestDemoRegistration(demo).registration.reference:undefined;
+    fixedFee = fixedFeeRefundRegistration(input.capability),
+    reference=sandbox?localFinancialSandboxRegistration(sandbox).registration.reference:demo?readEcsTestDemoRegistration(demo).registration.reference:fixedFee?.reference;
+  if (fixedFee) await assertFixedFeeRefundRegistration(client, input.capability, fixedFee.reference, true);
   const row = (await client.query<RefundRow>(`INSERT INTO zzsh_order.channel_refund_intent
     (id,posting_id,order_id,payment_confirmation_id,renter_user_id,payment_source,merchant_identity_id,
      original_payment_trx_no,original_payment_order_no,responsibility_version_hash,refund_order_no,
@@ -210,11 +226,15 @@ export async function createSandboxLiabilityRefundIntent(client:PoolClient,input
 async function lockControlledRefundContext(client: PoolClient, capability: unknown, intentId: string): Promise<RefundRow> {
   const sql = `SELECT ${COLUMNS} FROM zzsh_order.channel_refund_intent WHERE id=$1 AND payment_source='CONTROLLED'`;
   const sandbox = sandboxForChannelRequestCapability(capability), demo = demoForChannelRequestCapability(capability);
-  const original = sandbox || demo ? (await client.query<RefundRow>(sql, [intentId])).rows[0] : undefined;
-  if (sandbox || demo) {
+  const registered = sandbox || demo || fixedFeeRefundRegistration(capability);
+  const original = registered ? (await client.query<RefundRow>(sql, [intentId])).rows[0] : undefined;
+  if (registered) {
     if (!original) throw notFound();
     assertSyntheticChannelRequestOrder(capability, original.order_id);
     assertSandboxOriginalPayment(capability, { source: original.payment_source, merchant_scope_id: original.merchant_identity_id });
+    if (original.merchant_identity_id === fixedFeeTestResource.merchantScopeId && original.sandbox_registration_ref) {
+      await assertFixedFeeRefundRegistration(client, capability, original.sandbox_registration_ref, true);
+    }
     // The sandbox UPDATE guard also takes funds; match submit/terminal funds -> user -> intent order.
     await lockRefundFunds(client, original.payment_source, original.merchant_identity_id, original.original_payment_trx_no);
     if ((await client.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE', [original.renter_user_id])).rowCount !== 1) throw notFound();
@@ -223,8 +243,9 @@ async function lockControlledRefundContext(client: PoolClient, capability: unkno
   if (!row || row.payment_source !== "CONTROLLED") throw notFound();
   assertSyntheticChannelRequestOrder(capability, row.order_id);
   assertSandboxOriginalPayment(capability, { source: row.payment_source, merchant_scope_id: row.merchant_identity_id });
+  if (!registered && row.merchant_identity_id === fixedFeeTestResource.merchantScopeId && row.sandbox_registration_ref) throw notFound();
   if (original && (["order_id", "posting_id", "payment_confirmation_id", "renter_user_id", "payment_source", "merchant_identity_id",
-    "original_payment_trx_no", "original_payment_order_no", "responsibility_version_hash", "refund_order_no", "amount_cents", "currency"] as const)
+    "original_payment_trx_no", "original_payment_order_no", "responsibility_version_hash", "refund_order_no", "amount_cents", "currency", "sandbox_registration_ref"] as const)
     .some(key => row[key] !== original[key])) throw conflict("Original local refund binding changed while acquiring its locks");
   return row;
 }
@@ -251,6 +272,22 @@ export async function claimRefundIntent(client: PoolClient, input: {
 }
 
 /** 内部恢复 reader，无状态推进；对象授权与对外字段裁剪由后续路由负责，本包不提供 HTTP。 */
+export async function readFixedFeeRefundByOriginalNumber(client: PoolClient, refundOrderNo: string, capability: unknown) {
+  const proof = fixedFeeRefundRegistration(capability);
+  if (!proof || !validId(refundOrderNo)) throw invalid();
+  await admitted(client, capability);
+  const row = (await client.query<RefundRow & { terminal_complete: boolean }>(`SELECT ${COLUMNS},
+      CASE WHEN state='SUCCEEDED' THEN zzsh_order.local_controlled_refund_terminal_complete(id) ELSE false END AS terminal_complete
+    FROM zzsh_order.channel_refund_intent WHERE refund_order_no=$1 AND payment_source='CONTROLLED'
+      AND merchant_identity_id=$2 AND sandbox_registration_ref=$3
+      AND EXISTS(SELECT 1 FROM zzsh_order.fixed_fee_refund_registration r WHERE r.reference=$3 AND r.registration_digest=$4)`,
+    [refundOrderNo,proof.merchant,proof.reference,proof.digest])).rows[0];
+  if (!row) return null;
+  assertSyntheticChannelRequestOrder(capability,row.order_id);
+  if (row.state === "SUCCEEDED" && row.terminal_complete !== true) throw conflict("Original fixed-fee refund terminal batch is incomplete");
+  return view(row);
+}
+
 export async function readRecoverableRefundIntent(client: PoolClient, intentId: string, capability: unknown): Promise<RefundIntent | null> {
   if (!validId(intentId)) throw invalid();
   await admitted(client, capability);
@@ -258,6 +295,9 @@ export async function readRecoverableRefundIntent(client: PoolClient, intentId: 
   if (row?.payment_source!=="CONTROLLED") return null;
   assertSyntheticChannelRequestOrder(capability, row.order_id);
   assertSandboxOriginalPayment(capability, { source: row.payment_source, merchant_scope_id: row.merchant_identity_id });
+  if (row.merchant_identity_id === fixedFeeTestResource.merchantScopeId && row.sandbox_registration_ref) {
+    await assertFixedFeeRefundRegistration(client, capability, row.sandbox_registration_ref, false);
+  }
   return view(row);
 }
 

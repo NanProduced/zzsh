@@ -4,7 +4,7 @@ import { SecurityApiError, withTransaction } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { claimRefundIntent, lockRefundFunds, recordRefundTransportFailure, type RefundLease } from "./channel-refund-store";
-import { assertLocalSandboxRefundResource, captureLocalSandboxRefundTerminalFact, localRefundRegistration, type LocalSandboxRefundOptions } from "./local-sandbox-refund-source";
+import { assertLocalSandboxRefundResource, captureLocalSandboxRefundTerminalFact, localRefundRegistration, type LocalSandboxRefundOptions, type ControlledRefundOptions } from "./local-sandbox-refund-source";
 import { consumeLocalSandboxRentalRefundTerminal } from "../finance/native-rental-refund-store";
 import { demoFinanceScope } from "../finance/ecs-test-demo-resource";
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -19,7 +19,7 @@ async function confirmed<T>(pool:Pool,intentId:string,phase:LocalSandboxRefundCo
   });}catch(error){if(completed)throw new LocalSandboxRefundCommitUnknown(intentId,phase);throw error;}
 }
 
-async function submitOriginalOperation(c:PoolClient,options:LocalSandboxRefundOptions,lease:RefundLease){
+async function submitOriginalOperation(c:PoolClient,options:ControlledRefundOptions,lease:RefundLease){
   const r=await assertLocalSandboxRefundResource(c,options),p=localRefundRegistration(options),i=lease.intent;
   await lockRefundFunds(c,'CONTROLLED',i.originalPayment.merchantIdentityId,i.originalPayment.transactionNo);
   await c.query('SELECT id FROM zzsh_auth_user."user" WHERE id=$1 FOR UPDATE',[i.renterUserId]);
@@ -68,7 +68,7 @@ export async function runEcsDemoRefundStep(pool:Pool,options:Extract<LocalSandbo
 
 /** One bounded local step: the first ACK is lost after durable fake-channel truth. Only QUERY of
  * that original operation can then consume the liability. No HTTP outcome or real provider call. */
-export async function runLocalSandboxRefundStep(pool:Pool,options:LocalSandboxRefundOptions,intentId:string,workerId='local_refund_'+randomUUID().replaceAll('-','')){
+export async function runLocalSandboxRefundStep(pool:Pool,options:ControlledRefundOptions,intentId:string,workerId='local_refund_'+randomUUID().replaceAll('-','')){
   if(typeof intentId!=='string'||!ID.test(intentId)||typeof workerId!=='string'||!ID.test(workerId))throw invalid();
   const lease=await confirmed(pool,intentId,'CLAIM',async c=>{
     await assertLocalSandboxRefundResource(c,options);
