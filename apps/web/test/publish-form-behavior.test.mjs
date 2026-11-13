@@ -1416,6 +1416,19 @@ test("the fast entry converts an ordinary draft to a fast declaration before sav
   }
 });
 
+test("fixed-fee v3 keeps the fast rental selection and saves its selected ratio", async () => {
+  const attrs = { ...declaration().attributes, safe_box_code: "box-a", vit_level: 4, bear_level: 4, rentalPricing: { rentalMode: "ordinary" } };
+  const p = await probe({ mode: "fast", accountId: "account_1", options: { ...optionsV2, pricingSchema: "haff-ratio-v3" },
+    mine: () => supplyOf(declaration({ attributes: attrs })) });
+  try {
+    await p.render();
+    assert.doesNotMatch(p.text(), /极速入口当前不可用/);
+    await p.type('input[aria-label="兑换比例"]', "48");
+    await p.clickButton("保存草稿");
+    assert.deepEqual(p.calls.filter(call => call.op === "saveDraft").at(-1).body.attributes.rentalPricing, { rentalMode: "fast", ownerRatioB: "48" });
+  } finally { await p.close(); }
+});
+
 test("a disabled fast mode and a v1 rule both refuse to pretend fast pricing", async () => {
   const disabledFast = await probe({
     mode: "fast", accountId: "account_1", options: optionsV2NoFast,
