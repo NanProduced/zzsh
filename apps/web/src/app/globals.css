@@ -473,6 +473,13 @@ html[data-theme="dark"] .thumb-fallback {
   transform: scale(1.08);
   background: rgba(12, 16, 22, 0.82);
 }
+.account-card-fav-wrap .favorite:active {
+  transform: scale(0.95);
+}
+.account-card-fav-wrap .favorite:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.6), 0 0 0 4px var(--color-accent-brand);
+}
 
 /* ==========================================================================
    Account Card - List Mode (.account-card--list)
@@ -489,7 +496,7 @@ html[data-theme="dark"] .thumb-fallback {
   border: 1px solid var(--color-border-default, #e2e8f0);
   background: var(--color-bg-card, #ffffff);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
 }
 
@@ -501,10 +508,13 @@ html[data-theme="dark"] .account-card--list {
 
 .account-card--list:hover {
   border-color: color-mix(in srgb, var(--color-delta-accent, #059669) 45%, var(--color-border-default, #e2e8f0));
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1.5px);
 }
 
 html[data-theme="dark"] .account-card--list:hover {
   border-color: rgba(16, 185, 129, 0.4);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
 }
 
 /* 1. Media Thumbnail & Badges */
@@ -1198,13 +1208,24 @@ html[data-theme="dark"] .account-list-finance .finance-total-val--unconfirmed {
   font-size: 13px;
   font-weight: 700;
   text-decoration: none;
-  transition: background 0.15s ease, filter 0.15s ease;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, filter 0.15s ease, transform 0.15s ease;
   white-space: nowrap;
 }
 
 .account-list-cta-btn:hover {
   background: #d97706;
   color: #ffffff;
+}
+
+.account-list-cta-btn:active {
+  transform: scale(0.97);
+}
+
+.account-list-cta-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-bg-canvas, #ffffff), 0 0 0 4px var(--color-accent-brand, #ea580c);
 }
 
 html[data-theme="dark"] .account-list-cta-btn {
@@ -1233,13 +1254,24 @@ html[data-theme="dark"] .account-list-cta-btn:hover {
   place-items: center;
   color: #94a3b8;
   cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+  user-select: none;
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease, transform 0.15s ease;
 }
 
-.account-list-fav .favorite:hover,
-.account-list-fav .favorite:focus-visible {
+.account-list-fav .favorite:active {
+  transform: scale(0.92);
+}
+
+.account-list-fav .favorite:hover {
   border-color: #ea580c;
   color: #ea580c;
+}
+
+.account-list-fav .favorite:focus-visible {
+  outline: none;
+  border-color: #ea580c;
+  color: #ea580c;
+  box-shadow: 0 0 0 2px var(--color-bg-canvas, #ffffff), 0 0 0 4px var(--color-accent-brand, #ea580c);
 }
 
 .account-list-fav .favorite[data-favorite-state="saved"] {
@@ -1373,10 +1405,13 @@ html[data-theme="dark"] .account-list-fav .favorite:focus-visible {
   line-height: 1.3;
   text-align: center;
   text-decoration: none;
-  transition: background-color 0.16s ease, border-color 0.16s ease;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 .account-card-cta:hover { background: var(--color-accent-brand-hover); border-color: var(--color-accent-brand-hover); }
-.account-card-cta:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.account-card-cta:active { transform: scale(0.97); }
+.account-card-cta:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-bg-canvas, #ffffff), 0 0 0 4px var(--color-accent-brand, #ea580c); }
 
 /* 卡片模式重构（4列自适应、独立交互与金额构成） */
 .account-card--grid {
@@ -1388,14 +1423,14 @@ html[data-theme="dark"] .account-list-fav .favorite:focus-visible {
   overflow: hidden;
   background: var(--color-bg-card, #ffffff);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   position: relative;
 }
 .account-card--grid:hover,
 .account-card--grid:focus-within {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-  border-color: #cbd5e1;
+  transform: translateY(-3px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.09);
+  border-color: color-mix(in srgb, var(--color-delta-accent, #059669) 50%, #cbd5e1);
 }
 html[data-theme="dark"] .account-card--grid {
   background: var(--color-bg-card, #0f172a);
@@ -2675,7 +2710,7 @@ html[data-theme="dark"] .account-card { background:var(--color-bg-card); border-
 .account-card-thumb { aspect-ratio:2.2 / 1; }
 .account-card-thumb { flex:none; min-height:0; padding:0; border:0; border-radius:0; color:inherit; font:inherit; text-align:inherit; cursor:pointer; }
 .account-card-thumb:disabled { cursor:default; opacity:1; }
-.account-card-thumb:focus-visible { position:relative; z-index:4; outline:2px solid var(--color-focus-ring); outline-offset:-3px; }
+.account-card-thumb:focus-visible { position:relative; z-index:4; outline:none; box-shadow:0 0 0 2px var(--color-bg-canvas, #ffffff), 0 0 0 4px var(--color-accent-brand, #ea580c); }
 .account-card:hover .account-card-thumb img { transform:none; }
 .account-card-thumb:hover img, .account-card-thumb:focus-visible img { transform:scale(1.025); }
 .account-card-gallery-hint { position:absolute; right:10px; bottom:10px; z-index:2; display:inline-flex; align-items:center; gap:3px; padding:4px 7px; border:1px solid rgb(255 255 255 / 22%); border-radius:999px; background:rgb(5 8 12 / 70%); color:#fff; font-size:10px; line-height:1.2; opacity:0; transform:translateY(3px); transition:opacity .18s ease,transform .18s ease; pointer-events:none; }
