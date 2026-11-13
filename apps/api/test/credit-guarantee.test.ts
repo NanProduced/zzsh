@@ -142,6 +142,7 @@ function guaranteeWorld(input: { credit?: { score: number; revision: string } | 
       return { rows: [...newestPerAccount((input.bindings ?? []).filter(matches), new Set(frozen.map((entry) => entry.accountId))).values()].map((facts) => ({ ...facts.row, accountId: facts.accountId })) };
     }
     if (sql.includes("a.id=ANY($1::text[])")) return { rows: Object.entries(input.rows).map(([, row]) => row) };
+    if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
     if (sql.includes("FROM zzsh_order.owner_guarantee_requirement")) {
       // The per-account reader binds the exact tuple from its first read; the fake holds the same facts.
       const [accountId, ownerUserId, priceVersionId, versionId] = args as [string, string, string, string | null];
@@ -149,7 +150,6 @@ function guaranteeWorld(input: { credit?: { score: number; revision: string } | 
         && facts.priceVersionId === priceVersionId && (facts.listingVersionId === null ? versionId === null : facts.listingVersionId === versionId));
       return { rows: [...newestPerAccount(matched).values()].map((facts) => facts.row) };
     }
-    if (sql.includes('WHERE a.id=$1 AND a.owner_user_id=$2')) return { rows: input.rows[String(args[0])] ? [input.rows[String(args[0])]] : [] };
     throw new Error(`unexpected read: ${sql}`);
   } } as never;
   return { client, queries };
