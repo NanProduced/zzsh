@@ -4,24 +4,37 @@ import { invalid, conflict, notFound } from "../supply/supply-util";
 import { canonicalize } from "../supply/content-hash";
 import { assertLocalFinancialSandboxResource, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
-import { sandboxForChannelRequestCapability, demoForChannelRequestCapability } from "./channel-payment-store";
+import { assertSyntheticChannelRequestCapability, assertSyntheticChannelRequestOrder, fixedFeeRefundRegistration, sandboxForChannelRequestCapability, demoForChannelRequestCapability } from "./channel-payment-store";
 import type { NativeRefundTerminalFact } from "./joinpay-refund-source";
 
 export type LocalSandboxRefundOptions=Readonly<{sandbox:LocalFinancialSandbox;capability:unknown}|{demo:DemoFinanceResource;capability:unknown}>;
-const facts=new WeakMap<object,{client:PoolClient;xid:string;owner:string;version:string;options:LocalSandboxRefundOptions;canonical:string;fact:NativeRefundTerminalFact}>();
+export type FixedFeeTestRefundOptions = Readonly<{ fixedFeeTest: true; capability: unknown }>;
+export type ControlledRefundOptions = LocalSandboxRefundOptions | FixedFeeTestRefundOptions;
+const facts=new WeakMap<object,{client:PoolClient;xid:string;owner:string;version:string;options:ControlledRefundOptions;canonical:string;fact:NativeRefundTerminalFact}>();
 const sha=(value:string)=>createHash('sha256').update(value).digest('hex'),ID=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-export function localRefundRegistration(options:LocalSandboxRefundOptions){
+export function localRefundRegistration(options:ControlledRefundOptions){
+  if ('fixedFeeTest' in options) {
+    const proof = fixedFeeRefundRegistration(options.capability);
+    if (!proof) throw invalid("Fixed-fee refund capability is unavailable");
+    return proof;
+  }
   if('sandbox' in options){const p=localFinancialSandboxRegistration(options.sandbox);return{reference:p.registration.reference,digest:p.digest,merchant:'local_sandbox_'+p.digest.slice(0,32)};}
   const p=readEcsTestDemoRegistration(options.demo);return{reference:p.registration.reference,digest:p.digest,merchant:(options.demo.kind==='ECS_TEST_DEMO_FINANCE'?'ecs_demo_':'local_demo_')+p.digest.slice(0,32)};
 }
-export function isEcsDemoRefundTerminalFact(fact:unknown):boolean {
+export function usesIsolatedRefundEvidenceColumn(fact:unknown):boolean {
   const proof=fact&&typeof fact==='object'?facts.get(fact):undefined;
-  return Boolean(proof&&'demo' in proof.options);
+  return Boolean(proof&&('demo' in proof.options || 'fixedFeeTest' in proof.options));
 }
-export async function assertLocalSandboxRefundResource(client:PoolClient,options:LocalSandboxRefundOptions){
+export async function assertLocalSandboxRefundResource(client:PoolClient,options:ControlledRefundOptions){
   if(!options||typeof options!=='object')throw invalid('Registered refund capability required');
   let resource;
-  if('sandbox' in options){const sandbox=sandboxForChannelRequestCapability(options.capability);
+  if ('fixedFeeTest' in options) {
+    const proof = localRefundRegistration(options);
+    await assertSyntheticChannelRequestCapability(client, options.capability, 'REFUND');
+    const registered = (await client.query("SELECT 1 FROM zzsh_order.fixed_fee_refund_registration WHERE reference=$1 AND registration_digest=$2 AND active", [proof.reference, proof.digest])).rows[0];
+    if (!registered) throw conflict("Fixed-fee refund registration is unavailable");
+    resource = { reference: proof.reference };
+  } else if('sandbox' in options){const sandbox=sandboxForChannelRequestCapability(options.capability);
     if(!sandbox||sandbox!==options.sandbox)throw invalid('Registered local refund capabilities differ');resource=await assertLocalFinancialSandboxResource(client,sandbox);
   } else {const demo=demoForChannelRequestCapability(options.capability);
     if(!demo||demo!==options.demo)throw invalid('Registered test refund capabilities differ');resource=await assertEcsTestDemoResource(client,demo);}
@@ -32,24 +45,28 @@ export async function assertLocalSandboxRefundResource(client:PoolClient,options
 
 /** Reads the original SQL-backed local operation, never an HTTP outcome or a cached terminal flag.
  * No evidence FK is written until the common kernel owns its original funds/user/intent locks. */
-export async function captureLocalSandboxRefundTerminalFact(client:PoolClient,options:LocalSandboxRefundOptions,lease:{intentId:string;owner:string;version:string}):Promise<NativeRefundTerminalFact>{
+export async function captureLocalSandboxRefundTerminalFact(client:PoolClient,options:ControlledRefundOptions,lease:{intentId:string;owner:string;version:string}):Promise<NativeRefundTerminalFact>{
   const {intentId,owner,version}=lease;
   if(typeof intentId!=='string'||!ID.test(intentId)||typeof owner!=='string'||!ID.test(owner)||typeof version!=='string'
     ||!/^[1-9][0-9]{0,18}$/.test(version)||BigInt(version)>9223372036854775807n)throw invalid();
   await assertLocalSandboxRefundResource(client,options);
   const p=localRefundRegistration(options);
+  const fixedFee = 'fixedFeeTest' in options;
+  const paymentAdmission = fixedFee
+    ? "JOIN zzsh_order.payment_distribution_basis b ON b.payment_confirmation_id=c.id AND b.order_id=i.order_id JOIN zzsh_order.distribution_order_admission a ON a.id=b.admission_id AND a.order_id=i.order_id AND a.revision=b.admission_revision"
+    : "JOIN zzsh_order.controlled_payment_declaration d ON d.order_id=c.order_id AND d.merchant_scope_id=c.merchant_scope_id AND d.provider_transaction_id=c.provider_transaction_id JOIN zzsh_order.distribution_order_admission a ON a.id=d.admission_id AND a.order_id=i.order_id";
   const row=(await client.query(`SELECT i.id,i.posting_id,i.order_id,i.payment_confirmation_id,i.renter_user_id,i.merchant_identity_id,
     i.original_payment_trx_no,i.original_payment_order_no,i.responsibility_version_hash,i.refund_order_no,i.amount_cents::text,i.currency,
     i.basis_kind,i.sandbox_registration_ref,op.id AS operation_id,op.scenario,op.final_canonical,op.final_digest
     FROM zzsh_order.channel_refund_intent i JOIN zzsh_order.local_controlled_refund_operation op ON op.intent_id=i.id
     JOIN zzsh_order.payment_confirmation c ON c.id=i.payment_confirmation_id AND c.order_id=i.order_id AND c.source='CONTROLLED' AND c.disposition='APPLIED'
-    JOIN zzsh_order.controlled_payment_declaration d ON d.order_id=c.order_id AND d.merchant_scope_id=c.merchant_scope_id AND d.provider_transaction_id=c.provider_transaction_id
-    JOIN zzsh_order.distribution_order_admission a ON a.id=d.admission_id AND a.order_id=i.order_id
+    ${paymentAdmission}
     WHERE i.id=$1 AND i.payment_source='CONTROLLED' AND i.evidence_level='CONTROLLED_TEST'
       AND i.sandbox_registration_ref=$2 AND op.sandbox_registration_ref=$2 AND a.approval_digest=$3
-      AND d.approval_digest=$3 AND i.merchant_identity_id=$4 AND c.merchant_scope_id=$4 AND i.lease_owner=$5 AND i.lease_version=$6::bigint`,
+      ${fixedFee ? "AND a.mode='LOCAL_CONTROLLED' AND a.resource_marker='zzsh:synthetic:fixed-fee:v1'" : "AND d.approval_digest=$3"} AND i.merchant_identity_id=$4 AND c.merchant_scope_id=$4 AND i.lease_owner=$5 AND i.lease_version=$6::bigint`,
   [intentId,p.reference,p.digest,p.merchant,owner,version])).rows[0];
   if(!row)throw notFound();
+  if(fixedFee)assertSyntheticChannelRequestOrder(options.capability,row.order_id);
   let terminal:Record<string,unknown>;
   try{
     terminal=JSON.parse(row.final_canonical);
@@ -71,7 +88,7 @@ export async function captureLocalSandboxRefundTerminalFact(client:PoolClient,op
   const canonical=canonicalize(body),fact=Object.freeze({...body,factsDigest:sha(canonical)});
   const context=(await client.query('SELECT pg_current_xact_id()::text AS xid')).rows[0];
   if(typeof context?.xid!=='string')throw invalid('Original refund transaction unavailable');
-  const bound='sandbox' in options?{sandbox:options.sandbox,capability:options.capability}:{demo:options.demo,capability:options.capability};
+  const bound = { ...options };
   facts.set(fact,{client,xid:context.xid,owner,version,options:Object.freeze(bound),canonical,fact});return fact;
 }
 

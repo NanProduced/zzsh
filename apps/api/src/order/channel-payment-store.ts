@@ -65,17 +65,19 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; fixedFeeTest?: true; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; demoPurpose?: "COLLECTION" | "REFUND" }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; fixedFeeTest?: true; fixedFeeRefundDigest?: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; demoPurpose?: "COLLECTION" | "REFUND" }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
-export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
+export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[]; fixedFeeRefundDigest?: string }): SyntheticRequestCapability {
   const { config, resourceSet } = options;
   if (resourceSet === "fixed_fee") {
     assertFixedFeeTestConfiguration(config, options.allowedOrderIds ?? []);
     if (options.evidenceLevel !== "CONTROLLED_TEST") throw new ConfigurationError("Fixed-fee resource only admits controlled channel operations");
+    if (options.fixedFeeRefundDigest !== undefined && !/^[a-f0-9]{64}$/.test(options.fixedFeeRefundDigest))
+      throw new ConfigurationError("Fixed-fee refund approval digest required");
     const capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
     requestCapabilities.set(capability, { database: fixedFeeTestResource.name, runtimeUser: fixedFeeTestResource.role,
-      fixedFeeTest: true, orderIds: new Set(options.allowedOrderIds) });
+      fixedFeeTest: true, fixedFeeRefundDigest: options.fixedFeeRefundDigest, orderIds: new Set(options.allowedOrderIds) });
     return capability;
   }
   const regression = resourceSet === "regression";
@@ -133,7 +135,15 @@ function demoChannelBinding(demo: DemoFinanceResource): ChannelBinding {
     protocolVersion: "TEST_CASHIER_V1", keyVersionRef: "NO_REAL_PROVIDER" };
 }
 
+export function fixedFeeRefundRegistration(capability: unknown) {
+  const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
+  if (!scope?.fixedFeeTest || !scope.fixedFeeRefundDigest) return undefined;
+  return { reference: "fixed-fee-isolated", digest: scope.fixedFeeRefundDigest, merchant: fixedFeeTestResource.merchantScopeId };
+}
+
 export function assertSandboxOriginalPayment(capability: unknown, payment: { source: string; merchant_scope_id: string }): void {
+  const fixedFee = fixedFeeRefundRegistration(capability);
+  if (fixedFee && (payment.source !== "CONTROLLED" || payment.merchant_scope_id !== fixedFee.merchant)) throw closed();
   const binding = sandboxChannelBinding(capability);
   if (binding && (payment.source !== "CONTROLLED" || payment.merchant_scope_id !== binding.merchantIdentityId)) throw closed();
   const demo = demoForChannelRequestCapability(capability);
@@ -175,7 +185,10 @@ export async function assertSyntheticChannelRequestCapability(client: PoolClient
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
   if (scope.demo && purpose !== scope.demoPurpose) throw closed();
-  if (scope.fixedFeeTest) await assertFixedFeeTestResource(client);
+  if (scope.fixedFeeTest) {
+    await assertFixedFeeTestResource(client);
+    if (scope.fixedFeeRefundDigest && purpose !== "REFUND") throw closed();
+  }
   if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
   if (scope.sandbox) await assertLocalFinancialSandboxResource(client, scope.sandbox);
   if (scope.demo) await assertEcsTestDemoResource(client, scope.demo);
