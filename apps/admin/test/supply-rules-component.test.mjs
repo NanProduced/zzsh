@@ -117,6 +117,27 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   const activate = async () => { await click("选择版本并确认生效"); await click("确认生效"); };
   try {
     ({ SupplyRulesView: View } = await vite.ssrLoadModule("/src/views/supply-rules-view.tsx"));
+    await t.test("pricing schedules open lazily and show an uninstalled policy without write controls", async () => {
+      await mount({ section: "pricing", permissions: [...snapshot.permissions, "supply.rules.activate"] });
+      assert.equal(reads.some(read => read.path.endsWith("/pricing-schedules")), false);
+      const original = globalThis.fetch;
+      let pricingReads = 0;
+      globalThis.fetch = async (input, init) => {
+        if (new URL(String(input), browser.location.href).pathname.endsWith("/pricing-schedules")) {
+          pricingReads += 1;
+          return Response.json({ available: false, reason: "NOT_INSTALLED", asOf: "2026-11-13T00:00:00.000000Z" });
+        }
+        return original(input, init);
+      };
+      try {
+        await click("调价排期", el);
+        const panel = el.querySelector('section[aria-label="调价排期"]');
+        assert.equal(pricingReads, 1);
+        assert.match(panel.textContent, /调价排期尚未安装/);
+        assert.equal(byText("核对排期", panel), undefined);
+        assert.equal(businessWrites().length, 0);
+      } finally { globalThis.fetch = original; }
+    });
     await t.test("overview keeps trial and activation and does not offer an unsavable preview editor", async () => {
       await mount();
       assert.equal(byText("编辑规则（仅预览）"), undefined);

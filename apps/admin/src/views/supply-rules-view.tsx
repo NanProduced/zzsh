@@ -1,5 +1,5 @@
 import { versionTime } from "./supply-rules/publish-flow";
-import { useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 
 import { adminRequest, friendlyError, hasPermission, type RulesResponse, type SessionSnapshot, type SupplyGame } from "../api";
@@ -14,7 +14,8 @@ import { Textarea } from "../components/ui/textarea";
 import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
-import { draftCommand, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
+import { draftCommand, isPricingScheduleOperation, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
+import { PricingSchedulesPanel } from "./supply-rules/pricing-schedules-panel";
 import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 import { RentalModeEditor } from "./supply-rules/rental-mode-editor";
 import { FullPayoutTermsPanel } from "./supply-rules/full-payout-terms-panel";
@@ -34,7 +35,7 @@ export const RULES_SECTION_LABEL: Record<RulesSection, string> = { overview: "�
 export function rulesSection(value: string | undefined): RulesSection {
   return (RULES_SECTIONS as readonly string[]).includes(value ?? "") ? value as RulesSection : "overview";
 }
-const PRICING_TABS = [["base", "基础计价"], ["mode", "租赁模式"], ["term", "租期与每日消耗"]] as const;
+const PRICING_TABS = [["base", "基础计价"], ["mode", "租赁模式"], ["term", "租期与每日消耗"], ["schedule", "调价排期"]] as const;
 /** 三角洲行动专属分区；其他游戏显示未适配。 */
 export const DELTA_GAME_CODE = "delta";
 
@@ -105,9 +106,13 @@ export function SupplyRulesView({
   const canPreview = hasPermission(snapshot, "supply.quote.internal.read");
   const canLegal = snapshot.security.isBoss || ["content.platform.read", "content.platform.edit", "content.platform.publish"].some(p => hasPermission(snapshot, p));
   const isBoss = snapshot.security.isBoss;
+  const canSchedule = isBoss && canEdit && hasPermission(snapshot, "supply.rules.activate");
   const [games, setGames] = useState<SupplyGame[]>([]);
   const [gameId, setGameId] = useState("");
-  const [rules, setRules] = useState<RulesResponse | null>(null);
+  const [allRules, setRules] = useState<RulesResponse | null>(null);
+  // Fixed-fee price versions enter through the schedule, never through combined rule activation.
+  const rules = useMemo(() => allRules && { ...allRules,
+    priceVersions: allRules.priceVersions.filter(version => !version.fixedFeeRates) }, [allRules]);
   const [pricingTab, setPricingTab] = useState<typeof PRICING_TABS[number][0]>("base");
   const [termId, setTermId] = useState("");
   const [agreementId, setAgreementId] = useState("");
@@ -335,6 +340,7 @@ export function SupplyRulesView({
   }
 
   const deltaSection = ["pricing", "items", "skin", "deposit"].includes(section);
+  const showSchedules = section === "pricing" && pricingTab === "schedule";
   const show = (name: RulesSection) => (section === name ? undefined : true);
   const editorKey = `${snapshot.adminUserId}:${snapshot.session?.id}:${rules?.game.id}:${resetNonce}`;
   // 只有一份进行中的价格草稿：自动取它；没有时显示线上值，第一次保存时自动新建。
@@ -367,7 +373,7 @@ export function SupplyRulesView({
       <section className="section-panel">
         <div className="min-w-0 max-w-3xl">
           <h2 className="flex flex-wrap items-center gap-2 text-2xl leading-9 font-semibold">{RULES_SECTION_LABEL[section]}{rules ? <span className="rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">{rules.game.name}</span> : null}</h2>
-          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : deltaSection ? "线上运行与草稿修改相互隔离：保存改动进入草稿，提交后由 Boss 确认正式生效。" : ""}</p>
+          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : showSchedules ? "" : deltaSection ? "线上运行与草稿修改相互隔离：保存改动进入草稿，提交后由 Boss 确认正式生效。" : ""}</p>
         </div>
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {command.locked ? (
@@ -385,7 +391,7 @@ export function SupplyRulesView({
           <Alert variant="warning" role="alert" className="mt-3">
             <TriangleAlert aria-hidden="true" />
             <AlertTitle>版本已变化（409）</AlertTitle>
-            <AlertDescription><p>输入已保留。请核对当前版本后再操作。</p></AlertDescription>
+            <AlertDescription><p>{command.state.message ?? "输入已保留。请核对当前版本后再操作。"}</p></AlertDescription>
           </Alert>
         ) : command.state.kind === "error" ? (
           <Alert variant="destructive" className="mt-3">
@@ -395,7 +401,7 @@ export function SupplyRulesView({
           </Alert>
         ) : null}
         {command.state.kind === "not_sent" ? <p role="status" className="mt-3 text-sm text-muted-foreground">{command.state.message}</p> : null}
-        {command.state.kind === "done" && command.state.operation !== RULES_RELEASE_OPERATION ? <p role="status" className="mt-3 text-sm text-muted-foreground">已保存到草稿。</p> : null}
+        {command.state.kind === "done" && command.state.operation !== RULES_RELEASE_OPERATION ? <p role="status" className="mt-3 text-sm text-muted-foreground">{isPricingScheduleOperation(command.state.operation) ? "排期已保存并核对。" : "已保存到草稿。"}</p> : null}
       </section>
 
       {gamesLoaded && !gameId ? (
@@ -409,14 +415,15 @@ export function SupplyRulesView({
         </section>
       ) : null}
 
-      {rules && editorProps && rules.game.id === gameId ? (
+      {rules && allRules && editorProps && rules.game.id === gameId ? (
         <div className="space-y-6">
-          {deltaSection ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={isBoss} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
+          {deltaSection && !showSchedules ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={isBoss} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
           <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={canEdit} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
           <div hidden={show("deposit")}><DepositCapEditor key={`cap:${editorKey}`} {...editorProps} onDirtyChange={setCapDirty} /></div>
-          <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = rules.priceVersions.find(v => v.id === rules.release?.priceVersionId)?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion } : null; })()} onReload={reload} /></div>
+          <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = allRules.priceVersions.find(v => v.id === rules.release?.priceVersionId)?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion } : null; })()} onReload={reload} /></div>
           <div hidden={show("pricing")} className="space-y-4">
             <div role="tablist" aria-label="租赁定价" className="flex flex-wrap gap-2">{PRICING_TABS.map(([value, label]) => <Button key={value} type="button" role="tab" aria-selected={pricingTab === value} variant={pricingTab === value ? "secondary" : "ghost"} onClick={() => setPricingTab(value)}>{label}</Button>)}</div>
+            <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${snapshot.adminUserId}:${snapshot.session?.id}:${gameId}`} rules={allRules} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
             <div hidden={pricingTab !== "base" || undefined}><BasePricingEditor key={`base:${editorKey}`} {...editorProps} part="base" onDirtyChange={setBaseDirty} /></div>
             <div hidden={pricingTab !== "mode" || undefined}><RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={canEdit} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} /></div>
             <div hidden={pricingTab !== "term" || undefined} className="space-y-6"><BasePricingEditor key={`daily:${editorKey}`} {...editorProps} part="term" onDirtyChange={setDailyDirty} />

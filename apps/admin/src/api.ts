@@ -573,7 +573,26 @@ export type SkinDepositRecommendation = {
   };
 };
 
+export type PricingModel = "SPREAD" | "FIXED_FEE";
+export type PricingScheduleRow = {
+  id: string;
+  pricingModel: PricingModel;
+  priceVersionId?: string;
+  generation: string;
+  effectiveAt: string;
+  source?: "SYSTEM_INITIAL" | "ADMIN";
+};
+export type PricingSchedules = { asOf: string } & (
+  { available: false; reason: "INCOMPLETE" | "NOT_INSTALLED" } |
+  { available: true; current: (PricingScheduleRow & { priceScheduleId: string; priceVersionId: string }) | null;
+    currentPrices: PricingScheduleRow[]; prices: PricingScheduleRow[]; modes: PricingScheduleRow[]; priceGenerations: Record<PricingModel, string>;
+    modeGeneration: string; truncated: boolean; spreadSchedulingEnabled: boolean;
+    announcements: { id: string; title: string; publishedAt: string; gameId: string | null }[];
+    announcementsTruncated: boolean }
+);
+
 export type PriceVersionRecord = {
+  fixedFeeRates?: Record<"ordinary" | "custom" | "fast", string> | null;
   id: string;
   gameId: string;
   mode: "SPREAD" | "PERCENT";
