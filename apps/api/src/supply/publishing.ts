@@ -1,5 +1,3 @@
-import { readCandidateMarketPrices } from "./listing-candidates";
-import { applyMarketPrice, marketPriceTarget, readMarketPrice, readMarketPricing, type MarketPrice, type MarketPricing } from "./market-pricing";
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
@@ -58,7 +56,8 @@ import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwner
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
-import { readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
+import { validateFixedFeeTimeline } from "../auth/fixed-fee-policy-timeline";
+import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readEffectivePricingMode, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -145,6 +144,7 @@ export type ListingPublication = {
   published_by_user_id: string | null;
   published_by_admin_id: string | null;
   published_at: Date;
+  publishedAtExact?: string;
 };
 export async function lockPublishingAccount(
   client: PoolClient,
@@ -262,7 +262,6 @@ export type ListingGameRow = {
  *  reads per request removes the repeated lookups without moving any rule. */
 export type ListingPageShared = {
   game(gameId: string): Promise<ListingGameRow | undefined>;
-  marketPricing?(gameId: string): Promise<MarketPricing>;
   rentalService(gameId: string): Promise<GameServiceState>;
   retiredLegacy(account: PublishingAccount): Promise<boolean>;
   primeRetiredLegacy(accountIds: readonly string[]): Promise<void>;
@@ -273,7 +272,6 @@ export type ListingPageShared = {
 
 export function listingPageShared(client: PoolClient): ListingPageShared {
   const games = new Map<string, Promise<ListingGameRow | undefined>>();
-  const market = new Map<string, Promise<MarketPricing>>();
   const services = new Map<string, Promise<GameServiceState>>();
   const retired = new Map<string, Promise<boolean>>();
   const policies = new Map<
@@ -281,11 +279,6 @@ export function listingPageShared(client: PoolClient): ListingPageShared {
     Promise<Awaited<ReturnType<typeof readFundingPolicyForRelease>>>
   >();
   return {
-    marketPricing: (gameId) => {
-      let pricing = market.get(gameId);
-      if (!pricing) { pricing = readMarketPricing(client, gameId); market.set(gameId, pricing); }
-      return pricing;
-    },
     retiredLegacy: (account) => {
       let pending = retired.get(account.id);
       if (!pending) { pending = isRetiredMigratedAccount(client, account); retired.set(account.id, pending); }
@@ -358,8 +351,6 @@ export type ListingDetailPrefetch = {
   /** Answer to the publication probe, already resolved for this page. */
   hasPublication?: boolean;
   shared?: ListingPageShared;
-  marketPricing?: MarketPricing;
-  marketPriceForVersion?: (versionId: string) => MarketPrice | null;
   /** This request's public projection of one account. The admin detail path and
    *  the supervision facts path need the same account's public listing, and the
    *  projection is one expensive read; the memo serves both. A null result
@@ -373,18 +364,16 @@ export type ListingDetailPrefetch = {
  *  probe are read a window at a time instead of one round trip per candidate.
  *  The window is the caller's own page size, so a small limit never loads rows it
  *  will not project, and a rejected candidate just moves the window forward. */
-export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing, priceSelection: "CURRENT_VERSION" | "PUBLIC_DETAIL" = "CURRENT_VERSION") {
+export function listingCandidatePage(client: PoolClient) {
   const shared = listingPageShared(client);
   const accounts = new Map<string, PublishingAccount | undefined>();
   const versions = new Map<string, ListingVersion | null>();
   const published = new Set<string>();
-  const prices = new Map<string, MarketPrice | null>();
   return {
     shared,
     has: (id: string) => accounts.has(id),
     account: (id: string) => accounts.get(id),
     version: (id: string) => versions.get(id) ?? null,
-    marketPrice: (versionId: string) => prices.get(versionId) ?? null,
     /** Only meaningful for ids covered by a load() that asked for publications. */
     hasPublication: (id: string) => published.has(id),
     async load(ids: readonly string[], withPublications = false): Promise<void> {
@@ -396,11 +385,6 @@ export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing
         const account = found.get(id);
         accounts.set(id, account);
         versions.set(id, account ? byAccount.get(id) ?? null : null);
-      }
-      if (pricing) {
-        const idsToPrice = priceSelection === "PUBLIC_DETAIL" ? [...found.keys()]
-          : [...byAccount.values()].filter(v => v.schema_version === 2 || v.schema_version === 4).map(v => v.id);
-        for (const [versionId, price] of await readCandidateMarketPrices(client, idsToPrice, pricing, priceSelection)) prices.set(versionId, price);
       }
       await shared.primeRetiredLegacy(pending);
       if (!withPublications) return;
@@ -498,7 +482,7 @@ export async function readListingPublication(
   if (!version.rule_release_id || !version.content_hash) return null;
   return (
     await client.query<ListingPublication>(
-      `SELECT * FROM zzsh_supply.listing_publication
+      `SELECT *, to_char(published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "publishedAtExact" FROM zzsh_supply.listing_publication
         WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3
           AND game_id=$4 AND rule_release_id=$5 AND content_hash=$6`,
       [version.id, account.id, account.owner_user_id, account.game_id, version.rule_release_id, version.content_hash],
@@ -564,6 +548,7 @@ export async function publicationBlockers(
   purpose: "READ" | "WRITE" = "WRITE",
   strictReadErrors = false,
   shared?: ListingPageShared,
+  hasBoundPublication = false,
 ): Promise<string[]> {
   const reasons: string[] = [];
   const user = (
@@ -594,12 +579,11 @@ export async function publicationBlockers(
     : await readGameService(client, a.game_id, GAME_SERVICE.ACCOUNT_RENTAL);
   if (!rentalService.supported || !rentalService.gameEnabled || !rentalService.enabled) reasons.push("GAME_SERVICE_UNAVAILABLE");
   // A native draft that has never been bound to a release is not a rule change.
-  // A bound release that is no longer current still stops new orders.
   const unboundNativeDraft = v.origin === "NATIVE" && v.review_state === "DRAFT" && !v.rule_release_id;
-  if (!unboundNativeDraft && (!v.rule_release_id || game?.current_release_id !== v.rule_release_id))
+  if (!unboundNativeDraft && (!v.rule_release_id || (!hasBoundPublication && game?.current_release_id !== v.rule_release_id)))
     reasons.push("RULE_CHANGED");
   if (purpose === "WRITE" && v.payload && v.origin === "NATIVE" && !(await currentTradeResourcesMatch(client, a, v, true))) reasons.push("RULE_CHANGED");
-  if (v.rule_release_id && game?.current_release_id === v.rule_release_id) {
+  if (v.rule_release_id && (hasBoundPublication || game?.current_release_id === v.rule_release_id)) {
     try {
       const policy = shared
         ? await shared.fundingPolicy(v.rule_release_id)
@@ -1518,6 +1502,7 @@ export async function assertCurrentRelease(
   client: PoolClient,
   a: PublishingAccount,
   v: ListingVersion,
+  asOf?: string,
 ): Promise<void> {
   const game = (await client.query(
     `SELECT current_release_id,catalog_revision::text FROM zzsh_supply.game WHERE id=$1 FOR SHARE`,
@@ -1525,17 +1510,25 @@ export async function assertCurrentRelease(
   )).rows[0];
   if (game?.current_release_id !== v.rule_release_id ||
     (v.review_state === "DRAFT" && v.origin === "NATIVE" && (!v.payload?.ruleRefs.catalogRevision || v.payload.ruleRefs.catalogRevision !== game.catalog_revision)))
-    throw conflict("规则已更新，请创建新草稿并重新确认");
+    throw conflict("规则已更新，请在原草稿重新核价并确认");
   if(v.review_state==="DRAFT"&&v.origin==="NATIVE"&&v.payload&&v.payload.schemaVersion!==3){
-    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id});
+    const selected=await readListingPricingModel(client,{accountId:a.id,ownerUserId:a.owner_user_id,gameId:a.game_id,asOf});
     if(selected&&selected.model!=="LEGACY_PERCENT"&&selected.model!=="LEGACY_SPREAD"){
       const policy=v.payload.pricingPolicy;
       if(!policy||policy.pricingModel!==selected.model)throw conflict("抽成模式已更新，请重新核价并确认");
       const effective=selected.model==="FIXED_FEE"
         ?await readEffectiveFixedFeePrice(client,a.game_id,normalizeRentalPricing(v.payload.declaration.attributes.rentalPricing).rentalMode,selected.asOf)
         :await readEffectiveSpreadPrice(client,a.game_id,selected.asOf);
-      if(!effective||effective.scheduleId!==policy.scheduleId||effective.generation!==policy.generation||effective.priceVersionId!==policy.priceVersionId)
+      if(!effective||effective.scheduleId!==policy.scheduleId||effective.generation!==policy.generation||effective.priceVersionId!==policy.priceVersionId||normalizeTime(effective.effectiveAt)!==normalizeTime(policy.effectiveAt))
         throw conflict("价格政策已更新，请重新核价并确认");
+      if (asOf && selected.model === "FIXED_FEE") {
+        const timeline = await readFixedFeeTimeline(client, a.game_id, { from: asOf });
+        const fee = timeline?.fees.find(row => row.generation === policy.generation);
+        const rentalMode = normalizeRentalPricing(v.payload.declaration.attributes.rentalPricing).rentalMode;
+        if (!timeline || !fee || !validateFixedFeeTimeline({ ...timeline, frozenFees: [
+          ...(timeline.frozenFees ?? []), { rates: fee.rates, protectedModes: [rentalMode] },
+        ] }).valid) throw conflict("会员或礼遇与固定手续费政策不兼容");
+      }
     }
   }
 }
@@ -1701,12 +1694,16 @@ export async function submitListing(
   // The gate has locked current credit/coverage; freeze only its explicit waiver.
   const waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
   a.display_no = await assignAccountNumber(client, a.id);
+  const publishedAt = (await client.query<{ at: string }>(
+    `SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
+  if (!publishedAt) throw conflict("上架时间无法核实");
+  await assertCurrentRelease(client, a, v, publishedAt);
   await client.query(
     `INSERT INTO zzsh_supply.listing_publication
       (id,version_id,account_id,owner_user_id,game_id,rule_release_id,content_hash,source,published_by_realm,published_by_user_id,published_at,
        credit_guarantee_waived,credit_guarantee_waived_revision)
-     VALUES($1,$2,$3,$4,$5,$6,$7,'OWNER_DIRECT','user',$8,clock_timestamp(),$9,$10)`,
-    [newSupplyId("publication"),v.id,a.id,a.owner_user_id,a.game_id,v.rule_release_id,v.content_hash,actorId,waivedRevision ? true : null,waivedRevision],
+     VALUES($1,$2,$3,$4,$5,$6,$7,'OWNER_DIRECT','user',$8,$9::timestamptz,$10,$11)`,
+    [newSupplyId("publication"),v.id,a.id,a.owner_user_id,a.game_id,v.rule_release_id,v.content_hash,actorId,publishedAt,waivedRevision ? true : null,waivedRevision],
   );
   await client.query(
     `UPDATE zzsh_supply.listing_version SET review_state='PUBLISHED',revision=revision+1 WHERE id=$1`,
@@ -1939,8 +1936,8 @@ export async function evaluatePublication(
   media?: () => Promise<ListingMediaAssetRow[]>,
   observed?: { publication?: ListingPublication | null },
 ): Promise<string[]> {
-  const blockers = await publicationBlockers(client, a, v, gate, purpose, strictReadErrors, shared);
   const publication = await readListingPublication(client, a, v);
+  const blockers = await publicationBlockers(client, a, v, gate, purpose, strictReadErrors, shared, isEffectivePublicationState(v.review_state, publication?.source));
   if (observed) observed.publication = publication;
   if (!isEffectivePublicationState(v.review_state, publication?.source)) blockers.push("PUBLICATION_REQUIRED");
   if (a.owner_paused) blockers.push("OWNER_PAUSED");
@@ -2320,18 +2317,11 @@ export async function listingDetail(
     let quote = projectTenantPriceQuote(payload.quoteValues as unknown as InternalQuote, payload.quoteValues) as
       (ReturnType<typeof projectTenantPriceQuote> & { catalogRevision?: string }) | null;
     let priceReason: string | null = null;
-    if (payload.schemaVersion === 2 || payload.schemaVersion === 4) {
-      const market = prefetch?.marketPricing ?? await (prefetch?.shared?.marketPricing?.(a.game_id) ?? readMarketPricing(client, a.game_id));
-      const target = marketPriceTarget(payload, market, publication?.source === "OWNER_DIRECT");
-      if (target.scheduled) {
-        const live = target.priceId && market.ready
-          ? prefetch?.marketPriceForVersion ? prefetch.marketPriceForVersion(v.id) : await readMarketPrice(client, payload, a.game_id, target.priceId)
-          : null;
-        quote = quote ? applyMarketPrice(quote, live) : null;
-        if (availability === "RENTABLE" && (!quote || payload.schemaVersion === 4 || !SCHEDULED_SPREAD_ORDER_ENABLED)) {
-          availability = quote ? "UNAVAILABLE" : "UNKNOWN";
-          priceReason = quote ? "TRADE_NOT_ENABLED" : "PRICING_UNAVAILABLE";
-        }
+    if (payload.schemaVersion === 4 || payload.pricingPolicy) {
+      if (publication?.source !== "OWNER_DIRECT" || !boundListingPricingPolicy(payload, publication.publishedAtExact ?? publication.published_at)) quote = null;
+      if (availability === "RENTABLE" && (!quote || payload.schemaVersion === 4 || !SCHEDULED_SPREAD_ORDER_ENABLED)) {
+        availability = quote ? "UNAVAILABLE" : "UNKNOWN";
+        priceReason = quote ? "TRADE_NOT_ENABLED" : "PRICING_UNAVAILABLE";
       }
     }
     if (quote && payload.ruleRefs.catalogRevision !== undefined) quote.catalogRevision = payload.ruleRefs.catalogRevision;
@@ -2456,6 +2446,8 @@ export async function listingDetail(
       publication: publication ? {
         source: publication.source,
         publishedAt: publication.published_at.toISOString(),
+        ...(viewer === "admin" && typeof v.payload?.quoteValues.priceVersionId === "string"
+          ? { priceVersionId: v.payload.quoteValues.priceVersionId } : {}),
       } : null,
       safeBox: ownerOffer.safeBox,
       termOption: ownerOffer.termOption,

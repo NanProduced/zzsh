@@ -1,4 +1,4 @@
-import { readMarketPricing } from "./market-pricing";
+import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { formatDecimalExact, parseSignedDecimal } from "./decimal";
@@ -375,8 +375,7 @@ export async function handlePublishingRoute(
         if (filter.gameId) {
           await requirePublicGameService(client, filter.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
         }
-        const market = await readMarketPricing(client, filter.gameId ?? null);
-        if (query.has("cursor") && cursorMarket !== market.revision) throw conflict("Listing prices changed; refresh from the first page");
+        if (query.has("cursor") && cursorMarket !== "publication-snapshot" && cursorMarket !== null) throw conflict("Listing prices changed; refresh from the first page");
         const values:unknown[]=[cursor,filter.gameId];
         const param=(value:unknown)=>{values.push(value);return '$'+values.length;};
         const predicates=candidatePredicates({resources:filter.itemId?[{itemId:filter.itemId,minQuantity:filter.minQuantity??"0"}]:[],skinGroups:[{ids:filter.skins,match:filter.skinMatch}]},filter.q,param);
@@ -392,7 +391,7 @@ export async function handlePublishingRoute(
         const items: PublicListingProjection[] = [];
         let last = cursor;
         let hasMore = false;
-        const page = listingCandidatePage(client, market);
+        const page = listingCandidatePage(client);
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
           // The page is full and candidates remain unscanned: the caller still
@@ -417,7 +416,7 @@ export async function handlePublishingRoute(
                 undefined,
                 false,
                 "RENTABLE",
-                { version: page.version(row.id), shared: page.shared, marketPricing: market, marketPriceForVersion: page.marketPrice },
+                { version: page.version(row.id), shared: page.shared },
               ),
             );
           } catch (error) {
@@ -440,7 +439,7 @@ export async function handlePublishingRoute(
                   v: 2,
                   id: last,
                   filter: sha256Hex(JSON.stringify(filter)),
-                  ...(market.revision ? { marketRevision: market.revision } : {}),
+                  marketRevision: "publication-snapshot",
                 }),
               ).toString("base64url")
             : null,
@@ -676,6 +675,8 @@ export async function handlePublishingRoute(
     throw forbidden();
   const operation = `supply.publication.${action}`;
   const result = await withTransaction(options.pool, async (client) => {
+    // Fee schedules and benefits use this lock before any game or account lock.
+    if (action === "submit") await lockFixedFeePolicyChange(client);
     await setAuditContext(
       client,
       admin ? "admin" : "user",

@@ -1,3 +1,4 @@
+import { readAccountFundingPolicies } from "./funding-authority";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { PoolClient } from "pg";
@@ -251,16 +252,7 @@ const timestamp = (value: string) => `to_char(${value} AT TIME ZONE 'UTC','YYYY-
 async function guaranteeFactsBatch(client: PoolClient, accountIds: string[]) {
     if (!accountIds.length)
         return new Map<string, { policyRequirement: PolicyRequirement; proof: Record<string, string | boolean | null> | null }>();
-    const policyRows = (await client.query<{
-        accountId: string;
-        policy: unknown | null;
-        status: string;
-    }>(`SELECT a.id AS "accountId",p.funding_policy AS policy,p.status AS status
-          FROM zzsh_supply.rental_account a
-          JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
-          JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=a.game_id
-          JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-         WHERE a.id=ANY($1::text[])`, [accountIds])).rows;
+    const policyRows = await readAccountFundingPolicies(client, accountIds);
     const proofRows = (await client.query<{
         accountId: string;
         id: string;
@@ -776,7 +768,7 @@ export async function listSupervision(client: PoolClient, viewer: SupervisionVie
         const fetchLimit = hasResidualFilters ? Math.min(batchLimit, FILTER_SCAN_MAX_CANDIDATES - scanned) : batchLimit;
         if (fetchLimit <= 0) throw filterScopeTooLarge();
         const { values, where } = candidateWhere(scanAfter), p = (value: unknown) => "$" + values.push(value);
-        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{ruleRefs,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${selectedOccupied}) AS "statusOccupied",(${selectedCompleted}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
+        const rows = (await client.query(`SELECT a.id,a.id AS "accountId",a.display_no AS "displayNo",a.owner_user_id AS "ownerId",a.revision::text AS "revision",${sortAt} AS "sortAt",${timestamp("a.created_at")} AS "accountCreatedAt",${timestamp("a.updated_at")} AS "accountUpdatedAt",v.id AS "versionId",v.sequence::text AS sequence,v.title,v.review_state AS "reviewState",${timestamp("v.created_at")} AS "versionCreatedAt",v.rule_release_id AS "ruleReleaseId",v.term_option_code AS "termOptionCode",v.payload#>>'{quoteValues,priceVersionId}' AS "priceVersionId",u.name AS "ownerName",g.name AS "gameName",(${selectedOccupied}) AS "statusOccupied",(${selectedCompleted}) AS "statusCompleted"${hasCheapFilters ? `,(${legacySourceSql}) AS "filterLegacy"${needsDisplayVersion ? `,(${haffSql})::text AS "filterHaff",(${depositSql})::text AS "filterDeposit",(${displayAttributes}->>'login_method_code') AS "filterLogin"` : ""}` : ""} ${from} WHERE ${where.join(" AND ")} ORDER BY ${sort} DESC,a.id COLLATE "C" DESC LIMIT ${p(fetchLimit)}`, values)).rows;
         if (!rows.length) break;
         // A-5: the imported placeholder ("历史资料待核实") is a marker for "no title", not a name. The
         // owner-facing list already treats it as null (declaredTitleOrNull); the admin list must not

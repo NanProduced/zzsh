@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assertRulesGameSupported } from "../src/supply/game-services";
-import { assertSettlementResourcePrices } from "../src/supply/rules";
+import { assertScheduledTermCompatibility, assertSettlementResourcePrices } from "../src/supply/rules";
 import { initializeFixedFeePricing, readPricingSchedules, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "../src/supply/pricing-policy-schedule";
 import { compatRule } from "./pricing-compat-fixture";
 
@@ -21,6 +21,20 @@ test('rule activation checks every enabled settlement item, including items with
   assert.throws(()=>assertSettlementResourcePrices('SPREAD',[{...item,ownerUnitAmount:'10.01'}]),/额外物资/);
   assert.throws(()=>assertSettlementResourcePrices('SPREAD',[{...item,pricingKind:null}]),/额外物资/);
   assert.throws(()=>assertSettlementResourcePrices('SPREAD',Array(64).fill(item)),/63/);
+});
+
+test("a lease term must be quotable under the fixed fee and spread prices scheduled for new listings", async () => {
+  const terms = [{ code: "daily-10m", dailyConsumption: "10000000" }, { code: "daily-other", dailyConsumption: "20000000" }];
+  const client = { query: async () => ({ rows: terms }) } as never;
+  const spread = compatRule(), { compatibility, ...shared } = spread;
+  assert(compatibility);
+  const fixed = { ...shared, schema: "haff-ratio-v3", fixedModes: compatibility.modes,
+    dailyDeltaByTermOption: { ...shared.dailyDeltaByTermOption, "daily-other": "0" } };
+  const fixedPrice = { mode: "PERCENT" as const, haffRule: fixed };
+  await assertScheduledTermCompatibility(client, "term", [fixedPrice]);
+  await assert.rejects(assertScheduledTermCompatibility(client, "term", [fixedPrice, { mode: "SPREAD", haffRule: spread }]), /租期选项与排期价目不兼容/);
+  await assertScheduledTermCompatibility(client, "term", [fixedPrice, { mode: "SPREAD",
+    haffRule: { ...spread, dailyDeltaByTermOption: fixed.dailyDeltaByTermOption } }]);
 });
 
 test('scheduling a fixed-fee price rejects an enabled item without a price', async () => {

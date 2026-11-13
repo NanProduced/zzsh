@@ -1,4 +1,3 @@
-import { readMarketPricing } from "./market-pricing";
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { normalizeTime } from "./content-hash";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
@@ -97,8 +96,7 @@ export async function handleFavorites(
         // window so the page costs a fixed number of round trips, not one chain
         // per row. Losing public eligibility still yields UNAVAILABLE with no
         // private facts, and the saved id is never replaced by a detail.
-        const marketPricing = rows.length ? await readMarketPricing(client, null) : undefined;
-        const page = listingCandidatePage(client, marketPricing, "PUBLIC_DETAIL");
+        const page = listingCandidatePage(client);
         await page.load(rows.map((row) => row.account_id), true);
         for (const row of rows) {
           const account = page.account(row.account_id);
@@ -126,8 +124,6 @@ export async function handleFavorites(
                 version: page.version(row.account_id),
                 hasPublication: page.hasPublication(row.account_id),
                 shared: page.shared,
-                marketPricing,
-                marketPriceForVersion: page.marketPrice,
               },
             );
           } catch (error) {

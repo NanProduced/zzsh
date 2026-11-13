@@ -459,16 +459,20 @@ export async function assertPriceVersionResources(client:PoolClient,gameId:strin
   assertSettlementResourcePrices(mode,rows.filter(row=>row.unit!=='HAFF_BASE'));
 }
 
-export async function assertFixedFeeTermCompatibility(client: PoolClient, termVersionId: string, ...haffRules: unknown[]) {
+export async function assertScheduledTermCompatibility(client: PoolClient, termVersionId: string,
+  prices: readonly { mode: "PERCENT" | "SPREAD"; haffRule: unknown }[]) {
   const terms = (await client.query<{ code: string; dailyConsumption: string }>(
     `SELECT code, daily_consumption::text AS "dailyConsumption" FROM zzsh_supply.term_option WHERE version_id=$1`, [termVersionId])).rows;
-  for (const haffRule of haffRules) {
+  for (const { mode, haffRule } of prices) {
     let rule: DeltaHaffRule;
-    try { rule = validateDeltaHaffRule(haffRule, "PERCENT"); }
-    catch { throw conflict("固定手续费价目的哈夫币比例无法核对"); }
-    if (rule.schema !== "haff-ratio-v3" || !terms.length || terms.some(term => !Object.hasOwn(rule.dailyDeltaByTermOption, term.code))
-      || (rule.fixedModes?.custom.enabled && !terms.some(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION)))
-      throw conflict("租期选项与固定手续费价目不兼容，请核对日耗和对应比例");
+    try { rule = validateDeltaHaffRule(haffRule, mode); }
+    catch { throw conflict("排期价目的哈夫币比例无法核对"); }
+    const fixed = mode === "PERCENT";
+    const modes = fixed ? rule.fixedModes : rule.compatibility?.modes;
+    if (rule.schema !== (fixed ? "haff-ratio-v3" : "haff-ratio-v2") || !terms.length
+      || terms.some(term => !Object.hasOwn(rule.dailyDeltaByTermOption, term.code))
+      || (modes?.custom.enabled && !terms.some(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION)))
+      throw conflict("租期选项与排期价目不兼容，请核对日耗和对应比例");
   }
 }
 
@@ -522,19 +526,21 @@ export async function activateRelease(
   if (priceMeta.fixedFeeRates != null) {
     if (termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
       throw conflict("租期和协议均未变化");
-    if (termVersionId !== game.termVersionId) {
-      const scheduled = (await client.query<{ haffRule: unknown }>(`WITH relevant AS (
-        (SELECT price_version_id FROM zzsh_supply.pricing_policy_schedule
-         WHERE game_id=$1 AND pricing_model='FIXED_FEE' AND effective_at<=statement_timestamp()
-         ORDER BY effective_at DESC, generation DESC LIMIT 1)
-        UNION SELECT price_version_id FROM zzsh_supply.pricing_policy_schedule
-         WHERE game_id=$1 AND pricing_model='FIXED_FEE' AND effective_at>statement_timestamp()
-      ) SELECT p.haff_rule AS "haffRule" FROM relevant s
-        LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=$1 AND p.status='SEALED'`, [gameId])).rows;
-      await assertFixedFeeTermCompatibility(client, termVersionId, priceMeta.haffRule, ...scheduled.map(price => price.haffRule));
-    }
   } else {
     await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
+  }
+  if (termVersionId !== game.termVersionId) {
+    const scheduleReady = (await client.query<{ ready: boolean }>(
+      "SELECT to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS ready")).rows[0]?.ready;
+    const scheduled = scheduleReady ? (await client.query<{ mode: "PERCENT" | "SPREAD"; haffRule: unknown }>(`WITH relevant AS (
+      (SELECT DISTINCT ON (pricing_model) price_version_id, pricing_model FROM zzsh_supply.pricing_policy_schedule
+       WHERE game_id=$1 AND effective_at<=statement_timestamp() ORDER BY pricing_model, effective_at DESC, generation DESC)
+      UNION SELECT price_version_id, pricing_model FROM zzsh_supply.pricing_policy_schedule
+       WHERE game_id=$1 AND effective_at>statement_timestamp()
+    ) SELECT CASE WHEN s.pricing_model='FIXED_FEE' THEN 'PERCENT' ELSE 'SPREAD' END AS mode,p.haff_rule AS "haffRule"
+      FROM relevant s LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=$1 AND p.status='SEALED'`, [gameId])).rows : [];
+    if (priceMeta.fixedFeeRates != null) scheduled.push({ mode: "PERCENT", haffRule: priceMeta.haffRule });
+    if (scheduled.length) await assertScheduledTermCompatibility(client, termVersionId, scheduled);
   }
   const pricePolicy=priceMeta.policy;
   if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
@@ -548,6 +554,7 @@ export async function activateRelease(
   const affected = await client.query<{ count: string }>(
     `SELECT count(*)::text AS count FROM "zzsh_supply"."rental_account" a
       WHERE a."game_id" = $1 AND a."lifecycle" = 'ACTIVE'
+        AND NOT EXISTS (SELECT 1 FROM zzsh_supply.listing_publication pub WHERE pub.account_id=a.id)
         AND NOT EXISTS (SELECT 1 FROM "zzsh_supply"."rule_acceptance" r WHERE r."account_id" = a."id" AND r."rule_release_id" = $2)`,
     [gameId, releaseId],
   );

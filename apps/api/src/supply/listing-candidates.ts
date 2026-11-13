@@ -1,5 +1,3 @@
-import type { PoolClient } from "pg";
-import type { MarketPrice, MarketPricing } from "./market-pricing";
 import { effectivePublicationStateSql, listingSearchPattern } from "./listing-query";
 import type { ListingFilters, ListingQueryV2, ServiceWindow } from "./listing-filter-contract";
 import { PUBLIC_ACCOUNT_NUMBER_PATTERN } from "./account-number";
@@ -8,7 +6,8 @@ type CandidateFilters=Omit<ListingFilters,"skinGroups">&{skinGroups?:{ids:string
 export const PUBLIC_CANDIDATE_FROM=`FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id JOIN zzsh_supply.game g ON g.id=a.game_id`;
 export const PUBLIC_CANDIDATE_WHERE=`a.lifecycle='ACTIVE' AND NOT a.owner_paused AND NOT a.staff_restricted AND a.legacy_hold='NONE'
  AND NOT (g.code='delta' AND EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map legacy WHERE legacy.account_id=a.id AND legacy.source_system='legacy_mysql_restore' AND legacy.source_entity='la_rental_accounts'))
- AND ${effectivePublicationStateSql("v","pub")} AND v.rule_release_id=g.current_release_id AND pub.content_hash=v.content_hash`;
+ AND ${effectivePublicationStateSql("v","pub")} AND pub.rule_release_id=v.rule_release_id AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id
+ AND pub.content_hash=v.content_hash`;
 // LEGACY_OBSERVATION versions keep the same declaration attributes in the
 // immutable `attributes` column instead of a payload, so callers may pass the
 // column as the attribute source while sharing one predicate implementation.
@@ -58,66 +57,35 @@ export function candidatePredicates(filters:CandidateFilters,q:string|null,p:(v:
   return where;
 }
 /** Both native-only and mixed markets consume the same public price and use it for seek. */
-export function candidateMarketPrice(pricing: MarketPricing | undefined, bind: (value: unknown) => string) {
-  const amount=`v.payload#>>'{quoteValues,resourceTotal,amount}'`;
-  const frozen=`CASE WHEN v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan' AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$' THEN (${amount})::numeric END`;
-  if (!pricing) return { from: "", key: frozen, projected: false };
-  const gamePlans=pricing.ready&&pricing.byGame ? bind(JSON.stringify(pricing.byGame)) : null;
-  const fixedId=gamePlans ? `(${gamePlans}::jsonb #>> ARRAY[a.game_id,'fixed'])`
-    : pricing.ready&&pricing.fixed ? `${bind(pricing.fixed)}::text` : "NULL::text";
-  const spreadId=gamePlans ? `(${gamePlans}::jsonb #>> ARRAY[a.game_id,'spread'])`
-    : pricing.ready&&pricing.spread ? `${bind(pricing.spread)}::text` : "NULL::text";
-  const spread=pricing.spread || gamePlans ? `v.schema_version=2 AND v.payload#>>'{quoteValues,mode}'='SPREAD' AND pub.source='OWNER_DIRECT'` : "false";
-  const from=pricing.ready && (pricing.fixed || pricing.spread || gamePlans) ? `LEFT JOIN LATERAL (
-    SELECT zzsh_supply.public_market_price(v.payload,a.game_id,CASE
-      WHEN v.schema_version=4 AND pub.source='OWNER_DIRECT' THEN ${fixedId}
-      WHEN ${spread} THEN ${spreadId} END) AS market_price OFFSET 0
-  ) market ON true` : "";
-  return { from, projected: !!from,
-    key: `CASE WHEN v.schema_version=4 OR (v.payload ? 'pricingPolicy') OR (${spread})
-      THEN ${from ? "(market.market_price->>'amount')::numeric" : "NULL::numeric"} ELSE (${frozen}) END` };
-}
-
-/** Price sorts already carry the projection. Detail reads may select a prior public version. */
-export async function readCandidateMarketPrices(
-  client: PoolClient, ids: readonly string[], pricing: MarketPricing, selection: "CURRENT_VERSION" | "PUBLIC_DETAIL" = "CURRENT_VERSION",
-) {
-  const values: unknown[] = [ids];
-  const market = candidateMarketPrice(pricing, value => { values.push(value); return "$" + values.length; });
-  if (!ids.length || !market.projected) return new Map<string, MarketPrice | null>();
-  const source = selection === "PUBLIC_DETAIL"
-    ? `FROM zzsh_supply.rental_account a
-       JOIN LATERAL (
-         SELECT v.id AS version_id, pub.id AS publication_id FROM zzsh_supply.listing_publication pub
-         JOIN zzsh_supply.listing_version v ON v.id=pub.version_id AND v.account_id=pub.account_id
-         WHERE pub.account_id=a.id AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id
-           AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash
-           AND ${effectivePublicationStateSql("v", "pub")}
-         ORDER BY (v.id IS NOT DISTINCT FROM a.current_version_id) DESC, pub.published_at DESC, v.sequence DESC, v.id
-         LIMIT 1
-       ) selected ON true
-       JOIN zzsh_supply.listing_version v ON v.id=selected.version_id
-       JOIN zzsh_supply.listing_publication pub ON pub.id=selected.publication_id`
-    : PUBLIC_CANDIDATE_FROM;
-  const where = selection === "PUBLIC_DETAIL" ? "a.id=ANY($1::text[]) AND v.schema_version IN (2,4)" : "v.id=ANY($1::text[])";
-  const rows = (await client.query<{ id: string; price: MarketPrice | null }>(
-    `SELECT v.id,market.market_price AS price ${source} ${market.from} WHERE ${where}`, values,
-  )).rows;
-  return new Map(rows.map(row => [row.id, row.price]));
+export function candidateMarketPrice() {
+  const amount = `v.payload#>>'{quoteValues,resourceTotal,amount}'`;
+  const policy = `v.payload->'pricingPolicy'`;
+  const bound = `(${policy}->>'schema'='pricing-policy-v1'
+    AND ${policy}->>'priceVersionId'=v.payload#>>'{quoteValues,priceVersionId}'
+    AND ${policy}->>'effectiveAt' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{6}Z$'
+    AND ${policy}->>'scheduleId' ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    AND ${policy}->>'effectiveAt' <= to_char(pub.published_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    AND ${policy}->>'generation' ~ '^[1-9][0-9]{0,18}$'
+    AND CASE WHEN v.schema_version=4 THEN ${policy}->>'pricingModel'='FIXED_FEE'
+      WHEN v.schema_version=2 THEN ${policy}->>'pricingModel'='SPREAD' ELSE false END)`;
+  return `CASE WHEN (CASE WHEN v.schema_version=4 OR v.payload ? 'pricingPolicy'
+       THEN pub.source='OWNER_DIRECT' AND ${bound} ELSE true END)
+    AND v.payload#>>'{quoteValues,currency}'='CNY' AND v.payload#>>'{quoteValues,resourceTotal,unit}'='yuan'
+    AND v.payload#>>'{quoteValues,resourceTotal,scale}'='2' AND ${amount} ~ '^(0|[1-9][0-9]{0,63})[.][0-9]{2}$'
+    THEN (${amount})::numeric END`;
 }
 
 export type ListingPosition={id:string;key:string|null;isNull:boolean};
-export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null,pricing?:MarketPricing) {
+export function buildListingCandidates(query:ListingQueryV2,after:ListingPosition|null) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const where=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${p(query.gameId)}`,...candidatePredicates(query.filters,query.q,p)];
   const publication=`pub.published_at`;
-  const market=query.sort==="resourceTotal" ? candidateMarketPrice(pricing,p) : null;
-  const price=market?.key;
+  const price=candidateMarketPrice();
   const key=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${p(query.coreItemId)})`;
   where.push(PUBLIC_STANDARD_TIER_GUARD);
   let seek="";
   if(after){const id=p(after.id);if(after.isNull)seek=`WHERE sort_key IS NULL AND id>${id}`;
     else {const k=p(after.key),cast=query.sort==="latest"?"timestamptz":"numeric",op=query.direction==="ASC"?">":"<";seek=`WHERE (sort_key ${op} ${k}::${cast} OR sort_key IS NULL OR (sort_key=${k}::${cast} AND id>${id}))`;}}
-  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key${market?.projected?",market.market_price":""} ${PUBLIC_CANDIDATE_FROM} ${market?.from??""} WHERE ${where.join(" AND ")}) SELECT id,version_id,${market?.projected?"market_price,":""}${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  const text=`WITH candidates AS (SELECT a.id,v.id AS version_id,${key} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${where.join(" AND ")}) SELECT id,version_id,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM candidates ${seek} ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
 }

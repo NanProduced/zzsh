@@ -29,13 +29,19 @@ BEGIN
     p.full_payout_terms_version_id,p.full_payout_terms_digest,p.full_payout_disclosure_version,
     pub.id AS publication_id,pub.credit_guarantee_waived,pub.credit_guarantee_waived_revision::text AS waiver_revision INTO binding
     FROM zzsh_supply.rental_account a
-    JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id=NEW.rule_release_id
-    JOIN zzsh_supply.rule_release r ON r.id=NEW.rule_release_id
-    JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.status='SEALED'
-    JOIN zzsh_supply.listing_version v ON v.id=NEW.listing_version_id AND v.account_id=a.id
+    JOIN zzsh_supply.game g ON g.id=a.game_id AND g.enabled
+    JOIN zzsh_supply.rule_release r ON r.id=NEW.rule_release_id AND r.game_id=a.game_id
+    JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=a.game_id AND p.status='SEALED'
+    JOIN zzsh_supply.listing_version v ON v.id=NEW.listing_version_id AND v.id=a.current_version_id AND v.account_id=a.id
+      AND v.rule_release_id=r.id AND v.content_hash=NEW.content_hash
     LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id
       AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id AND pub.rule_release_id=r.id AND pub.content_hash=v.content_hash
-   WHERE a.id=NEW.account_id AND a.owner_user_id=NEW.owner_user_id
+   WHERE a.id=NEW.account_id AND a.owner_user_id=NEW.owner_user_id AND a.game_id=NEW.game_id
+     AND a.lifecycle='ACTIVE' AND NOT a.staff_restricted AND NOT a.owner_paused AND a.legacy_hold='NONE'
+     AND NOT (g.code='delta' AND EXISTS (SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id
+       AND m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts'))
+     AND ((v.review_state='PUBLISHED' AND pub.source='OWNER_DIRECT')
+       OR (v.review_state='APPROVED' AND pub.source='LEGACY_APPROVED'))
      AND p.id=personal#>>'{ruleRefs,priceVersionId}' AND p.funding_policy->>'policyVersion'=personal#>>'{funding,version}';
   IF NOT FOUND THEN RAISE EXCEPTION 'formal guarantee binding changed' USING ERRCODE='40001'; END IF;
   IF personal#>>'{fullPayoutDeclaration,selected}'='true' THEN

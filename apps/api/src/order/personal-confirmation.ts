@@ -11,7 +11,7 @@ import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSprea
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
-import { readEffectiveFixedFeePrice, readEffectiveSpreadPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
+import { boundListingPricingPolicy, readBoundListingPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
@@ -170,10 +170,11 @@ function fullPayoutDeclaration(value:unknown):{schema:"full-payout-declaration-v
 }
 
 async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,options:PersonalConfirmationOptions,account:PublishingAccount,game:{current_release_id:string|null;enabled:boolean},purpose:"READ"|"WRITE",readAsOfUtc?:string) {
+  if (!game.enabled) throw notFound();
   const version=(await client.query<ListingVersion>(`SELECT * FROM zzsh_supply.listing_version WHERE id=$1 AND account_id=$2`,[input.versionId,account.id])).rows[0];
   if(!version || !version.payload || !version.content_hash)throw notFound();
   if(account.current_version_id!==version.id) { if(purpose === "READ") throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing version changed"); throw notFound(); }
-  if(version.rule_release_id!==input.releaseId || game.current_release_id!==input.releaseId)throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
+  if(version.rule_release_id!==input.releaseId)throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Listing rules changed");
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
   const legacy = version.payload.schemaVersion === 3;
   const fixedFee = version.payload.schemaVersion === 4;
@@ -187,8 +188,11 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
       unavailable("Legacy listing source cannot be verified");
     if (!options.membershipGrowthReader) throw new SecurityApiError(503,"MEMBERSHIP_UNKNOWN","Membership growth is unavailable");
   }
-  const publication=purpose === "READ" ? await readListingPublication(client,account,version) : (await client.query<{source:string}>(`SELECT source FROM zzsh_supply.listing_publication WHERE version_id=$1 AND account_id=$2 AND owner_user_id=$3 AND rule_release_id=$4 AND content_hash=$5 LIMIT 1`,[version.id,account.id,account.owner_user_id,version.rule_release_id,version.content_hash])).rows[0];
-  if(!isEffectivePublicationState(version.review_state, publication?.source)) { if(purpose === "READ") throw notFound(); unavailable("Listing publication evidence cannot be verified"); }
+  const publication = await readListingPublication(client, account, version);
+  if (!isEffectivePublicationState(version.review_state, publication?.source)) {
+    if (purpose === "READ") throw notFound();
+    unavailable("Listing publication evidence cannot be verified");
+  }
   const blockers=purpose === "READ" ? await evaluatePricePreviewPublication(client,account,version,options.gate) : await evaluatePublication(client,account,version,options.gate);
   if(blockers.includes("LEGACY_LISTING_RELIST_REQUIRED"))throw new SecurityApiError(409,"CONFIRMATION_CHANGED","旧账号已下架，请号主重新填写资料上架");
   if(blockers.includes("OCCUPIED"))throw new SecurityApiError(409,"OCCUPIED","Account is occupied");
@@ -243,36 +247,21 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   let pricingPolicy: ContentPayloadInput["pricingPolicy"];
   let publishedSpreadListing: (PublishedQuoteProof & {listingVersionId:string;ownerUserId:string}) | undefined;
   let release=originalRelease;
-  if (fixedFee) {
-    asOfUtc ??= (await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
-    if (!asOfUtc) unavailable("Pricing policy clock is unavailable");
-    const rentalMode=normalizeRentalPricing(attrs.rentalPricing).rentalMode;
-    const effective=await readEffectiveFixedFeePrice(client,account.game_id,rentalMode,asOfUtc!);
-    if (!effective) unavailable("Fixed fee policy is unavailable");
-    pricingPolicy={schema:"pricing-policy-v1",pricingModel:"FIXED_FEE",scheduleId:effective!.scheduleId,generation:effective!.generation,effectiveAt:effective!.effectiveAt,priceVersionId:effective!.priceVersionId};
-    release={...originalRelease,id:effective!.priceVersionId,mode:"PERCENT",haff_rule:effective!.haffRule as HaffRatioRule,
-      commission_rate:effective!.commissionRate,rounding_policy:effective!.roundingPolicy};
-  } else if (version.origin==="NATIVE" && publication?.source==="OWNER_DIRECT" && version.payload.schemaVersion===2 && original.mode==="SPREAD") {
-    const schema=(await client.query<{prices:boolean;modes:boolean;rates:boolean}>(`SELECT
-      to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
-      to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,
-      EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.price_version') AND attname='fixed_fee_rates' AND attnum>0 AND NOT attisdropped) AS rates`)).rows[0];
-    if(!schema||typeof schema.prices!=="boolean"||typeof schema.modes!=="boolean"||typeof schema.rates!=="boolean"||schema.prices!==schema.modes
-      ||(schema.prices&&!schema.rates))unavailable("Pricing policy schema is unavailable");
-    if(schema?.prices){
-      asOfUtc ??= (await client.query<{at:string}>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
-      if(!asOfUtc)unavailable("Pricing policy clock is unavailable");
-      const effective=await readEffectiveSpreadPrice(client,account.game_id,asOfUtc!);
-      if(effective){
-        if(!SCHEDULED_SPREAD_ORDER_ENABLED && purpose === "WRITE")unavailable("Scheduled spread settlement contract is not enabled");
-        if(!options.membershipGrowthReader||!ownerDeclaration)unavailable("Scheduled spread confirmation requires the current membership policy");
-        pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:effective.scheduleId,generation:effective.generation,effectiveAt:effective.effectiveAt,priceVersionId:effective.priceVersionId};
-        publishedSpreadListing={accountId:account.id,gameId:account.game_id,contentHash:version.content_hash,payload:version.payload,
-          listingVersionId:version.id,ownerUserId:account.owner_user_id};
-        release={...originalRelease,id:effective.priceVersionId,mode:"SPREAD",haff_rule:effective.haffRule,commission_rate:null,rounding_policy:effective.roundingPolicy};
-      }
-    }
-    if(!publishedSpreadListing&&(version.payload.pricingPolicy||original.priceVersionId!==originalRelease.id))unavailable("Published spread policy is unavailable");
+  if (fixedFee || version.payload.pricingPolicy) {
+    if (publication?.source !== "OWNER_DIRECT") return unavailable("Published pricing policy is unavailable");
+    pricingPolicy = boundListingPricingPolicy(version.payload, publication.publishedAtExact ?? publication.published_at) ??
+      unavailable("Published pricing policy is unavailable");
+    if (!fixedFee && !SCHEDULED_SPREAD_ORDER_ENABLED && purpose === "WRITE") unavailable("Scheduled spread settlement contract is not enabled");
+    if (!options.membershipGrowthReader || !ownerDeclaration) unavailable("Published pricing requires the current membership policy");
+    const rentalMode = normalizeRentalPricing(attrs.rentalPricing).rentalMode;
+    const frozen = await readBoundListingPrice(client, account.game_id, pricingPolicy, rentalMode);
+    if (!frozen) return unavailable("Published price version is unavailable");
+    release = { ...originalRelease, id: frozen.id, mode: frozen.mode, haff_rule: frozen.haffRule as HaffRatioRule,
+      commission_rate: frozen.commissionRate, rounding_policy: frozen.roundingPolicy };
+    if (!fixedFee) publishedSpreadListing = { accountId:account.id,gameId:account.game_id,contentHash:version.content_hash,
+      payload:version.payload,listingVersionId:version.id,ownerUserId:account.owner_user_id };
+  } else if (!legacy && original.priceVersionId !== originalRelease.id) {
+    unavailable("Published price version is unavailable");
   }
   const rows=(await client.query<FrozenPriceLine>(`SELECT p.item_id,p.pricing_kind,p.unit_quantity::text,p.buyer_unit_amount::text,p.owner_unit_amount::text,
     i.unit AS item_unit,i.name AS item_name,i.enabled AS item_enabled FROM zzsh_supply.price_line p JOIN zzsh_supply.billable_item i ON i.id=p.item_id
@@ -325,7 +314,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     || !/^[0-9a-f]{64}$/.test(agreementDigest) || releaseId!==input.releaseId
     || priceVersionId!==originalRelease.id || termVersionId!==originalRelease.term_version_id)unavailable("Personal rule references cannot be verified");
 
-  const projection={quote:projectTenantPriceQuote(quote,fixedFee||publishedSpreadListing?result.quote:original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
+  const projection={quote:projectTenantPriceQuote(quote,original),baseTenantDeposit:yuanAmountObject(parseNonNegativeDecimal(f.baseDepositCents,0,"deposit").value),...(growthSelection?{membershipBenefits:growthSelection.benefits}:{customerTier:membership!.tier}),depositWaived:quote.tenantDeposit?.amount === "0.00",
     ...(ownerDeclaration?{compensationDisclosure:{selected:ownerDeclaration.selected,disclosureVersion:v2Funding!.disclosureVersion,...(v2Funding!.fullPayoutTerms?{terms:v2Funding!.fullPayoutTerms}:{})}}:{})};
   let settlementPricing:ReturnType<typeof freezeSettlementPricing>|undefined;
   const settlementRatio=growthSelection===null?"1":growthSelection.payableRatio;

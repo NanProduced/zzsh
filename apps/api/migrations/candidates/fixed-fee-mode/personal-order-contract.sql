@@ -121,8 +121,13 @@ BEGIN
     OR jsonb_typeof(policy->'effectiveAt') IS DISTINCT FROM 'string'
   THEN RAISE EXCEPTION 'fixed fee policy reference invalid' USING ERRCODE='40001'; END IF;
 
-  SELECT * INTO v FROM zzsh_supply.listing_version
-    WHERE id=n.listing_version_id AND account_id=n.account_id AND content_hash=n.content_hash AND rule_release_id=n.rule_release_id;
+  SELECT lv.* INTO v FROM zzsh_supply.listing_version lv
+    JOIN zzsh_supply.listing_publication pub ON pub.version_id=lv.id AND pub.account_id=lv.account_id
+      AND pub.owner_user_id=n.owner_user_id AND pub.game_id=n.game_id AND pub.rule_release_id=n.rule_release_id
+      AND pub.content_hash=n.content_hash AND pub.source='OWNER_DIRECT'
+    WHERE lv.id=n.listing_version_id AND lv.account_id=n.account_id AND lv.content_hash=n.content_hash AND lv.rule_release_id=n.rule_release_id
+      AND lv.review_state='PUBLISHED'
+      AND (lv.payload#>>'{pricingPolicy,effectiveAt}')::timestamptz<=pub.published_at;
   IF NOT FOUND OR v.origin IS DISTINCT FROM 'NATIVE' OR v.schema_version IS DISTINCT FROM 4
     OR v.payload->>'schemaVersion' IS DISTINCT FROM '4' OR v.payload#>>'{quoteValues,schemaVersion}' IS DISTINCT FROM '4'
     OR v.payload#>>'{pricingPolicy,schema}' IS DISTINCT FROM 'pricing-policy-v1'
@@ -140,9 +145,7 @@ BEGIN
   SELECT s.id,s.generation,s.effective_at,s.price_version_id,pv.haff_rule,pv.fixed_fee_rates,pv.rounding_policy
     INTO effective
     FROM zzsh_supply.pricing_policy_schedule s JOIN zzsh_supply.price_version pv ON pv.id=s.price_version_id
-   WHERE s.id=(SELECT t.id FROM zzsh_supply.pricing_policy_schedule t
-      WHERE t.game_id=n.game_id AND t.pricing_model='FIXED_FEE' AND t.effective_at<=clock_timestamp()
-      ORDER BY t.effective_at DESC,t.generation DESC LIMIT 1)
+   WHERE s.id=old_policy.id AND policy IS NOT DISTINCT FROM v.payload->'pricingPolicy'
      AND pv.game_id=n.game_id AND pv.status='SEALED' AND pv.mode='PERCENT'
      AND zzsh_supply.valid_fixed_fee_rates(pv.fixed_fee_rates) AND zzsh_supply.valid_fixed_fee_haff_rule(pv.haff_rule);
   IF NOT FOUND OR effective.id IS DISTINCT FROM policy->>'scheduleId'
@@ -152,7 +155,7 @@ BEGIN
     OR effective.price_version_id IS DISTINCT FROM n.quote_snapshot->>'priceVersionId'
     OR basis->>'priceVersionId' IS DISTINCT FROM effective.price_version_id
     OR n.quote_snapshot->>'roundingPolicy' IS DISTINCT FROM effective.rounding_policy
-  THEN RAISE EXCEPTION 'fixed fee effective policy changed' USING ERRCODE='40001'; END IF;
+  THEN RAISE EXCEPTION 'fixed fee published policy differs' USING ERRCODE='40001'; END IF;
 
   choice:=v.payload#>'{declaration,attributes,rentalPricing}';
   conditions:=n.quote_snapshot#>'{pricingInputs,conditions}';
@@ -421,31 +424,25 @@ BEGIN
     WHERE pub.version_id=v.id AND pub.account_id=n.account_id AND pub.owner_user_id=n.owner_user_id AND pub.game_id=n.game_id
       AND pub.rule_release_id=n.rule_release_id AND pub.content_hash=n.content_hash AND pub.source='OWNER_DIRECT' LIMIT 1;
 
-  IF v.payload ? 'pricingPolicy' THEN
-    SELECT s.id,s.generation,s.effective_at,s.price_version_id INTO old_policy FROM zzsh_supply.pricing_policy_schedule s
-      WHERE s.id=v.payload#>>'{pricingPolicy,scheduleId}' AND s.game_id=n.game_id AND s.pricing_model='SPREAD';
-    IF NOT FOUND OR v.payload#>>'{pricingPolicy,schema}' IS DISTINCT FROM 'pricing-policy-v1'
-      OR v.payload#>>'{pricingPolicy,pricingModel}' IS DISTINCT FROM 'SPREAD'
-      OR old_policy.generation::text IS DISTINCT FROM v.payload#>>'{pricingPolicy,generation}'
-      OR old_policy.effective_at IS DISTINCT FROM (v.payload#>>'{pricingPolicy,effectiveAt}')::timestamptz
-      OR old_policy.effective_at>published_at OR old_policy.price_version_id IS DISTINCT FROM v.payload#>>'{pricingPolicy,priceVersionId}'
-      OR old_policy.price_version_id IS DISTINCT FROM v.payload#>>'{quoteValues,priceVersionId}'
-    THEN RAISE EXCEPTION 'scheduled spread original listing policy invalid' USING ERRCODE='40001'; END IF;
-  ELSE
-    IF v.payload#>>'{quoteValues,priceVersionId}' IS DISTINCT FROM v.payload#>>'{ruleRefs,priceVersionId}'
-    THEN RAISE EXCEPTION 'legacy spread listing price invalid' USING ERRCODE='40001'; END IF;
-  END IF;
+  SELECT s.id,s.generation,s.effective_at,s.price_version_id INTO old_policy FROM zzsh_supply.pricing_policy_schedule s
+    WHERE s.id=v.payload#>>'{pricingPolicy,scheduleId}' AND s.game_id=n.game_id AND s.pricing_model='SPREAD';
+  IF NOT FOUND OR v.payload#>>'{pricingPolicy,schema}' IS DISTINCT FROM 'pricing-policy-v1'
+    OR v.payload#>>'{pricingPolicy,pricingModel}' IS DISTINCT FROM 'SPREAD'
+    OR old_policy.generation::text IS DISTINCT FROM v.payload#>>'{pricingPolicy,generation}'
+    OR old_policy.effective_at IS DISTINCT FROM (v.payload#>>'{pricingPolicy,effectiveAt}')::timestamptz
+    OR old_policy.effective_at>published_at OR old_policy.price_version_id IS DISTINCT FROM v.payload#>>'{pricingPolicy,priceVersionId}'
+    OR old_policy.price_version_id IS DISTINCT FROM v.payload#>>'{quoteValues,priceVersionId}'
+  THEN RAISE EXCEPTION 'scheduled spread original listing policy invalid' USING ERRCODE='40001'; END IF;
 
   SELECT s.id,s.generation,s.effective_at,s.price_version_id,pv.haff_rule,pv.rounding_policy INTO effective
     FROM zzsh_supply.pricing_policy_schedule s JOIN zzsh_supply.price_version pv ON pv.id=s.price_version_id AND pv.game_id=s.game_id
-   WHERE s.id=(SELECT t.id FROM zzsh_supply.pricing_policy_schedule t WHERE t.game_id=n.game_id AND t.pricing_model='SPREAD'
-      AND t.effective_at<=clock_timestamp() ORDER BY t.effective_at DESC,t.generation DESC LIMIT 1)
+   WHERE s.id=old_policy.id AND policy IS NOT DISTINCT FROM v.payload->'pricingPolicy'
      AND pv.status='SEALED' AND pv.mode='SPREAD' AND pv.fixed_fee_rates IS NULL AND zzsh_supply.valid_compat_haff_rule(pv.haff_rule);
   IF NOT FOUND OR effective.id IS DISTINCT FROM policy->>'scheduleId' OR effective.generation::text IS DISTINCT FROM policy->>'generation'
     OR effective.effective_at IS DISTINCT FROM (policy->>'effectiveAt')::timestamptz OR effective.price_version_id IS DISTINCT FROM policy->>'priceVersionId'
     OR effective.price_version_id IS DISTINCT FROM n.quote_snapshot->>'priceVersionId' OR basis->>'priceVersionId' IS DISTINCT FROM effective.price_version_id
     OR effective.rounding_policy IS DISTINCT FROM 'HALF_UP_CENT_V1' OR n.quote_snapshot->>'roundingPolicy' IS DISTINCT FROM effective.rounding_policy
-  THEN RAISE EXCEPTION 'scheduled spread effective policy changed' USING ERRCODE='40001'; END IF;
+  THEN RAISE EXCEPTION 'scheduled spread published policy differs' USING ERRCODE='40001'; END IF;
 
   quote:=n.quote_snapshot-ARRAY['quoteKind','orderSnapshotSchema','confirmationId','confirmationDigest','confirmationExpiresAt',
     'listingHash','personal','settlementPricing','agreementAcceptanceSchema','agreementAcceptance','earlySettlementDisclosure','fullPayoutTermsAcceptance'];

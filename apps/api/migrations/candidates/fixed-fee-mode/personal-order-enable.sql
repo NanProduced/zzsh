@@ -46,8 +46,7 @@ BEGIN
       JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=v.account_id AND pub.source='OWNER_DIRECT'
       WHERE v.id=NEW.listing_version_id AND v.account_id=NEW.account_id AND v.schema_version=2 AND v.origin='NATIVE'
         AND v.payload#>>'{quoteValues,mode}'='SPREAD'
-        AND (v.payload ? 'pricingPolicy' OR EXISTS(SELECT 1 FROM zzsh_supply.pricing_policy_schedule p
-          WHERE p.game_id=NEW.game_id AND p.pricing_model='SPREAD' AND p.effective_at<=clock_timestamp()))
+        AND v.payload ? 'pricingPolicy'
     ) THEN RAISE EXCEPTION 'scheduled spread order requires its versioned confirmation' USING ERRCODE='40001'; END IF;
   ELSIF NEW.confirmation_id IS DISTINCT FROM OLD.confirmation_id THEN
     RAISE EXCEPTION 'confirmation consumption is immutable' USING ERRCODE='40001';

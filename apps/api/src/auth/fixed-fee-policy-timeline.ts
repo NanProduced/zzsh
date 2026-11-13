@@ -6,7 +6,7 @@ import { entitlementPricingSummary, validateBenefitPolicy, type GrowthBenefitPol
 type FeeVersion = { effectiveAt: string; generation: string; rates: FixedFeeRates; protectedModes: readonly RentalMode[] };
 type BenefitVersion = { effectiveAt: string; version: string; policy: GrowthBenefitPolicy };
 type Entitlement = { startsAt: string; endsAt: string; pricing: unknown };
-export type FixedFeeTimelineInput = { from: string; fees: readonly FeeVersion[]; benefits: readonly BenefitVersion[]; entitlements: readonly Entitlement[] };
+export type FixedFeeTimelineInput = { from: string; fees: readonly FeeVersion[]; frozenFees?: readonly Pick<FeeVersion, "rates" | "protectedModes">[]; benefits: readonly BenefitVersion[]; entitlements: readonly Entitlement[] };
 export type FixedFeeTimelineResult = { valid: true } | { valid: false; reason: string; at: string; mode?: RentalMode };
 
 const instant = (value: string) => {
@@ -43,19 +43,21 @@ export function validateFixedFeeTimeline(input: FixedFeeTimelineInput): FixedFee
       if (!fee) return { valid: false, reason: "FEE_POLICY_UNAVAILABLE", at };
       const benefit = benefits.filter(row => row.effectiveAt <= at).sort((left, right) => left.versionNo > right.versionNo ? -1 : left.versionNo < right.versionNo ? 1 : 0)[0];
       if (!benefit) return { valid: false, reason: "BENEFIT_POLICY_UNAVAILABLE", at };
-      const checked = validateBenefitPolicy(benefit.policy, { enabledModes: fee.protectedModes, fixedFeeRates: fee.rates });
-      if (!checked.publishable) return { valid: false, reason: "BENEFIT_POLICY_INCOMPATIBLE", at };
       const next = events[index + 1];
-      for (const entitlement of entitlements) {
-        if (next && entitlement.startsAt >= next) break;
-        if (entitlement.endsAt <= at) continue;
-        const observedAt = entitlement.startsAt > at ? entitlement.startsAt : at;
-        const pricing = entitlementPricingSummary(entitlement.pricing);
-        if (pricing.knowledge !== "KNOWN") return { valid: false, reason: "ENTITLEMENT_PRICING_UNAVAILABLE", at: observedAt };
-        const applicable = "scope" in pricing ? fee.protectedModes : [pricing.mode];
-        for (const mode of applicable) {
-          if (!fee.protectedModes.includes(mode)) continue;
-          if (!fixedFeeAllowsPayableRatio(fee.rates[mode], pricing.payableRatio)) return { valid: false, reason: "ENTITLEMENT_DISCOUNT_EXCEEDS_FEE", at: observedAt, mode };
+      for (const protectedFee of [fee, ...(input.frozenFees ?? [])]) {
+        const checked = validateBenefitPolicy(benefit.policy, { enabledModes: protectedFee.protectedModes, fixedFeeRates: protectedFee.rates });
+        if (!checked.publishable) return { valid: false, reason: "BENEFIT_POLICY_INCOMPATIBLE", at };
+        for (const entitlement of entitlements) {
+          if (next && entitlement.startsAt >= next) break;
+          if (entitlement.endsAt <= at) continue;
+          const observedAt = entitlement.startsAt > at ? entitlement.startsAt : at;
+          const pricing = entitlementPricingSummary(entitlement.pricing);
+          if (pricing.knowledge !== "KNOWN") return { valid: false, reason: "ENTITLEMENT_PRICING_UNAVAILABLE", at: observedAt };
+          const applicable = "scope" in pricing ? protectedFee.protectedModes : [pricing.mode];
+          for (const mode of applicable) {
+            if (!protectedFee.protectedModes.includes(mode)) continue;
+            if (!fixedFeeAllowsPayableRatio(protectedFee.rates[mode], pricing.payableRatio)) return { valid: false, reason: "ENTITLEMENT_DISCOUNT_EXCEEDS_FEE", at: observedAt, mode };
+          }
         }
       }
     }

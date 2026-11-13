@@ -75,18 +75,29 @@ export async function readFundingPolicyForRelease(client: PoolClient, releaseId:
   return validateFundingPolicy(row.policy);
 }
 
-async function currentPolicyForAccount(client: PoolClient, accountId: string, ownerUserId: string): Promise<PolicyRow | null> {
-  const row = (await client.query<PolicyRow>(
-    `SELECT p.id AS "priceVersionId",p.funding_policy AS policy,p.status,
-            a.game_id AS "gameId",r.id AS "releaseId"
-       FROM zzsh_supply.rental_account a
-       JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id IS NOT NULL
-       JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=a.game_id
-       JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-      WHERE a.id=$1 AND a.owner_user_id=$2`,
-    [accountId, ownerUserId],
-  )).rows[0];
-  return row ?? null;
+const accountFundingPolicyFrom = `FROM zzsh_supply.rental_account a JOIN zzsh_supply.game g ON g.id=a.game_id AND g.enabled
+  LEFT JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
+  LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id
+    AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash
+  JOIN zzsh_supply.rule_release r ON r.game_id=a.game_id AND r.id=CASE
+    WHEN v.review_state IN ('PUBLISHED','APPROVED') THEN v.rule_release_id ELSE g.current_release_id END
+  JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=a.game_id`;
+const accountFundingPolicyBound = `(v.id IS NULL OR v.review_state NOT IN ('PUBLISHED','APPROVED')
+  OR (v.review_state='PUBLISHED' AND pub.source='OWNER_DIRECT')
+  OR (v.review_state='APPROVED' AND pub.source='LEGACY_APPROVED'))`;
+
+async function accountFundingPolicy(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string) {
+  return (await client.query<PolicyRow & { versionId: string | null }>(`SELECT p.id AS "priceVersionId",
+    p.funding_policy AS policy,p.status,a.game_id AS "gameId",r.id AS "releaseId",v.id AS "versionId"
+    ${accountFundingPolicyFrom}
+    WHERE a.id=$1 AND a.owner_user_id=$2 AND ($3::text IS NULL OR v.id=$3) AND ${accountFundingPolicyBound}`,
+    [accountId, ownerUserId, versionId ?? null])).rows[0] ?? null;
+}
+
+export async function readAccountFundingPolicies(client: PoolClient, accountIds: string[]) {
+  return (await client.query<{ accountId: string; policy: unknown | null; status: string }>(`SELECT a.id AS "accountId",p.funding_policy AS policy,p.status AS status
+    ${accountFundingPolicyFrom}
+    WHERE a.id=ANY($1::text[]) AND ${accountFundingPolicyBound}`, [accountIds])).rows;
 }
 
 async function latestProof(client: PoolClient, accountId: string): Promise<ProofRow | null> {
@@ -143,23 +154,7 @@ type FormalFundingContext = {
 };
 
 async function readFormalContext(client: PoolClient, accountId: string, ownerUserId: string, versionId?: string, options: ProductionFundingAuthorityOptions = {}, purpose: "READ" | "WRITE" = "WRITE", evaluatedAt?: string): Promise<FormalFundingContext | null> {
-  const policyRow = versionId
-    ? (await client.query<PolicyRow & { versionId: string; ownerUserId: string; accountId: string; contentHash: string | null; payload: ListingVersion["payload"]; currentVersionId: string | null; publicationSource: string | null }>(
-      `SELECT p.id AS "priceVersionId",p.funding_policy AS policy,p.status,
-              a.game_id AS "gameId",r.id AS "releaseId",v.id AS "versionId",
-              a.owner_user_id AS "ownerUserId",a.current_version_id AS "currentVersionId",
-              v.account_id AS "accountId",v.content_hash AS "contentHash",v.payload,
-              pub.source AS "publicationSource"
-         FROM zzsh_supply.listing_version v
-         JOIN zzsh_supply.rental_account a ON a.id=v.account_id
-         JOIN zzsh_supply.game g ON g.id=a.game_id AND g.current_release_id=v.rule_release_id
-         JOIN zzsh_supply.rule_release r ON r.id=v.rule_release_id AND r.game_id=a.game_id
-         JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-         LEFT JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id
-        WHERE v.id=$1 AND v.account_id=$2 AND a.owner_user_id=$3 AND p.status='SEALED'`,
-      [versionId, accountId, ownerUserId],
-    )).rows[0]
-    : await currentPolicyForAccount(client, accountId, ownerUserId);
+  const policyRow = await accountFundingPolicy(client, accountId, ownerUserId, versionId);
   if (!policyRow || policyRow.policy === null || policyRow.status !== "SEALED") return null;
   const policy = validateFundingPolicy(policyRow.policy);
   if (options.creditGuaranteeEnabled) {
@@ -321,7 +316,7 @@ export async function appendAccountGuaranteeProof(client: PoolClient, adminUserI
   if (input.reason.trim().length < 2 || input.reason.length > 500) throw invalid("Proof reason is invalid");
   const account = await lockPublishingAccount(client, accountId);
   await authorize();
-  const policyRow = await currentPolicyForAccount(client, account.id, account.owner_user_id);
+  const policyRow = await accountFundingPolicy(client, account.id, account.owner_user_id);
   if (!policyRow || policyRow.policy === null || policyRow.status !== "SEALED") throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", "Funding policy is unavailable");
   const policy = validateFundingPolicy(policyRow.policy);
   if (policy.policyVersion !== input.expectedPolicyVersion || policyRow.priceVersionId !== input.expectedPriceVersionId
@@ -423,7 +418,7 @@ export async function projectGuaranteeProof(client: PoolClient, account: Publish
 export async function readGuaranteeContext(client: PoolClient, accountId: string, permissions: ReadonlySet<string>, storage: MediaStorage) {
   const account = await readPublishingAccount(client, accountId);
   const evaluatedAt = (await client.query<{ now: string }>(`SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS now`)).rows[0]!.now;
-  const row = await currentPolicyForAccount(client, account.id, account.owner_user_id);
+  const row = await accountFundingPolicy(client, account.id, account.owner_user_id);
   let policy: FundingPolicy | null = null;
   try { if (row?.status === "SEALED" && row.policy) policy = validateFundingPolicy(row.policy); } catch { /* Invalid policies fail closed, but remain diagnosable. */ }
   const proof = await readLatestAccountGuaranteeProof(client, accountId, evaluatedAt);

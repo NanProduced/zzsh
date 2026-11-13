@@ -109,7 +109,7 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
 }
 
 test("scheduled spread remains closed while an old listing without a plan retains v4 pricing",async()=>{
-  const f=personalRefsFixture(true,"SPREAD"),oldRule=compatRule("47"),newRule=compatRule("50");
+  const f=personalRefsFixture(true,"SPREAD"),oldRule=compatRule("47");
   const input={priceVersionId:"price-1",mode:"SPREAD" as const,roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD" as const,haffRule:oldRule,
     lines:[{itemId:"haff",quantity:"60000000",unit:"HAFF_BASE" as const,pricingKind:"HAFF_RATIO" as const,customerTier:"STANDARD" as const},
       {itemId:"item",quantity:"5",unit:"PIECE" as const,pricingKind:"FIXED_UNIT" as const,unitQuantity:"1",buyerUnitAmount:"2",ownerUnitAmount:"1",customerTier:"STANDARD" as const}],
@@ -121,15 +121,16 @@ test("scheduled spread remains closed while an old listing without a plan retain
   f.payload.declaration.inventory=input.lines.map(line=>({itemId:line.itemId,quantity:line.quantity}));
   f.payload.declaration.termOptionCode="daily-10m";f.payload.declaration.pricingOptionCode="";
   f.payload.quoteValues=old.quote as unknown as Record<string,unknown>;f.rehash();
-  const frozen=JSON.stringify(f.payload),state={enabled:true,price:"price-2",buyer:"3"};
+  const frozen=JSON.stringify(f.payload);
   const original=(f.client as any).query.bind(f.client),client={query:async(sql:string,values?:unknown[])=>{
-    if(sql.includes("to_regclass('zzsh_supply.pricing_policy_schedule')"))return{rows:[{prices:state.enabled,modes:state.enabled,rates:state.enabled}],rowCount:1};
-    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule s'))return{rows:state.enabled?[{id:'spread-schedule',generation:'2',effectiveAt:'2026-01-01T00:00:00.000000Z',priceVersionId:state.price,mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null,haffRule:newRule}]:[]};
+    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule')) assert.fail("a frozen listing must not resolve a current policy");
+    if(sql.includes('SELECT current_release_id,enabled FROM zzsh_supply.game'))
+      return {rows:[{enabled:true,current_release_id:"release-next"}],rowCount:1};
     if(sql.includes('AS at'))return{rows:[{at:'2026-10-25T00:00:00.000000Z'}],rowCount:1};
     if(sql.includes('SELECT p.id,p.status'))return{rows:[{id:'price-1',status:'SEALED',mode:'SPREAD',haff_rule:oldRule,commission_rate:null,rounding_policy:'HALF_UP_CENT_V1',term_version_id:'term-1'}],rowCount:1};
     if(sql.includes('/* current-trade-resources */'))return{rows:[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true},{id:'item',code:'fixture',unit:'PIECE',enabled:true}],rowCount:2};
     if(sql.includes('FROM zzsh_supply.price_line'))return{rows:[{item_id:'haff',pricing_kind:'HAFF_RATIO',unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null,item_unit:'HAFF_BASE',item_enabled:true},
-      {item_id:'item',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:state.enabled?state.buyer:'2',owner_unit_amount:'1',item_unit:'PIECE',item_enabled:true}],rowCount:2};
+      {item_id:'item',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:'2',owner_unit_amount:'1',item_unit:'PIECE',item_enabled:true}],rowCount:2};
     if(sql.includes('FROM zzsh_supply.term_option'))return{rows:[input.termOption],rowCount:1};
     return original(sql,values);
   }} as never;
@@ -138,12 +139,11 @@ test("scheduled spread remains closed while an old listing without a plan retain
     return {knowledge:"KNOWN" as const,policyVersion:"1",effectiveTier:"STANDARD" as const,policyTier:"STANDARD" as const,asOfUtc:request.asOfUtc,entitlementIds:[],
       candidates:[{quote:request.baseQuote,payableRatio:"1",plan:quoteToGrowthOfferPlan(request.baseQuote,{source:"GROWTH",benefitVersion:"1",binding})}]};
   }};
-  state.enabled=false;const legacy=await rebuildPersonalConfirmation(client,f.context,f.input,options);
+  const legacy=await rebuildPersonalConfirmation(client,f.context,f.input,options);
   assert.equal(legacy.snapshot.schema,"personal-quote-v4");assert.equal(legacy.snapshot.quote.priceVersionId,"price-1");
   assert.equal(JSON.stringify(f.payload),frozen);
-  const issued=await issuePersonalConfirmation(client,f.context,f.input,options);state.enabled=true;
-  await assert.rejects(rebuildPersonalConfirmation(client,f.context,f.input,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
-  await assert.rejects(verifyPersonalConfirmation(client,f.context,f.input,issued.confirmationToken,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
+  const issued=await issuePersonalConfirmation(client,f.context,f.input,options);
+  await verifyPersonalConfirmation(client,f.context,f.input,issued.confirmationToken,options);
   const listingQuote=structuredClone(old.quote);listingQuote.priceVersionId="listing-price";
   f.payload.quoteValues=listingQuote as unknown as Record<string,unknown>;
   f.payload.pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:"listing-schedule",generation:"1",effectiveAt:"2026-01-01T00:00:00Z",priceVersionId:"listing-price"};
@@ -179,7 +179,7 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   assert.deepEqual(inserted?.agreementAcceptance, issued.agreementAcceptance);
   assert.deepEqual(inserted?.earlySettlementDisclosure, disclosure);
 
-  for (const message of ["fixed fee effective policy changed", "scheduled spread effective policy changed"]) {
+  for (const message of ["fixed fee published policy differs", "scheduled spread published policy differs", "fixed fee effective policy changed", "scheduled spread effective policy changed"]) {
     insertError = Object.assign(Error(message), { code: "40001" });
     await assert.rejects(create, { status: 409, code: "CONFIRMATION_CHANGED" });
   }

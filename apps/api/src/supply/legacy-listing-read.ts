@@ -1,4 +1,3 @@
-import type { MarketPricing } from "./market-pricing";
 import { recordedListingFeeDisplay } from "./tenant-price-projection";
 import type { PoolClient } from "pg";
 import type { PublicListingProjection } from "./legacy-path-projection";
@@ -420,12 +419,11 @@ export function buildLegacyListingCandidates(query:ListingQueryV2,after:ListingP
 // union while each branch (and the DISTINCT ON / final sort) carries fewer rows.
 // An output alias such as sort_key is not visible in the same SELECT's WHERE, so
 // the expression is repeated rather than referenced.
-export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPosition|null,admission?:LegacyPublicAdmission,pricing?:MarketPricing) {
+export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPosition|null,admission?:LegacyPublicAdmission) {
   const values:unknown[]=[];const p=(v:unknown)=>{values.push(v);return '$'+values.length;};
   const game=p(query.gameId),core=query.coreItemId===null?null:p(query.coreItemId);
   const publication=`pub.published_at`;
-  const market=query.sort==="resourceTotal"?candidateMarketPrice(pricing,p):null;
-  const price=market?.key;
+  const price=candidateMarketPrice();
   const nativeKey=query.sort==="latest"?publication:query.sort==="resourceTotal"?price:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
   const legacyKey=query.sort==="latest"?`h.source_updated_at`:query.sort==="resourceTotal"?`((h.snapshot->>'haffRentYuan')::numeric+(h.snapshot->>'goodsYuan')::numeric)`:`(SELECT l.quantity FROM zzsh_supply.inventory_line l WHERE l.version_id=v.id AND l.item_id=${core})`;
   // No cursor means no seek conjunct at all; an empty string would leave a
@@ -438,10 +436,10 @@ export function buildMixedListingCandidates(query:ListingQueryV2,after:ListingPo
       legacySeek.push(`(${legacyKey} ${op} ${k}::${cast} OR ${legacyKey} IS NULL OR (${legacyKey}=${k}::${cast} AND a.id>${id}))`);}}
   const nativeWhere=[PUBLIC_CANDIDATE_WHERE,`a.game_id=${game}`,PUBLIC_STANDARD_TIER_GUARD,...candidatePredicates(query.filters,query.q,p),...nativeSeek];
   const legacyWhere=[VISIBLE,legacyAdmissionSql(admission,p),`a.game_id=${game}`,...legacySearchPredicate(query.q,p),...candidatePredicates(query.filters,null,p,"COALESCE(d.snapshot->'attributes',v.attributes)"),...legacySeek];
-  const text=`WITH native AS (SELECT a.id AS id,v.id AS version_id,'native' AS source,0 AS priority,${nativeKey} AS sort_key${market?.projected?",market.market_price":""} ${PUBLIC_CANDIDATE_FROM} ${market?.from??""} WHERE ${nativeWhere.join(" AND ")}),
-   legacy AS (SELECT a.id AS id,v.id AS version_id,'legacy' AS source,1 AS priority,${legacyKey} AS sort_key${market?.projected?",NULL::jsonb AS market_price":""} ${FROM} WHERE ${legacyWhere.join(" AND ")}),
-   merged AS (SELECT DISTINCT ON (id) id,version_id,source,priority,sort_key${market?.projected?",market_price":""} FROM (SELECT * FROM native UNION ALL SELECT * FROM legacy) combined ORDER BY id,priority)
-   SELECT id,version_id,source,${market?.projected?"market_price,":""}${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM merged ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
+  const text=`WITH native AS (SELECT a.id AS id,v.id AS version_id,'native' AS source,0 AS priority,${nativeKey} AS sort_key ${PUBLIC_CANDIDATE_FROM} WHERE ${nativeWhere.join(" AND ")}),
+   legacy AS (SELECT a.id AS id,v.id AS version_id,'legacy' AS source,1 AS priority,${legacyKey} AS sort_key ${FROM} WHERE ${legacyWhere.join(" AND ")}),
+   merged AS (SELECT DISTINCT ON (id) id,version_id,source,priority,sort_key FROM (SELECT * FROM native UNION ALL SELECT * FROM legacy) combined ORDER BY id,priority)
+   SELECT id,version_id,source,${query.sort==="latest"?`to_char(sort_key AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`:"sort_key::text"} AS key FROM merged ORDER BY sort_key ${query.direction} NULLS LAST,id ASC LIMIT 200`;
   return {text,values};
 }
 

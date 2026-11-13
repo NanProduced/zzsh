@@ -80,6 +80,10 @@ test('fee changes check current and future member policies and still-active enti
  assert.deepEqual(validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,lowered],entitlements:[stillActive]}),{valid:false,reason:'ENTITLEMENT_DISCOUNT_EXCEEDS_FEE',at:later,mode:'custom'});
  const futureGift={...entitlement,startsAt:'2026-10-02T00:00:00.000001Z',endsAt:'2026-10-03T00:00:00.000000Z'};
  assert.deepEqual(validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,lowered],entitlements:[futureGift]}),{valid:false,reason:'ENTITLEMENT_DISCOUNT_EXCEEDS_FEE',at:futureGift.startsAt,mode:'custom'});
+ const higher={...lowered,rates:{...rate,custom:'0.20'}};
+ const frozen={rates:{...rate,custom:'0.04'},protectedModes:['custom'] as const};
+ assert.deepEqual(validateFixedFeeTimeline({...timeline,from:later,fees:[...timeline.fees,higher],frozenFees:[frozen],entitlements:[futureGift]}),
+  {valid:false,reason:'ENTITLEMENT_DISCOUNT_EXCEEDS_FEE',at:futureGift.startsAt,mode:'custom'});
  const invalidEntitlement={...entitlement,pricing:{status:'CONFIGURED',kind:'TOTAL_DISCOUNT',payableRatio:'0.95'}};
  assert.equal((validateFixedFeeTimeline({...timeline,entitlements:[invalidEntitlement]}) as any).reason,'ENTITLEMENT_PRICING_UNAVAILABLE');
  const deep=structuredClone(config);for(const tier of NORMAL_GROWTH_TIERS)deep.tiers[tier].payableRatio='0.90';

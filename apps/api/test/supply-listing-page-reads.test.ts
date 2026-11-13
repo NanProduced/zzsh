@@ -80,8 +80,8 @@ function scheduledFixture(id: string, model: "FIXED_FEE" | "SPREAD" = "SPREAD", 
   fixture.version.payload = normalizeContentPayload({ ...payload, gameId, schemaVersion: fixed ? 4 : 2,
     declaration: { ...payload.declaration, pricingOptionCode: "", attributes: { ...payload.declaration.attributes, rentalPricing: { rentalMode: "ordinary" } } },
     quoteValues: { ...result.quote, ruleReleaseId: "release-a" },
-    ...(fixed ? { pricingPolicy: { schema: "pricing-policy-v1", pricingModel: model, scheduleId: "initial-plan",
-      generation: "1", effectiveAt: "2026-10-01T00:00:00Z", priceVersionId: "price-a" } } : {}) });
+    pricingPolicy: { schema: "pricing-policy-v1", pricingModel: model, scheduleId: "initial-plan",
+      generation: "1", effectiveAt: id === "unknown" ? "2026-10-02T00:00:00Z" : "2026-10-01T00:00:00Z", priceVersionId: "price-a" } });
   fixture.version.content_hash = computeContentHash(fixture.version.payload);
   return fixture;
 }
@@ -110,7 +110,7 @@ function clientFor(fixtures: Fixture[], favorites?: (userId: string) => Array<{ 
     else if (sql.includes("zzsh_supply.listing_publication")) rows = pick(versions).map((v) => byAccount.get(v.account_id)!.publication());
     else if (sql.includes('SELECT u.suspended')) { const f = fixtures.find((x) => x.owner === args[0])!; rows = [{ suspended: f.state.suspended, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }]; }
     else if (sql.includes("game_service_operation")) rows = [{ id: "service-a", gameId: GAME, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-a", catalog_revision: "1" }];
+    else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: GAME, code: "delta", name: "三角洲行动", enabled: true, current_release_id: "release-new", catalog_revision: "1" }];
     else if (sql.includes("funding_policy AS policy")) rows = [{ policy: null }];
     else if (sql.includes("rule_acceptance")) rows = pick(accounts).some((a) => byAccount.get(a.id)!.state.accepted) ? [{}] : [];
     else if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = media.filter((m) => pick(versions).some((v) => `media-${v.account_id}` === m.id));
@@ -139,31 +139,15 @@ function candidateRows(fixtures: Fixture[]) {
   return fixtures.map((f, index) => ({ id: f.account.id, version_id: f.version.id, key: `2026-10-0${index + 1}T00:00:00.000000Z` }));
 }
 
-async function marketPage(t: { mock: { method: (object: object, key: string, value: unknown) => () => void } }, fixtures: Fixture[], search: URLSearchParams, mode: "native" | "mixed" = "native", currentPrices?: Record<string, string | null>) {
+async function marketPage(t: { mock: { method: (object: object, key: string, value: unknown) => () => void } }, fixtures: Fixture[], search: URLSearchParams, mode: "native" | "mixed" = "native") {
   const rows = mode === "native"
     ? candidateRows(fixtures)
     : [{ id: "legacy-1", version_id: "legacy-version", key: "2026-10-09T00:00:00.000000Z", source: "legacy" },
        ...candidateRows(fixtures).map((row, index) => ({ ...row, key: `2026-10-0${8 - index}T00:00:00.000000Z`, source: "native" }))];
   const { client, gate, queries, windows } = clientFor(fixtures);
   const real = client.query;
-  const priceReads: string[][] = [];
-  let scheduleReads = 0;
   (client as unknown as { query: PoolClient["query"] }).query = (async (sql: string, args: unknown[] = []) => {
     if (sql.startsWith(mode === "native" ? "WITH candidates AS" : "WITH native AS")) return { rows, rowCount: rows.length };
-    if (currentPrices && sql.includes("market-pricing-schema")) return { rows: [{ schedules: true, ready: true }] };
-    if (currentPrices && sql.includes("DISTINCT ON (game_id,pricing_model)")) {
-      scheduleReads++;
-      return { rows: [{ gameId: GAME, model: "SPREAD", price: "current-price", id: "current-plan" }] };
-    }
-    if (currentPrices && sql.includes("public_market_price(")) {
-      assert(Array.isArray(args[0]), "the page must never issue a single-account price query");
-      const versionIds = args[0] as string[];
-      priceReads.push(versionIds);
-      return { rows: versionIds.map(id => {
-        const amount = currentPrices[id];
-        return { id, price: amount == null ? null : { amount, ratio: "40", lines: [{ itemId: "haff-a", amount, unitAmount: "2.50000000" }] } };
-      }) };
-    }
     return real(sql, args);
   }) as never;
   const options = { pool: { connect: async () => client }, supplyGateReader: gate, listingCursorKey: CURSOR_KEY, mediaStorage: { accountImageCdn: cdn },
@@ -177,7 +161,7 @@ async function marketPage(t: { mock: { method: (object: object, key: string, val
   ];
   try {
     const page = await listV2({ url: "/listings?" + search } as never, options as never, search);
-    return { page, queries, windows, priceReads, scheduleReads };
+    return { page, queries, windows };
   } finally { for (const restore of undo) restore(); }
 }
 
@@ -203,15 +187,15 @@ test("a native market page reads each shared dimension once, not once per candid
   assert.equal(countOf(queries, "SELECT a.* FROM zzsh_supply.listing_media"), 5, "one media read per candidate, not two");
 });
 
-test("latest and core quantity batch scheduled prices for the same native or mixed candidate window", async t => {
+test("latest and quantity markets project publication quotes without reading current prices", async t => {
   for (const [sort, mode] of [["latest", "native"], ["coreQuantity", "native"], ["latest", "mixed"], ["coreQuantity", "mixed"]] as const) {
     const fixtures = ["a", "b", "c"].map(id => scheduledFixture(id));
     const search = new URLSearchParams({ queryVersion: "2", gameId: GAME, sort, limit: "4", ...(sort === "coreQuantity" ? { coreItemId: "haff-a" } : {}) });
-    const { page, priceReads, scheduleReads } = await marketPage(t, fixtures, search, mode, { "version-a": "2.50", "version-b": "2.50", "version-c": null });
-    assert.deepEqual(priceReads, [["version-a", "version-b", "version-c"]]);
-    assert.equal(scheduleReads, 1);
+    const { page, queries } = await marketPage(t, fixtures, search, mode);
+    assert.equal(queries.some(sql => /pricing_policy_schedule|public_market_price/.test(sql)), false);
     const items = page.items.filter(item => item.id !== "legacy-1");
-    assert.deepEqual(items.map(item => (item.quote as { resourceTotal: { amount: string } } | null)?.resourceTotal.amount ?? null), ["2.50", "2.50", null]);
+    assert.deepEqual(items.map(item => (item.quote as { resourceTotal: { amount: string } } | null)?.resourceTotal.amount ?? null),
+      fixtures.map(fixture => (fixture.version.payload!.quoteValues.resourceTotal as {amount:string}).amount));
     assert(items.every(item => item.canCreateOrder === false));
   }
 });
@@ -359,7 +343,7 @@ test("favorites read the private set once per page and hide objects that lost pu
   assert.deepEqual(other.result.body.items, [], "another reader never sees this set");
 });
 
-test("favorites batch current prices across games and keep missing and private listings separate", async () => {
+test("favorites keep publication prices across games and keep missing and private listings separate", async () => {
   const fixtures = [
     scheduledFixture("fixed", "FIXED_FEE"),
     scheduledFixture("spread", "SPREAD", "game-b"),
@@ -368,27 +352,13 @@ test("favorites batch current prices across games and keep missing and private l
     scheduledFixture("outside", "FIXED_FEE"),
   ];
   const favoriteRows = fixtures.map((f, i) => ({ account_id: f.id, savedAt: "2026-10-0" + (5 - i) + "T00:00:00.000000Z" }));
-  const { client, gate } = clientFor(fixtures, userId => userId === "reader-a" ? favoriteRows : []);
+  const { client, gate, queries } = clientFor(fixtures, userId => userId === "reader-a" ? favoriteRows : []);
   const original = client.query;
-  const priceReads: unknown[][] = [];
   const spread = fixtures[1]!;
   spread.account.current_version_id = "unreviewed-draft";
   client.query = (async (sql: string, args: unknown[] = []) => {
-    if (sql.includes("market-pricing-schema")) return { rows: [{ schedules: true, ready: true }] };
-    if (sql.includes("DISTINCT ON (game_id,pricing_model)")) return { rows: [
-      { gameId: GAME, model: "FIXED_FEE", price: "fixed-live", id: "fixed-plan" },
-      { gameId: "game-b", model: "SPREAD", price: "spread-live", id: "spread-plan" },
-    ] };
-    if (sql.includes("public_market_price(")) {
-      priceReads.push(args);
-      const price = (amount: string) => ({ amount, ratio: "40", lines: [{ itemId: "haff-a", amount, unitAmount: amount + "000000" }] });
-      return { rows: [
-        { id: "version-fixed", price: price("2.50") }, { id: "version-spread", price: price("3.00") },
-        { id: "version-unknown", price: null }, { id: "version-hidden", price: price("9.99") },
-      ] };
-    }
     if (sql.includes("SELECT v.* FROM zzsh_supply.listing_version") && args[0] === spread.id) return { rows: [spread.version] };
-    if (sql.includes("SELECT * FROM zzsh_supply.listing_publication") && args[1] === spread.id)
+    if (sql.includes("AS \"publishedAtExact\" FROM zzsh_supply.listing_publication") && args[1] === spread.id)
       return { rows: [{ ...spread.publication(), game_id: spread.account.game_id }] };
     return original(sql, args);
   }) as never;
@@ -398,12 +368,10 @@ test("favorites batch current prices across games and keep missing and private l
   await handleFavorites({ method: "GET", headers: {} } as never, capture.response as never, options as never,
     "req_fixture", "/me/favorites", new URLSearchParams("limit=4"));
   assert.equal(capture.result.status, 200);
-  assert.equal(priceReads.length, 1);
-  assert.deepEqual(priceReads[0]![0], ["fixed", "spread", "unknown", "hidden"]);
-  assert.deepEqual(JSON.parse(String(priceReads[0]![1])), { [GAME]: { fixed: "fixed-live" }, "game-b": { spread: "spread-live" } });
+  assert.equal(queries.some(sql => /pricing_policy_schedule|public_market_price/.test(sql)), false);
   const { items, nextCursor } = capture.result.body;
   assert.deepEqual(items.map((row: any) => [row.accountId, row.state, row.listing?.quote?.resourceTotal?.amount ?? null]), [
-    ["fixed", "AVAILABLE", "2.50"], ["spread", "AVAILABLE", "3.00"], ["unknown", "AVAILABLE", null], ["hidden", "UNAVAILABLE", null],
+    ["fixed", "AVAILABLE", (fixtures[0]!.version.payload!.quoteValues.resourceTotal as {amount:string}).amount], ["spread", "AVAILABLE", (spread.version.payload!.quoteValues.resourceTotal as {amount:string}).amount], ["unknown", "AVAILABLE", null], ["hidden", "UNAVAILABLE", null],
   ]);
   assert.equal(items[1].listing.versionId, "version-spread", "prior publication uses its own price");
   assert.equal(items[3].listing, null);

@@ -3,11 +3,10 @@ import type { PoolClient } from "pg";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
-import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
+import { computeContentHash, normalizePricingPolicy, normalizeQuote, normalizeTime, type ContentPayloadInput } from "./content-hash";
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { validateDeltaHaffRule } from "./delta-rental";
-import { effectivePublicationStateSql } from "./listing-query";
-import { assertFixedFeeTermCompatibility, assertPriceVersionResources } from "./rules";
+import { assertScheduledTermCompatibility, assertPriceVersionResources } from "./rules";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 type PriceVersion = { id: string; mode: string; status: string; haffRule: unknown; rates: unknown; roundingPolicy: string };
@@ -134,6 +133,37 @@ export async function readEffectivePricingMode(client: PoolClient, gameId: strin
     priceScheduleId:row.priceScheduleId,priceVersionId:row.priceVersionId};
 }
 
+/** The immutable publication owns the accepted policy; never substitute today's schedule. */
+export function boundListingPricingPolicy(payload: ContentPayloadInput, publishedAt: string | Date) {
+  try {
+    const policy = normalizePricingPolicy(payload.pricingPolicy);
+    const instant = normalizeTime(typeof publishedAt === "string" ? publishedAt : publishedAt.toISOString());
+    const quote = payload.quoteValues;
+    if (!instant || policy.effectiveAt > instant || quote.priceVersionId !== policy.priceVersionId
+      || quote.schemaVersion !== payload.schemaVersion) return null;
+    if (payload.schemaVersion === 4 && quote.mode === "PERCENT" && policy.pricingModel === "FIXED_FEE"
+      || payload.schemaVersion === 2 && quote.mode === "SPREAD" && policy.pricingModel === "SPREAD") return policy;
+  } catch { /* An incomplete publication does not authorize a price. */ }
+  return null;
+}
+
+export async function readBoundListingPrice(client: PoolClient, gameId: string, policy: NonNullable<ContentPayloadInput["pricingPolicy"]>, rentalMode: RentalMode) {
+  const row = (await client.query<PriceVersion>(`SELECT p.id,p.mode,p.status,p.haff_rule AS "haffRule",
+    p.fixed_fee_rates AS rates,p.rounding_policy AS "roundingPolicy"
+    FROM zzsh_supply.pricing_policy_schedule s JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=s.game_id
+    WHERE s.id=$1 AND s.game_id=$2 AND s.pricing_model=$3 AND s.generation=$4::bigint
+      AND s.effective_at=$5::timestamptz AND p.id=$6`,
+    [policy.scheduleId, gameId, policy.pricingModel, policy.generation, policy.effectiveAt, policy.priceVersionId])).rows[0];
+  if (!row || row.status !== "SEALED" || row.roundingPolicy !== "HALF_UP_CENT_V1") return null;
+  if (policy.pricingModel === "SPREAD") {
+    if (row.mode !== "SPREAD" || row.rates !== null) return null;
+    return { ...row, haffRule: spreadRule(row.haffRule), commissionRate: null };
+  }
+  if (row.mode !== "PERCENT" || (row.haffRule as {schema?: unknown} | null)?.schema !== "haff-ratio-v3"
+    || !sealedEnabledRentalModes(row.haffRule)?.includes(rentalMode)) return null;
+  return { ...row, commissionRate: fixedFeeRateForMode(parseFixedFeeRates(row.rates), rentalMode) };
+}
+
 /** Existing owner-published accounts keep their accepted model when the default changes. */
 export async function readListingPricingModel(client:PoolClient,input:{accountId:string;ownerUserId:string;gameId:string;asOf?:string}):Promise<{model:PricingModel|"LEGACY_SPREAD"|"LEGACY_PERCENT";asOf:string}|null> {
   if(!input||![input.accountId,input.ownerUserId,input.gameId].every(value=>typeof value==="string"&&/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)))throw invalid("Listing pricing reference is invalid");
@@ -218,17 +248,33 @@ export async function readFixedFeeTimeline(client: PoolClient, gameId: string, o
     WHERE s.game_id=$1 AND s.pricing_model='FIXED_FEE'`, [gameId])).rows;
   if (options.fee) feeRows.push(options.fee);
   if (feeRows.length === 0) return null;
-  const existingModes = (await client.query<{ mode: string | null }>(`SELECT DISTINCT v.payload#>>'{quoteValues,pricingInputs,compatibility,rentalMode}' AS mode
+  const published = (await client.query<{ mode: RentalMode; rates: unknown }>(`SELECT DISTINCT
+    v.payload#>>'{declaration,attributes,rentalPricing,rentalMode}' AS mode, p.fixed_fee_rates AS rates
     FROM zzsh_supply.rental_account a JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
     JOIN zzsh_supply.listing_publication pub ON pub.version_id=v.id AND pub.account_id=a.id AND pub.content_hash=v.content_hash
-    WHERE a.game_id=$1 AND a.lifecycle='ACTIVE' AND v.schema_version=4 AND ${effectivePublicationStateSql("v", "pub")}`, [gameId])).rows;
-  if (existingModes.some(row => !modeNames.includes(row.mode as RentalMode))) throw conflict("已上架账号的出租方式无法核实");
+      AND pub.source='OWNER_DIRECT' AND pub.game_id=a.game_id AND pub.owner_user_id=a.owner_user_id AND pub.rule_release_id=v.rule_release_id
+    LEFT JOIN zzsh_supply.pricing_policy_schedule s ON s.id=v.payload#>>'{pricingPolicy,scheduleId}' AND s.game_id=a.game_id
+      AND s.pricing_model='FIXED_FEE' AND s.price_version_id=v.payload#>>'{quoteValues,priceVersionId}'
+      AND s.price_version_id=v.payload#>>'{pricingPolicy,priceVersionId}'
+      AND s.generation::text=v.payload#>>'{pricingPolicy,generation}'
+      AND ${instantSql("s.effective_at")}=v.payload#>>'{pricingPolicy,effectiveAt}' AND s.effective_at<=pub.published_at
+    LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=a.game_id AND p.mode='PERCENT' AND p.status='SEALED'
+      AND (p.fixed_fee_rates->>(v.payload#>>'{declaration,attributes,rentalPricing,rentalMode}'))::numeric =
+        CASE WHEN v.payload#>>'{quoteValues,pricingInputs,commissionRate}' ~ '^0([.][0-9]{1,8})?$'
+          THEN (v.payload#>>'{quoteValues,pricingInputs,commissionRate}')::numeric END
+    WHERE a.game_id=$1 AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE' AND v.schema_version=4 AND v.review_state='PUBLISHED'`, [gameId])).rows;
+  const frozenFees = published.map(row => {
+    try {
+      if (!modeNames.includes(row.mode)) throw new Error();
+      return { protectedModes: [row.mode], rates: parseFixedFeeRates(row.rates) };
+    } catch { throw conflict("已上架账号的固定手续费率无法核实"); }
+  });
   const fees: FixedFeeTimelineInput["fees"][number][] = feeRows.map(row => {
     const modes = sealedEnabledRentalModes(row.haffRule);
     if (!modes || (row.haffRule as { schema?: unknown })?.schema !== "haff-ratio-v3") throw conflict("固定手续费出租规则无法核实");
     let rates: ReturnType<typeof parseFixedFeeRates>;
     try { rates = parseFixedFeeRates(row.rates); } catch { throw conflict("固定手续费率无法核实"); }
-    return { effectiveAt: row.effectiveAt, generation: row.generation, rates, protectedModes: [...new Set([...modes, ...existingModes.map(entry => entry.mode as RentalMode)])] };
+    return { effectiveAt: row.effectiveAt, generation: row.generation, rates, protectedModes: modes };
   });
   let from: string;
   try {
@@ -245,7 +291,7 @@ export async function readFixedFeeTimeline(client: PoolClient, gameId: string, o
     FROM zzsh_iam.membership_entitlement WHERE game_id=$1 AND status IN ('ACTIVE','EXECUTED_PENDING_START') AND ends_at>$2::timestamptz
       AND ($3::text IS NULL OR id<>$3)`, [gameId, from, options.excludeEntitlementId ?? null])).rows;
   if (options.entitlement) entitlements.push(options.entitlement);
-  return { from, fees, benefits, entitlements };
+  return { from, fees, frozenFees, benefits, entitlements };
 }
 
 /** Call with the shared policy lock held; membership policies currently apply across games. */
@@ -366,7 +412,7 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
     FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
     WHERE g.id=$1`, [input.gameId])).rows[0];
   if (!currentTerms) throw conflict("固定手续费排期需要已生效的租期版本");
-  await assertFixedFeeTermCompatibility(client, currentTerms.id, price.haffRule);
+  await assertScheduledTermCompatibility(client, currentTerms.id, [{ mode: "PERCENT", haffRule: price.haffRule }]);
   const timeline = await readFixedFeeTimeline(client, input.gameId, { from: effectiveAt, fee: { effectiveAt, generation, rates, haffRule: price.haffRule } });
   if (!timeline) throw conflict("固定手续费政策无法核实");
   const validation = validateFixedFeeTimeline(timeline);
@@ -403,6 +449,12 @@ export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string
     FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1 AND pricing_model='SPREAD'`,[input.gameId])).rows[0];
   if(!current||current.generation!==input.expectedGeneration)throw conflict("价格政策版本已变化，请刷新后重试");
   await assertPriceVersionResources(client,input.gameId,price.id,"SPREAD");
+  const currentTerms = (await client.query<{ id: string }>(`SELECT r.term_version_id AS id
+    FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
+    WHERE g.id=$1`, [input.gameId])).rows[0];
+  if (!currentTerms) throw conflict("价差排期需要已生效的租期版本");
+  await assertScheduledTermCompatibility(client, currentTerms.id, [{ mode: "SPREAD", haffRule: price.haffRule }]);
+
   const generation=(BigInt(current.generation)+1n).toString(),id=newSupplyId("price_policy");
   await client.query(`INSERT INTO zzsh_supply.pricing_policy_schedule
     (id,game_id,pricing_model,price_version_id,generation,effective_at,source,created_by_admin_id)
