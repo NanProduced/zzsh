@@ -147,7 +147,7 @@ export async function applyFinancialDomains(ctx) {
     const continuationReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
     let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", [],continuationReceiptMode) : null;
     if (!continuationRows) {
-        const target = await facts(ctx, continuations.map(row => row.sourceId));
+        const target = await facts(ctx, continuations.map(row => row.sourceId),next);
         const byLegacy = new Map(target.parents.map(p => [p.legacyId, p]));
         continuationRows = [];
         if (next) {
