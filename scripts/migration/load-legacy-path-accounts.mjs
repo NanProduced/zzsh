@@ -55,12 +55,13 @@ const withinWindow = () => {
 };
 withinWindow();
 if (![credentialsFile, out].every(path => path && isAbsolute(path)) || !/^[0-9]+$/.test(expectedOid ?? "") || !/^[a-z0-9]{12,40}$/.test(expectedNonce ?? "")) throw new Error("EXACT_TARGET_REQUIRED");
+for (let p=resolve(credentialsFile);;) { if (lstatSync(p).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent=dirname(p); if(parent===p||p===parse(p).root)break;p=parent; }
 const registered = loadRegisteredTarget(credentialsFile), isNext = registered.migrationProfile === NEXT_MIGRATION_PROFILE;
 if (!isNext && (!actorFile || !isAbsolute(actorFile))) throw new Error("EXACT_TARGET_AND_ACTOR_REQUIRED");
 if (isNext && (![notBefore,expiresAt].every(value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)&&Number.isFinite(Date.parse(value)))
   || Date.parse(notBefore) >= Date.parse(expiresAt))) throw new Error("NEXT_MEDIA_WINDOW_REQUIRED");
 for (const path of [out, ...(!isNext ? [actorFile] : [])]) if (!resolve(path).toLowerCase().startsWith(privateRoot.toLowerCase() + "\\")) throw new Error("PRIVATE_PATH_REQUIRED");
-for (const path of [credentialsFile, ...(!isNext ? [actorFile] : [])]) { let p = resolve(path); for (;;) { if (lstatSync(p).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(p); if (parent === p || p === parse(p).root) break; p = parent; } }
+if (!isNext) { let p=resolve(actorFile);for(;;){if(lstatSync(p).isSymbolicLink())throw new Error("REPARSE_POINT_REFUSED");const parent=dirname(p);if(parent===p||p===parse(p).root)break;p=parent;} }
 if (existsSync(out)) throw new Error("NEW_OUTPUT_REQUIRED");
 const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json"))), credentials = JSON.parse(readFileSync(credentialsFile));
 if (apply) assertNextMigrationWriteReady(registered);
