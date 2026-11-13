@@ -1,4 +1,4 @@
-import assert from 'node:assert/strict';import {test} from 'node:test';import {createRequire,Module} from 'node:module';import {readFileSync} from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {loadInformation} from './information-module.mjs';
+import assert from 'node:assert/strict';import {test} from 'node:test';import {createRequire,Module} from 'node:module';import {existsSync,readFileSync} from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {loadInformation} from './information-module.mjs';
 const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..'),require=createRequire(tree+'/package.json'),React=require('react'),{Window}=require('happy-dom'),ts=require('typescript'),client=require(tree+'/apps/web/src/lib/personal-wallet-client.ts'),information=loadInformation();
 const compiled=ts.transpileModule(readFileSync(tree+'/apps/web/src/components/account/personal-wallet.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText;
 const at='2026-10-03T02:31:22.516000Z',ctx=(id='user_A')=>({contractVersion:'personal-finance.read.v1',projectionVersion:2,subjectId:id,asOf:at,snapshotVersion:'snapshot_1',coverage:{knowledge:'KNOWN',origin:'RECONCILED_OPENING',coverageVersion:'1'}}),money=n=>({currency:'CNY',unit:'cent',knowledge:n===null?'UNKNOWN':'KNOWN',amountCents:n});
@@ -699,6 +699,24 @@ async function probeBankWorkspace(overrides = {}) {
     if (name === '@/lib/withdrawal-history-client') return historyApi;
     if (name === 'next/link') return ({ children, ...props }) => React.createElement('a', props, children);
     if (name.endsWith('.css')) return {};
+    if (name.startsWith("./bank-")) {
+      const candidates = [
+        tree + "/apps/web/src/components/account/" + name.slice(2) + ".tsx",
+        tree + "/apps/web/src/components/account/" + name.slice(2) + ".ts",
+      ];
+      const target = candidates.find(f => existsSync(f));
+      if (target) {
+        const child = new Module(target);
+        child.filename = target;
+        child.paths = Module._nodeModulePaths(tree);
+        child.require = module.require;
+        const code = readFileSync(target, "utf8");
+        child._compile(ts.transpileModule(code, {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+        }).outputText, target);
+        return child.exports;
+      }
+    }
     if (name.startsWith('@/')) return require(tree + '/apps/web/src/' + name.slice(2) + '.ts');
     return require(name);
   };
