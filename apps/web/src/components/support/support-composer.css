@@ -1,0 +1,59 @@
+/* Integrated Composer (WeChat style: clean textarea on top, tools & send on bottom) */
+.support-composer-wrap { padding:10px 18px 14px;background:var(--color-bg-surface);border-top:1px solid var(--color-border-subtle); }
+.support-composer { display:flex;flex-direction:column;border:1px solid var(--color-border-default,var(--color-border-subtle));border-radius:10px;background:color-mix(in srgb,var(--color-text-primary) 2%,transparent);padding:8px 10px 6px;gap:0;transition:border-color .15s ease,background-color .15s ease;box-shadow:none;outline:none; }
+.support-composer[data-dragging="true"] { border-color:var(--color-accent-brand)!important;background:color-mix(in srgb,var(--color-accent-brand) 6%,var(--color-bg-canvas))!important;box-shadow:0 0 0 1px var(--color-accent-brand)!important; }
+.support-composer:focus-within,.support-composer:focus { border-color:var(--color-border-subtle)!important;box-shadow:none!important;outline:none!important; }
+.support-composer textarea { width:100%;min-height:44px;max-height:120px;resize:none;border:0!important;outline:0!important;box-shadow:none!important;color:var(--color-text-primary);background:transparent;font-size:13px;line-height:1.5;padding:2px 0;caret-color:var(--color-accent-brand); }
+.support-composer textarea:focus,.support-composer textarea:focus-visible { outline:none!important;box-shadow:none!important;border:none!important; }
+/* Keyboard focus needs a visible affordance; mouse clicks keep the flat look. */
+.support-composer:has(textarea:focus-visible) { border-color:var(--color-accent-brand)!important;box-shadow:0 0 0 2px color-mix(in srgb,var(--color-accent-brand) 14%,transparent)!important; }
+.support-composer textarea::placeholder { color:var(--color-text-muted); }
+.support-composer-footer { display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:2px;border-top:none; }
+.support-composer-tools { display:flex;align-items:center;gap:4px; }
+.support-tool-btn { display:inline-grid;width:28px;height:28px;place-items:center;border-radius:5px;border:0;background:transparent;color:var(--color-text-secondary);cursor:pointer;transition:background-color .15s ease,color .15s ease;position:relative;padding:0; }
+.support-tool-btn:hover { background:color-mix(in srgb,var(--color-text-primary) 6%,transparent);color:var(--color-text-primary); }
+.support-tool-btn:focus-within { outline:2px solid var(--color-focus-ring);outline-offset:1px; }
+.support-tool-btn input { position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);opacity:0; }
+.support-composer-actions { display:flex;align-items:center;gap:4px;margin-left:auto; }
+.support-composer-hint { font-size:10px;color:var(--color-text-muted);white-space:nowrap;display:inline-flex;align-items:center;gap:2px; }
+.support-kbd { display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;font-family:inherit;font-size:10px;font-weight:500;line-height:1;color:var(--color-text-secondary);background:var(--color-bg-elevated);border:1px solid var(--color-border-default);border-radius:4px;box-shadow:0 1px 1px rgba(0,0,0,.05);user-select:none;margin:0 1px;vertical-align:middle; }
+html.dark .support-kbd,html[data-theme="dark"] .support-kbd,:root:not([data-theme="light"]) .support-kbd { background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16);color:rgba(255,255,255,.7); }
+.support-composer-status { font-size:10px;color:var(--color-status-warning-ink);white-space:nowrap; }
+.support-send-btn { display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;flex:none;min-width:52px;height:30px;padding:0 14px;border-radius:6px;border:0;background:var(--color-accent-brand);color:var(--color-accent-brand-text);font-size:12px;font-weight:600;cursor:pointer;transition:opacity .15s ease; }
+.support-send-btn:hover:not(:disabled) { opacity:.9; }
+.support-send-btn:disabled { opacity:1;cursor:not-allowed;background:var(--color-bg-elevated);color:var(--color-text-secondary);border:1px solid var(--color-border-default); }
+.support-context-send-btn { width:100%;margin-top:12px;justify-content:center; }
+
+/* Staged Image Preview in Composer (Chat-Style Compact Pill Tray) */
+.support-staged-tray { display:flex;flex-direction:column;gap:4px;margin-bottom:6px;max-width:100%; }
+.support-staged-tray-header { display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--color-text-muted);padding:0 2px; }
+.support-staged-resume-button { font-size:10px;padding:2px 8px;border-radius:4px;border:1px solid var(--color-border-subtle);background:var(--color-bg-elevated);color:var(--color-text-primary);cursor:pointer;transition:all .15s ease; }
+.support-staged-resume-button:hover:not(:disabled) { border-color:var(--color-accent-brand);color:var(--color-accent-brand-ink); }
+.support-staged-resume-button:disabled { opacity:.5;cursor:not-allowed; }
+.support-staged-tray-list { display:flex;align-items:center;gap:6px;overflow-x:auto;padding-bottom:2px;max-width:100%; }
+.support-staged-image { display:inline-flex;align-items:center;gap:8px;padding:4px 10px 4px 6px;max-width:240px;width:fit-content;border-radius:8px;border:1px solid var(--color-border-subtle);background:var(--color-bg-elevated);position:relative;box-shadow:var(--shadow-xs);flex-shrink:0; }
+.support-staged-thumb { width:36px;height:36px;border-radius:6px;overflow:hidden;flex-shrink:0;border:1px solid var(--color-border-subtle);background:var(--color-bg-surface); }
+.support-staged-thumb img { width:100%;height:100%;object-fit:cover;display:block; }
+.support-staged-info { display:flex;flex-direction:column;gap:1px;min-width:0;max-width:180px; }
+.support-staged-info strong { font-size:11px;font-weight:500;color:var(--color-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.3; }
+.support-staged-info span { font-size:10px;color:var(--color-text-muted);line-height:1.2; }
+.support-staged-remove { display:inline-grid;width:22px;height:22px;place-items:center;border-radius:50%;border:0;background:var(--color-bg-surface);color:var(--color-text-muted);cursor:pointer;flex-shrink:0;margin-left:2px;box-shadow:0 1px 2px rgba(0,0,0,.08);transition:all .15s ease; }
+.support-staged-remove:hover { color:#ef4444;background:rgba(239,68,68,.12); }
+
+/* Composer popover */
+.support-emoji-pop { width:auto;padding:0;border:1px solid var(--color-border-default);border-radius:10px;background:var(--color-bg-surface);box-shadow:var(--shadow-lg);z-index:120; }
+
+/* 窄屏覆盖必须排在基础规则之后，否则同优先级的基础声明会把它们盖掉。 */
+@media(max-width:520px) { .support-composer-wrap { padding-inline:10px; } .support-composer-status { display:none; } .support-composer-actions { justify-content:flex-end; } }
+
+@media(max-width:760px) {
+ /* Touch targets: the compact composer controls are 22–34px and fail on a phone. */
+ .support-composer-hint { display:none; }
+ .support-tool-btn { width:44px;height:44px;border-radius:6px; }
+ .support-send-btn { height:44px;padding:0 18px;border-radius:6px;font-size:13px; }
+ .support-staged-remove { width:44px;height:44px; }
+}
+
+@media(max-width:768px) {
+ .support-composer-hint { display:none; }
+}
