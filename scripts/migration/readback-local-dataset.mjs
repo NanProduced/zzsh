@@ -3,7 +3,7 @@ import { acquireMigrationTransactionFence, advisoryLockSql, assertCoreSystemMigr
 import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
-import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
@@ -449,13 +449,34 @@ try {
       report[name] = { expected, matched };
     }
     const display = state.additiveInputs.display, dm = JSON.parse(readFileSync(await checked(display.directory, "manifest.json", display.manifestSha256)));
+    const systemDisplay=display.receiptMode==='SYSTEM_ACCOUNT_V1';
+    if(display.receiptMode!==undefined&&!systemDisplay||state.binding.systemAccountId&&!systemDisplay||systemDisplay&&!systemCore)throw new Error('SYSTEM_DISPLAY_RECEIPT_MODE_UNCONFIRMED');
+    const displayAttribution=systemDisplay?{expected:dm.rows,matched:0}:null,displayModule=systemDisplay?mod('supply/legacy-display-snapshot'):null;
     if(hasIdentityProfiles)assertDisplayCaptureCoverage(dm);
     const ratio = dm.accountBaseRatio ? { scope: dm.accountBaseRatio.scope, expected: dm.rows, matched: 0, known: 0, unknown: 0 } : null;
     const payout = dm.accountFullPayout ? { scope: dm.accountFullPayout.scope, expected: dm.rows, matched: 0, selected: 0, unselected: 0, unknown: 0 } : null;
     if (ratio && (ratio.scope !== "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !originalMetricSources || dm.accountBaseRatio.known + dm.accountBaseRatio.unknown !== dm.rows)) throw new Error("DISPLAY_ACCOUNT_RATIO_SOURCE_PROOF_REQUIRED");
     if (payout && (payout.scope !== "ACCOUNT_AT_CAPTURE_NOT_ORDER_SNAPSHOT" || !originalMetricSources || dm.accountFullPayout.selected + dm.accountFullPayout.unselected + dm.accountFullPayout.unknown !== dm.rows)) throw new Error("DISPLAY_ACCOUNT_PAYOUT_SOURCE_PROOF_REQUIRED");
-    await compare("display", rows(await checked(display.directory, dm.file, dm.sha256)), async batch => (await query(`SELECT m.legacy_id key,m.version_id,d.observation_version_id,d.extract_sha256,d.base_source_digest,d.snapshot,to_char(d.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') updated_at FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_listing_display_snapshot d USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [batch.map(r => r.sourceId)])).rows, (r, a) => {
+    await compare("display", rows(await checked(display.directory, dm.file, dm.sha256)), async batch => {
+      const values=(await query(`SELECT m.legacy_id key,m.account_id,m.version_id,d.observation_version_id,d.extract_sha256,d.base_source_digest,d.snapshot,d.display_digest,d.evidence_ref,
+        to_jsonb(d)->>'created_by_migration_id' AS migration_id,to_jsonb(d)->>'migration_manifest_sha256' AS migration_manifest,
+        to_char(d.source_updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') updated_at FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_listing_display_snapshot d USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`,[batch.map(r=>r.sourceId)])).rows;
+      if(systemDisplay){
+        const ids=values.map(row=>row.account_id),audits=await readSystemMigrationAudits(query,'display',ids),scopes=ids.map(id=>JSON.stringify(['system',state.binding.systemAccountId,'supply.legacy.display_snapshot_recorded',id]));
+        const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows;
+        const byScope=Map.groupBy(receipts,row=>row.scope_key);for(const row of values){row.systemAudits=audits.get(row.account_id);row.systemReceipts=byScope.get(JSON.stringify(['system',state.binding.systemAccountId,'supply.legacy.display_snapshot_recorded',row.account_id]));}
+      }
+      return values;
+    }, (r, a) => {
       if (!a || a.version_id !== a.observation_version_id || a.extract_sha256 !== dm.extractSha256 || a.base_source_digest !== r.baseSourceDigest || a.updated_at !== r.sourceUpdatedAt || canonical(a.snapshot) !== canonical(r.snapshot)) return false;
+      if(systemDisplay){
+        const input={observationVersionId:a.observation_version_id,baseSourceDigest:r.baseSourceDigest,extractSha256:dm.extractSha256,sourceUpdatedAt:r.sourceUpdatedAt,evidenceRef:`legacy-display-v1:${dm.extractSha256}:${r.sourceId}`,snapshot:displayModule.parseLegacyDisplaySnapshot(r.snapshot)};
+        const digest=displayModule.legacyDisplayDigest(a.account_id,input),fingerprint=mod('supply/supply-util').fingerprintRequest('supply.legacy.display_snapshot_recorded',a.account_id,input);
+        if(a.migration_id!==state.binding.systemAccountId||a.migration_manifest!==state.binding.datasetSha256||a.display_digest!==digest||a.evidence_ref!==input.evidenceRef
+          ||!matchesSystemMigrationAudit(a.systemAudits,{objectId:a.account_id,action:'supply.legacy.display_snapshot_recorded',actorId:state.binding.systemAccountId,manifestSha256:state.binding.datasetSha256,sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',legacyId:r.sourceId,sourceDigest:r.baseSourceDigest,payloadDigest:digest,observationVersionId:a.observation_version_id})
+          ||!matchesSystemDisplayReceipt(a.systemReceipts,{actorId:state.binding.systemAccountId,accountId:a.account_id,displayDigest:digest,fingerprint,canonicalize:canonical}))return false;
+        displayAttribution.matched++;
+      }
       if (ratio) {
         if (!matchesCapturedAccountBaseRatio(originalMetricSources.accounts.get(r.sourceId), a.snapshot, a.base_source_digest)) return false;
         ratio.matched++;ratio[a.snapshot.sourceAccountBaseRatioWanPerYuan === null ? "unknown" : "known"]++;
@@ -466,6 +487,7 @@ try {
       }
       return true;
     }, dm.rows);
+    if(displayAttribution)report.display.systemAttribution={...displayAttribution,status:displayAttribution.matched===displayAttribution.expected?'VERIFIED':'MISMATCH'};
     if (ratio) {
       ratio.status = ratio.matched === dm.rows && ratio.known === dm.accountBaseRatio.known && ratio.unknown === dm.accountBaseRatio.unknown ? "VERIFIED" : "MISMATCH";
       if (ratio.status !== "VERIFIED") difference("display", "ACCOUNT_RATIO", "SOURCE_ACCOUNT_RATIO_READBACK_DRIFT");

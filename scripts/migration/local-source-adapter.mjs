@@ -335,6 +335,7 @@ function sourceBatchDigest(rows) {
 const SYSTEM_AUDIT_DOMAINS = Object.freeze({
     users: {objectType:"user", actions:["user.legacy_owner.migrated"]},
     accounts: {objectType:"rental_account", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
+    display: {objectType:"rental_account", actions:["supply.legacy.display_snapshot_recorded"]},
     orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
 });
 
@@ -365,6 +366,12 @@ export function matchesSystemMigrationAudit(rows, expected) {
     if(expected.initialAvatarPresetId!==undefined&&(details.initialAvatar?.presetId!==expected.initialAvatarPresetId
       ||details.initialAvatar?.version!=="1"||details.initialAvatar?.created!==true))return false;
     return expected.observationVersionId===undefined||details.after?.observationVersionId===expected.observationVersionId;
+}
+export function matchesSystemDisplayReceipt(rows,{actorId,accountId,displayDigest,fingerprint,canonicalize}){
+    if(!Array.isArray(rows)||rows.length!==1||typeof canonicalize!=="function")return false;
+    const row=rows[0],scope=JSON.stringify(["system",actorId,"supply.legacy.display_snapshot_recorded",accountId]);
+    return row.scope_key===scope&&row.key==="legacy-display-v1:"+accountId&&row.request_fingerprint===fingerprint
+      &&row.response_status===200&&row.publish_required===false&&canonicalize(row.response_body)===canonicalize({accountId,displayDigest,schemaVersion:1});
 }
 function assertRegularSourceFile(file) {
     const stat = lstatSync(file);

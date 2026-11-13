@@ -14,7 +14,7 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test("readback checks every core system identity against the registered target",()=>{
   const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
@@ -49,6 +49,13 @@ test('system invitation completion requires every imported and closed packet rec
  for(const proof of [{...readback.invitationFacts.systemAttribution,status:'MISMATCH'},{...readback.invitationFacts.systemAttribution,countsMatched:1},{...readback.invitationFacts.systemAttribution,importMatched:1}])
   assert.equal(systemInvitationAttributionMatches(checkpoint,{invitationFacts:{...readback.invitationFacts,systemAttribution:proof}}),false);
  assert.equal(systemInvitationAttributionMatches({...checkpoint,phases:{...checkpoint.phases,invitationCounts:{...checkpoint.phases.invitationCounts,complete:false}}},readback),false);
+});
+test('system display completion requires source, original receipt and audit readback',()=>{
+ const checkpoint={binding:{systemAccountId:'legacy-account-migration:'+'a'.repeat(64)},additiveInputs:{display:{receiptMode:'SYSTEM_ACCOUNT_V1',rows:2}},phases:{accountDisplay:{complete:true,quarantined:0,nextIndex:2}}};
+ const readback={display:{expected:2,matched:2,systemAttribution:{status:'VERIFIED',expected:2,matched:2}}};
+ assert.equal(systemDisplayAttributionMatches(checkpoint,readback),true);
+ assert.equal(systemDisplayAttributionMatches(checkpoint,{display:{...readback.display,systemAttribution:{...readback.display.systemAttribution,matched:1}}}),false);
+ assert.equal(systemDisplayAttributionMatches({...checkpoint,additiveInputs:{display:{rows:2}}},readback),false);
 });
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{

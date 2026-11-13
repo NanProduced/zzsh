@@ -622,6 +622,24 @@ function systemInvitationAdapter(){
     }
     return {import:packet=>apply(packet,'IMPORT'),closeCounts:packet=>apply(packet,'COUNTS')};
 }
+function systemDisplayAdapter(){
+    const writer=mod('supply/legacy-listing-read').recordLegacyDisplaySnapshot,display=mod('supply/legacy-display-snapshot');
+    if(typeof writer!=='function'||typeof display.legacyDisplayDigest!=='function')throw new Error('NEXT_SYSTEM_DISPLAY_ADAPTER_REQUIRED');
+    return async entries=>{
+      if(!fenceHeld||!fenceEpoch||!Array.isArray(entries)||!entries.length||entries.length>100||new Set(entries.map(row=>row.accountId)).size!==entries.length)
+        throw new Error('NEXT_SYSTEM_DISPLAY_BATCH_INVALID');
+      const epoch=fenceEpoch,admitted=new Set(entries.map(row=>JSON.stringify({operation:'DISPLAY',accountId:row.accountId,
+        sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',legacyId:row.legacyId,sourceDigest:row.input.baseSourceDigest,
+        payloadDigest:display.legacyDisplayDigest(row.accountId,row.input)})));
+      const displayActor={kind:'SYSTEM_ACCOUNT_MIGRATION',id:systemAccountId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+        requestId:'core-legacy-dataset-'+expectedOid,assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');
+          await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
+        assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_DISPLAY_SOURCE_NOT_ADMITTED');}};
+      return systemUserMigration.withSystemAccountMigrationBatch(client,displayActor,async()=>{
+        const results=[];for(const row of entries)results.push(await writer(client,row.accountId,row.input,displayActor));return results;
+      });
+    };
+}
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {
         if (resourceState.protectedDataset?.manifestSha256 !== manifest.sourceDatasetSha256 || resourceState.protectedDataset?.epoch?.oid !== expectedOid
@@ -729,7 +747,8 @@ try {
         }
         else if (displayOnly) {
             const { applyDisplayDomain } = await import("./local-target-display.mjs");
-            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE }, option("--display-plan"), option("--display-plan-sha"));
+            await applyDisplayDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event,
+              isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE,systemDisplay:registered.migrationProfile === NEXT_MIGRATION_PROFILE?systemDisplayAdapter():null }, option("--display-plan"), option("--display-plan-sha"));
             state.status = "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED";
         }
         else {
