@@ -90,7 +90,8 @@ export async function preflightEcsTestDemoRuntime(pool: Pool, assembly: EcsTestD
       AND has_column_privilege(current_user,'zzsh_order.controlled_payment_declaration','canonical_payment','INSERT')
       AND NOT has_table_privilege(current_user,'zzsh_order.controlled_payment_declaration','UPDATE')
       AND NOT has_table_privilege(current_user,'zzsh_order.controlled_payment_declaration','DELETE')
-      AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL
+      AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)'),'EXECUTE'),false)
+      AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)'),'EXECUTE'),false)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('zzsh_order.channel_refund_intent')
         AND conname='sandbox_refund_source_reference' AND convalidated AND position('PRESTART_TERMINATION' IN pg_get_constraintdef(oid))>0)
       AND COALESCE(position('ecs_test_demo_finance_registration' IN pg_get_functiondef(to_regprocedure('zzsh_order.support_cancel_payment_basis_valid(jsonb)')))>0,false)

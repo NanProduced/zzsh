@@ -71,8 +71,8 @@ export async function supportPoststartSchemaReady(client:PoolClient,controlled:b
   AND EXISTS(SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('zzsh_order.support_cancellation_refund_original_key') AND indisvalid AND indisready AND indisunique)
   AND (NOT $1::boolean OR (to_regclass('zzsh_order.local_controlled_refund_operation') IS NOT NULL
    AND to_regclass('zzsh_order.local_controlled_refund_evidence') IS NOT NULL
-   AND to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)') IS NOT NULL
-   AND to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)') IS NOT NULL))
+   AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)'),'EXECUTE'),false)
+   AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)'),'EXECUTE'),false)))
   AND (NOT $2::boolean OR ((${fixedFeeSupportCancelContractSql})
    AND has_function_privilege(current_user,to_regprocedure('zzsh_order.cancel_order_after_start_v3(text,bigint,numeric,numeric,text)'),'EXECUTE')
    AND has_function_privilege(current_user,to_regprocedure('zzsh_order.fixed_fee_poststart_rate(jsonb,text,text,text,text,text,text)'),'EXECUTE'))),false) AS ready`,[controlled,fixedFee])).rows[0];

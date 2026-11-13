@@ -76,6 +76,10 @@ async function readDemoTradeRegistration(client: PoolClient, demo: DemoFinanceRe
   if (!registration.active) return null;
   if (!await fixedFeeTradeSchemaReady(client))
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo trade guards unavailable");
+  const refund = (await client.query(`SELECT
+    COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_liability_complete(text)'),'EXECUTE'),false)
+    AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.local_controlled_refund_terminal_complete(text)'),'EXECUTE'),false) AS ready`)).rows[0];
+  if (refund?.ready !== true) throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo refund guards unavailable");
   if ((await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN")
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo distribution policy unavailable");
   return registration;

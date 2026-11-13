@@ -1,6 +1,6 @@
 import type {PoolClient} from 'pg';
 import {distributionAccrualTaskContractSql} from './distribution-accrual-tasks';
-import {fixedFeeSupportCancelContractSql,supportPoststartTriggersSql} from './support-poststart-schema';
+import {fixedFeeSupportCancelContractSql,supportPoststartExecutorSafeSql,supportPoststartTriggersSql} from './support-poststart-schema';
 
 /** Fixed-fee orders may advance only when their accounting and cancellation guards are installed together. */
 export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'query'>):Promise<boolean> {
@@ -99,6 +99,8 @@ export async function fixedFeeTradeSchemaReady(client: Pick<PoolClient, "query">
       WHERE c.conrelid=to_regclass('zzsh_order.rental_order') AND c.conname='rental_order_confirmation_unique'
         AND c.contype='u' AND c.convalidated AND i.indisvalid AND pg_get_indexdef(i.indexrelid,1,true)='confirmation_id'
     )
+    AND (${supportPoststartExecutorSafeSql})
+    AND COALESCE(has_function_privilege(current_user,to_regprocedure('zzsh_order.cancel_order_after_start_v2(text,bigint,numeric,numeric,text)'),'EXECUTE'),false)
     AND NOT EXISTS (
       SELECT 1 FROM (VALUES
         ('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),
