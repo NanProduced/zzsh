@@ -119,6 +119,15 @@ BEGIN
        OR COALESCE(NEW.details->>'coverageCount','') !~ '^([1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$' THEN
       RAISE EXCEPTION 'legacy finance history source is invalid' USING ERRCODE='42501';
     END IF;
+  ELSIF NEW.action='finance.opening.imported' THEN
+    actor_prefix:='legacy-finance-migration:'; source_entity:='la_user';
+    IF NEW.object_type IS DISTINCT FROM 'finance_event' OR COALESCE(NEW.details->>'subjectId','')=''
+       OR COALESCE(NEW.details->>'bodyDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'inputSha256','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'fenceEpochSha256','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'executionRef','')='' OR COALESCE(NEW.details->>'attempt','')='' THEN
+      RAISE EXCEPTION 'legacy opening source is invalid' USING ERRCODE='42501';
+    END IF;
   ELSE
     RAISE EXCEPTION 'unsupported legacy system source' USING ERRCODE='42501';
   END IF;

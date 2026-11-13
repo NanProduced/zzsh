@@ -2,7 +2,8 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {canonicalize} from '../src/supply/content-hash';
-import {bindReviewedStoredOpeningAdmission,bindReviewedStoredOpeningAdmissionBatch,bindReviewedFinanceOpeningAdmission,planFinanceOpening,openingPlanCore,importReviewedStoredOpeningBatch,importReviewedStoredOpeningBatchOn,recoverReviewedStoredOpeningBatch,type StoredOpeningInput,type StoredOpeningReview} from '../src/finance/personal-finance-maintenance';
+import {bindReviewedStoredOpeningAdmission,bindReviewedStoredOpeningAdmissionBatch,bindReviewedFinanceOpeningAdmission,planFinanceOpening,openingPlanCore,importReviewedStoredOpeningBatch,importReviewedStoredOpeningBatchOn,recoverReviewedStoredOpeningBatch,systemStoredOpeningBatchProof,type StoredOpeningInput,type StoredOpeningReview} from '../src/finance/personal-finance-maintenance';
+import {systemFinanceMigrationId} from '../src/legacy-load/system-user-migration';
 import {fingerprintRequest} from '../src/supply/supply-util';
 import {prepareFrozenFinanceObservation,prepareStoredOpeningCandidate} from '../src/finance/legacy-finance-source-preparation';
 const sha=(s:unknown)=>createHash('sha256').update(typeof s==='string'?s:canonicalize(s)).digest('hex');
@@ -34,6 +35,19 @@ function adminInput():StoredOpeningInput{
   sourceEvidence:[{observationId:'501',originalDigest:sha(raw),extractSha256:'c'.repeat(64),canonical:canonicalize(supplemental),digest:sha(supplemental)}]});
  assert.equal(candidate.state,'CANDIDATE');if(candidate.state!=='CANDIDATE')throw Error('Fixture proof failed');return candidate.input;
 }
+
+test('system opening binds the original subject, source proof and migration window',()=>{
+ const target={systemIdentifier:'123',databaseOid:'42',marker:'zzsh:order-reservation-test:v1',nonce:'a'.repeat(24),roleOid:'43'};
+ const sourceDatasetSha256='d'.repeat(64),system={kind:'SYSTEM_FINANCE_MIGRATION' as const,id:systemFinanceMigrationId(sourceDatasetSha256,target),requestId:'fixture-system',sourceDatasetSha256,target,fenceEpochSha256:'e'.repeat(64),assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ const window={ref:'fixture-opening',attempt:'fixture-1',notBefore:'2026-10-15T08:00:00.000Z',expiresAt:'2026-10-15T09:00:00.000Z'},original=adminInput();
+ const result=systemStoredOpeningBatchProof([original],system,window);
+ assert.notEqual(result.source.inputsDigest,systemStoredOpeningBatchProof([original],system,{...window,attempt:'fixture-2'}).source.inputsDigest);
+ original.proof.availableCents='100';assert.equal(result.inputs[0]!.proof.availableCents,'750');
+ assert.throws(()=>systemStoredOpeningBatchProof([original],system,window),/Stored amount\/source does not close/);
+ const missing=adminInput();delete missing.sourceProof;assert.throws(()=>systemStoredOpeningBatchProof([missing],system,window),/original source proof required/);
+ const good=adminInput();assert.throws(()=>systemStoredOpeningBatchProof([good,good],system,window),/subject is invalid/);
+ assert.throws(()=>systemStoredOpeningBatchProof([good],system,{...window,expiresAt:window.notBefore}),/window required/);
+});
 function fixture(){
  const state={queries:[] as {sql:string;args:any[]}[],receipts:new Map<string,any>(),now:'2026-10-15T08:30:00.000Z',identity:true,role:'fixture_owner',existing:null as any,failAudit:false,proofReady:true,recoveryRows:null as Record<string,any[]>|null};
  const query=async(sql:string,args:any[]=[])=>{
@@ -154,11 +168,11 @@ test('0108 old no-proof receipt replays byte-for-byte after extension readiness;
  const plan=await planFinanceOpening(f.client,actor,f.i,f.scope),p=f.i.proof,o=plan.observations[0]!;
  f.state.recoveryRows={
   facts:[{amount:'750',subject:'fixture-wallet',kind:'OPENING',lines:2,debits:'750',credits:'750'}],
-  review:[{body_digest:sealed.args[1],source_canonical:sealed.args[2],review_canonical:sealed.args[3],review_digest:sealed.args[4]}],
+  review:[{body_digest:sealed.args[1],source_canonical:sealed.args[2],review_canonical:sealed.args[3],review_digest:sealed.args[4],input_canonical:sealed.args[5]}],
   basis:[{userId:p.userId,sourceSystem:p.source.sourceSystem,sourceEntity:'la_user',sourceId:'101',identityDigest:p.source.identityDigest,sourceDigest:p.sourceDigest,cutoff:f.i.cutoff,coveredCount:0,coveredDigest:p.coveredDigest,rootKind:'LEGACY_OPENING',rootType:'LEGACY_MYSQL',rootSystem:p.source.sourceSystem,rootEntity:'la_user',rootSourceId:'101',rootSubject:p.userId,rootRole:'WALLET_HOLDER'}],
   covered:[],
   observations:[{userId:p.userId,sourceSystem:o.sourceSystem,legacyUserId:'101',sourceEntity:'la_log_earnings',sourceId:'501',sourceDigest:o.sourceDigest,sourceEventAt:o.sourceEventAt,included:true,canonical:o.sourceCanonical,observationUserId:p.userId,observationBasis:plan.basisId,observationDigest:o.sourceDigest,observationCanonical:o.sourceCanonical,observationIncluded:true}],
-  ledger:[{line:1,account:'LEGACY_OPENING_SOURCE',debit:'750',credit:'0',subject:null},{line:2,account:'WALLET_AVAILABLE',debit:'0',credit:'750',subject:p.userId}],audit:[{}]
+  ledger:[{line:1,account:'LEGACY_OPENING_SOURCE',debit:'750',credit:'0',subject:null,details:{basisId:plan.basisId,economicRootId:plan.rootId,sourceDigest:p.sourceDigest}},{line:2,account:'WALLET_AVAILABLE',debit:'0',credit:'750',subject:p.userId,details:{basisId:plan.basisId,economicRootId:plan.rootId,sourceDigest:p.sourceDigest}}],audit:[{}]
  };
  f.state.now='2026-10-15T10:00:00.000Z';const recoveredScope=await bindReviewedStoredOpeningAdmission(f.client,actor,f.r,'recover'),before=f.state.queries.length;
  const recovered=await recoverReviewedStoredOpeningBatch(f.client,actor,[f.i],[recoveredScope]);assert.equal(recovered.knowledge,'KNOWN');
