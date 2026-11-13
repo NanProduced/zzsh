@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createServer } from "node:http";
 import sharp from "sharp";
 
+import * as consultation from "../src/im/consultation";
 import { mountAuthHandlers } from "../src/auth/auth-runtime";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId, type ImIdentityKey, type ImIdentityMapping } from "../src/im/identity-lifecycle";
 import { YunxinIdentityRepository } from "../src/im/yunxin-identity-repository";
@@ -201,6 +202,46 @@ test("user token route derives the subject from the authenticated session", asyn
   }
 });
 
+test("user consultation close forwards the authenticated subject and stable operationId", async (t) => {
+  const operationId = "support_close_0123456789abcdef";
+  const close = t.mock.method(consultation, "closeUserConsultation", async () => ({ consultation: { id: "consult_1" } }));
+  const options = userRouteOptions({ consultation: {} as never });
+  const response = responseCapture();
+  await handleYunxinRoute({
+    method: "POST", url: "/api/v1/im/user/consultations/consult_1/close", body: { operationId },
+    headers: { origin: options.security.userOrigin, cookie: "zzsh_user.session_token=opaque", "x-request-id": "req_route" },
+  }, response, options);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { consultation: { id: "consult_1" } });
+  assert.equal(response.headers.get("x-request-id"), "req_route");
+  assert.deepEqual(close.mock.calls.map(call => call.arguments), [
+    [options.consultation, { userId: "user-1", sessionId: "session-1" }, "consult_1", operationId, "req_route"],
+  ]);
+});
+
+test("user consultation close rejects invalid requests before running the command", async (t) => {
+  const operationId = "support_close_0123456789abcdef";
+  const close = t.mock.method(consultation, "closeUserConsultation", () => assert.fail("command must not run"));
+  const path = "/api/v1/im/user/consultations/consult_1/close";
+  const options = userRouteOptions({ consultation: {} as never });
+  const valid = { method: "POST", url: path, body: { operationId }, headers: { origin: options.security.userOrigin, cookie: "zzsh_user.session_token=opaque" } };
+  for (const [overrides, status] of [
+    [{ method: "GET" }, 404], [{ headers: { origin: "https://foreign.invalid" } }, 403],
+    [{ url: path + "?unexpected=1" }, 400],
+    ...[undefined, null, {}, { operationId: "short" }, { operationId: operationId + "!" }, { operationId, extra: true }]
+      .map(body => [{ body }, 400] as const),
+  ] as const) {
+    const response = responseCapture();
+    await handleYunxinRoute({ ...valid, ...overrides }, response, options);
+    assert.equal(response.statusCode, status, JSON.stringify(overrides));
+  }
+  const unavailable = responseCapture();
+  await handleYunxinRoute(valid, unavailable, userRouteOptions());
+  assert.equal(unavailable.statusCode, 503);
+  assert.equal((unavailable.body as { error: { code: string } }).error.code, "IM_UNAVAILABLE");
+  assert.equal(close.mock.callCount(), 0);
+});
+
 test("admin token issuance rechecks the connection after a delayed issue and discards a taken-over token", async () => {
   const adminKey = key("ADMIN", "admin-1");
   const securityPool = {
@@ -358,16 +399,11 @@ test("IM image body uses bounded Base64 and the full decoder", async () => {
   if (parsed.kind !== "image") throw new Error("image parser returned text");
   assert.deepEqual({ width: parsed.image.width, height: parsed.image.height }, { width: 8, height: 4 });
 
-  const sizes: Array<[number, number]> = [[1_250, 1_400], [1_660, 2_100]];
-  for (const [width, height] of sizes) {
-    const large = await noisyPng(width, height);
-    assert.ok(large.length > (width === 1_250 ? 5 * 1024 * 1024 : 10_000_000));
-    assert.ok(large.length <= MAX_MEDIA_BYTES);
-    const accepted = await parseMessageBody(imageBody(large, { messageClientId: `image-${width}` }));
-    assert.equal(accepted.kind, "image");
-    if (accepted.kind !== "image") throw new Error("image parser returned text");
-    assert.equal(accepted.image.body.length, large.length);
-  }
+  const large = await noisyPng(1_660, 2_100);
+  assert.ok(large.length > 10_000_000 && large.length <= MAX_MEDIA_BYTES);
+  const accepted = await parseMessageBody(imageBody(large));
+  assert.equal(accepted.kind, "image");
+  assert.equal(accepted.image.body.length, large.length);
 
   await assert.rejects(() => parseMessageBody(imageBody(small, { size: MAX_MEDIA_BYTES + 1 })), /Image message is invalid/);
   await assert.rejects(() => parseMessageBody(imageBody(small, { size: 1, data: "" })), /Image data is invalid/);

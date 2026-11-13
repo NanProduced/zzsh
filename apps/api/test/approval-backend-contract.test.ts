@@ -505,11 +505,20 @@ test("amended approval rejects stale hashes, frozen target changes, unsupported 
 
 test("retired mutation endpoints (execute, add-candidate, template update) return 409 without touching state", async () => {
   const view = harness(baseFixture());
-  for (const path of ["/approvals/requests/execute", "/approvals/requests/add-candidate", "/approvals/templates/update"]) {
+  for (const path of ["/approvals/requests/execute", "/approvals/requests/add-candidate"]) {
     const result = await call(view, BOSS.id, "POST", path, { requestId: "approval_req_target" }, { "idempotency-key": "idem_retired_" + path });
     assert.equal(result.status, 409, path + ": " + JSON.stringify(result.body));
     assert.equal(result.code, "CONFLICT");
   }
+  const version = view.state.templates[0]?.version;
+  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] };
+  const first = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
+  assert.equal(first.status, 409, JSON.stringify(first.body));
+  assert.equal(first.code, "CONFLICT");
+  const replay = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
+  assert.equal(replay.status, 409, "a retired endpoint never replays a stored receipt");
+  assert.equal(view.state.templates[0]?.version, version, "template version never bumps");
+  assert.equal(view.state.templateCandidates.length, 1, "candidate snapshots are no longer managed through the retired endpoint");
   assert.equal(view.state.decisions, 0);
   assert.equal(view.state.executions, 0);
   assert.equal(view.state.audits, 0);
@@ -582,21 +591,6 @@ test("idempotency scope separates principal, operation and target", async () => 
 
   const otherTarget = await call(view, CANDIDATE.id, "POST", "/approvals/requests/decision", { requestId: "approval_req_other", decision: "APPROVE" }, { "idempotency-key": "shared_key" });
   assert.equal(otherTarget.status, 404, "an unknown target on a reused key is not the first receipt");
-});
-
-test("template configuration is retired: every update returns 409 without touching state", async () => {
-  const view = harness(baseFixture());
-  const body = { operationCode: "approval.test.execute", triggerCondition: "manual", candidateUsernames: [CANDIDATE.username] };
-  const first = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
-  assert.equal(first.status, 409, JSON.stringify(first.body));
-  assert.equal(first.code, "CONFLICT");
-  const version = view.state.templates[0]?.version;
-  const audits = view.state.audits;
-  const replay = await call(view, BOSS.id, "POST", "/approvals/templates/update", body, { "idempotency-key": "idem_tpl" });
-  assert.equal(replay.status, 409, "a retired endpoint never replays a stored receipt");
-  assert.equal(view.state.templates[0]?.version, version, "template version never bumps");
-  assert.equal(view.state.audits, audits, "no template audit is appended");
-  assert.equal(view.state.templateCandidates.length, 1, "candidate snapshots are no longer managed through the retired endpoint");
 });
 
 test("request creation replays return the original request id without a second request", async () => {

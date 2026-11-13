@@ -1,16 +1,14 @@
 import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import type { INestApplication } from "@nestjs/common";
 import type { Pool } from "pg";
 
 import {
   OrderImEventRecoveryLifecycle, buildStaffApprovalBasis, clientSourcesConflict, conflictingApproval, conflictingDelivery,
   deliverySourceOf, isHumanClientSource, normalizeClientSource, orderImEventsActivateApp, parseSupplierMessageEvent,
-  recoverOrderFirstResponse, verifySupplierRequest, mountOrderImEventHandlers,
+  recoverOrderFirstResponse, verifySupplierRequest,
 } from "../src/im/order-im-events";
 import { YunxinServerApiClient } from "../src/im/yunxin-provider";
-import { createApp } from "../src/app";
 
 const APP_KEY = "oim4b_synthetic_app";
 const APP_SECRET = "synthetic-secret-value";
@@ -151,46 +149,6 @@ test("supplier event parsing keeps only whitelisted identifiers", () => {
   if (numericSource.ok) assert.equal(numericSource.event.fromClientType, "REST");
 });
 
-test("actual Nest/Express callback parser accepts only a fresh signed empty copy probe without business effects", async () => {
-  let databaseAttempts = 0;
-  let now = NOW;
-  const pool = {
-    async connect() { databaseAttempts += 1; throw new Error("synthetic persistence failure"); },
-  } as unknown as Pool;
-  const app = await createApp({ health: { dependencies: {
-    postgres: { check: async () => undefined, close: async () => undefined },
-    redis: { check: async () => undefined, close: async () => undefined },
-  } }, logSink: { write: () => undefined } });
-  mountOrderImEventHandlers(app as unknown as INestApplication, { pool, appId: APP_KEY, appSecret: APP_SECRET, now: () => now, freshnessMs: 300_000 });
-  await app.listen(0, "127.0.0.1");
-  try {
-    const base = await app.getUrl();
-    const send = (path: string, body: string, headers = signedHeaders(body)) => fetch(`${base}${path}`, {
-      method: "POST", headers: { ...headers, "content-type": "application/json" }, body: body || undefined,
-    });
-    let response = await send("/api/v1/im/order-events/copy", "");
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { ok: true });
-    assert.equal(databaseAttempts, 0);
-
-    assert.equal((await send("/api/v1/im/order-events/copy", "{}")).status, 400);
-    assert.equal((await send("/api/v1/im/order-events/copy", "{")).status, 400);
-    assert.equal((await send("/api/v1/im/order-events/copy", "", { ...signedHeadersAt(""), checksum: "0".repeat(40) })).status, 403);
-    assert.equal((await send("/api/v1/im/order-events/copy", "", signedHeadersAt("", String(NOW), "other-app"))).status, 403);
-    assert.equal((await send("/api/v1/im/order-events/copy", "", signedHeadersAt("", String(NOW - 400_000)))).status, 403);
-    assert.equal((await send("/api/v1/im/order-events/pre-send", "")).status, 400);
-    assert.equal(databaseAttempts, 0);
-
-    const business = JSON.stringify({ eventType: 1, convType: "TEAM", to: "63941858026", fromAccount: "admin-1", fromClientType: "WEB", msgType: "TEXT", msgTimestamp: NOW, msgidServer: "4291065454174142469", msgidClient: "client-1" });
-    response = await send("/api/v1/im/order-events/copy", business);
-    assert.equal(response.status, 503);
-    assert.equal(databaseAttempts, 1);
-  } finally {
-    now = NOW;
-    await app.close();
-  }
-});
-
 test("provider readTeamMessage uses the narrow conversation endpoint with explicit team checks", async () => {
   const calls: Array<{ url: string; method: string }> = [];
   const client = new YunxinServerApiClient({
@@ -242,10 +200,19 @@ test("provider readTeamMessage maps confirmed absence to null and rejects mismat
 test("recovery surfaces startup failure and awaits the in-flight sweep on shutdown", async () => {
   const broken = { query: async () => { throw new Error("database unavailable"); } } as unknown as Pool;
   await assert.rejects(recoverOrderFirstResponse({ pool: broken, appId: APP_KEY, appSecret: APP_SECRET }));
-  let finished = false;
-  const slow = { query: async () => { await new Promise((resolve) => setTimeout(resolve, 200)); finished = true; return { rows: [] }; } } as unknown as Pool;
+  let finishQuery!: () => void;
+  const queryGate = new Promise<void>(resolve => { finishQuery = resolve; });
+  const slow = { query: async () => { await queryGate; return { rows: [] }; } } as unknown as Pool;
   const lifecycle = new OrderImEventRecoveryLifecycle();
   lifecycle.start({ pool: slow, appId: APP_KEY, appSecret: APP_SECRET }, 60_000);
-  await lifecycle.beforeApplicationShutdown();
-  assert.equal(finished, true);
+  let closed = false;
+  const shutdown = lifecycle.beforeApplicationShutdown().then(() => { closed = true; });
+  try {
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(closed, false);
+  } finally {
+    finishQuery();
+    await shutdown;
+  }
+  assert.equal(closed, true);
 });

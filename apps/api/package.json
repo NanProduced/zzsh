@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "npm run build && concurrently --kill-others \"tsc --watch --preserveWatchOutput\" \"node --watch --env-file-if-exists=.env dist/src/main.js\"",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc --build tsconfig.json",
     "start": "node --env-file-if-exists=.env dist/src/main.js",
     "start:prod": "node dist/src/main.js",
     "migrate:business": "npm run build && node --env-file-if-exists=.env dist/src/database/migrate-business-cli.js",
@@ -37,6 +37,7 @@
     "test:legacy-team-callback:synthetic": "npm run build && node test/legacy-order-team-callback-synthetic.cjs",
     "test:legacy-team-migration-chain:synthetic": "npm run build && node test/legacy-order-team-migration-chain-synthetic.cjs",
     "test:distribution-contributors:pg": "node --test dist/test/admin-distribution-contributors-postgres.test.js",
+    "test:distribution-participant-page:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(process.env.DISTRIBUTION_PAGE_PG_READONLY==='1' && Boolean(process.env.DISTRIBUTION_PAGE_PG_CREDENTIALS?.trim()) && /^[0-9]+$/.test(process.env.DISTRIBUTION_PAGE_PG_OID||'') && Boolean(process.env.DISTRIBUTION_PAGE_PG_NONCE?.trim()) && Boolean(process.env.DISTRIBUTION_PAGE_PG_MARKER?.trim()) && /^[0-9]+$/.test(process.env.DISTRIBUTION_PAGE_PG_SYSTEM_ID||''),'Required: explicit read-only distribution PG opt-in and registered resource identity')\" && npm run build && node --env-file-if-exists=.env --test dist/test/admin-distribution-participant-page-postgres.test.js",
     "test:legacy-withdrawal-link:pg": "node --test dist/test/legacy-withdrawal-link-postgres.test.js",
     "test:legacy-observation:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(Boolean(process.env.REAL_SOURCE_5_CREDENTIALS_FILE),'Required PG opt-in: REAL_SOURCE_5_CREDENTIALS_FILE')\" && npm run build && node --env-file-if-exists=.env --test dist/test/legacy-observation-postgres.test.js",
     "test:credit-guarantee:pg": "node --env-file-if-exists=.env -e \"require('node:assert/strict').ok(Boolean(process.env.CREDIT_GUARANTEE_PASSWORD?.trim()),'Required PG opt-in/credential missing for test:credit-guarantee:pg')\" && npm run build && node --env-file-if-exists=.env --test dist/test/credit-guarantee-postgres.test.js",

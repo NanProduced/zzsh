@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
-import { closeUserConsultation, parseUserCloseBody } from "../src/im/consultation";
+import { closeUserConsultation } from "../src/im/consultation";
 
 const APP_ID = "provider-test";
 const USER_ID = "user_a";
@@ -128,13 +128,6 @@ function user(userId = USER_ID) {
 function options(f: ReturnType<typeof fixture>, appId = APP_ID) {
   return { pool: f.pool, appId } as never;
 }
-
-test("user close body requires one stable operationId", () => {
-  assert.deepEqual(parseUserCloseBody({ operationId: OP }), { operationId: OP });
-  for (const body of [undefined, null, {}, { operationId: "short" }, { operationId: `${OP}!` }, { operationId: OP, extra: true }]) {
-    assert.throws(() => parseUserCloseBody(body), (error: { status?: number }) => error.status === 400);
-  }
-});
 
 test("only the round owner in the same App can close; other owners and missing rounds are 404", async () => {
   const otherUser = fixture();

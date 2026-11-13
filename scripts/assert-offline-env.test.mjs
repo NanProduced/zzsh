@@ -22,6 +22,7 @@ test("dedicated PG entries fail without their explicit opt-in, before compilatio
   const required = {
     "test:admin-finance:pg": { ADM_FINANCE_QUERY_PG: "admin_order_read" },
     "test:admin-finance-filter:pg": { ADMIN_FINANCE_PG: "1", ADMIN_FINANCE_PG_DATABASE: "zzsh_test_regression", ZZSH_REGRESSION_DB_OID: "700100", ZZSH_REGRESSION_RUN: "synthetic_run_01" },
+    "test:distribution-participant-page:pg": { DISTRIBUTION_PAGE_PG_READONLY: "1", DISTRIBUTION_PAGE_PG_CREDENTIALS: "fixture-path", DISTRIBUTION_PAGE_PG_OID: "700100", DISTRIBUTION_PAGE_PG_NONCE: "synthetic_run_01", DISTRIBUTION_PAGE_PG_MARKER: "fixture-marker", DISTRIBUTION_PAGE_PG_SYSTEM_ID: "123456" },
     "test:admin-supervision:pg": { ADMIN_READ_PG_CREDENTIALS: "fixture-path" },
     "test:legacy-observation:pg": { REAL_SOURCE_5_CREDENTIALS_FILE: "fixture-path" },
     "test:credit-guarantee:concurrency:pg": { CREDIT_GUARANTEE_CONCURRENCY_PG: "1" },

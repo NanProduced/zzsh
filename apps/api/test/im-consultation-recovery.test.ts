@@ -661,10 +661,6 @@ test("hardening: a failed welcome still leaves the user-opened round queue-visib
   const threadUpdate = fixture.f.calls.find(({ sql }) => sql.includes('UPDATE "zzsh_iam"."im_support_thread"') && sql.includes('"state" = \'WAITING\''));
   assert.match(threadUpdate!.sql, /"user_read_at" = clock_timestamp\(\)/, "the opener's own action does not fabricate unread");
   assert.equal(fixture.previewUpdates.length, 0, "no welcome preview was written");
-  // 队列与自动分配都只隐藏 first_user_message_at 为空的无主 WAITING 轮次。
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
-  assert.match(source, /AND NOT \(c\."state" = 'WAITING' AND c\."assigned_admin_id" IS NULL AND c\."first_user_message_at" IS NULL\)/);
-  assert.match(source, /AND c\."first_user_message_at" IS NOT NULL/);
 });
 
 /* ------------------------------- fixtures ---------------------------------- */

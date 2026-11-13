@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type { Pool } from "pg";
 import { createApp } from "../src/app";
+import { mountOrderImEventHandlers } from "../src/im/order-im-events";
 import { applyReadCopy, handleReadCopy, mountReadCopyHandler, parseReadCopyEvent, parseReadCopySettings, readCopySettings, READ_COPY_PATH } from "../src/im/read-copy";
 
 const NOW = 1793526400000, APP = "synthetic-read-copy", SECRET = "synthetic-only";
@@ -131,19 +132,27 @@ test("admin receipts require current assignment and active support permissions; 
   assert.equal(await applyReadCopy(order.db, APP, event), "IGNORED"); assert.equal(order.state.positions.size, 0);
 });
 
-function signed(raw: string, curtime = String(NOW)) {
+function signed(raw: string, curtime = String(NOW), appkey = APP) {
   const md5 = createHash("md5").update(raw).digest("hex");
-  return { appkey: APP, curtime, md5, checksum: createHash("sha1").update(SECRET + md5 + curtime).digest("hex") };
+  return { appkey, curtime, md5, checksum: createHash("sha1").update(SECRET + md5 + curtime).digest("hex") };
 }
-test("real HTTP parser preserves signed bytes; probes, bad signatures, disabled ingress and storage failures have distinct outcomes", async () => {
+test("IM callback HTTP contracts use the production raw-body parser", async (t) => {
   const { state, pool } = fixture();
   state.settings = { ...input, publicOrigin: "https://im-dev.example.com", updatedBy: "staff", updatedAt: new Date(NOW), lastVerifiedAt: null, lastEventAt: null };
   const app = await createApp({ health: { dependencies: {
     postgres: { check: async () => undefined, close: async () => undefined }, redis: { check: async () => undefined, close: async () => undefined } } }, logSink: { write() {} } });
   mountReadCopyHandler(app, { pool, appId: APP, appSecret: SECRET, now: () => NOW });
+  let databaseAttempts = 0;
+  const orderPool = {
+    async connect() { databaseAttempts += 1; throw new Error("synthetic persistence failure"); },
+  } as unknown as Pool;
+  const orderApp = "oim4b_synthetic_app";
+  mountOrderImEventHandlers(app, { pool: orderPool, appId: orderApp, appSecret: SECRET, now: () => NOW, freshnessMs: 300_000 });
+  t.after(() => app.close());
   await app.listen(0, "127.0.0.1");
-  try {
-    const base = await app.getUrl();
+  const base = await app.getUrl();
+
+  await t.test("read copy distinguishes probes, signatures, valid events and disabled ingress", async () => {
     const send = (raw: string, headers = signed(raw), path = READ_COPY_PATH) => fetch(base + path, { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: raw || undefined });
     assert.equal((await send("", { ...signed(""), checksum: "0".repeat(40) })).status, 403); assert.equal(state.reads, 0);
     assert.equal((await send("", signed("", String(NOW - 400000)))).status, 403);
@@ -158,7 +167,34 @@ test("real HTTP parser preserves signed bytes; probes, bad signatures, disabled 
     assert.equal((await send(raw, signed(raw), READ_COPY_PATH + "?x=1")).status, 404);
     assert.equal((await fetch(base + READ_COPY_PATH)).status, 404);
     assert.equal((await send("x".repeat(102401))).status, 413);
-  } finally { await app.close(); }
+  });
+
+  await t.test("order events accept only a fresh signed empty copy probe without business effects", async () => {
+    const orderSignature = (raw: string, curtime = String(NOW)) => signed(raw, curtime, orderApp);
+    const send = (path: string, body: string, headers = orderSignature(body)) => fetch(base + path, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" }, body: body || undefined,
+    });
+    let response = await send("/api/v1/im/order-events/copy", "");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    assert.equal(databaseAttempts, 0);
+
+    assert.equal((await send("/api/v1/im/order-events/copy", "{}")).status, 400);
+    assert.equal((await send("/api/v1/im/order-events/copy", "{")).status, 400);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", { ...orderSignature(""), checksum: "0".repeat(40) })).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", signed("", String(NOW), "other-app"))).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/copy", "", orderSignature("", String(NOW - 400_000)))).status, 403);
+    assert.equal((await send("/api/v1/im/order-events/pre-send", "")).status, 400);
+    assert.equal(databaseAttempts, 0);
+
+    const business = JSON.stringify({ eventType: 1, convType: "TEAM", to: "63941858026", fromAccount: "admin-1", fromClientType: "WEB", msgType: "TEXT", msgTimestamp: NOW, msgidServer: "4291065454174142469", msgidClient: "client-1" });
+    response = await send("/api/v1/im/order-events/copy", business);
+    assert.equal(response.status, 503);
+    assert.equal(databaseAttempts, 1);
+  });
+});
+
+test("read-copy storage failure remains unavailable", async () => {
   const broken = { connect: async () => { throw new Error("db unavailable"); } } as unknown as Pool;
   let code = 0; const response: any = { status(n: number) { code = n; return this; }, setHeader() { return this; }, json() {} };
   await handleReadCopy({ method: "POST", originalUrl: READ_COPY_PATH, headers: signed("{}"), rawBody: Buffer.from("{}") } as never, response, { pool: broken, appId: APP, appSecret: SECRET, now: () => NOW });
