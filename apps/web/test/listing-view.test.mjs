@@ -12,6 +12,7 @@ import {
   termLabel,
   listingResourceLinesLabel,
   publicAvailabilityLabel,
+  previewListingCard,
   resourceQuantityLabel,
   toListingCard,
   toListingDetail,
@@ -576,6 +577,25 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.deepEqual(empty.skinNames, []);
   assert.throws(() => toListingCard({ ...historical, canCreateOrder: true }));
   assert.throws(() => toListingCard({ ...listing, quote: null }));
+});
+
+test('a public favorite with an explicitly unknown price keeps its card without rental or money', () => {
+  const unpriced = { ...listing, quote: null, canCreateOrder: false, availability: { state: 'UNKNOWN' } };
+  const preview = previewListingCard(unpriced);
+  assert.equal(preview.ok, true);
+  const card = preview.card;
+  assert.equal(card.title, listing.title);
+  assert.equal(card.imageUrl, listing.media[1].url);
+  assert.deepEqual(card.skinNames, ['M4A1 金色']);
+  assert.equal(card.resourceTotalLabel, '以平台确认为准');
+  assert.equal(card.haffRentLabel, null);
+  assert.equal(card.itemResourceTotalLabel, null);
+  assert.equal(card.payableTotalLabel, null);
+  assert.equal(card.canCreateOrder, false);
+  assert.equal(toListingDetail(unpriced).description, listing.description);
+  assert.equal(previewListingCard({ ...unpriced, canCreateOrder: true }).ok, false);
+  assert.equal(previewListingCard({ ...unpriced, availability: { state: 'RENTABLE' } }).ok, false);
+  assert.equal(previewListingCard({ ...unpriced, availability: {} }).ok, false);
 });
 
 test('legacy image slots keep order without replacing actual bound media', () => {
