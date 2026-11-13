@@ -312,7 +312,6 @@ function is3x3SafeBoxCode(code: string, displayName?: string | null): boolean {
 }
 
 const SYSTEM_ERROR_BLOCKER_CODES = new Set<string>([
-  "PUBLISHER_BAIL_UNCONFIRMED",
   "FUNDING_UNKNOWN",
   "RULE_UNCONFIGURED",
   "REQUIRED_ITEM_UNPRICED",
@@ -3345,7 +3344,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const modeRange = ratioRangeText(rentalModes?.[rentalMode]);
   const ratioInlineProblem = ratioInput.trim() === "" ? null : ratioEntryProblem(rentalMode, rentalModes?.[rentalMode], ratioInput, ratioRanges?.[rentalMode]);
   const fastReady = optionsAvailability === "ready" && options?.pricingSchema === "haff-ratio-v2" && rentalModes?.fast?.enabled === true;
-  const visibleBlockers = [...new Set(blockers)].filter((code) => !FORM_ENTRY_BLOCKER_CODES.has(code));
+  // The guarantee cannot be determined until the draft has a current quote.
+  const visibleBlockers = [...new Set(blockers)].filter((code) => !FORM_ENTRY_BLOCKER_CODES.has(code) && (code !== "PUBLISHER_BAIL_UNCONFIRMED" || Boolean(effectiveQuote)));
   const userBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "USER");
   const systemBlockers = visibleBlockers.filter((code) => supplyBlockerGroup(code) === "SYSTEM");
   const blockerHint = visibleBlockers.length ? "当前暂无法上架" : undefined;
@@ -3407,6 +3407,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
 
       const quoted = await sendQuoteRequest(context, saved, "quote");
       if (!quoted) return;
+
+      if (!Array.isArray(quoted.blockers) || quoted.blockers.some((code) => !FORM_ENTRY_BLOCKER_CODES.has(code))) {
+        setNotice("报价已生成，请先核对上架条件，再确认上架。");
+        return;
+      }
 
       const authoritativeCents = centsOfMoney(quoted.version?.quote?.ownerTotal);
       const previewCents = ownerIncomePreviewSnapshot?.value?.state === "READY" && ownerIncomePreviewSnapshot.value.totalExpectedIncome
