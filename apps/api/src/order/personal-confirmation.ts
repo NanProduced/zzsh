@@ -11,6 +11,7 @@ import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSprea
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
+import { assertFixedFeeTestListingAdmission, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import { boundListingPricingPolicy, readBoundListingPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
@@ -34,7 +35,7 @@ export type V2ConfirmationFunding = ConfirmationFundingBase & {
 };
 export type ConfirmationFunding = LegacyConfirmationFunding | V2ConfirmationFunding;
 export type ConfirmationFundingReader = (client:PoolClient,account:PublishingAccount,version:ListingVersion)=>Promise<ConfirmationFunding|null>;
-export type PersonalConfirmationOptions = {gate:SupplyGateReader;fundingReader?:ConfirmationFundingReader;key?:ConfirmationKey;membershipGrowthReader?:MembershipGrowthConfirmationReader};
+export type PersonalConfirmationOptions = {gate:SupplyGateReader;fundingReader?:ConfirmationFundingReader;key?:ConfirmationKey;membershipGrowthReader?:MembershipGrowthConfirmationReader;fixedFeeTestAdmission?:FixedFeeTestListingAdmission};
 export type MembershipGrowthQuoteCandidate = { plan: GrowthOfferPlan; quote: InternalQuote; payableRatio?: string };
 export type MembershipGrowthConfirmationReader = (client: PoolClient, input: {
   userId: string; ownerUserId: string; accountId: string; gameId: string; listingVersionId: string; listingHash: string;
@@ -178,7 +179,11 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
   const legacy = version.payload.schemaVersion === 3;
   const fixedFee = version.payload.schemaVersion === 4;
-  if (fixedFee && purpose === "WRITE") unavailable("Fixed fee order creation is not enabled");
+  if (fixedFee && purpose === "WRITE") {
+    if (!options.fixedFeeTestAdmission) unavailable("Fixed fee order creation is not enabled");
+    await assertFixedFeeTestListingAdmission(client, options.fixedFeeTestAdmission!, { role: "RENTER", actorId: context.userId,
+      ownerUserId: account.owner_user_id, accountId: account.id, listingVersionId: version.id, listingHash: version.content_hash });
+  }
   if (fixedFee && !options.membershipGrowthReader) unavailable("Fixed fee confirmation requires the current membership policy");
   if (legacy) {
     const source = version.payload.legacyQuote, marker = version.payload.declaration.attributes.legacy_published_reference;

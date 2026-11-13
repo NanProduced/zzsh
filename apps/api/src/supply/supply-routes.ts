@@ -8,6 +8,7 @@ import { handleLegacyPathMediaRoute } from "./legacy-path-routes";
 import { applyLegacyOrdinaryDraft, authorizeLegacyOrdinaryDraft, type LegacyTradeIntake } from "./legacy-trade-takeover";
 import { handleListingFilters } from "./listing-filter-routes";
 import type { ListingCursorKey } from "./listing-cursor";
+import type { FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import type { SupplyGateReader } from "./publishing";
 import type { INestApplication } from "@nestjs/common";
 import { assignAccountNumber } from "./account-number";
@@ -122,7 +123,7 @@ import {
   type SupplyNodeResponse,
 } from "./supply-util";
 
-export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader; listingCursorKey?: ListingCursorKey; legacyPublicAdmission?: LegacyPublicAdmission; legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex };
+export type SupplyRuntimeOptions = AuthSecurityOptions & { mediaStorage: MediaStorage; supplyGateReader?: SupplyGateReader; listingCursorKey?: ListingCursorKey; legacyPublicAdmission?: LegacyPublicAdmission; legacyPublicAdmissionDetail?: LegacyPublicAdmissionDetailIndex; fixedFeeTestAdmission?: FixedFeeTestListingAdmission };
 
 export type SupplyResponse = SupplyNodeResponse & {
   send?: (body: Buffer | string) => void;

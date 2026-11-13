@@ -713,7 +713,7 @@ export async function handlePublishingRoute(
         else if (action === "accept-rules")
           await acceptListingRules(client, a, body);
         else if (action === "submit")
-          await submitListing(client, a, actorId, body, gate);
+          await submitListing(client, a, actorId, body, gate, options.fixedFeeTestAdmission);
         else if (action === "withdraw") await withdrawListing(client, a, body);
         else if (action === "delist")
           delisting = await delistListing(client, a, body, {userId:actorId,sessionId:context.sessionId,requestId});

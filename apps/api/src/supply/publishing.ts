@@ -57,6 +57,7 @@ import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwner
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
+import { assertFixedFeeTestListingAdmission, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import { validateFixedFeeTimeline } from "../auth/fixed-fee-policy-timeline";
 import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readNewListingPrice, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
@@ -1690,6 +1691,7 @@ export async function submitListing(
   actorId: string,
   body: Record<string, unknown>,
   gate: SupplyGateReader,
+  fixedFeeTestAdmission?: FixedFeeTestListingAdmission,
 ): Promise<void> {
   checkAccountRevision(a, body.expectedRevision);
   if (a.lifecycle !== "ACTIVE") throw conflict("账号已结束出租，不能再次上架");
@@ -1698,7 +1700,11 @@ export async function submitListing(
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
-  if(v.payload?.schemaVersion===4)throw conflict("固定手续费订单结算暂未就绪");
+  if (v.payload?.schemaVersion === 4) {
+    if (!fixedFeeTestAdmission) throw conflict("固定手续费订单结算暂未就绪");
+    await assertFixedFeeTestListingAdmission(client, fixedFeeTestAdmission, { role: "OWNER", actorId, ownerUserId: a.owner_user_id,
+      accountId: a.id, listingVersionId: v.id, listingHash: v.content_hash });
+  }
   if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
   await assertCurrentRelease(client, a, v);
   await validatePublicationAttributes(client, a, v.payload!.declaration.attributes);
