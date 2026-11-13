@@ -236,7 +236,7 @@ export function assertReadbackTarget(target, binding, credential) {
 /** Older receipts have no system identities; new ones must bind all core domains to this target. */
 export function assertCoreSystemMigrationBinding(target, binding, identities) {
   const keys = ["systemUserId", "systemAccountId", "systemOrderId"];
-  if (keys.every(key => binding?.[key] === undefined) && binding?.systemFinanceId === undefined) return false;
+  if (keys.every(key => binding?.[key] === undefined) && binding?.systemFinanceId === undefined && binding?.systemInvitationId === undefined) return false;
   assert.equal(target?.migrationProfile, NEXT_MIGRATION_PROFILE, "SYSTEM_MIGRATION_PROFILE_MISMATCH");
   assert.ok(keys.every(key => typeof binding?.[key] === "string") && /^[a-f0-9]{64}$/.test(binding.datasetSha256 ?? ""),
     "SYSTEM_MIGRATION_BINDING_INCOMPLETE");
@@ -244,6 +244,7 @@ export function assertCoreSystemMigrationBinding(target, binding, identities) {
     nonce:target.nonce,roleOid:target.migrationRoleOid};
   const methods=[["systemUserId","systemUserMigrationId"],["systemAccountId","systemAccountMigrationId"],["systemOrderId","systemOrderMigrationId"]];
   if(binding.systemFinanceId!==undefined)methods.push(["systemFinanceId","systemFinanceMigrationId"]);
+  if(binding.systemInvitationId!==undefined)methods.push(["systemInvitationId","systemInvitationMigrationId"]);
   for (const [key,method] of methods) {
     assert.equal(typeof identities?.[method], "function", "SYSTEM_MIGRATION_BUILD_REQUIRED");
     assert.equal(binding[key],identities[method](binding.datasetSha256,source),"SYSTEM_MIGRATION_BINDING_CHANGED:"+key);

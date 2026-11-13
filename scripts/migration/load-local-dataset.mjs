@@ -144,6 +144,9 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
       "importSystemCompactEmptyFinanceObservationBatch","recoverSystemCompactEmptyFinanceObservationBatch","systemFinanceHistoryBatchProof",
       "bindSystemHistoryReceiptBaseline","importSystemFinanceHistoryBatch","recoverSystemFinanceHistoryBatch"].some(name=>typeof finance[name]!=="function"))
         throw new Error("NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED");
+    if(execute && importsCore && !args.includes("--core-only") && ["bindSystemInvitationReceiptBaseline","importSystemLegacyInvitationFacts",
+      "closeSystemLegacyInvitationCounts","recoverSystemLegacyInvitationFacts"].some(name=>typeof mod('finance/legacy-invitation-facts-maintenance')[name]!=="function"))
+        throw new Error("NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
 if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
@@ -152,8 +155,9 @@ const usesSystemUser = registered.migrationProfile === NEXT_MIGRATION_PROFILE &&
 const usesSystemAccount = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemAccountId === "string"));
 const usesSystemOrder = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemOrderId === "string"));
 const usesSystemFinance = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemFinanceId === "string"));
+const usesSystemInvitation = registered.migrationProfile === NEXT_MIGRATION_PROFILE && (execute || (recover && typeof state?.binding?.systemInvitationId === "string"));
 let systemUserMigration = null;
-if (usesSystemUser || usesSystemAccount || usesSystemOrder || usesSystemFinance) {
+if (usesSystemUser || usesSystemAccount || usesSystemOrder || usesSystemFinance || usesSystemInvitation) {
     try { systemUserMigration = mod("legacy-load/system-user-migration"); }
     catch { throw new Error("NEXT_SYSTEM_USER_MIGRATION_BUILD_REQUIRED"); }
 }
@@ -169,6 +173,9 @@ if (usesSystemOrder
 if (usesSystemFinance
     && (typeof systemUserMigration?.systemFinanceMigrationId !== "function" || typeof systemUserMigration?.withSystemFinanceMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_FINANCE_MIGRATION_BUILD_REQUIRED");
+if (usesSystemInvitation
+    && (typeof systemUserMigration?.systemInvitationMigrationId !== "function" || typeof systemUserMigration?.withSystemInvitationMigrationBatch !== "function"))
+    throw new Error("NEXT_SYSTEM_INVITATION_MIGRATION_BUILD_REQUIRED");
 const systemUserTarget = systemUserMigration ? {
     systemIdentifier: registered.instance?.systemIdentifier, databaseOid: registered.oid, marker: registered.marker,
     nonce: registered.nonce, roleOid: registered.migrationRoleOid,
@@ -177,12 +184,14 @@ const systemUserId = usesSystemUser ? systemUserMigration.systemUserMigrationId(
 const systemAccountId = usesSystemAccount ? systemUserMigration.systemAccountMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemOrderId = usesSystemOrder ? systemUserMigration.systemOrderMigrationId(sha(manifestBytes), systemUserTarget) : null;
 const systemFinanceId = usesSystemFinance ? systemUserMigration.systemFinanceMigrationId(sha(manifestBytes), systemUserTarget) : null;
+const systemInvitationId = usesSystemInvitation ? systemUserMigration.systemInvitationMigrationId(sha(manifestBytes), systemUserTarget) : null;
 
 const binding = { datasetSha256: sha(manifestBytes), database: registered.database, oid: expectedOid, nonce: expectedNonce, actorId: actor.id, sessionId: actor.sessionId, ...keyBinding,
     ...(systemUserId ? {systemUserId} : {}),
     ...(systemAccountId ? {systemAccountId} : {}),
     ...(systemOrderId ? {systemOrderId} : {}),
     ...(systemFinanceId ? {systemFinanceId} : {}),
+    ...(systemInvitationId ? {systemInvitationId} : {}),
     ...(registered.instance ? {instance: registered.instance} : {}), ...(registered.migrationProfile ? {migrationProfile: registered.migrationProfile} : {}) };
 function assertCheckpointBinding(checkpoint) {
     if (recover && !checkpoint?.pending) throw new Error("ORIGINAL_PENDING_CHECKPOINT_REQUIRED");
@@ -593,6 +602,26 @@ function systemFinanceAdapter() {
     }
     return {receiptMode:"SYSTEM_BATCH_V1",importEmpty:inputs=>importBatch(inputs,false),importHistory:inputs=>importBatch(inputs,true)};
 }
+function systemInvitationAdapter(){
+    const module=mod('finance/legacy-invitation-facts-maintenance'),facts=mod('finance/legacy-invitation-facts'),epoch=fenceEpoch,admitted=new Set();
+    if(!epoch||!fenceHeld||['bindSystemInvitationReceiptBaseline','importSystemLegacyInvitationFacts','closeSystemLegacyInvitationCounts',
+      'recoverSystemLegacyInvitationFacts'].some(name=>typeof module[name]!=='function'))throw new Error('NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED');
+    const invitationActor={kind:'SYSTEM_INVITATION_MIGRATION',id:systemInvitationId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+      fenceEpochSha256:sha(JSON.stringify(epoch)),requestId:'core-legacy-dataset-'+expectedOid,
+      assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');
+        await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
+      assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_INVITATION_SOURCE_NOT_ADMITTED');}};
+    let baseline;
+    async function apply(packet,phase){
+      const plan=facts.prepareLegacyInvitationFacts(packet.input,packet.bodyDigest),source={phase,key:plan.key,sourceDigest:facts.invitationFactHash(packet.input.source),bodyDigest:plan.bodyDigest};
+      admitted.clear();admitted.add(JSON.stringify(source));
+      try{return await systemUserMigration.withSystemInvitationMigrationBatch(client,invitationActor,async()=>{
+        baseline??=await module.bindSystemInvitationReceiptBaseline(client,invitationActor,packet.input,phase);
+        return phase==='IMPORT'?module.importSystemLegacyInvitationFacts(client,invitationActor,packet.input,baseline):module.closeSystemLegacyInvitationCounts(client,invitationActor,packet.input,baseline);
+      });}finally{admitted.clear();}
+    }
+    return {import:packet=>apply(packet,'IMPORT'),closeCounts:packet=>apply(packet,'COUNTS')};
+}
 function protectDataset(resourceState, status) {
     if (contactAppend || numberOnly) {
         if (resourceState.protectedDataset?.manifestSha256 !== manifest.sourceDatasetSha256 || resourceState.protectedDataset?.epoch?.oid !== expectedOid
@@ -715,6 +744,7 @@ try {
                 await applyFinancialDomains({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, invitationSource, invitationPacketCount,
                     isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE,
                     systemFinance: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemFinanceAdapter() : null,
+                    systemInvitation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemInvitationAdapter() : null,
                     targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }

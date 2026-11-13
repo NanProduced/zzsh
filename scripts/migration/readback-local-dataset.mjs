@@ -4,7 +4,7 @@ import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
-import { assessInvitationChildSet, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
 import { createHash, createHmac } from "node:crypto";
@@ -78,7 +78,7 @@ const maintenance = new Client(maintenanceConnection(registration, { user: "zzsh
 const db = new Client(targetConnection(registration, { user: credential.migration.name, password: credential.migration.password, applicationName: "core-dataset-reconciliation-read-only", connectionTimeoutMillis: 3000, statement_timeout: 15000, lock_timeout: 500 }));
 const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
-const hasSystemIds = ["systemUserId","systemAccountId","systemOrderId","systemFinanceId"].some(key => state.binding?.[key] !== undefined);
+const hasSystemIds = ["systemUserId","systemAccountId","systemOrderId","systemFinanceId","systemInvitationId"].some(key => state.binding?.[key] !== undefined);
 const systemCore = assertCoreSystemMigrationBinding(registration,state.binding,hasSystemIds ? mod("legacy-load/system-user-migration") : null);
 const hasIdentityProfiles = manifest.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1";
 if (manifest.identityProfiles && (!hasIdentityProfiles || manifest.identityProfiles.invalid !== 0
@@ -646,28 +646,33 @@ try {
     if((actual?.count??0)!==0)difference("guaranteeHistory","TABLE","RETIRED_LISTING_DEPOSIT_PRESENT_IN_TARGET");
   }
   if(state.phases.invitationFacts?.complete){
-    const module=mod("finance/legacy-invitation-facts"), closureRequired=requiresInvitationCountClosure(manifest);
+    const module=mod("finance/legacy-invitation-facts"), closureRequired=requiresInvitationCountClosure(manifest),systemInvitation=state.binding.systemInvitationId!==undefined;
+    const systemActor=systemInvitation?{id:state.binding.systemInvitationId,sourceDatasetSha256:state.binding.datasetSha256,requestId:'core-legacy-dataset-'+state.binding.oid}:null;
+    const systemAttribution=systemInvitation?{status:'VERIFYING',expectedPackets:0,importMatched:0,expectedCounts:0,countsMatched:0}:null;
     let expectedSubjects=0,matchedSubjects=0,expectedRelations=0,matchedRelations=0,childProofAudits=0;
     const closure={status:closureRequired?"VERIFYING":"NOT_APPLICABLE_PARTIAL_SOURCE",packets:0,auditsMatched:0,subjects:0,known:0,unknown:0,matched:0};
     if(closureRequired && (state.phases.invitationCounts?.complete!==true || state.phases.invitationCounts.quarantined!==0
       || state.phases.invitationCounts.nextIndex!==manifest.invitationFacts.selectedPackets)) difference("invitationCounts","PHASE","COUNT_CLOSURE_NOT_COMMITTED");
-    const audits = new Map((await query("SELECT object_id,details FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.imported' AND outcome='SUCCESS'")).rows.map(r => [r.object_id, r.details]));
+    const auditFields="object_id,action,object_type,outcome,actor_type,actor_id,session_id,request_id,details,to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest";
+    const auditRows=(await query(`SELECT ${auditFields} FROM zzsh_iam.audit_event e WHERE action='distribution.legacy_facts.imported' AND outcome='SUCCESS'`)).rows;
+    const audits=Map.groupBy(auditRows,row=>row.object_id);
     const countAudits=new Map();
-    if(closureRequired)for(const row of (await query("SELECT object_id,details FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.counts_closed' AND outcome='SUCCESS'")).rows){
-      const values=countAudits.get(row.object_id)??[];values.push(row.details);countAudits.set(row.object_id,values);
+    if(closureRequired)for(const row of (await query(`SELECT ${auditFields} FROM zzsh_iam.audit_event e WHERE action='distribution.legacy_facts.counts_closed' AND outcome='SUCCESS'`)).rows){
+      const values=countAudits.get(row.object_id)??[];values.push(row);countAudits.set(row.object_id,values);
     }
     const invitationFile=manifest.files["invitation-facts"], invitationPath=invitationFile?join(dataset,invitationFile.file):null;
-    if(closureRequired && !invitationFile)throw new Error("INVITATION_FILE_BINDING_REQUIRED");
+    if((closureRequired||systemInvitation) && !invitationFile)throw new Error("INVITATION_FILE_BINDING_REQUIRED");
     const invitationHashes=closureRequired ? await preflightInvitationFile(invitationPath,invitationFile?.sha256,manifest,module) : null;
     if(invitationFile) await batched("invitation-facts",async packets=>{for(const packet of packets){
       const plan=module.prepareLegacyInvitationFacts(packet.input,packet.bodyDigest),ids=plan.subjects.map(p=>p.userId);
-      const audit = audits.get(plan.bodyDigest);
-      if (!audit || canonical(audit.facts) !== canonical(packet.input.subjects) || canonical(audit.source) !== canonical(packet.input.source) || audit.financialEffects !== false) difference("invitationFacts", plan.bodyDigest, "ORIGINAL_CHILD_DENOMINATOR_AUDIT_DRIFT");
+      const importAudits=audits.get(plan.bodyDigest)??[],audit=importAudits[0]?.details;
+      if (importAudits.length!==1 || !audit || canonical(audit.facts) !== canonical(packet.input.subjects) || canonical(audit.source) !== canonical(packet.input.source) || audit.financialEffects !== false) difference("invitationFacts", plan.bodyDigest, "ORIGINAL_CHILD_DENOMINATOR_AUDIT_DRIFT");
       else childProofAudits++;
       const subjects=new Map((await query(`SELECT p.*,c.id AS code_id,c.display_code,c.match_code,c.source_type AS code_source_type,c.source_id AS code_source_id,c.source_digest AS code_digest FROM zzsh_order.distribution_participant p LEFT JOIN zzsh_order.distribution_invite_code c ON c.user_id=p.user_id WHERE p.user_id=ANY($1::text[])`,[ids])).rows.map(r=>[r.user_id,r]));
       for(const expected of plan.subjects){expectedSubjects++;const found=subjects.get(expected.userId);if(!found||found.source_type!=='LEGACY_MYSQL'||found.source_ref!==expected.sourceRef||found.source_digest!==expected.sourceDigest||found.eligibility!==expected.eligibility||found.commission_frozen!==expected.commissionFrozen||found.policy_version_id!==null||found.code_id!==expected.codeId||found.display_code!==expected.fact.codeSource.code||found.match_code!==expected.fact.codeSource.code.toUpperCase()||found.code_source_type!=='LEGACY_MYSQL'||found.code_source_id!==expected.fact.legacyId||found.code_digest!==expected.codeDigest)difference("invitationFacts",expected.userId,"IMMUTABLE_INVITATION_FACT_CODE_OR_ELIGIBILITY_DRIFT");else matchedSubjects++;}
       const relations=new Map((await query(`SELECT * FROM zzsh_order.invitation_relation WHERE child_user_id=ANY($1::text[]) AND source_type='LEGACY_MYSQL'`,[ids])).rows.map(r=>[r.id,r]));
       for(const expected of plan.relations){expectedRelations++;const found=relations.get(expected.id);if(!found||found.type!==expected.type||found.child_user_id!==expected.childUserId||found.parent_user_id!==expected.parentUserId||found.policy_version_id!==null||found.source_ref!==expected.sourceRef||found.source_digest!==expected.sourceDigest)difference("invitationFacts",expected.id,"ORIGINAL_PARENT_RELATION_DRIFT");else matchedRelations++;}
+      let expectedCountBody=null;
       if(closureRequired){
         closure.packets++;
         const childRows=(await query(`SELECT id,type,parent_user_id,source_digest FROM zzsh_order.invitation_relation
@@ -681,17 +686,34 @@ try {
           else closure.matched++;
         }
         closure.known+=known;closure.unknown+=unknown;
-        const expected={bodyDigest:plan.bodyDigest,sourceDigest:module.invitationFactHash(packet.input.source),subjects:ids.length,known,unknown,financialEffects:false};
+        const expected={bodyDigest:plan.bodyDigest,sourceDigest:module.invitationFactHash(packet.input.source),subjects:ids.length,known,unknown,financialEffects:false};expectedCountBody=expected;
         const evidence=countAudits.get(plan.bodyDigest)??[];
-        if(evidence.length!==1||canonical(evidence[0])!==canonical(expected))difference("invitationCounts",plan.bodyDigest,"COUNT_CLOSURE_AUDIT_DRIFT");
+        if(evidence.length!==1||canonical(evidence[0].details)!==canonical(expected))difference("invitationCounts",plan.bodyDigest,"COUNT_CLOSURE_AUDIT_DRIFT");
         else closure.auditsMatched++;
+      }
+      if(systemInvitation){
+        const scopes=[module.legacyInvitationFactsOperation,...(closureRequired?[module.legacyInvitationCountsOperation]:[])].map(operation=>JSON.stringify(['system',systemActor.id,operation,null]));
+        const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[]) AND key=$2`,[scopes,plan.key])).rows;
+        const checked=compareSystemInvitationPacketEvidence({packet,plan,actor:systemActor,receipts,audits:[...importAudits,...(countAudits.get(plan.bodyDigest)??[])],countBody:expectedCountBody,canonical,sourceHash:module.invitationFactHash});
+        systemAttribution.expectedPackets++;if(checked.importMatched)systemAttribution.importMatched++;else difference('invitationFacts',plan.bodyDigest,'SYSTEM_INVITATION_IMPORT_EVIDENCE_DRIFT');
+        if(closureRequired){systemAttribution.expectedCounts++;if(checked.countMatched)systemAttribution.countsMatched++;else difference('invitationCounts',plan.bodyDigest,'SYSTEM_INVITATION_COUNT_EVIDENCE_DRIFT');}
       }
     }},null,1,invitationHashes ? readBoundInvitationPackets(invitationPath,invitationFile.sha256,invitationHashes) : null);
     if(closureRequired){
       if(closure.packets!==manifest.invitationFacts.selectedPackets||closure.subjects!==manifest.domains.users.source)difference("invitationCounts","POPULATION","COUNT_CLOSURE_DENOMINATOR_DRIFT");
       closure.status=closure.packets===closure.auditsMatched&&closure.subjects===closure.matched&&closure.subjects===manifest.domains.users.source?"VERIFIED":"MISMATCH";
     }
-    report.invitationFacts={expectedSubjects,matchedSubjects,expectedRelations,matchedRelations,childProofAudits,policy:null,childCountClosure:closure};
+    if(systemInvitation){
+      const scopes=[module.legacyInvitationFactsOperation,module.legacyInvitationCountsOperation].map(operation=>JSON.stringify(['system',systemActor.id,operation,null]));
+      const totals=(await query(`SELECT (SELECT count(*)::int FROM zzsh_supply.idempotency_record WHERE scope_key=$1) imports,(SELECT count(*)::int FROM zzsh_supply.idempotency_record WHERE scope_key=$2) counts,
+        (SELECT count(*)::int FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.imported' AND object_type='legacy_invitation_batch') import_audits,
+        (SELECT count(*)::int FROM zzsh_iam.audit_event WHERE action='distribution.legacy_facts.counts_closed' AND object_type='legacy_invitation_batch') count_audits`,scopes)).rows[0];
+      if(!totals||totals.imports!==systemAttribution.expectedPackets||totals.import_audits!==systemAttribution.expectedPackets||totals.counts!==systemAttribution.expectedCounts||totals.count_audits!==systemAttribution.expectedCounts)
+        difference('invitationFacts','COHORT','SYSTEM_INVITATION_EVIDENCE_TOTAL_DRIFT');
+      systemAttribution.status=totals&&totals.imports===systemAttribution.expectedPackets&&totals.import_audits===systemAttribution.expectedPackets&&totals.counts===systemAttribution.expectedCounts&&totals.count_audits===systemAttribution.expectedCounts
+        &&systemAttribution.importMatched===systemAttribution.expectedPackets&&systemAttribution.countsMatched===systemAttribution.expectedCounts?'VERIFIED':'MISMATCH';
+    }
+    report.invitationFacts={expectedSubjects,matchedSubjects,expectedRelations,matchedRelations,childProofAudits,policy:null,childCountClosure:closure,...(systemAttribution?{systemAttribution}:{})};
   }
   const phaseDirectory = dirname(checkpoint);
   const reviewedEffects = [];

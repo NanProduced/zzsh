@@ -14,15 +14,17 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test("readback checks every core system identity against the registered target",()=>{
   const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
   const identities={systemUserMigrationId:(sha,t)=>"u:"+sha+":"+t.databaseOid,systemAccountMigrationId:(sha,t)=>"a:"+sha+":"+t.databaseOid,
-    systemOrderMigrationId:(sha,t)=>"o:"+sha+":"+t.databaseOid},datasetSha256="b".repeat(64);
+    systemOrderMigrationId:(sha,t)=>"o:"+sha+":"+t.databaseOid,systemInvitationMigrationId:(sha,t)=>"i:"+sha+":"+t.databaseOid},datasetSha256="b".repeat(64);
   const binding={datasetSha256,systemUserId:"u:"+datasetSha256+":42",systemAccountId:"a:"+datasetSha256+":42",systemOrderId:"o:"+datasetSha256+":42"};
   assert.equal(assertCoreSystemMigrationBinding(target,{},identities),false);
   assert.equal(assertCoreSystemMigrationBinding(target,binding,identities),true);
+  assert.equal(assertCoreSystemMigrationBinding(target,{...binding,systemInvitationId:"i:"+datasetSha256+":42"},identities),true);
+  assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemInvitationId:"i:wrong"},identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
   assert.throws(()=>assertCoreSystemMigrationBinding(target,{datasetSha256,systemFinanceId:'finance'},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
   assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemOrderId:undefined},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
   assert.throws(()=>assertCoreSystemMigrationBinding({...target,oid:"43"},binding,identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
@@ -38,6 +40,15 @@ test("new system-source receipts require complete independent attribution readba
  assert.equal(systemCoreAttributionMatches({...checkpoint,binding:{...checkpoint.binding,systemOrderId:undefined}},readback),false);
  assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:{...proof,orders:{expected:1,matched:0}}}),false);
  assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:undefined}),false);
+});
+
+test('system invitation completion requires every imported and closed packet receipt',()=>{
+ const checkpoint={binding:{systemInvitationId:'legacy-invitation-migration:'+'d'.repeat(64)},phases:{invitationFacts:{complete:true,quarantined:0,nextIndex:2},invitationCounts:{complete:true,quarantined:0,nextIndex:2}}};
+ const readback={invitationFacts:{childProofAudits:2,systemAttribution:{status:'VERIFIED',expectedPackets:2,importMatched:2,expectedCounts:2,countsMatched:2}}};
+ assert.equal(systemInvitationAttributionMatches(checkpoint,readback),true);
+ for(const proof of [{...readback.invitationFacts.systemAttribution,status:'MISMATCH'},{...readback.invitationFacts.systemAttribution,countsMatched:1},{...readback.invitationFacts.systemAttribution,importMatched:1}])
+  assert.equal(systemInvitationAttributionMatches(checkpoint,{invitationFacts:{...readback.invitationFacts,systemAttribution:proof}}),false);
+ assert.equal(systemInvitationAttributionMatches({...checkpoint,phases:{...checkpoint.phases,invitationCounts:{...checkpoint.phases.invitationCounts,complete:false}}},readback),false);
 });
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
@@ -165,7 +176,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   files.set("test-secret", "fixture");
   files.set("test-profile-secret", profileSecret);
   const proc = { version: "v24.20.0", env: { DB_PASSWORD_FILE: "test-secret", USER_IDENTITY_SUBJECT_HMAC_KEY_FILE: "test-secret", USER_LEGACY_IDENTITY_PROFILE_KEY_FILE: "test-profile-secret" }, argv: ["node", "script",
-    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...((failure?.startsWith("empty-coverage")||failure?.startsWith("system-finance")) ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
+    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...((failure?.startsWith("empty-coverage")||failure?.startsWith("system-finance")||failure?.startsWith("system-invitation")) ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
     "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
@@ -181,6 +192,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
       if (sql.startsWith("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject")) return { rows: [] };
       if (sql === "COMMIT" && failure === "empty-coverage-unknown" && events.some(e => e.domain === "financeEmptyCoverage" && e.event === "INTENT")) throw Object.assign(Error("original coverage commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "system-finance-history-unknown" && events.some(e => e.domain === "financeHistory" && e.event === "INTENT")) throw Object.assign(Error("original history commit error"), {code:"ECONNRESET"});
+      if (sql === "COMMIT" && failure === "system-invitation-unknown" && events.some(e => e.domain === "invitationFacts" && e.event === "INTENT")) throw Object.assign(Error("original invitation commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "lost-commit") {
         const error = Object.assign(Error("original commit error"), { code: "ECONNRESET" });
         this.emit("error", error);
@@ -208,6 +220,11 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     "database/business-migrations": { assertBusinessMigrationPrefix() {} },
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
+    "finance/legacy-invitation-facts": {invitationFactHash:value=>sha(JSON.stringify(value)),prepareLegacyInvitationFacts(input,digest){if(sha(JSON.stringify(input))!==digest)throw Error('INVITATION_PACKET_CHANGED');return {key:'synthetic-invitation-key',bodyDigest:digest};}},
+    "finance/legacy-invitation-facts-maintenance": {
+      bindSystemInvitationReceiptBaseline:failure==='system-invitation-build-old'?undefined:async(_c,acting,input,phase)=>{const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase,key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:p.bodyDigest});commands.push('SYSTEM_INVITATION_BASELINE');return{fixture:true};},
+      async importSystemLegacyInvitationFacts(_c,acting,input,baseline){assert.equal(baseline.fixture,true);const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase:'IMPORT',key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:failure==='system-invitation-drift'?'0'.repeat(64):p.bodyDigest});commands.push('SYSTEM_INVITATION_IMPORT');return{replayed:false};},
+      async closeSystemLegacyInvitationCounts(_c,acting,input,baseline){assert.equal(baseline.fixture,true);const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase:'COUNTS',key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:p.bodyDigest});commands.push('SYSTEM_INVITATION_COUNTS');return{replayed:false};},recoverSystemLegacyInvitationFacts(){}},
     "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
       importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){},
       systemCompactEmptyFinanceBatchProof:failure==='system-finance-build-old'?undefined:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
@@ -228,6 +245,9 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
         const result=await body();await acting.assertMigrationFence(c);return result; },
       systemFinanceMigrationId(source,target) { return "synthetic-finance-system-" + sha(JSON.stringify([source,target])); },
       async withSystemFinanceMigrationBatch(c,acting,body) { commands.push("SYSTEM_FINANCE_BATCH");await acting.assertMigrationFence(c);
+        const result=await body();await acting.assertMigrationFence(c);return result; },
+      systemInvitationMigrationId(source,target) { return "synthetic-invitation-system-" + sha(JSON.stringify([source,target])); },
+      async withSystemInvitationMigrationBatch(c,acting,body) { commands.push("SYSTEM_INVITATION_BATCH");await acting.assertMigrationFence(c);
         const result=await body();await acting.assertMigrationFence(c);return result; } },
     "legacy-load/legacy-account-seam": { legacyAccountId(_system,_entity,id) { return "synthetic-account-"+id; },
       async createLegacyOwnerRentalAccount(_c,input,acting) {const accountId="synthetic-account-"+input.legacyId;
@@ -265,12 +285,16 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     advisoryLockSql, assertLiveTarget, assertNextMigrationWriteReady: fenceFixture ? () => {} : assertNextMigrationWriteReady,
     captureMaintenanceLockEpoch: fenceFixture ? async () => { commands.push('FENCE_EPOCH'); return { fixture: true }; } : captureMaintenanceLockEpoch,
     NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets,
-    requiresInvitationCountClosure: failure?.startsWith('system-finance') ? () => false : requiresInvitationCountClosure,
+    requiresInvitationCountClosure: failure?.startsWith('system-finance')||failure?.startsWith('system-invitation') ? () => false : requiresInvitationCountClosure,
     readBoundSelectedSourceReceipt: (_source, _digest) => ({}),
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
     loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },
-    financialFixture: () => ({ applyFinancialDomains: ctx => ['system-finance-success','system-finance-mixed','system-finance-history-only','system-finance-history-unknown'].includes(failure)
+    financialFixture: () => ({ applyFinancialDomains: ctx => failure?.startsWith('system-invitation-')
+      ? (async()=>{const input={source:{id:'original'},policy:null},packet={sourceId:'invitation-1',input,bodyDigest:sha(JSON.stringify(input))};
+        await ctx.runItems('invitationFacts',[packet],row=>ctx.systemInvitation.import(row),1);
+        await ctx.runItems('invitationCounts',[packet],row=>ctx.systemInvitation.closeCounts(row),1);})()
+      : ['system-finance-success','system-finance-mixed','system-finance-history-only','system-finance-history-unknown'].includes(failure)
       ? (async()=>{if(!['system-finance-history-only','system-finance-history-unknown'].includes(failure))await ctx.runItems("financeEmptyCoverage",[{sourceId:"chunk-1"},{sourceId:"chunk-2"}],()=>ctx.systemFinance.importEmpty([{synthetic:true}]),2);
         if(failure!=='system-finance-success')await ctx.runBatches('financeHistory',[{sourceId:'history-1'},{sourceId:'history-2'}],async rows=>{const outcome=await ctx.systemFinance.importHistory(rows);return rows.map(()=>({replayed:outcome.replayed}));},500);})()
       : ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
@@ -342,6 +366,10 @@ test('NEXT refuses an old finance build before acquiring the target lock or writ
 test('NEXT system finance build is checked before connecting',async()=>{
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'system-finance-build-old'});
  assert.match(result.error?.message??'',/NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED/);assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));
+});
+test('NEXT system invitation build is checked before connecting',async()=>{
+ const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'system-invitation-build-old'});
+ assert.match(result.error?.message??'',/NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED/);assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));
 });
 
 test('NEXT refuses the wrong population or incomplete continuation evidence before target writes',async()=>{
@@ -446,6 +474,18 @@ test('NEXT history lost commit retains the original batch keys and never claims 
  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true,failure:'system-finance-history-unknown'});
  assert.equal(result.exit,1);assert.equal(result.state.status,'COMMIT_UNKNOWN');assert.equal(result.state.phases.financeHistory.nextIndex,0);
  assert.deepEqual(result.state.pending.sourceIds,['history-1','history-2']);assert.equal(result.events.some(e=>e.domain==='financeHistory'&&e.event==='COMMIT_ACK'),false);
+});
+test('NEXT invitation import and count closure share a fenced system source',async()=>{
+ const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true};
+ const result=await load({...options,failure:'system-invitation-success'});
+ assert.ifError(result.error);assert.equal(result.exit,undefined);assert.match(result.state.binding.systemInvitationId,/^synthetic-invitation-system-/);
+ assert.equal(result.commands.filter(command=>command==='SYSTEM_INVITATION_BASELINE').length,1);
+ assert(result.commands.indexOf('SYSTEM_INVITATION_IMPORT')<result.commands.indexOf('SYSTEM_INVITATION_COUNTS'));
+ assert.equal(result.state.phases.invitationFacts.nextIndex,1);assert.equal(result.state.phases.invitationCounts.nextIndex,1);
+ const drift=await load({...options,failure:'system-invitation-drift'});assert.equal(drift.exit,1);assert.equal(drift.state.phases.invitationFacts.nextIndex,0);
+ assert(!drift.commands.includes('SYSTEM_INVITATION_IMPORT'));assert(!drift.commands.includes('SYSTEM_INVITATION_COUNTS'));
+ const unknown=await load({...options,failure:'system-invitation-unknown'});assert.equal(unknown.exit,1);assert.equal(unknown.state.status,'COMMIT_UNKNOWN');
+ assert.deepEqual(unknown.state.pending.sourceIds,['invitation-1']);assert(!unknown.events.some(e=>e.domain==='invitationFacts'&&e.event==='COMMIT_ACK'));
 });
 
 test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
