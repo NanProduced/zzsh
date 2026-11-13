@@ -87,7 +87,7 @@ export function newEarlySettlementDisclosure(): EarlySettlementDisclosure {
   return { versionId: "early-settlement-fees-v1", body: EARLY_DISCLOSURE_BODY, digest: legalDigest(EARLY_DISCLOSURE_BODY) };
 }
 
-type EarlySettlementSnapshot = { agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown };
+type EarlySettlementSnapshot = { agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown; personal?: unknown };
 
 function earlySettlementUnavailable(): never {
   throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "本单提前结束说明暂时无法核验");
@@ -95,6 +95,9 @@ function earlySettlementUnavailable(): never {
 
 export function earlySettlementReference(quote: EarlySettlementSnapshot): (LegalAcceptanceRef & { body?: string }) | null {
   const schema = quote.agreementAcceptanceSchema;
+  const personal = quote.personal;
+  if (personal && typeof personal === "object" && "schema" in personal
+    && (personal.schema === "personal-quote-v5" || personal.schema === "personal-quote-v6") && schema !== 2) return earlySettlementUnavailable();
   if (schema === undefined || schema === 0) return null;
   const doc = quote.earlySettlementDisclosure as Partial<EarlySettlementDisclosure> | null;
   if ((schema !== 1 && schema !== 2) || !doc || typeof doc.versionId !== "string" || !ID.test(doc.versionId)

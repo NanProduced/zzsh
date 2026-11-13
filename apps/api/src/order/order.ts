@@ -166,7 +166,14 @@ export function projectOrder(
     return projected;
   };
   const expired = row.expiredAwaitingCancel === true;
-  const earlyDisclosure = earlySettlementReference(row.quoteSnapshot);
+  let earlyDisclosure: ReturnType<typeof earlySettlementReference> = null;
+  let earlyDisclosureUnavailable = false;
+  try {
+    earlyDisclosure = earlySettlementReference(row.quoteSnapshot);
+  } catch (error) {
+    if (!(error instanceof SecurityApiError) || error.status !== 503) throw error;
+    earlyDisclosureUnavailable = true;
+  }
   const amounts = {
     rental: centsToYuan(row.rentalAmountCents),
     deposit: centsToYuan(row.depositAmountCents),
@@ -175,6 +182,7 @@ export function projectOrder(
   };
   const base = {
     ...(earlyDisclosure ? { earlySettlementDisclosure: earlyDisclosure } : {}),
+    ...(earlyDisclosureUnavailable ? { earlySettlementDisclosureUnavailable: true } : {}),
     id: row.id,
     displayNo: row.displayNo,
     status: row.status,

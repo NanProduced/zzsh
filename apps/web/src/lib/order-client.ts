@@ -285,6 +285,7 @@ export type OrderImProjection = {
 export type Order = {
   viewerParty?: OrderParty;
   earlySettlementDisclosure?: { versionId: string; digest: string; body?: string };
+  earlySettlementDisclosureUnavailable?: boolean;
   source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
   readOnly?: boolean;
   legacyAmounts?: LegacyOrder["legacyAmounts"];
