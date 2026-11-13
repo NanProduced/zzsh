@@ -73,13 +73,14 @@ export type InventoryEditorRow = {
 };
 
 export function inventoryEditorRows(
-  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean; priced?: boolean; mediaId?: string | null }> } | null,
+  catalog: { items: Array<{ id: string; name: string; unit: string; required?: boolean; priced?: boolean | null; mediaId?: string | null }>; blockers?: Array<{ code: string }> } | null,
   inventory: DraftInput["inventory"],
   labels: Array<{ id: string; name: string; unit: string; priced?: boolean }> = [],
   availability: CatalogAvailability = catalog ? "ready" : "pending",
 ): InventoryEditorRow[] {
   // Directory membership and current pricing are separate; saved labels do not prove a price.
   const catalogState: CatalogAvailability = catalog ? "ready" : availability === "failed" ? "failed" : "pending";
+  const pricingUnavailable = catalog?.blockers?.some(({ code }) => code === "RULE_UNCONFIGURED" || code === "PRICING_POLICY_UNAVAILABLE");
   const labelById = new Map(labels.map((item) => [item.id, item]));
   const catalogIds = new Set(catalogState === "ready" ? (catalog?.items ?? []).map((item) => item.id) : []);
   const rows: InventoryEditorRow[] = (catalogState === "ready" ? catalog?.items ?? [] : []).map((item) => ({
@@ -87,7 +88,7 @@ export function inventoryEditorRows(
     name: item.name,
     unit: item.unit,
     quantity: inventory.find((row) => row.itemId === item.id)?.quantity ?? null,
-    priced: typeof item.priced === "boolean" ? item.priced : null,
+    priced: !pricingUnavailable && typeof item.priced === "boolean" ? item.priced : null,
     required: Boolean(item.required),
     catalogState,
     mediaId: item.mediaId ?? null,
@@ -100,7 +101,7 @@ export function inventoryEditorRows(
       name: label?.name ?? "名称待确认",
       unit: label?.unit ?? null,
       quantity: line.quantity,
-      priced: catalogState === "ready" ? false : null,
+      priced: catalogState === "ready" && !pricingUnavailable ? false : null,
       required: false,
       catalogState,
       mediaId: null,
