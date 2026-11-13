@@ -15,6 +15,7 @@ import {planLegacyTradeIntakeBatch,assembleLegacyTradeIntakeBatch,assembleLegacy
 import {legacyDisplayDigest} from "../src/supply/legacy-display-snapshot";
 import {computeDeltaQuote} from "../src/supply/pricing";
 import {compatRule} from "./pricing-compat-fixture";
+import { readPublishingSource } from "./publishing-source";
 
 function bindSource(input: LegacyTradeIntake) {
   const { source } = input;
@@ -725,7 +726,7 @@ test("ordinary draft command saves one legacy observation without quote, review,
   const source = readFileSync(join(sourceRoot, "supply/legacy-trade-takeover.ts"), "utf8");
   const fn = source.slice(source.indexOf("export async function applyLegacyOrdinaryDraft"), source.indexOf("export async function takeoverLegacyTrade"));
   for (const name of ["quoteListing(", "reviewListing(", "takeoverLegacyTrade(", "finalizeLegacyTradeTakeover(", "publishTakenOverDraft(", "withIdempotency("]) assert.equal(fn.includes(name), false, name);
-  const publishingSource = readFileSync(join(sourceRoot, "supply/publishing.ts"), "utf8");
+  const publishingSource = readPublishingSource();
   const blockers = publishingSource.slice(publishingSource.indexOf("export async function publicationBlockers"), publishingSource.indexOf("export async function assertEditable"));
   assert.match(blockers, /purpose === "WRITE"/);
   assert.match(blockers, /TITLE_REVIEW_REQUIRED/);

@@ -1,16 +1,15 @@
-import { effectiveRuleRelease } from "./effective-rule-release";
+
 import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
-import { verifyTradeTermsBody } from "./full-payout-terms";
+
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
-import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
-import { formatDecimalExact, parseSignedDecimal } from "./decimal";
+
 import { listSupervision, parseSupervisionQuery, readSupervision, supervisionViewer } from "./admin-supervision-read";
 import { loadLegacyHistoricalRead, loadLegacyHistoricalReads, withoutLegacyResourceNo } from "./legacy-listing-read";
 import { publicAccountNumber } from "./account-number";
 import { listOwnerAccounts, parseOwnerAccountQuery, projectOwnerAccount } from "./owner-account-list";
 import { listV2 } from "./listing-filter-routes";
 import { lookupPublicListing, parseNumberLookupQuery } from "./public-listing-lookup";
-import { candidatePredicates,PUBLIC_CANDIDATE_FROM,PUBLIC_CANDIDATE_WHERE } from "./listing-candidates";
+
 import type { PoolClient } from "pg";
 import { assertGameScopeUsable, gameScopeSql, readAdminGameScope } from "../auth/admin-scope";
 import { readAdminContext, assertAdminContextInTransaction } from "../auth/auth-security";
@@ -31,11 +30,10 @@ import {
 } from "../auth/security-core";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
 import { OWNER_INCOME_PREVIEW_MAX_BYTES, parseOwnerIncomePreviewInput, readOwnerIncomePreview } from "./owner-income-preview";
-import { parseFixedFeeRates } from "./fixed-fee";
+
 import type { SupplyRuntimeOptions } from "./supply-routes";
 import { GAME_SERVICE, requirePublicGameService } from "./game-services";
-import { loadMediaAsset } from "./media";
-import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
+
 import {
   assertGameScope,
   bodyOf,
@@ -52,41 +50,10 @@ import {
   type SupplyNodeRequest,
   type SupplyNodeResponse,
 } from "./supply-util";
-import {
-  EFFECTIVE_PUBLICATION_STATE_SQL,
-  isAccountDisplayPubliclyEligible,
-  parsePublicListingSearch,
-  publicGradingOptions,
-  publicLoginMethodOptions,
-  publicSafeBoxOptions,
-  publicSafeBoxCodes,
-} from "./listing-query";
-import {
-  acceptListingRules,
-  createListingDraft,
-  currentVersion,
-  delistListing,
-  listingCandidatePage,
-  listingDetail,
-  lockPublishingAccount,
-  readPublicListingSnapshot,
-  readPublishingAccount,
-  readCurrentVersion,
-  readDepositRecommendation,
-  readResourceIncomePreview,
-  resolveIncomePreviewRelease,
-  withPublicListingSnapshot,
-  quoteListing,
-  readDeclaration,
-  restrictListing,
-  reviewListing,
-  saveListingDraft,
-  submitListing,
-  unknownSupplyGate,
-  withdrawListing,
-  type PublishingAccount,
-  type IncomePreviewRelease,
-} from "./publishing";
+import { EFFECTIVE_PUBLICATION_STATE_SQL, parsePublicListingSearch } from "./listing-query";
+import { acceptListingRules, createListingDraft, currentVersion, delistListing, listingDetail, lockPublishingAccount, readPublishingAccount, readDepositRecommendation, readResourceIncomePreview, withPublicListingSnapshot, quoteListing, readDeclaration, restrictListing, reviewListing, saveListingDraft, submitListing, unknownSupplyGate, withdrawListing, type PublishingAccount } from "./publishing";
+import { readPublishingOptions } from "./publishing-quote";
+import { projectPublishingOptions, readPublicListingDetailOrAsset, readPublicListingPage } from "./publishing-public";
 const ACCOUNT_ROUTE =
   /^\/accounts\/([A-Za-z0-9._:-]+)(?:\/(drafts|draft|quote|accept-rules|submit|withdraw|delist|restriction|deposit-recommendation))?$/;
 const ADMIN_ROUTE =
@@ -182,97 +149,9 @@ export async function handlePublishingRoute(
         const account=await readPublishingAccount(client,accountId);
         if(account.owner_user_id!==context.userId||account.game_id!==gameId)throw notFound();
       }
-      const release=(await client.query<IncomePreviewRelease&{agreement_id:string;title:string;body:string;digest:string;body_document:unknown}>(
-        `SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",
-          g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",
-          p.status AS "priceStatus",p.haff_rule AS "haffRule",ag.id AS agreement_id,ag.title,ag.body,ag.digest,to_jsonb(ag)->'body_document' AS body_document
-         FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
-         JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,[gameId])).rows[0];
-      if(!release)throw notFound();
-      const bodyDocument = await verifyTradeTermsBody(release.body, release.digest, release.body_document);
-      const asOf=(await client.query<{at:string}>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
-      if(!asOf)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架规则暂不可用");
-      const resolved=await resolveIncomePreviewRelease(client,gameId,release,{asOf,...(context&&accountId?{accountId,ownerUserId:context.userId}:{})});
-      if(!resolved.available)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架计价规则暂不可用");
-      const terms=(await client.query(`SELECT code,name,daily_consumption::text AS "dailyConsumption",duration_rounding AS "durationRounding" FROM zzsh_supply.term_option WHERE version_id=$1 ORDER BY code`,[release.termVersionId])).rows;
-      let fixedFeeRates:ReturnType<typeof parseFixedFeeRates>|undefined;
-      if(resolved.release.pricingPolicy?.pricingModel==="FIXED_FEE"){
-        const row=(await client.query<{rates:unknown}>(`SELECT fixed_fee_rates AS rates FROM zzsh_supply.price_version WHERE id=$1 AND game_id=$2 AND status='SEALED'`,[resolved.release.priceVersionId,gameId])).rows[0];
-        try{fixedFeeRates=parseFixedFeeRates(row?.rates);}catch{throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"手续费率暂不可用");}
-      }
-      return {release,terms,rule:resolved.release.haffRule,pricingPolicy:resolved.release.pricingPolicy,fixedFeeRates,bodyDocument};
+      return readPublishingOptions(client,gameId,context&&accountId?{accountId,ownerUserId:context.userId}:undefined);
     });
-    const {release,terms,bodyDocument}=result;
-    const rule = result.rule as {
-      schema?: string;
-      compatibility?: import("./delta-rental").DeltaCompatPricing;
-      fixedModes?: import("./delta-rental").DeltaHaffRule["fixedModes"];
-      baseBySafeBox?: Record<string, string>;
-      options?: Record<string, { enabled: boolean }>;
-      vitalityDeltaByLevel?: Record<string,string>;
-      bearDeltaByLevel?: Record<string,string>;
-      dailyDeltaByTermOption?: Record<string,string>;
-    } | null;
-    const mappedTerms = terms.filter(term => Object.hasOwn(rule?.dailyDeltaByTermOption ?? {}, term.code));
-    const customTerms = mappedTerms.filter(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION);
-    const modes=rule?.schema==="haff-ratio-v3"?rule.fixedModes:rule?.compatibility?.modes;
-    const customEnabled = modes?.custom?.enabled === true && customTerms.length > 0;
-    const termOptions = terms.map(term => {
-      let adjustment: string | null = null;
-      const value = rule?.dailyDeltaByTermOption?.[term.code];
-      if (typeof value === "string") try { adjustment = formatDecimalExact(parseSignedDecimal(value, 8, "daily ratio adjustment")); } catch { /* An unproved adjustment stays unknown. */ }
-      return { ...term, ownerRatioAdjustmentWanPerYuan: adjustment };
-    });
-    sendJson(
-      response,
-      200,
-      {
-        releaseId: release.releaseId,
-        generation: release.generation,
-        ...(options.mediaStorage?.accountMedia ? { accountMediaTransport: "OSS_POST" } : {}),
-        termOptions,
-        declarationOptions: {
-          next_season_pass: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "下赛季通行证计划", type: "BOOLEAN", public: true },
-          demulan_unlocked: { enabled: true, required: true, requiredAt: "QUOTE_AND_PUBLICATION", label: "是否已解锁德穆兰", type: "BOOLEAN", public: true },
-          info_source: { enabled: true, required: false, label: "通过哪个渠道了解洲洲商行", public: false, options: DELTA_INFO_SOURCE_DICTIONARY.options, optionsState: "CONFIGURED", sourceSnapshot: DELTA_INFO_SOURCE_DICTIONARY.sourceSnapshot, acceptsLegacyText: true },
-        },
-        vitalityLevels:[...DELTA_PUBLISH_LEVELS],
-        bearLevels:[...DELTA_PUBLISH_LEVELS],
-        diveLevels:[0,1,2,3],
-        safeBoxCodes: publicSafeBoxCodes(),
-        safeBoxOptions: publicSafeBoxOptions(publicSafeBoxCodes()),
-        pricingInputOptions: {
-          safeBoxCodes: publicSafeBoxCodes().filter(code=>Object.hasOwn(rule?.baseBySafeBox??{},code)),
-          vitalityLevels: deltaPublicationLevels(rule?.vitalityDeltaByLevel),
-          bearLevels: deltaPublicationLevels(rule?.bearDeltaByLevel),
-        },
-        gradingOptions: publicGradingOptions(),
-        loginMethodOptions: publicLoginMethodOptions(),
-        pricingOptionCodes: Object.entries(rule?.options ?? {})
-          .filter(([, v]) => v.enabled)
-          .map(([key]) => key)
-          .sort(),
-        ...(["haff-ratio-v2","haff-ratio-v3"].includes(rule?.schema??"") ? {
-          pricingSchema: rule!.schema,
-          rentalModes: modes ? { ...modes, custom: { ...modes.custom, enabled: customEnabled } } : undefined,
-          rentalTermOptions: {
-            ordinary: { termOptionCodes: mappedTerms.map(term => term.code) },
-            custom: { termOptionCodes: customTerms.map(term => term.code), requiredDailyConsumption: DELTA_CUSTOM_DAILY_CONSUMPTION, reasonCodes: !customTerms.length ? ["CUSTOM_10M_TERM_UNAVAILABLE"] : [] },
-            fast: { termOptionCodes: mappedTerms.map(term => term.code) },
-          },
-        } : {}),
-        ...(result.pricingPolicy?{pricingPolicy:result.pricingPolicy,fixedFeeRates:result.fixedFeeRates}:{}),
-        agreement: {
-          id: release.agreement_id,
-          title: release.title,
-          body: release.body,
-          digest: release.digest,
-          ...(bodyDocument ? { bodyDocument } : {}),
-        },
-      },
-      requestId,
-      "private, no-store",
-    );
+    sendJson(response, 200, projectPublishingOptions(result, options.mediaStorage?.accountMedia ? "OSS_POST" : undefined), requestId, "private, no-store");
     return true;
   }
   const accountMatch = admin
@@ -293,28 +172,7 @@ export async function handlePublishingRoute(
     if (publicMatch) {
       const result = await withPublicListingSnapshot(
         options.pool,
-        async (client) => {
-          const a = await readPublishingAccount(client, publicMatch[1]!);
-          const detail = await readPublicListingSnapshot(client, a, gate, options.legacyPublicAdmission, false, "DETAIL", options.legacyPublicAdmissionDetail, { fixedFeeDemo: options.fixedFeeDemo });
-          if (!publicMatch[2]) return { detail: (await projectPublicListingImages(client, [detail], options.mediaStorage?.accountImageCdn))[0]! };
-          if (!Array.isArray(detail.media) || !detail.media.some((media: { assetId?: string }) => media.assetId === publicMatch[2])) throw notFound();
-          const asset = await loadMediaAsset(client, publicMatch[2]);
-          const v = await readCurrentVersion(client, { ...a, current_version_id: String(detail.versionId) });
-          if (
-            !asset ||
-            asset.ownerUserId !== a.owner_user_id ||
-            asset.accountId !== a.id ||
-            asset.gameId !== a.game_id ||
-            asset.purpose !== "ACCOUNT_DISPLAY" ||
-            !isAccountDisplayPubliclyEligible(asset) ||
-            !(await client.query(
-              `SELECT 1 FROM zzsh_supply.listing_media WHERE version_id=$1 AND asset_id=$2`,
-              [v.id, asset.id],
-            )).rowCount
-          )
-            throw notFound();
-          return { asset };
-        },
+        async (client) => readPublicListingDetailOrAsset(client, publicMatch[1]!, publicMatch[2], { gate, legacyPublicAdmission: options.legacyPublicAdmission, legacyPublicAdmissionDetail: options.legacyPublicAdmissionDetail, fixedFeeDemo: options.fixedFeeDemo, accountImageCdn: options.mediaStorage?.accountImageCdn }),
       );
       if (result.asset) {
         const bytes = await options.mediaStorage.read(
@@ -375,80 +233,7 @@ export async function handlePublishingRoute(
     }
     const data = await withPublicListingSnapshot(
       options.pool,
-      async (client) => {
-        if (filter.gameId) {
-          await requirePublicGameService(client, filter.gameId, GAME_SERVICE.ACCOUNT_RENTAL);
-        }
-        if (query.has("cursor") && cursorMarket !== "publication-snapshot" && cursorMarket !== null) throw conflict("Listing prices changed; refresh from the first page");
-        const values:unknown[]=[cursor,filter.gameId];
-        const param=(value:unknown)=>{values.push(value);return '$'+values.length;};
-        const predicates=candidatePredicates({resources:filter.itemId?[{itemId:filter.itemId,minQuantity:filter.minQuantity??"0"}]:[],skinGroups:[{ids:filter.skins,match:filter.skinMatch}]},filter.q,param);
-        const rows = (
-          await client.query<{
-            id: string;
-            version_id: string;
-          }>(
-            `SELECT a.id,v.id AS version_id ${PUBLIC_CANDIDATE_FROM} WHERE a.id>$1 AND ${PUBLIC_CANDIDATE_WHERE} AND ($2::text IS NULL OR a.game_id=$2)${predicates.length?' AND '+predicates.join(' AND '):''} ORDER BY a.id LIMIT 200`,
-            values,
-          )
-        ).rows;
-        const items: PublicListingProjection[] = [];
-        let last = cursor;
-        let hasMore = false;
-        const page = listingCandidatePage(client, options.fixedFeeDemo && { resource: options.fixedFeeDemo, accountIds: rows.map(row => row.id) });
-        for (let i = 0; i < rows.length; i++) {
-          const row = rows[i]!;
-          // The page is full and candidates remain unscanned: the caller still
-          // has rows to fetch, so the cursor advances to the last scanned one.
-          if (items.length === limit) {
-            hasMore = true;
-            break;
-          }
-          if (!page.has(row.id))
-            await page.load(rows.slice(i, i + limit).map((candidate) => candidate.id));
-          last = row.id;
-          const account = page.account(row.id);
-          if (!account) continue;
-          try {
-            items.push(
-              await listingDetail(
-                client,
-                account,
-                "public",
-                gate,
-                undefined,
-                undefined,
-                false,
-                "RENTABLE",
-                { version: page.version(row.id), shared: page.shared, fixedFeeDemoAccount: await page.fixedFeeDemoAccount(row.id) },
-              ),
-            );
-          } catch (error) {
-            if (
-              (
-                error as {
-                  status?: number;
-                }
-              ).status !== 404
-            )
-              throw error;
-          }
-        }
-        if (rows.length === 200) hasMore = true;
-        return {
-          items: await projectPublicListingImages(client, items, options.mediaStorage?.accountImageCdn),
-          nextCursor: hasMore
-            ? Buffer.from(
-                JSON.stringify({
-                  v: 2,
-                  id: last,
-                  filter: sha256Hex(JSON.stringify(filter)),
-                  marketRevision: "publication-snapshot",
-                }),
-              ).toString("base64url")
-            : null,
-        };
-      },
+      async (client) => readPublicListingPage(client, { query, filter, cursor, cursorMarket, limit, gate, fixedFeeDemo: options.fixedFeeDemo, accountImageCdn: options.mediaStorage?.accountImageCdn }),
     );
     sendJson(response, 200, data, requestId);
     return true;
