@@ -652,26 +652,28 @@ try {
     if (pm.datasetSha256 !== state.binding.datasetSha256) throw new Error("ADDITIVE_PATH_DATASET_DRIFT");
     const systemPaths=state.binding.systemAccountId!==undefined;
     if(systemPaths&&!systemCore)throw new Error('SYSTEM_MEDIA_RECEIPT_MODE_UNCONFIRMED');
-    const pathRows=[];for await(const row of rows(await checked(pathDir,pm.file,pm.fileSha256)))pathRows.push(row);
+    const pathFile=await checked(pathDir,pm.file,pm.fileSha256),pathEntry={sha256:pm.fileSha256,rows:pm.accounts};
     let pathSources,pathWriter;
     if(systemPaths){
       const entry=listedSourceReceipt.files?.accounts;
       if(!entry||entry.file!==basename(entry.file))throw new Error('MEDIA_SOURCE_READBACK_UNCONFIRMED');
-      const wanted=new Set(pathRows.map(row=>row.legacyId));if(wanted.size!==pathRows.length)throw new Error('MEDIA_SOURCE_DUPLICATE');
+      const wanted=new Set();for await(const row of readBoundSourceRows(pathFile,pathEntry)){
+        if(wanted.has(row.legacyId))throw new Error('MEDIA_SOURCE_DUPLICATE');wanted.add(row.legacyId);
+      }
       pathSources=new Map();pathWriter=mod('legacy-load/legacy-path-records');
       for await(const source of readBoundSourceRows(privatePath(join(manifest.source,entry.file)),entry))if(wanted.has(source.id)){
-        if(pathSources.has(source.id))throw new Error('MEDIA_SOURCE_DUPLICATE');pathSources.set(source.id,source);
+        if(pathSources.has(source.id))throw new Error('MEDIA_SOURCE_DUPLICATE');
+        pathSources.set(source.id,{ownerId:source.user_id,fact:pathWriter.prepareLegacyPathRecord(source)});
       }
     }
     const pathBatches=new Map();
-    await compare("paths",pathRows,async batch => (await query(`SELECT m.legacy_id key,m.account_id,m.version_id,p.observation_version_id,p.source_digest,p.display_paths,p.penalty_paths,
+    await compare("paths",readBoundSourceRows(pathFile,pathEntry),async batch => (await query(`SELECT m.legacy_id key,m.account_id,m.version_id,p.observation_version_id,p.source_digest,p.display_paths,p.penalty_paths,
       to_jsonb(p)->>'created_by_migration_id' migration_id,to_jsonb(p)->>'migration_manifest_sha256' migration_manifest,to_jsonb(p)->>'migration_batch_id' batch_id
       FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_account_media_paths p USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`,[batch.map(r=>r.legacyId)])).rows,(r,a)=>{
       if(!a||a.version_id!==a.observation_version_id||a.source_digest!==r.sourceDigest||canonical(a.display_paths)!==canonical(r.displayPaths)||canonical(a.penalty_paths)!==canonical(r.penaltyPaths))return false;
       if(systemPaths){
-        const source=pathSources.get(r.legacyId);if(!source)return false;
-        const fact=pathWriter.prepareLegacyPathRecord(source);
-        if(source.user_id!==r.legacyOwnerId||fact.ownerUserId!==r.ownerUserId||fact.sourceDigest!==r.sourceDigest
+        const source=pathSources.get(r.legacyId);if(!source)return false;const fact=source.fact;
+        if(source.ownerId!==r.legacyOwnerId||fact.ownerUserId!==r.ownerUserId||fact.sourceDigest!==r.sourceDigest
           ||canonical(fact.displayPaths)!==canonical(r.displayPaths)||canonical(fact.penaltyPaths)!==canonical(r.penaltyPaths)
           ||a.migration_id!==state.binding.systemAccountId||a.migration_manifest!==state.binding.datasetSha256
           ||!/^legacy-media-batch:[a-f0-9]{64}$/.test(a.batch_id??''))return false;
