@@ -8,13 +8,13 @@ import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, legacyListedProofVersion, legacyListedTargetMatches, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readLfLines } from "./local-source-adapter.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
   const hash='a'.repeat(64),receiptSha='b'.repeat(64),dumpSha='c'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='d'.repeat(64),cutoff='2026-11-03T07:01:00Z';
@@ -76,6 +76,11 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   if (unicodeFirst) userRows[0].input.note = "合成\u2028昵称\u2029保留";
   if (verifiedFirst) Object.assign(userRows[0], { userId: "synthetic-user-101", sourceDigest: "a".repeat(64), trustedIdentityNumber: "99000019900101123X",
     legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { status: { realNameBound: true } } } });
+  if (migrationProfile === NEXT_MIGRATION_PROFILE) for (const row of userRows) {
+    row.userId = "synthetic-user-" + row.sourceId; row.sourceDigest = "a".repeat(64);
+    Object.assign(row.input.evidence, { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: row.sourceId, sourceDigest: row.sourceDigest });
+    row.input.evidenceDigest = "b".repeat(64);
+  }
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
   const fileEntries = {};
@@ -139,17 +144,36 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const modules = {
     "supply/content-hash": { canonicalize: JSON.stringify },
     "auth/identity-subject": { deriveIdentitySubjectKey() { return Buffer.alloc(32, 9); }, identitySubjectDigest() { return "b".repeat(64); },
-      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); } },
+      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); },
+      recordLegacyIdentitySubjects() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); } },
     "auth/legacy-identity-profile": { legacyIdentityProfileKey(value) { return createHash("sha256").update(value).digest(); },
       recordLegacyIdentityProfile() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); },
       recordLegacyIdentityProfiles() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); } },
     "database/business-migrations": { assertBusinessMigrationPrefix() {} },
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
-    "supply/legacy-user-migration": { migrateLegacyOwner(_client, row) {
+    "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION: "BATCH_V2",
+      importReviewedCompactEmptyFinanceObservationBatch() {}, recoverReviewedCompactEmptyFinanceObservationBatch() {}, compactEmptyFinanceBatchProof() {} },
+    "legacy-load/system-user-migration": {
+      systemUserMigrationId: source => "synthetic-user-system-" + source,
+      systemAccountMigrationId: source => "synthetic-account-system-" + source,
+      systemOrderMigrationId: source => "synthetic-order-system-" + source,
+      systemFinanceMigrationId: source => "synthetic-finance-system-" + source,
+      systemInvitationMigrationId: source => "synthetic-invitation-system-" + source,
+      async withSystemUserMigrationBatch(c, acting, body) { await acting.assertMigrationFence(c); const result=await body(); await acting.assertMigrationFence(c); return result; },
+      async withSystemAccountMigrationBatch(c, acting, body) { await acting.assertMigrationFence(c); return body(); },
+      async withSystemOrderMigrationBatch(c, acting, body) { await acting.assertMigrationFence(c); return body(); },
+      async withSystemFinanceMigrationBatch(c, acting, body) { await acting.assertMigrationFence(c); return body(); },
+      async withSystemInvitationMigrationBatch(c, acting, body) { await acting.assertMigrationFence(c); return body(); },
+    },
+    "supply/legacy-user-migration": { legacyOwnerUserId(_system,_entity,id) { return "synthetic-user-"+id; }, async migrateLegacyOwner(_client, row, acting) {
+      if (migrationProfile === NEXT_MIGRATION_PROFILE) {
+        assert.equal(acting.kind, "SYSTEM_USER_MIGRATION");
+        await acting.assertSourceEvidence({sourceSystem:row.evidence.sourceSystem,sourceEntity:row.evidence.sourceEntity,legacyId:row.evidence.legacyId,sourceDigest:row.evidence.sourceDigest,evidenceDigest:row.evidenceDigest});
+      }
       if (row.id === 2 && ["rejected", "lost-rollback"].includes(failure)) throw Object.assign(Error("original rejection"), { status: 409 });
       if (unicodeFirst && row.id === 1) { assert.equal(row.note, "合成\u2028昵称\u2029保留"); commands.push("UNICODE_SOURCE_PRESERVED"); }
-      return { replayed: false };
+      return { replayed: false, ...(row.evidence.legacyId ? { userId: "synthetic-user-" + row.evidence.legacyId } : {}) };
     } },
   };
   const context = {
@@ -159,7 +183,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     releaseMigrationSessionFence: fenceFixture ? async () => { commands.push('UNFENCE'); } : releaseMigrationSessionFence,
     advisoryLockSql, assertLiveTarget, assertNextMigrationWriteReady: fenceFixture ? () => {} : assertNextMigrationWriteReady,
     captureMaintenanceLockEpoch: fenceFixture ? async () => { commands.push('FENCE_EPOCH'); return { fixture: true }; } : captureMaintenanceLockEpoch,
-    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
+    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
     readBoundSelectedSourceReceipt: (_source, _digest) => ({}),
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
@@ -167,6 +191,10 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
     async *readRows(file) { for await (const line of readLfLines(context.createReadStream(file))) if (line.trim()) yield JSON.parse(line); },
+    async preflightBoundSourceBatches(file, entry, size) {
+      assert.equal(entry.rows, get(file).split("\n").filter(Boolean).length); assert.equal(size, 100); return {};
+    },
+    async *readBoundSourceBatches(file) { yield* context.readRows(file); },
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
     writeFileSync: (file, value) => files.set(file, value), appendFileSync: (_file, value) => events.push(JSON.parse(value)),
     writeLoadCheckpoint(file, value) {
@@ -621,7 +649,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     assertSameDirectoryResumeSafe,
     inspectRoundResumeOutput: directory => directory === oldOut && oldReceiptRef ? { sequence: 1, previousReceipt: oldReceiptRef } : directory === out && sameOutputReceipt ? { sequence: 1, previousReceipt: sameOutputReceipt, stageNames: sameOutputStages.map(stage => stage.name) } : null,
     reserveRoundResumeOutput: directory => { const attempt = path.join(directory, "round-attempt-000001"); directories.push(attempt); return attempt; },
-    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage,
+    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, compactEmptyCoverageReadbackMatches, legacyListedProofVersion, legacyListedTargetMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage,
     verifyDisplayCaptureInputs:async()=>({status:'SOURCE_DISPLAY_CAPTURE_VERIFIED_TARGET_NOT_RUN',displayRows:cohort,sourceConnections:0,targetConnections:0,targetWrites:0}),
     digestInlineGrowthLog:async()=>inlineLogInvalid?'0'.repeat(64):'f'.repeat(64),
     requiresInvitationCountClosure, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
@@ -1075,9 +1103,31 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   for (const name of ['prepare','manifest','apply','readback']) Object.assign(data.growth[name], { instance, migrationProfile });
   data.checkpoint.targetFenceReleased = true; data.checkpoint.protectionRecorded = true;
   data.readback.targetFence = 'HELD_UNTIL_ROLLBACK';
+  data.checkpoint.generatedPhases={financeEmptyCoverage:{schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:2,chunks:[{},{}]}};
+  data.readback.emptyFinancialCoverage={sourceRebuilt:true,expected:2,readable:2,actual:2,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}};
   Object.assign(data.receipt.stages.find(stage=>stage.name==='paths').metrics,{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased:true});
   for (const name of ['prepare','readback']) Object.assign(data.growth[name], { readOnlyFence:'HELD_UNTIL_ROLLBACK', readOnlyMaintenanceUnlock:true, readOnlyMaintenanceClosed:true });
   Object.assign(data.growth.apply, { targetFence:'HELD_ACROSS_BATCHES', targetFenceReleased:true });
+  const listed=structuredClone(data),empty=sha(''),one=sha('listed-1');
+  listed.input.source={sha256:'a'.repeat(64)};
+  Object.assign(listed.expected.dataset,{sourceReceiptSha256:listed.input.source.sha256,gameBindings:{'1':'delta'}});
+  listed.expected.dataset.files.accounts={sha256:'b'.repeat(64)};
+  listed.expected.source={files:{accounts:{sha256:'c'.repeat(64)},games:{sha256:'d'.repeat(64)}}};
+  const source={schema:'zzsh.legacy-listed-source-scope.v2',scope:'ALL_CAPTURED_GAMES',status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN',
+    sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,
+    sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,
+    binding:{sourceReceiptSha256:listed.input.source.sha256,sourceAccountsSha256:'c'.repeat(64),sourceGamesSha256:'d'.repeat(64),
+      datasetAccountsSha256:'b'.repeat(64),gameBindingsSha256:sha(JSON.stringify(listed.expected.dataset.gameBindings)),gameBindingStatus:'VERIFIED'},
+    delta:{sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,
+      readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'},
+    otherGames:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty},
+    unknownGame:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty}};
+  listed.checkpoint.sourceScopeVerification.legacyListed=source;
+  listed.readback.legacyListedSource=source;listed.readback.legacyListedSourceOrigin='CHECKPOINT_BOUND_V2';
+  listed.readback.legacyListedTarget={status:'MAPPED_HISTORICAL_NOT_PUBLISHED',scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',
+    sourceProofSha256:sha(JSON.stringify(source)),expectedMapped:1,verifiedMapped:1,missingTarget:0,missingSnapshot:0,published:0,
+    expectedMappedIdsSha256:one,verifiedMappedIdsSha256:one,missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
+  Object.assign(data,listed);
   const result = assessRoundEvidence(data); assert.equal(result.status, 'COMPLETE', result.issues.join(','));
   for (const domain of ['liabilityDuties','completedCommissions']) {
     const isolated=structuredClone(data);isolated.checkpoint.quarantine.push({domain,sourceId:'source-1',code:'REVIEW_REQUIRED'});
