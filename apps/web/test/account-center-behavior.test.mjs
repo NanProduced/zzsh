@@ -140,25 +140,51 @@ function loadCenter(session) {
       };
     }
     if (name === "./membership-center") {
-      const child = new Module(path.join(tree, "membership-center-probe.cjs"));
-      child.filename = path.join(tree, "membership-center-probe.cjs");
-      child.paths = Module._nodeModulePaths(tree);
-      child.require = (request) => {
+      const accountDir = path.join(tree, "apps/web/src/components/account");
+      const membershipCache = new Map();
+      const transpileOpts = { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } };
+      const loadMembership = (request, fromDir) => {
+        if (request.endsWith(".css")) return {};
         if (request === "../../lib/membership-growth-client") return module.require("@/lib/membership-growth-client");
         if (request === "../../lib/publish-derive") return requireFromTree(path.join(tree, "apps/web/src/lib/publish-derive.ts"));
         if (request === "../ui/progress") {
           const progressPath = path.join(tree, "apps/web/src/components/ui/progress.tsx");
+          if (membershipCache.has(progressPath)) return membershipCache.get(progressPath).exports;
           const progress = new Module(progressPath);
           progress.filename = progressPath;
           progress.paths = Module._nodeModulePaths(path.dirname(progressPath));
-          progress._compile(typescript.transpileModule(fs.readFileSync(progressPath, "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, progressPath);
+          progress.require = (next) => next.endsWith(".css") ? {} : module.require(next);
+          membershipCache.set(progressPath, progress);
+          progress._compile(typescript.transpileModule(fs.readFileSync(progressPath, "utf8"), transpileOpts).outputText, progressPath);
           return progress.exports;
         }
         if (request === "embla-carousel-react") return emblaStub;
         if (request === "@radix-ui/react-dialog") return dialogStub;
+        if (request.startsWith("./") || request.startsWith("../")) {
+          const base = path.resolve(fromDir, request);
+          for (const ext of [".tsx", ".ts", ""]) {
+            const file = base + ext;
+            if (fs.existsSync(file) && fs.statSync(file).isFile()) {
+              if (membershipCache.has(file)) return membershipCache.get(file).exports;
+              const sub = new Module(file);
+              sub.filename = file;
+              sub.paths = Module._nodeModulePaths(path.dirname(file));
+              sub.require = (next) => loadMembership(next, path.dirname(file));
+              membershipCache.set(file, sub);
+              sub._compile(typescript.transpileModule(fs.readFileSync(file, "utf8"), transpileOpts).outputText, file);
+              return sub.exports;
+            }
+          }
+        }
         return module.require(request);
       };
-      child._compile(typescript.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/account/membership-center.tsx"), "utf8"), { compilerOptions: { module: typescript.ModuleKind.CommonJS, jsx: typescript.JsxEmit.ReactJSX, target: typescript.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, child.filename);
+      const entry = path.join(accountDir, "membership-center.tsx");
+      const child = new Module(entry);
+      child.filename = entry;
+      child.paths = Module._nodeModulePaths(accountDir);
+      child.require = (request) => loadMembership(request, accountDir);
+      membershipCache.set(entry, child);
+      child._compile(typescript.transpileModule(fs.readFileSync(entry, "utf8"), transpileOpts).outputText, entry);
       membershipModule = child.exports;
       return child.exports;
     }
