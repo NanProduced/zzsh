@@ -51,6 +51,23 @@ const ACTION_LABELS: Record<string, string> = {
   "approval.template.created": "创建审批模板",
   "approval.template.updated": "修改审批模板",
   "approval.approver.appended": "追加审批人",
+  "order.reservation.created": "创建订单预留",
+  "order.reservation.cancelled": "取消订单预留",
+  "order.reservation.create.v2": "创建订单预留",
+  "approval.execution.completed": "完成审批执行",
+  "user.phone.support.read": "查看用户手机号",
+  "supply.media.uploaded": "上传供给图片",
+  "content.media.uploaded": "上传图片素材",
+  "content.media.visibility_changed": "变更图片可见性",
+  "content.media.reviewed": "审核图片素材",
+  "content.media.upload_intent_created": "准备上传图片",
+  "im.support.presence.updated": "更新客服在线状态",
+  "im.presence.updated": "更新客服在线状态",
+  "supply.favorite.set": "更新账号收藏",
+  "supply.publication.restriction": "调整账号发布限制",
+  "supply.account.image.watermark.updated": "更新账号图片水印",
+  "supply.account_image_watermark.updated": "更新账号图片水印",
+  "controlled.withdrawal.target.declared": "登记提现去向",
   // P1a 内部文档库（requirements「P1 权限与审计」的 DOC_* 动作；自动保存不逐次记录）。
   DOC_CREATED: "创建内部文档",
   DOC_RENAMED: "重命名内部文档",
@@ -74,6 +91,10 @@ const SEGMENT_LABELS: Record<string, string> = {
   approved: "批准", rejected: "驳回", executed: "执行", withdrawn: "撤回", published: "发布", publish: "发布",
   grant: "授予", granted: "授予", revoke: "撤销", revoked: "撤销", replace: "替换", adjust: "调整", adjusted: "调整",
   read: "读取", failure: "失败", lockout: "锁定", issued: "签发", completed: "完成", requested: "申请",
+  reservation: "预留", cancelled: "取消", create: "创建", phone: "手机号", support: "客服",
+  media: "图片", visibility: "可见性", watermark: "水印", publication: "发布", restriction: "限制",
+  favorite: "收藏", presence: "在线状态", withdrawal: "提现", destination: "去向", target: "目标",
+  declared: "登记", uploaded: "上传", reviewed: "审核", intent: "凭据",
 };
 
 export function actionLabel(action: string): string {
@@ -89,7 +110,7 @@ export function humanizeAction(action: string): string {
   if (parts.length === 0) return "未知操作";
   const translated = parts.map((part) => SEGMENT_LABELS[part]);
   if (translated.every(Boolean)) return translated.join("");
-  return `其他操作（${parts.map((part) => SEGMENT_LABELS[part] ?? part).join(" · ")}）`;
+  return `其他操作（${DOMAIN_LABELS[parts[0] ?? ""] ?? "未分类"}）`;
 }
 
 export const DOMAIN_LABELS: Record<string, string> = {
@@ -133,10 +154,19 @@ const OBJECT_TYPE_LABELS: Record<string, string> = {
   credit_event: "信用记录",
   distribution_participant: "分销商",
   im_consultation: "客服会话",
+  content_media_asset: "图片素材",
+  media_asset: "图片素材",
+  content_media_upload_intent: "图片上传任务",
+  media_upload_intent: "图片上传任务",
+  withdrawal_destination: "提现去向",
+  favorite: "收藏",
+  im_support_presence: "客服在线状态",
+  supply_account: "供给账号",
+  account_image_watermark: "账号图片水印",
 };
 
 export function objectTypeLabel(objectType: string): string {
-  return OBJECT_TYPE_LABELS[objectType] ?? objectType.replace(/[._]/g, " ");
+  return OBJECT_TYPE_LABELS[objectType] ?? "对象";
 }
 
 export const ACCOUNT_OBJECT_TYPES = [
@@ -151,6 +181,7 @@ const DETAIL_KEY_LABELS: Record<string, string> = {
   failedAttempts: "失败次数", lockedUntil: "锁定至", expiresAt: "过期时间", requestId: "请求编号",
   operation: "业务类型", operationCode: "业务类型", decision: "决定", approverUsername: "审批人", amount: "金额",
   userId: "用户编号", targetUserId: "对象编号", ip: "IP", userAgent: "客户端", count: "数量", source: "来源",
+  after: "变更后", before: "变更前", cancelReason: "取消原因", state: "状态", result: "结果",
 };
 
 export function detailKeyLabel(key: string): string {

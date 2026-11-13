@@ -192,6 +192,38 @@ test("cursor stack paginates and safety details collapse by default", async () =
   }
 });
 
+test("operations detail opens in a dialog and keeps codes out of the list", async () => {
+  const event = { ...auditEvent("op1", "order.reservation.cancelled", {}), objectType: "rental_order", objectId: "order_1", reason: "TIMEOUT" };
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/security/audit/operations")) return json({ events: [event], nextCursor: null, scope: "BOSS_ALL_AUDIT_EVENTS" });
+    return json({});
+  };
+  const view = await renderView({ snapshot: snapshot([]), initialQuery: {}, variant: "operations" });
+  try {
+    await waitFor(() => tableText(view).includes("取消订单预留"));
+    assert.equal(tableText(view).includes("TIMEOUT"), false, "reason stays out of the list");
+    assert.equal(tableText(view).includes("order.reservation.cancelled"), false, "raw code stays out of the list");
+    assert.equal(view.rootNode.querySelectorAll("thead th").length, 6);
+    assert.equal(view.rootNode.querySelectorAll("colgroup col").length, 6);
+    assert.equal(view.rootNode.querySelectorAll(".xl\\:hidden > li").length, 1, "mobile card list mirrors the row");
+    const actionField = view.rootNode.querySelector('input[name="action"]')?.closest("label");
+    assert.ok(actionField?.className.includes("max-xl:hidden"), "advanced fields start collapsed");
+    const more = [...view.rootNode.querySelectorAll("button")].find((button) => button.textContent.trim().startsWith("更多筛选"));
+    assert.equal(more?.getAttribute("aria-expanded"), "false");
+    await click(more);
+    assert.equal([...view.rootNode.querySelectorAll("button")].find((button) => button.textContent.trim().startsWith("收起筛选"))?.getAttribute("aria-expanded"), "true");
+    assert.equal(actionField?.className.includes("max-xl:hidden"), false, "advanced fields open on demand");
+    const detail = [...view.rootNode.querySelectorAll("tbody button")].find((button) => button.textContent.trim() === "查看详情");
+    assert.ok(detail, "operations row has a detail action");
+    await click(detail);
+    const dialog = [...browser.document.querySelectorAll('[data-slot="dialog-content"]')].find((node) => node.textContent.includes("order.reservation.cancelled"));
+    assert.ok(dialog, "detail opens in a dialog");
+    assert.equal(browser.document.querySelector('[data-slot="sheet-content"]'), null, "no drawer");
+    assert.match(dialog.textContent, /TIMEOUT/);
+  } finally { await view.cleanup(); }
+});
+
 test("initialQuery backfills the filters and submit resets the cursor stack", async () => {
   calls = [];
   globalThis.fetch = mockFetch;

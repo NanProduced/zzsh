@@ -8,6 +8,7 @@ import { Input } from "../components/ui/input";
 import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import { StepUpCaptcha } from "../components/altcha-field";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { InfoTip } from "../components/ui/tooltip";
 
 export const RETENTION_MIN_DAYS = 90;
 export const RETENTION_MAX_DAYS = 3650;
@@ -79,8 +80,8 @@ export function AuditRetentionPanel({ onPurged }: { onPurged?: () => void }) {
     <section className="section-panel">
       <div className="panel-heading">
         <div>
-          <h3>日志保留与清理</h3>
-          <p>手动删除指定天数之前的账号、登录与会话类日志，至少保留 {RETENTION_MIN_DAYS} 天。订单、资金、审批等业务日志不在清理范围；每次清理都会永久记录，且清理记录本身不会被删除。</p>
+          <h3 className="flex items-center gap-1.5">日志保留与清理<InfoTip label="清理记录与审计" body="每次清理都会永久记录，清理记录本身不会被删除。" /></h3>
+          <p>清理 {RETENTION_MIN_DAYS} 天前的账号、登录与会话日志；业务日志不在范围内。</p>
         </div>
         <Trash2Icon size={20} className="text-muted-foreground" />
       </div>
@@ -95,7 +96,7 @@ export function AuditRetentionPanel({ onPurged }: { onPurged?: () => void }) {
             : preview ? `${beijing(preview.cutoff)}（北京时间）之前可清理 ${preview.purgeableCount} 条`
             : "正在统计…"}
         </p>
-        <Button type="button" size="sm" variant="destructive" disabled={!days || !preview || preview.purgeableCount === 0} onClick={() => setOpen(true)}>清理旧日志</Button>
+        <Button type="button" size="sm" variant="destructive" className="max-xl:min-h-11" disabled={!days || !preview || preview.purgeableCount === 0} onClick={() => setOpen(true)}>清理旧日志</Button>
       </div>
       {message ? <div className="mt-3"><StatusMessage error={message.tone === "error" ? message.text : undefined} success={message.tone === "success" ? message.text : undefined} /></div> : null}
       <Dialog open={open} onOpenChange={(next) => { if (!next) close(); }}>
@@ -112,7 +113,7 @@ export function AuditRetentionPanel({ onPurged }: { onPurged?: () => void }) {
             <label className="block space-y-1">
               <span className="text-xs font-medium">本人密码</span>
               <PasswordInput autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)}
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none!" />
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm" />
             </label>
             <label className="block space-y-1">
               <span className="text-xs font-medium">6 位动态验证码</span>
@@ -121,8 +122,8 @@ export function AuditRetentionPanel({ onPurged }: { onPurged?: () => void }) {
             <StepUpCaptcha />
           </form>
           <DialogFooter>
-            <Button type="button" size="sm" variant="ghost" onClick={close}>取消</Button>
-            <Button type="button" size="sm" variant="destructive" disabled={!ready || busy} onClick={() => void run()}>{busy ? "清理中…" : "确认清理"}</Button>
+            <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11" onClick={close}>取消</Button>
+            <Button type="button" size="sm" variant="destructive" className="max-xl:min-h-11" disabled={!ready || busy} onClick={() => void run()}>{busy ? "清理中…" : "确认清理"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

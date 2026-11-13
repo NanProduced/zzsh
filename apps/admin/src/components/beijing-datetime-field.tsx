@@ -45,7 +45,7 @@ export function BeijingDateTimeField({
         }}
       />
       {clearable && value && !disabled ? (
-        <Button type="button" variant="ghost" size="xs" aria-label={`清除${label}`} className="absolute right-0 top-0 h-5 px-1 text-[10px]" onClick={() => onChange("")}>
+        <Button type="button" variant="ghost" size="xs" aria-label={`清除${label}`} className="absolute right-0 top-0 h-6 px-1.5 text-xs" onClick={() => onChange("")}>
           <XIcon className="size-3" />
           清除
         </Button>

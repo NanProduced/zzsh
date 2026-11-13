@@ -19,8 +19,8 @@ import { Skeleton } from "../components/ui/skeleton";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
 import { InlineStatus } from "../components/ui/badge";
 import { Input } from "../components/ui/input";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "../components/ui/sheet";
+import { ActionTooltip } from "../components/ui/tooltip";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   ACCOUNT_AUDIT_ACTIONS,
   ACCOUNT_OBJECT_TYPES,
@@ -105,24 +105,20 @@ function scopeLabel(scope: string | undefined): string {
 function CopyId({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={<button type="button" aria-label={`复制${label}`} className="inline-flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" />}
-        onClick={() => { void navigator.clipboard?.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => undefined); }}
-      >
+    <ActionTooltip content={copied ? "已复制" : `${label}：${value}`} className="break-all font-mono">
+      <button type="button" aria-label={`复制${label}`} className="inline-flex size-5 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        onClick={() => { void navigator.clipboard?.writeText(value).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }).catch(() => undefined); }}>
         {copied ? <CheckIcon className="size-3" /> : <CopyIcon className="size-3" />}
-      </TooltipTrigger>
-      <TooltipContent className="max-w-72 break-all font-mono text-[11px]">{copied ? "已复制" : `${label}：${value}`}</TooltipContent>
-    </Tooltip>
+      </button>
+    </ActionTooltip>
   );
 }
 
 function Hint({ children, hint }: { children: ReactNode; hint: string }) {
   return (
-    <Tooltip>
-      <TooltipTrigger render={<span tabIndex={0} className="cursor-help rounded underline decoration-dotted decoration-muted-foreground/50 underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring" />}>{children}</TooltipTrigger>
-      <TooltipContent className="max-w-72 break-all font-mono text-[11px]">{hint}</TooltipContent>
-    </Tooltip>
+    <ActionTooltip content={hint} className="break-all font-mono">
+      <span className="cursor-help rounded underline decoration-dotted decoration-muted-foreground/50 underline-offset-4">{children}</span>
+    </ActionTooltip>
   );
 }
 
@@ -138,9 +134,9 @@ function ObjectCell({ event }: { event: AuditEvent }) {
 
 function DetailList({ details }: { details: Record<string, unknown> }) {
   const rows = detailRows(details);
-  if (rows.length === 0) return <p className="text-[11px] text-muted-foreground">无附加详情</p>;
+  if (rows.length === 0) return <p className="text-xs text-muted-foreground">无附加详情</p>;
   return (
-    <dl className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-x-3 gap-y-1 text-[11px]">
+    <dl className="grid grid-cols-[minmax(5rem,auto)_1fr] gap-x-3 gap-y-1 text-xs">
       {rows.map((row) => (
         <div key={row.key} className="contents">
           <dt className="text-muted-foreground">{row.label}</dt>
@@ -187,7 +183,7 @@ const OPERATION_OBJECT_ITEMS = [ALL, ...[
   "user_account", "user", "auth_account", "approval_request", "approval_template",
   "rental_order", "rental_account", "payment_request", "content_resource", "credit_event", "distribution_participant", "im_consultation",
 ].map((value) => ({ value, label: objectTypeLabel(value) }))];
-const inputClass = "h-9 w-full text-xs";
+const inputClass = "h-9 w-full text-xs max-xl:h-10";
 
 export function AdminAuditView({
   snapshot,
@@ -215,6 +211,9 @@ export function AdminAuditView({
   const contextEpoch = contextEpochRef.current;
 
   const [draft, setDraft] = useState<AuditFilterQuery>(() => queryFrom(initialQuery));
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedKeys = isOperations ? (["action", "objectType", "objectId", "requestId"] as const) : (["objectType", "requestId"] as const);
+  const advancedActive = advancedKeys.filter((key) => draft[key].trim()).length;
   const setField = (key: keyof AuditFilterQuery, value: string) => setDraft((current) => ({ ...current, [key]: value }));
   const [submittedQuery, setSubmittedQuery] = useState<AuditFilterQuery>(() => queryFrom(initialQuery));
   const submittedQueryRef = useRef(submittedQuery);
@@ -447,6 +446,7 @@ export function AdminAuditView({
   const handleClearFilters = () => {
     const emptyFilters = queryFrom(undefined);
     setDraft(emptyFilters);
+    setAdvancedOpen(false);
     setSubmittedQuery(emptyFilters);
     submittedQueryRef.current = emptyFilters;
     onQueryChange?.({});
@@ -474,59 +474,65 @@ export function AdminAuditView({
   const objectItems = isOperations ? OPERATION_OBJECT_ITEMS : ACCOUNT_OBJECT_ITEMS;
   const timeInvalid = Boolean(draft.from && draft.to && beijingLocalToIso(draft.from) > beijingLocalToIso(draft.to));
   const draftHasFilters = hasActiveFilters(draft) || hasActiveFilters(submittedQuery);
-  const selectField = (key: keyof AuditFilterQuery, label: string, items: { value: string; label: string }[]) => (
-    <label className="space-y-1 text-xs">
+  const fieldClass = (advanced = false, full = false) => [
+    advanced && !advancedOpen ? "max-xl:hidden" : "",
+    full ? "col-span-2 xl:col-span-1" : "",
+  ].filter(Boolean).join(" ");
+  const selectField = (key: keyof AuditFilterQuery, label: string, items: { value: string; label: string }[], options: { advanced?: boolean; full?: boolean } = {}) => (
+    <label className={`space-y-1 text-xs ${fieldClass(options.advanced, options.full)}`}>
       <span className="text-muted-foreground block">{label}</span>
       <Select name={key} value={draft[key] || "ALL"} onValueChange={(next) => setField(key, next && next !== "ALL" ? String(next) : "")} items={items}>
-        <SelectTrigger aria-label={label} className="h-9 w-full text-xs"><SelectValue /></SelectTrigger>
+        <SelectTrigger aria-label={label} className="h-9 w-full text-xs max-xl:min-h-10"><SelectValue /></SelectTrigger>
         <SelectContent>{items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
       </Select>
     </label>
   );
-  const textField = (key: keyof AuditFilterQuery, label: string, placeholder?: string) => (
-    <label className="space-y-1 text-xs"><span className="text-muted-foreground block">{label}</span><Input name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} placeholder={placeholder} /></label>
+  const textField = (key: keyof AuditFilterQuery, label: string, placeholder?: string, options: { advanced?: boolean; full?: boolean } = {}) => (
+    <label className={`space-y-1 text-xs ${fieldClass(options.advanced, options.full)}`}><span className="text-muted-foreground block">{label}</span><Input name={key} value={draft[key]} onChange={(event) => setField(key, event.target.value)} className={inputClass} placeholder={placeholder} /></label>
   );
   const timeField = (key: "from" | "to", label: string) => (
-    <BeijingDateTimeField label={label} value={draft[key]} onChange={(value) => setField(key, value)} invalid={timeInvalid} />
+    <div className={fieldClass(false, true)}><BeijingDateTimeField label={label} value={draft[key]} onChange={(value) => setField(key, value)} invalid={timeInvalid} /></div>
   );
   const columns = ["时间（北京时间）", "操作者", "操作", "对象", "结果", ...(isOperations ? ["详情"] : [])];
 
   return (
-    <TooltipProvider>
     <div className="space-y-6">
       <section className="section-panel">
         <div className="panel-heading">
           <div>
-            <h3>{isOperations ? "操作日志" : "账号与权限审计"}</h3>
+            <h1 className="m-0 mb-1 text-base font-semibold text-foreground">{isOperations ? "操作日志" : "账号与权限审计"}</h1>
             <p>{isOperations
               ? "后台全部操作记录，仅供查看。敏感字段已由服务端隐藏。"
               : "查看账号、角色、授权、登录安全与会话相关的操作记录。审批记录请在「审批与审计」中查看。"}</p>
           </div>
           <Icons.Shield size={20} className="text-muted-foreground" />
         </div>
-        <form onSubmit={submit} className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mt-4" noValidate>
+        <form onSubmit={submit} className="grid grid-cols-2 gap-3 mt-4 sm:grid-cols-2 xl:grid-cols-4" noValidate>
           {isOperations ? selectField("domain", "业务域", DOMAIN_ITEMS) : null}
-          {isOperations ? textField("action", "操作代码", "如 admin.frozen") : selectField("action", "操作类型", actionItems ?? [])}
-          {selectField("objectType", "对象类型", objectItems)}
+          {isOperations ? textField("action", "操作代码", "如 admin.frozen", { advanced: true, full: true }) : selectField("action", "操作类型", actionItems ?? [])}
+          {selectField("objectType", "对象类型", objectItems, { advanced: true })}
           {selectField("outcome", "结果", OUTCOME_ITEMS)}
-          {textField("actorUsername", "操作者账号", "如 ZZ00001")}
-          {isOperations ? textField("objectId", "对象编号") : null}
-          {textField("requestId", "请求编号")}
+          {textField("actorUsername", "操作者账号", "如 ZZ00001", { full: true })}
+          {isOperations ? textField("objectId", "对象编号", undefined, { advanced: true, full: true }) : null}
+          {textField("requestId", "请求编号", undefined, { advanced: true, full: true })}
           {timeField("from", "开始时间")}
           {timeField("to", "结束时间")}
-          <div className="flex items-end gap-2 sm:col-span-2 xl:col-span-4">
-            <Button type="submit" size="sm" variant="secondary" className="w-24 justify-center" loading={loading} disabled={timeInvalid}>查询</Button>
-            {draftHasFilters ? <Button type="button" size="sm" variant="ghost" disabled={loading} onClick={handleClearFilters}>清除筛选</Button> : null}
-            {timeInvalid ? <span className="text-[11px] text-destructive">开始时间不能晚于结束时间</span> : null}
+          <div className="flex flex-wrap items-center gap-2 col-span-2 xl:col-span-4">
+            <Button type="submit" size="sm" variant="secondary" className="w-24 justify-center max-xl:min-h-11" loading={loading} disabled={timeInvalid}>查询</Button>
+            <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 xl:hidden" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen((value) => !value)}>
+              {advancedOpen ? "收起筛选" : `更多筛选${advancedActive ? `（${advancedActive}）` : ""}`}
+            </Button>
+            {draftHasFilters ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11" disabled={loading} onClick={handleClearFilters}>清除筛选</Button> : null}
+            {timeInvalid ? <span className="text-xs text-destructive">开始时间不能晚于结束时间</span> : null}
           </div>
         </form>
-        <p className="text-[11px] text-muted-foreground mt-3">查看范围：{scopeLabel(scope)}。记录只能查看，不能修改或删除。</p>
+        <p className="text-xs text-muted-foreground mt-3">查看范围：{scopeLabel(scope)}。记录只能查看，不能修改或删除。</p>
       </section>
 
       <section className="section-panel">
         <div className="flex items-center justify-between gap-3 mb-3">
           <h3 className="text-sm font-semibold">{isOperations ? "操作记录" : "审计记录"}</h3>
-          <span className="text-[11px] text-muted-foreground">
+          <span className="text-xs text-muted-foreground">
             {loading && !hasLoadedOnce ? (
               "正在读取…"
             ) : error ? (
@@ -553,27 +559,27 @@ export function AdminAuditView({
         ) : null}
 
         {loading && !hasLoadedOnce ? (
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  {columns.map((column) => <th key={column}>{column}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: 5 }).map((_, i) => (
-                  <tr key={i}>
-                    <td><Skeleton className="h-4 w-24" /></td>
-                    <td><Skeleton className="h-4 w-28" /></td>
-                    <td><Skeleton className="h-4 w-36" /></td>
-                    <td><Skeleton className="h-4 w-32" /></td>
-                    <td><Skeleton className="h-4 w-16" /></td>
-                    <td><Skeleton className="h-4 w-20" /></td>
+          <>
+            <div className="table-wrap hidden xl:block">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    {columns.map((column) => <th key={column} scope="col">{column}</th>)}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <tr key={i}>
+                      {columns.map((column) => <td key={column}><Skeleton className="h-4 w-24" /></td>)}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="space-y-4 xl:hidden">
+              {Array.from({ length: 5 }).map((_, i) => <div key={i} className="space-y-2 border-b border-border/60 pb-3"><Skeleton className="h-3 w-32" /><Skeleton className="h-4 w-2/3" /><Skeleton className="h-3 w-1/2" /></div>)}
+            </div>
+          </>
         ) : error ? (
           <EmptyState
             icon={<AlertCircleIcon className="size-5 text-destructive" />}
@@ -650,26 +656,34 @@ export function AdminAuditView({
           )
         ) : (
           <>
-            <div className="table-wrap">
-              <table className="data-table">
+            <div className="table-wrap hidden xl:block">
+              <table className="data-table" style={{ tableLayout: "fixed" }}>
+                <colgroup>
+                  {isOperations ? <>
+                    <col style={{ width: "15%" }} /><col style={{ width: "15%" }} /><col style={{ width: "27%" }} />
+                    <col style={{ width: "18%" }} /><col style={{ width: "10%" }} /><col style={{ width: "15%" }} />
+                  </> : <>
+                    <col style={{ width: "16%" }} /><col style={{ width: "18%" }} /><col style={{ width: "26%" }} />
+                    <col style={{ width: "22%" }} /><col style={{ width: "18%" }} />
+                  </>}
+                </colgroup>
                 <thead>
                   <tr>
-                    {columns.map((column) => <th key={column}>{column}</th>)}
+                    {columns.map((column) => <th key={column} scope="col">{column}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {events.map((item) => (
                     <tr key={item.eventId} className={isOperations ? "cursor-pointer hover:bg-muted/40" : undefined} onClick={isOperations ? () => setSelected(item) : undefined}>
                       <td className="whitespace-nowrap tabular-nums">{formatBeijing(item.occurredAt)}</td>
-                      <td>{item.actor.displayUsername || item.actor.username !== "系统" ? <Hint hint={`账号：${item.actor.displayUsername ?? item.actor.username}`}>{actorText(item.actor)}</Hint> : actorText(item.actor)}</td>
+                      <td className="whitespace-nowrap">{item.actor.displayUsername || item.actor.username !== "系统" ? <Hint hint={`账号：${item.actor.displayUsername ?? item.actor.username}`}>{actorText(item.actor)}</Hint> : actorText(item.actor)}</td>
                       <td><Hint hint={`操作代码：${item.action}`}>{labelForAction(item.action)}</Hint></td>
                       <td className="max-w-56"><ObjectCell event={item} /></td>
                       <td>
                         <InlineStatus tone={item.outcome === "SUCCESS" ? "success" : "error"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>
-                        {item.reason ? <span className="block text-[11px] text-muted-foreground mt-1">{item.reason}</span> : null}
                       </td>
                       {isOperations ? (
-                        <td className="max-w-xs">
+                        <td>
                           <Button type="button" size="sm" variant="ghost" onClick={(event) => { event.stopPropagation(); setSelected(item); }}>查看详情</Button>
                         </td>
                       ) : null}
@@ -678,6 +692,22 @@ export function AdminAuditView({
                 </tbody>
               </table>
             </div>
+            <ul className="divide-y divide-border/60 xl:hidden">
+              {events.map((item) => (
+                <li key={item.eventId} className="py-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs tabular-nums text-muted-foreground">{formatBeijing(item.occurredAt)}</span>
+                    <InlineStatus tone={item.outcome === "SUCCESS" ? "success" : "error"}>{item.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>
+                  </div>
+                  <p className="mt-1 text-sm font-medium"><Hint hint={`操作代码：${item.action}`}>{labelForAction(item.action)}</Hint></p>
+                  <div className="mt-1 text-xs text-muted-foreground"><ObjectCell event={item} /></div>
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    <span className="min-w-0 truncate text-xs text-muted-foreground">{actorText(item.actor)}</span>
+                    {isOperations ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11" onClick={() => setSelected(item)}>查看详情</Button> : null}
+                  </div>
+                </li>
+              ))}
+            </ul>
 
             {!page.nextCursor ? (
               <EndOfFeed
@@ -687,11 +717,12 @@ export function AdminAuditView({
             ) : null}
 
             <div className="flex items-center justify-end gap-2 mt-4">
-              <span className="text-[11px] text-muted-foreground">第 {page.index + 1} 页</span>
+              <span className="text-xs text-muted-foreground">第 {page.index + 1} 页</span>
               <Button
                 type="button"
                 size="sm"
                 variant="secondary"
+                className="max-xl:min-h-11"
                 disabled={loading || page.index === 0}
                 onClick={() => navigate("prev")}
               >
@@ -702,6 +733,7 @@ export function AdminAuditView({
                   type="button"
                   size="sm"
                   variant="secondary"
+                  className="max-xl:min-h-11"
                   disabled={loading}
                   onClick={() => navigate("first")}
                 >
@@ -712,6 +744,7 @@ export function AdminAuditView({
                 type="button"
                 size="sm"
                 variant="secondary"
+                className="max-xl:min-h-11"
                 disabled={loading || !page.nextCursor}
                 onClick={() => navigate("next")}
               >
@@ -721,34 +754,39 @@ export function AdminAuditView({
           </>
         )}
       </section>
-      <Sheet open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null); }}>
-        <SheetContent side="right" closeLabel="关闭" className="w-full overflow-y-auto sm:max-w-md">
+      <Dialog open={selected !== null} onOpenChange={(open) => { if (!open) setSelected(null); }}>
+        <DialogContent size="lg" className="flex max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[640px]">
           {selected ? (
             <>
-              <SheetHeader>
-                <SheetTitle>{labelForAction(selected.action)}</SheetTitle>
-                <SheetDescription>{formatBeijing(selected.occurredAt)}（北京时间）</SheetDescription>
-              </SheetHeader>
-              <div className="space-y-4 px-4 pb-6 text-xs">
-                <dl className="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-2">
-                  <dt className="text-muted-foreground">业务域</dt><dd>{DOMAIN_LABELS[domainOf(selected.action)] ?? domainOf(selected.action)}</dd>
+              <DialogHeader className="shrink-0 border-b border-border/60 px-5 py-4 pr-12">
+                <DialogTitle className="break-words">{labelForAction(selected.action)}</DialogTitle>
+                <DialogDescription>{formatBeijing(selected.occurredAt)}（北京时间）</DialogDescription>
+              </DialogHeader>
+              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4 text-xs">
+                <dl className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-2">
+                  <dt className="text-muted-foreground">业务域</dt><dd>{DOMAIN_LABELS[domainOf(selected.action)] ?? "其他"}</dd>
                   <dt className="text-muted-foreground">操作代码</dt><dd className="font-mono break-all">{selected.action}</dd>
                   <dt className="text-muted-foreground">操作者</dt><dd>{actorText(selected.actor)}{selected.actor.displayUsername ? `（${selected.actor.displayUsername}）` : ""}</dd>
                   <dt className="text-muted-foreground">对象</dt><dd><ObjectCell event={selected} /></dd>
-                  <dt className="text-muted-foreground">结果</dt><dd><InlineStatus tone={selected.outcome === "SUCCESS" ? "success" : "error"}>{selected.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus>{selected.reason ? <span className="ml-2 text-muted-foreground">{selected.reason}</span> : null}</dd>
-                  <dt className="text-muted-foreground">请求编号</dt><dd className="flex items-center gap-1">{selected.requestId ? <><span className="font-mono truncate">{selected.requestId}</span><CopyId value={selected.requestId} label="请求编号" /></> : "—"}</dd>
+                  <dt className="text-muted-foreground">对象类型</dt><dd className="font-mono break-all">{selected.objectType}</dd>
+                  {selected.objectId ? <><dt className="text-muted-foreground">对象编号</dt><dd className="flex items-center gap-1"><span className="font-mono break-all">{selected.objectId}</span><CopyId value={selected.objectId} label="对象编号" /></dd></> : null}
+                  <dt className="text-muted-foreground">结果</dt><dd><InlineStatus tone={selected.outcome === "SUCCESS" ? "success" : "error"}>{selected.outcome === "SUCCESS" ? "成功" : "失败"}</InlineStatus></dd>
+                  {selected.reason ? <><dt className="text-muted-foreground">服务端说明</dt><dd className="break-all">{selected.reason}</dd></> : null}
+                  <dt className="text-muted-foreground">请求编号</dt><dd className="flex items-center gap-1">{selected.requestId ? <><span className="font-mono break-all">{selected.requestId}</span><CopyId value={selected.requestId} label="请求编号" /></> : "—"}</dd>
                 </dl>
                 <div>
                   <h4 className="mb-2 text-xs font-semibold">详情（敏感字段已隐藏）</h4>
                   <DetailList details={selected.details} />
                 </div>
               </div>
+              <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border/60 bg-muted/30 px-5 py-3 sm:flex-row sm:justify-end">
+                <Button type="button" size="sm" variant="secondary" className="max-xl:min-h-11" onClick={() => setSelected(null)}>关闭</Button>
+              </div>
             </>
           ) : null}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
       {isOperations && canRead ? <AuditRetentionPanel onPurged={() => navigate("first")} /> : null}
     </div>
-    </TooltipProvider>
   );
 }
