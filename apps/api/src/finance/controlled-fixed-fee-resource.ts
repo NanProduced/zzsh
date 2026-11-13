@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 import { ConfigurationError, type AppConfig } from "../config/config";
 import { SecurityApiError } from "../auth/security-core";
 import { assertBusinessRuntimeIdentity } from "../database/business";
+import { readReleaseEarlySettlementReference } from "../legal/legal-documents";
 import { fixedFeeTradeSchemaReady } from "./fixed-fee-settlement-schema";
 import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from "./ecs-test-demo-resource";
 import { readDistributionPolicyRowInTransaction } from "./distribution-policy-store";
@@ -77,8 +78,10 @@ export async function readFixedFeeDemoAccounts(client: PoolClient, demo: DemoFin
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo trade guards unavailable");
   if ((await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN")
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo distribution policy unavailable");
-  const result = await client.query<{ id: string }>(`SELECT a.id
+  const result = await client.query<{ id: string; game_id: string; rule_release_id: string }>(`SELECT a.id,a.game_id,v.rule_release_id
     FROM zzsh_supply.rental_account a
+    JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
+      AND v.origin='NATIVE' AND v.schema_version=4 AND v.rule_release_id IS NOT NULL
     JOIN zzsh_order.ecs_test_demo_finance_registration r ON r.reference=$2 AND r.active AND a.created_at>=r.registered_at
     JOIN zzsh_iam.audit_event e ON e.object_id=a.id AND e.object_type='rental_account'
       AND e.actor_type='user' AND e.actor_id=a.owner_user_id AND e.action='supply.account.created'
@@ -92,8 +95,20 @@ export async function readFixedFeeDemoAccounts(client: PoolClient, demo: DemoFin
           AND (p.created_at<r.registered_at OR p.original_receipt->>'source' IS DISTINCT FROM 'ECS_DEMO_GUARANTEE'
             OR p.original_receipt->>'registrationDigest' IS DISTINCT FROM $3)
       )
-      AND NOT EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id
-        AND (p.source<>'OWNER_DIRECT' OR p.published_at<r.registered_at))
-    GROUP BY a.id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest]);
+      AND ((v.review_state='DRAFT' AND $4='WRITE' AND NOT EXISTS(
+        SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id
+      )) OR (v.review_state='PUBLISHED' AND EXISTS(
+        SELECT 1 FROM zzsh_supply.listing_publication p
+        WHERE p.account_id=a.id AND p.version_id=v.id AND p.owner_user_id=a.owner_user_id AND p.game_id=a.game_id
+          AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
+          AND p.source='OWNER_DIRECT' AND p.published_at>=r.registered_at
+      )))
+    GROUP BY a.id,v.rule_release_id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest, purpose]);
+  const releaseIds = new Set<string>();
+  for (const { game_id, rule_release_id } of result.rows) {
+    if (releaseIds.has(rule_release_id)) continue;
+    await readReleaseEarlySettlementReference(client, game_id, rule_release_id);
+    releaseIds.add(rule_release_id);
+  }
   return new Set(result.rows.map(row => row.id));
 }
