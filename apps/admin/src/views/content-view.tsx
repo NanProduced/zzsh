@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BookOpen, FileText, FolderOpen, FolderTree, Image, Megaphone, Newspaper, Plus, RefreshCw, Search } from "lucide-react";
+import { Plus } from "lucide-react";
 
 import {
   adminRequest,
@@ -14,73 +14,20 @@ import {
   type ContentVersionRow,
   type SessionSnapshot,
 } from "../api";
-import { Badge } from "../components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StatusMessage } from "../components/ui-elements";
-import { Field } from "../components/ui/field";
-import { Input } from "../components/ui/input";
 import type { WorkspaceTab } from "../workspace/tab-model";
 
 import { ContentResourcesTab, ContentStoragePanel } from "./content-resources-tab";
 import { ContentHelpTree } from "./content-help-tree";
-import { contentTime } from "./content-resources-model";
-import { ContentSelect } from "./content-resource-fields";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../components/ui/dialog";
-import { ItemEditor, itemStateLabel } from "./content-item-editor";
+import { ItemEditor } from "./content-item-editor";
+import { ContentItemList } from "./content-item-list";
+import { ContentViewDialogs } from "./content-view-dialogs";
+import { ITEM_NOUN, TAB_META, SURFACE_TABS, CONTENT_TABS, allowedContentTab, allowedNewsScope, defaultContentTab, defaultNewsScope, type ContentSurface, type ContentTab } from "./content-view-tabs";
 import { ContentMediaTab } from "./content-media-tab";
 import { LegalDocumentsPanel } from "./legal-documents-panel";
 import { PlateTrialTab } from "./plate-trial-tab";
 import "./content-updates.css";
-
-type ContentTab = "rules" | "help" | "pages" | "announcement" | "news" | "media" | "legal" | "plate-trial";
-type ContentSurface = "help" | "updates" | "legal" | "pages" | "media" | "trial";
-const SURFACE_TABS: Record<ContentSurface, readonly ContentTab[]> = {
-  help: ["help", "rules"], updates: ["announcement", "news"], legal: ["legal"], pages: ["pages"], media: ["media"], trial: ["plate-trial"],
-};
-
-/** 分区顺序与命名即信息架构：规则与手册／帮助目录／图片与二维码／平台公告／资讯／运营素材／法律文书／Plate 试用。每个分区一句 helper 说明。 */
-const TAB_META: Record<ContentTab, { label: string; icon: typeof BookOpen; helper: string }> = {
-  rules: { label: "规则与手册", icon: BookOpen, helper: "维护面向用户的规则与帮助手册正文；保存草稿不改变线上。" },
-  help: { label: "帮助目录", icon: FolderTree, helper: "管理帮助中心的文件夹与文章结构；点击文章在本页直接编辑正文。" },
-  pages: { label: "用户站展示", icon: Image, helper: "维护首页轮播、市场海报、联系二维码与网站页脚。" },
-  announcement: { label: "平台公告", icon: Megaphone, helper: "发布平台级公告，进入用户端平台动态；长期规则请放入帮助手册。" },
-  news: { label: "资讯", icon: Newspaper, helper: "维护有时效的平台与游戏资讯、服务更新。" },
-  media: { label: "图片素材", icon: FolderOpen, helper: "上传并审核供文章和用户站使用的图片。" },
-  legal: { label: "协议条款", icon: FileText, helper: "维护协议、告知与页面说明，提交审批后发布。" },
-  "plate-trial": { label: "Plate 试用", icon: FileText, helper: "Plate 编辑器的试用与验证入口。" },
-};
-
-const CONTENT_TABS = Object.keys(TAB_META) as ContentTab[];
-
-/** 无可用分区时给出可读默认：平台级优先，其次资讯；权限收窄后仍落在允许集合内。 */
-function defaultContentTab(available: readonly ContentTab[]): ContentTab {
-  return available[0] ?? "announcement";
-}
-
-/** 资讯范围的默认与合法值都取决于当前权限，避免先渲染无权分区。 */
-function defaultNewsScope(canPlatformRead: boolean): "platform" | "game" {
-  return canPlatformRead ? "platform" : "game";
-}
-
-function allowedNewsScope(value: string | undefined, canPlatformRead: boolean, canGameRead: boolean): "platform" | "game" | null {
-  if (value === "platform") return canPlatformRead ? "platform" : null;
-  if (value === "game") return canGameRead ? "game" : null;
-  return null;
-}
-
-/** 地址栏分区必须属于当前可访问分区集合；资讯另需范围合法，否则按权限默认。 */
-function allowedContentTab(value: string | undefined, available: readonly ContentTab[]): ContentTab | null {
-  if (value === "carousel") value = "pages";
-  if (!value || !CONTENT_TABS.includes(value as ContentTab) || !available.includes(value as ContentTab)) return null;
-  return value as ContentTab;
-}
-
-function itemStateTone(item: ContentItemRow): "success" | "info" | "warning" | "unknown" {
-  if (item.published) return "success";
-  if (item.draft) return "info";
-  if (item.latest) return "warning";
-  return "unknown";
-}
 
 function itemWithSavedDraft(item: ContentItemRow, draft: ContentVersionRow): ContentItemRow {
   if (item.id !== draft.itemId || item.draft?.id !== draft.id) return item;
@@ -439,54 +386,43 @@ export function ContentView({
     {updatesWorkspace && !detail ? retryDetail : null}
   </>;
   const itemList = itemTab ? (
-        <section className={updatesWorkspace ? "content-updates-list" : "section-panel content-list-panel"} aria-label={`${ITEM_NOUN[itemType]}列表`} aria-busy={listLoading || undefined}>
-          <div className="content-heading content-updates-list-head">
-            {updatesWorkspace ? tabList : <div><h3 className="text-base font-semibold">{tab === "announcement" ? "平台公告" : "资讯"}</h3></div>}
-            <div className="content-heading-meta">{!itemCanEdit ? <Badge variant="unknown">只读</Badge> : newItem}</div>
-          </div>
-          {updatesWorkspace && !detail ? workspaceMessage : null}
-            <div className="content-toolbar content-item-toolbar">
-              <div className="content-search"><Search size={15} aria-hidden="true" /><Input aria-label="在当前页筛选标题或编号" value={itemSearch} placeholder="筛选本页标题或编号" onChange={event => setItemSearch(event.target.value)} /></div>
-              <Button type="button" size="sm" variant="ghost" className={updatesWorkspace ? "content-updates-refresh" : undefined} aria-label="刷新列表" title="刷新列表" loading={listLoading} disabled={writeLocked} onClick={() => void loadList(cursorTrail[pageIndex] ?? null)}><RefreshCw size={14} aria-hidden="true" />{!updatesWorkspace ? "刷新" : null}</Button>
-              {tab === "news" && canGameRead && (canPlatformRead || !updatesWorkspace) ? <label className="content-inline-field"><span>范围</span><ContentSelect ariaLabel="资讯范围" value={newsScope} disabled={listLoading || writeLocked} onChange={next => { if (next !== newsScope) leaveIfDirty(() => setNewsScope(next as "platform" | "game")); }} options={[...(canPlatformRead ? [{ value: "platform", label: "平台资讯" }] : []), { value: "game", label: "游戏资讯" }]} className="min-w-32" /></label> : null}
-              {tab === "news" && newsScope === "game" ? <label className="content-inline-field"><span>游戏</span><ContentSelect ariaLabel="游戏范围" value={gameId} disabled={listLoading || writeLocked} onChange={next => { if (next !== gameId) leaveIfDirty(() => setGameId(next)); }} options={games.length ? games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` })) : [{ value: "", label: "没有可用游戏范围" }]} className="min-w-40" /></label> : null}
-              <div className="content-state-filter" role="group" aria-label="按状态筛选本页">{itemChips.map(chip => <Button key={chip.value} type="button" size={updatesWorkspace ? "xs" : "sm"} variant={itemFilter === chip.value ? "secondary" : "ghost"} aria-pressed={itemFilter === chip.value} onClick={() => setItemFilter(chip.value)}>{updatesWorkspace && chip.value === "withdrawn" ? "已下线" : chip.label}{!updatesWorkspace && page ? <span className="content-state-count">{chip.count}</span> : null}</Button>)}</div>
-            </div>
-            <StatusMessage error={listError} className="mt-3" />
-            {page && filteredItems.length > 0 ? (
-              updatesWorkspace ? (
-                <ul className="content-updates-rows">
-                  {filteredItems.map(item => <li key={item.id}>
-                    <button type="button" className="content-updates-row" aria-current={detail?.item.id === item.id ? "true" : undefined} disabled={writeLocked} onClick={() => selectItem(item.id)}>
-                      <span className="content-item-title">{item.draft?.title || item.published?.title || item.latest?.title || "未命名草稿"}</span>
-                      <span className="content-updates-row-state">{!item.published && !item.draft && item.latest ? "已下线" : itemStateLabel(item)}{item.published && item.draft ? " · 有草稿" : ""}</span>
-                    </button>
-                  </li>)}
-                </ul>
-              ) : (
-              <div className="table-wrap mt-3">
-                <table className="data-table content-item-table">
-                  <thead><tr><th>标题</th><th>范围</th><th>状态</th><th>发布时间 / 更新</th><th /></tr></thead>
-                  <tbody>
-                    {filteredItems.map((item) => {
-                      const title = item.published?.title || item.draft?.title || item.latest?.title || "（无标题）";
-                      return <tr key={item.id}>
-                        <td className="max-w-sm"><span className="content-item-title">{title}</span><span className="content-item-id">{item.id}</span></td>
-                        <td>{item.gameId === null ? "平台" : item.gameName ?? item.gameId}</td>
-                        <td><Badge variant={itemStateTone(item)}>{itemStateLabel(item)}</Badge><span className="content-item-sub">{item.published ? `线上 v${item.published.sequence}` : item.draft ? `草稿 v${item.draft.sequence} 未发布` : item.latest ? `历史 v${item.latest.sequence}` : "无版本"}{item.published && item.draft ? ` · 草稿 v${item.draft.sequence} 待发布` : ""}</span></td>
-                        <td className="text-[11px]"><span className="block">{item.published?.publishedAt ? `发布 ${contentTime(item.published.publishedAt)}` : "尚未发布"}</span><span className="block text-muted-foreground">更新 {contentTime(item.updatedAt)}</span></td>
-                        <td><Button type="button" size="sm" variant="secondary" disabled={writeLocked} onClick={() => selectItem(item.id)}>{itemCanEdit ? "编辑" : "查看"}</Button></td>
-                      </tr>;
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              )
-            ) : (
-              !listError ? <p className="text-xs text-muted-foreground py-6 text-center" role="status">{listLoading ? "加载中…" : itemScope === "game" && !itemGameId ? "没有可用游戏范围。" : itemSearch || itemFilter !== "all" ? "本页没有匹配的内容；可翻页或调整筛选。" : "当前筛选下没有内容。"}</p> : null
-            )}
-            <div className="content-pager" aria-label="公告资讯分页"><span>第 {pageIndex + 1} 页{!updatesWorkspace && page ? ` · 本页 ${items.length} 条` : ""}</span><div><Button type="button" size={updatesWorkspace ? "xs" : "sm"} variant="secondary" disabled={pageIndex === 0 || listLoading || writeLocked} onClick={previousPage}>上一页</Button><Button type="button" size={updatesWorkspace ? "xs" : "sm"} variant="secondary" disabled={!page?.nextCursor || listLoading || writeLocked} onClick={nextPage}>下一页</Button></div></div>
-        </section>
+    <ContentItemList
+      updatesWorkspace={updatesWorkspace}
+      itemType={itemType}
+      listLoading={listLoading}
+      tabList={tabList}
+      tab={tab}
+      itemCanEdit={itemCanEdit}
+      newItem={newItem}
+      detail={detail}
+      workspaceMessage={workspaceMessage}
+      itemSearch={itemSearch}
+      setItemSearch={setItemSearch}
+      writeLocked={writeLocked}
+      loadList={loadList}
+      cursorTrail={cursorTrail}
+      pageIndex={pageIndex}
+      canGameRead={canGameRead}
+      canPlatformRead={canPlatformRead}
+      newsScope={newsScope}
+      leaveIfDirty={leaveIfDirty}
+      setNewsScope={setNewsScope}
+      gameId={gameId}
+      setGameId={setGameId}
+      games={games}
+      itemChips={itemChips}
+      itemFilter={itemFilter}
+      setItemFilter={setItemFilter}
+      listError={listError}
+      page={page}
+      filteredItems={filteredItems}
+      selectItem={selectItem}
+      itemScope={itemScope}
+      itemGameId={itemGameId}
+      items={items}
+      previousPage={previousPage}
+      nextPage={nextPage}
+    />
   ) : null;
 
   const itemEditor = itemTab && detail ? (
@@ -555,10 +491,24 @@ export function ContentView({
           onQueryChange?.(query);
         }} /> : null}
       {tab === "plate-trial" ? <PlateTrialTab /> : null}
-      <Dialog open={createOpen} onOpenChange={open => { if (!creating) setCreateOpen(open); }}><DialogContent><DialogTitle>新建{ITEM_NOUN[itemType]}</DialogTitle><DialogDescription>先创建草稿；保存并发布后进入平台动态。</DialogDescription><Field label={`新建${ITEM_NOUN[itemType]}标题（可留空后编辑）`}><Input value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} maxLength={200} autoFocus disabled={!itemCanEdit || creating} /></Field><DialogFooter><Button type="button" variant="secondary" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" loading={creating} disabled={!itemCanEdit || (itemScope === "game" && !gameId)} onClick={() => void createItem()}>创建草稿</Button></DialogFooter></DialogContent></Dialog>
-      <Dialog open={tabIntent !== null} onOpenChange={open => { if (!open) setTabIntent(null); }}><DialogContent role="alertdialog"><DialogTitle>离开当前内容？</DialogTitle><DialogDescription>{itemTab ? "未保存修改将丢失，可以返回继续编辑。" : "未保存修改将丢失。结果待核对的请求会保留，回到对应内容后继续核对。"}</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setTabIntent(null)}>继续编辑</Button><Button type="button" variant="danger" onClick={() => { if (writeLockedRef.current) return; const action = tabIntent; setTabIntent(null); reportDirty(false); action?.(); }}>离开当前内容</Button></DialogFooter></DialogContent></Dialog>
+      <ContentViewDialogs
+        createOpen={createOpen}
+        setCreateOpen={setCreateOpen}
+        creating={creating}
+        itemType={itemType}
+        createTitle={createTitle}
+        setCreateTitle={setCreateTitle}
+        itemCanEdit={itemCanEdit}
+        itemScope={itemScope}
+        gameId={gameId}
+        createItem={() => void createItem()}
+        tabIntent={tabIntent}
+        setTabIntent={setTabIntent}
+        itemTab={itemTab}
+        writeLockedRef={writeLockedRef}
+        reportDirty={reportDirty}
+      />
     </div>
   );
 }
 
-const ITEM_NOUN: Record<ContentType, string> = { ANNOUNCEMENT: "公告", NEWS: "资讯" };

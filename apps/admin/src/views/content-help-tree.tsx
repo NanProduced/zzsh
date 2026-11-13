@@ -1,65 +1,30 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
-import { ArchiveRestore, BookOpen, ChevronDown, ChevronRight, Coins, FileText, Folder, Headphones, KeyRound, Megaphone, MoreHorizontal, Plus, RefreshCw, ScrollText, Search, Shield, Store, Ticket, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FileText, MoreHorizontal, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FloatingStatusMessage, StatusMessage } from "../components/ui-elements";
 import type { PlateEditorHandle } from "../components/plate/plate-editor";
 import {
-  createHelpArticle, createHelpFolder, deleteHelpNode, fetchHelpTrash, fetchHelpTree, helpArticleStateLabel,
-  isConflict, isForbidden, isSlugRetired, moveHelpNode, renameHelpNode, restoreHelpTrash,
-  type HelpTrashItem, type HelpTreeNode,
+  createHelpArticle, createHelpFolder, deleteHelpNode, fetchHelpTree,
+  isConflict, isForbidden, isSlugRetired, moveHelpNode, renameHelpNode,
+  type HelpTreeNode,
 } from "./docs/docs-help-api";
-import { DOC_MAX_DEPTH, buildDocTree, canMoveDoc, docTime, flattenDocTree, newWriteKey, purgeDaysLeft } from "./docs/docs-model";
+import { DOC_MAX_DEPTH, buildDocTree, canMoveDoc, flattenDocTree, newWriteKey } from "./docs/docs-model";
 import { resourcePath, type ContentOperation, type ResourceDetail } from "./content-resources-model";
 import { useContentResourceWrite } from "./content-resource-write";
 import "./docs/docs.css";
+import { displayTitle } from "./content-help-icons";
+import { HelpWorkspaceDialogs } from "./content-help-dialogs";
+import { HelpTreeRow } from "./content-help-tree-row";
 import "./content-management.css";
 import "./content-help-workspace.css";
 
 const DocumentEditor = lazy(() => import("./content-resource-editor").then(module => ({ default: module.ContentResourceEditor })));
 
 type DropZone = "before" | "inside" | "after";
-const groupIcons = {
-  folder: { label: "文件夹", Icon: Folder },
-  rental: { label: "租用", Icon: Ticket },
-  publish: { label: "出租", Icon: Store },
-  fees: { label: "费用", Icon: Coins },
-  account: { label: "账号", Icon: KeyRound },
-  "after-sale": { label: "客服", Icon: Headphones },
-  membership: { label: "动态", Icon: Megaphone },
-  agreement: { label: "协议", Icon: ScrollText },
-  book: { label: "手册", Icon: BookOpen },
-  shield: { label: "安全", Icon: Shield },
-};
-const groupIconOptions = [{ value: "", label: "默认图标" }, ...Object.entries(groupIcons).map(([value, { label }]) => ({ value, label }))];
-
-function groupIcon(key: string | null | undefined) {
-  return key && Object.hasOwn(groupIcons, key) ? groupIcons[key as keyof typeof groupIcons].Icon : Folder;
-}
-
-function HelpIconSelect({ value, onChange, disabled }: { value: string; onChange: (value: string) => void; disabled: boolean }) {
-  return (
-    <label className="docs-move-field">
-      <span>分组图标</span>
-      <Select value={value} items={groupIconOptions} onValueChange={next => onChange(next ?? "")} disabled={disabled}>
-        <SelectTrigger aria-label="分组图标"><SelectValue /></SelectTrigger>
-        <SelectContent>{groupIconOptions.map(option => {
-          const Icon = groupIcon(option.value);
-          return <SelectItem key={option.value} value={option.value}><Icon size={15} aria-hidden="true" />{option.label}</SelectItem>;
-        })}</SelectContent>
-      </Select>
-    </label>
-  );
-}
-
-const displayTitle = (node: HelpTreeNode): string => node.title || node.resourceKey?.slice("guide:".length) || "未命名文章";
-
 /** 与规则手册同一编辑链路：详情缺正文时按最新版本补齐 editorSource（只读授权接口）。 */
 async function withEditorSource(detail: ResourceDetail): Promise<ResourceDetail> {
   if (detail.draft?.payload || detail.published?.payload || detail.baseline || detail.current.payload) return detail;
@@ -570,73 +535,10 @@ function HelpWorkspace({ snapshot, refreshNonce, onDirtyChange, onWriteLockChang
     else rowRefs.current.delete(id);
   };
 
-  const renderRow = (node: HelpTreeNode) => {
-    const children = siblingsOf(node.id).filter(child => visibleNodes.includes(child));
-    const isExpanded = treeExpanded.has(node.id);
-    const hint = dropHint?.id === node.id ? dropHint.zone : undefined;
-    const title = displayTitle(node);
-    const badge = (node as HelpTreeNode & { withdrawn?: boolean }).withdrawn && !node.published && !node.hasDraft ? "已下线" : helpArticleStateLabel(node);
-    const Icon = node.kind === "FOLDER" ? groupIcon(node.iconKey ?? node.id) : FileText;
-    const siblings = siblingsOf(node.parentId), index = siblings.findIndex(item => item.id === node.id);
-    const openRow = () => { setActiveId(node.id); if (node.kind === "ARTICLE") openArticle(node); else if (!query) toggleExpanded(node.id); };
-    return (
-      <div key={node.id} role="none">
-        <div
-          ref={setRowRef(node.id)}
-          role="treeitem"
-          aria-level={node.depth}
-          aria-expanded={children.length ? isExpanded : undefined}
-          aria-selected={node.kind === "ARTICLE" ? node.resourceKey === openKey : undefined}
-          tabIndex={focusId === node.id ? 0 : -1}
-          data-help-id={node.id}
-          data-current-group={node.kind === "FOLDER" && selectedFolder === node.id || undefined}
-          data-drop={hint}
-          className="docs-tree-row"
-          draggable={canManage && !query && !navigationLocked}
-          onFocus={() => setActiveId(node.id)}
-          onClick={openRow}
-          onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openRow(); } }}
-          onDragStart={(event) => { if (!canManage || query) return; setDragId(node.id); event.dataTransfer.setData("text/plain", node.id); event.dataTransfer.effectAllowed = "move"; }}
-          onDragEnd={() => { setDragId(null); setDropHint(null); }}
-          onDragOver={(event) => onRowDragOver(event, node)}
-          onDragLeave={() => setDropHint((current) => (current?.id === node.id ? null : current))}
-          onDrop={(event) => onRowDrop(event, node)}
-          style={{ paddingLeft: `${0.45 + (node.depth - 1) * 0.7}rem` }}
-        >
-          {children.length ? (
-            <button
-              type="button"
-              className="docs-tree-twisty"
-              aria-label={isExpanded ? `折叠「${title}」` : `展开「${title}」`}
-              tabIndex={-1}
-              onClick={(event) => { event.stopPropagation(); if (!query) toggleExpanded(node.id); }}
-            >
-              {isExpanded ? <ChevronDown size={13} aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
-            </button>
-          ) : <span className="docs-tree-twisty" aria-hidden="true" />}
-          <Icon size={14} aria-hidden="true" className="docs-tree-icon" />
-          <span className="docs-tree-title" title={title}>{title}</span>
-          {badge ? <span className="help-tree-status" title={badge}>{badge === "有未发布修改" ? "待发布" : badge === "未发布" && node.hasDraft ? "草稿" : badge}</span> : null}
-          {canManage ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger className="docs-tree-menu" disabled={navigationLocked} tabIndex={focusId === node.id ? 0 : -1} aria-label={`「${title}」操作`} onClick={(event) => event.stopPropagation()}>
-                <MoreHorizontal size={14} aria-hidden="true" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" onClick={(event) => event.stopPropagation()}>
-                {node.kind === "FOLDER" && node.depth < DOC_MAX_DEPTH ? <DropdownMenuItem onClick={() => beginCreate("FOLDER", node.id)}>新建子分组</DropdownMenuItem> : null}
-                {node.kind === "FOLDER" && node.depth < DOC_MAX_DEPTH ? <DropdownMenuItem onClick={() => beginCreate("ARTICLE", node.id)}>新建文章</DropdownMenuItem> : null}
-                {node.kind === "FOLDER" ? <DropdownMenuItem onClick={() => beginRename(node)}>编辑分组</DropdownMenuItem> : <DropdownMenuItem onClick={() => openArticle(node)}>编辑文章</DropdownMenuItem>}
-                <DropdownMenuItem disabled={index <= 0 || Boolean(query)} onClick={() => requestMove(node.id, node.parentId, siblings[index - 2]?.id ?? null)}>上移</DropdownMenuItem>
-                <DropdownMenuItem disabled={index < 0 || index === siblings.length - 1 || Boolean(query)} onClick={() => requestMove(node.id, node.parentId, siblings[index + 1]!.id)}>下移</DropdownMenuItem>
-                <DropdownMenuItem onClick={() => openMoveDialog(node.id)}>移动到…</DropdownMenuItem>
-                <DropdownMenuItem variant="destructive" onClick={() => { setActionError(null); setDeleteTarget(node); }}>删除</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-        </div>
-        {children.length && isExpanded ? <div role="group">{children.map(child => renderRow(child))}</div> : null}
-      </div>
-    );
+  const rowShared = {
+    siblingsOf, visibleNodes, treeExpanded, dropHint, focusId, openKey, selectedFolder,
+    canManage, query, navigationLocked, setActiveId, openArticle, toggleExpanded, setDragId, setDropHint,
+    onRowDragOver, onRowDrop, setRowRef, beginCreate, beginRename, requestMove, openMoveDialog, setActionError, setDeleteTarget,
   };
 
   return (
@@ -682,7 +584,7 @@ function HelpWorkspace({ snapshot, refreshNonce, onDirtyChange, onWriteLockChang
                 <div className="docs-tree-empty"><p>{query ? "没有找到匹配的文章。" : "帮助目录还是空的。"}</p></div>
               ) : (
                 <div role="tree" aria-label="帮助中心目录" className="docs-tree" onKeyDown={onTreeKeyDown}>
-                  {roots.map(root => renderRow(root.node as HelpTreeNode))}
+                  {roots.map(root => <HelpTreeRow key={root.node.id} {...rowShared} node={root.node as HelpTreeNode} />)}
                 </div>
               )}
             </div>
@@ -747,199 +649,56 @@ function HelpWorkspace({ snapshot, refreshNonce, onDirtyChange, onWriteLockChang
           ) : null}
         </section>
       </div>
-      <Dialog open={pendingNavigation !== null} onOpenChange={open => { if (!open) setPendingNavigation(null); }}>
-        <DialogContent role="alertdialog">
-          <DialogTitle>放弃未保存的修改？</DialogTitle>
-          <DialogDescription>继续后，当前文章中尚未保存的修改会丢失。</DialogDescription>
-          <DialogFooter>
-            <Button type="button" variant="secondary" autoFocus onClick={() => setPendingNavigation(null)}>继续编辑</Button>
-            <Button type="button" variant="danger" disabled={locked} onClick={() => {
-              if (!pendingNavigation || locked || flowRef.current) return;
-              navigate(pendingNavigation.key);
-              setPendingNavigation(null);
-            }}>放弃修改并继续</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={trashOpen} onOpenChange={setTrashOpen}>
-        <DialogContent className="max-w-3xl max-h-[85dvh] overflow-y-auto">
-          <DialogTitle>帮助回收站</DialogTitle>
-          <DialogDescription>条目保留 30 天，恢复后回到删除前的状态。</DialogDescription>
-          {trashOpen && canViewHistory ? <HelpTrashPanel canRestore={canPublish} refreshNonce={refreshNonce} onRestored={() => void loadTree()} /> : null}
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={create !== null} onOpenChange={(open) => { if (!open && !busy) setCreate(null); }}>
-        <DialogContent>
-          <DialogTitle>{create?.kind === "ARTICLE" ? "新建帮助文章" : "新建帮助分组"}</DialogTitle>
-          <DialogDescription>{create?.kind === "ARTICLE" ? "文章先保存为草稿，发布后对用户可见。" : "目录最多三层，含有已发布文章的分组会显示在用户侧。"}</DialogDescription>
-          <Field label="标题">
-            <Input value={createTitle} maxLength={create?.kind === "FOLDER" ? 40 : 200} autoFocus disabled={busy} onChange={(event) => setCreateTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitCreate(); } }} />
-          </Field>
-          {create?.kind === "ARTICLE" ? <Field label="文章地址（可选）" hint="留空自动生成。发布后可使用此地址打开文章。">
-            <Input value={createSlug} maxLength={120} disabled={busy} placeholder="例如 rental-getting-started" onChange={(event) => setCreateSlug(event.target.value)} />
-          </Field> : null}
-          <label className="docs-move-field">
-            <span>父目录</span>
-            <Select value={create?.parentId ?? ""} items={createParentOptions} onValueChange={(value) => setCreate((current) => current ? { ...current, parentId: value === null || value === "" ? null : String(value) } : current)} disabled={busy}>
-              <SelectTrigger aria-label="父目录"><SelectValue /></SelectTrigger>
-              <SelectContent>{createParentOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-            </Select>
-          </label>
-          {create?.kind === "FOLDER" && create.parentId === null ? <HelpIconSelect value={createIcon} onChange={setCreateIcon} disabled={busy} /> : null}
-          {createError ? <p className="docs-inline-error" role="alert">{createError}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="secondary" disabled={busy} onClick={() => setCreate(null)}>取消</Button>
-            <Button type="button" loading={busy} onClick={() => void submitCreate()}>创建</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={rename !== null} onOpenChange={(open) => { if (!open && !busy) setRename(null); }}>
-        <DialogContent>
-          <DialogTitle>编辑分组</DialogTitle>
-          <DialogDescription>分组设置保存后即时生效。</DialogDescription>
-          <Field label="标题">
-            <Input value={renameTitle} maxLength={rename?.kind === "FOLDER" ? 40 : 200} autoFocus disabled={busy} onChange={(event) => setRenameTitle(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void submitRename(); } }} />
-          </Field>
-          {rename?.parentId === null ? <HelpIconSelect value={renameIcon} onChange={setRenameIcon} disabled={busy} /> : null}
-          {renameError ? <p className="docs-inline-error" role="alert">{renameError}</p> : null}
-          <DialogFooter>
-            <Button type="button" variant="secondary" disabled={busy} onClick={() => setRename(null)}>取消</Button>
-            <Button type="button" loading={busy} onClick={() => void submitRename()}>保存</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={moveId !== null} onOpenChange={(open) => { if (!open) setMoveId(null); }}>
-        <DialogContent>
-          <DialogTitle>移动到…</DialogTitle>
-          <DialogDescription>将「{moveId && byId.get(moveId) ? displayTitle(byId.get(moveId)!) : "该条目"}」移动到指定分组和位置。{moveId && affectsOnline(moveId) ? "线上目录立即更新，文章地址保持不变。" : ""}</DialogDescription>
-          <div className="docs-move-fields">
-            <label className="docs-move-field">
-              <span>目标目录</span>
-              <Select value={moveParent} items={moveParentOptions} onValueChange={(value) => { setMoveParent(value === null ? "" : String(value)); setMoveAfter(""); }}>
-                <SelectTrigger aria-label="目标目录"><SelectValue /></SelectTrigger>
-                <SelectContent>{moveParentOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </label>
-            <label className="docs-move-field">
-              <span>插入位置</span>
-              <Select value={moveAfter} items={movePositionOptions} onValueChange={(value) => setMoveAfter(value === null ? "" : String(value))}>
-                <SelectTrigger aria-label="插入位置"><SelectValue /></SelectTrigger>
-                <SelectContent>{movePositionOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </label>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => setMoveId(null)}>取消</Button>
-            <Button type="button" disabled={!moveId || !byId.has(moveId) || Boolean(moveParent && !byId.has(moveParent)) || Boolean(moveAfter && !byId.has(moveAfter))} onClick={() => { if (!moveId) return; void moveNode(moveId, moveParent || null, moveAfter || null); setMoveId(null); }}>移动</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={confirmMove !== null} onOpenChange={open => { if (!open) setConfirmMove(null); }}>
-        <DialogContent role="alertdialog">
-          <DialogTitle>确认调整目录位置？</DialogTitle>
-          <DialogDescription>将「{confirmMove && byId.get(confirmMove.id) ? displayTitle(byId.get(confirmMove.id)!) : "该条目"}」放到「{confirmMove?.parentId ? byId.get(confirmMove.parentId) ? displayTitle(byId.get(confirmMove.parentId)!) : "目标分组已变化" : "帮助目录顶层"}」{confirmMove?.afterId ? `中「${byId.get(confirmMove.afterId) ? displayTitle(byId.get(confirmMove.afterId)!) : "目标位置已变化"}」之后` : "最前面"}。线上目录立即更新，文章地址保持不变。</DialogDescription>
-          <DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setConfirmMove(null)}>取消</Button><Button type="button" disabled={!confirmMove || !byId.has(confirmMove.id) || Boolean(confirmMove.parentId && !byId.has(confirmMove.parentId)) || Boolean(confirmMove.afterId && !byId.has(confirmMove.afterId))} onClick={() => { if (confirmMove) void moveNode(confirmMove.id, confirmMove.parentId, confirmMove.afterId); setConfirmMove(null); }}>确认移动</Button></DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open && !busy) setDeleteTarget(null); }}>
-        <DialogContent role="alertdialog">
-          <DialogTitle>删除「{deleteTarget ? displayTitle(deleteTarget) : ""}」？</DialogTitle>
-          <DialogDescription>
-            {deleteTarget?.kind === "ARTICLE" ? "文章将下线并移到回收站，保留 30 天。" : "分组及其中的文章会移到回收站，保留 30 天。已发布的文章会同时下线。"}
-            {typeof deleteTarget?.referenceCount === "number" && deleteTarget.referenceCount > 0 ? ` 有 ${deleteTarget.referenceCount} 处引用（其他文章关联、正文链接、页脚或动态），删除后这些链接会失效。` : ""}
-          </DialogDescription>
-          <DialogFooter>
-            <Button type="button" variant="secondary" autoFocus disabled={busy} onClick={() => setDeleteTarget(null)}>取消</Button>
-            <Button type="button" variant="danger" loading={busy} onClick={() => void confirmDelete()}>删除进回收站</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <HelpWorkspaceDialogs
+        pendingNavigation={pendingNavigation}
+        setPendingNavigation={setPendingNavigation}
+        locked={locked}
+        flowRef={flowRef}
+        navigate={navigate}
+        trashOpen={trashOpen}
+        setTrashOpen={setTrashOpen}
+        canViewHistory={canViewHistory}
+        canPublish={canPublish}
+        refreshNonce={refreshNonce}
+        loadTree={() => void loadTree()}
+        create={create}
+        setCreate={setCreate}
+        busy={busy}
+        createTitle={createTitle}
+        setCreateTitle={setCreateTitle}
+        createSlug={createSlug}
+        setCreateSlug={setCreateSlug}
+        submitCreate={() => void submitCreate()}
+        createParentOptions={createParentOptions}
+        createIcon={createIcon}
+        setCreateIcon={setCreateIcon}
+        createError={createError}
+        rename={rename}
+        setRename={setRename}
+        renameTitle={renameTitle}
+        setRenameTitle={setRenameTitle}
+        submitRename={() => void submitRename()}
+        renameIcon={renameIcon}
+        setRenameIcon={setRenameIcon}
+        renameError={renameError}
+        moveId={moveId}
+        setMoveId={setMoveId}
+        byId={byId}
+        affectsOnline={affectsOnline}
+        moveParent={moveParent}
+        setMoveParent={setMoveParent}
+        moveParentOptions={moveParentOptions}
+        moveAfter={moveAfter}
+        setMoveAfter={setMoveAfter}
+        movePositionOptions={movePositionOptions}
+        moveNode={(id, parentId, afterId) => void moveNode(id, parentId, afterId)}
+        confirmMove={confirmMove}
+        setConfirmMove={setConfirmMove}
+        deleteTarget={deleteTarget}
+        setDeleteTarget={setDeleteTarget}
+        confirmDelete={() => void confirmDelete()}
+      />
     </div>
   );
 }
 
-/** 帮助中心回收站（从内部文档库迁入）：批次保留 30 天；恢复回到删除前状态，需发布权限。 */
-function HelpTrashPanel({ canRestore, refreshNonce, onRestored }: { canRestore: boolean; refreshNonce: number; onRestored: () => void }) {
-  const [state, setState] = useState<{ status: "loading" | "ready" | "error"; items: HelpTrashItem[]; cursor: string | null; error?: string }>({ status: "loading", items: [], cursor: null });
-  const [restoring, setRestoring] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
-
-  const load = useCallback(async (cursor?: string | null) => {
-    setState((current) => ({ ...current, status: "loading", error: undefined }));
-    try {
-      const page = await fetchHelpTrash(cursor);
-      setState((current) => ({
-        status: "ready",
-        items: cursor ? [...current.items, ...(page.items ?? [])] : page.items ?? [],
-        cursor: page.nextCursor ?? null,
-      }));
-    } catch (failure) {
-      setState({ status: "error", items: [], cursor: null, error: isForbidden(failure) ? "没有权限" : "回收站暂时无法读取" });
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load, refreshNonce]);
-
-  const restore = async (batch: HelpTrashItem) => {
-    if (restoring) return;
-    setRestoring(batch.batchId);
-    setActionError(null);
-    setActionSuccess(null);
-    try {
-      await restoreHelpTrash(batch.batchId);
-      setActionSuccess(`已恢复 ${batch.count} 项。`);
-      onRestored();
-      void load();
-    } catch (failure) {
-      setActionError(isForbidden(failure) ? "恢复需要帮助发布权限。" : isConflict(failure) ? "别人刚改过，刷新后再改。" : "恢复未完成，请刷新回收站后重试。");
-      void load();
-    } finally {
-      setRestoring(null);
-    }
-  };
-
-  return (
-    <section className="docs-trash" aria-label="帮助中心回收站">
-      <div className="docs-trash-actions">
-        <Button type="button" variant="ghost" size="sm" loading={state.status === "loading"} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" />刷新</Button>
-      </div>
-        <FloatingStatusMessage error={actionError ?? undefined} success={actionSuccess ?? undefined} />
-        {state.status === "loading" && state.items.length === 0 ? (
-          <div role="status" aria-label="帮助回收站加载中" className="docs-trash-skeleton">
-            <Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" />
-          </div>
-        ) : state.status === "error" ? (
-          <div role="alert" className="docs-detail-state">
-            <StatusMessage error={state.error ?? "回收站暂时无法读取"} />
-            <Button type="button" variant="secondary" onClick={() => void load()}>重试</Button>
-          </div>
-        ) : state.items.length === 0 ? (
-          <p className="docs-trash-empty">帮助中心回收站是空的。</p>
-        ) : (
-          <ul className="docs-trash-list" aria-label="帮助中心回收站批次">
-            {state.items.map((batch) => (
-              <li key={batch.batchId} className="docs-trash-item" data-help-batch={batch.batchId}>
-                <div className="docs-trash-item-main">
-                  <span className="docs-trash-item-title">{batch.title ?? "（无标题）"}</span>
-                  <span className="docs-trash-item-meta">共 {batch.count} 项 · 删除于 {docTime(batch.deletedAt)} · 操作人 {batch.deletedBy || "—"}</span>
-                </div>
-                <span className="docs-trash-purge">{purgeDaysLeft(batch.purgeAt)} 天后永久清理</span>
-                {canRestore ? (
-                  <Button type="button" size="sm" variant="secondary" loading={restoring === batch.batchId} disabled={restoring !== null && restoring !== batch.batchId} onClick={() => void restore(batch)}>
-                    <ArchiveRestore size={13} aria-hidden="true" />恢复
-                  </Button>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-        {state.cursor ? <Button type="button" size="sm" variant="secondary" loading={state.status === "loading"} onClick={() => void load(state.cursor)}>加载更多</Button> : null}
-    </section>
-  );
-}

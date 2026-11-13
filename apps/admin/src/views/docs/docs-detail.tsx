@@ -1,11 +1,9 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, Check, CircleDot, Copy, History, Loader2, MessageSquareText, MoreHorizontal, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
+import { Copy, RefreshCw, TriangleAlert } from "lucide-react";
 import { extractPlate, type PlateDocumentEnvelope, type PlateNode } from "@zzsh/content/plate";
 import { PlateDocument } from "@zzsh/ui/plate-document";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FloatingStatusMessage, StatusMessage } from "../../components/ui-elements";
 import { friendlyError } from "../../api";
@@ -18,7 +16,6 @@ import {
   docAncestors,
   docPath,
   normalizeRevision,
-  saveClock,
   type DocDetail,
   type DocDiscussion,
   type DocDiscussionWriteResult,
@@ -27,6 +24,8 @@ import {
 import { useDocAutosave, type DocSavePhase } from "./use-doc-autosave";
 import { DocsVersions } from "./docs-versions";
 import { DocsDiscussions, type DocsDiscussionView } from "./docs-discussions";
+import { DocsDetailDialogs } from "./docs-detail-dialogs";
+import { DocsDetailWorkbar } from "./docs-detail-workbar";
 import type { PlateEditorHandle } from "../../components/plate/plate-editor";
 import type { PlateCommentAnchor } from "../../components/plate/shell/comment-toolbar-button";
 import type { PlateCommentTarget } from "../../components/plate/shell/page-block";
@@ -50,28 +49,6 @@ export type DocsDetailProps = {
   onDirtyChange: (dirty: boolean) => void;
   onTreeChanged: () => void;
 };
-
-function SaveStatus({ phase, savedAt, message }: { phase: DocSavePhase; savedAt: string | null; message: string | null }) {
-  const clock = saveClock(savedAt);
-  const icon = phase === "saving" ? <Loader2 size={13} aria-hidden="true" className="docs-spin motion-reduce:animate-none" />
-    : phase === "saved" ? <Check size={13} aria-hidden="true" />
-    : phase === "conflict" ? <TriangleAlert size={13} aria-hidden="true" />
-    : phase === "failed" ? <AlertCircle size={13} aria-hidden="true" />
-    : <CircleDot size={13} aria-hidden="true" />;
-  const text = phase === "saving" ? (message ?? "保存中")
-    : phase === "saved" ? `已保存${clock ? ` ${clock}` : ""}`
-    : phase === "conflict" ? "冲突"
-    : phase === "failed" ? "未保存"
-    : phase === "dirty" ? "未保存"
-    : "";
-  if (!text) return null;
-  return (
-    <span className="docs-save-status" data-phase={phase} role="status" aria-live="polite">
-      {icon}<span>{text}</span>
-      {phase === "failed" && message ? <span className="docs-save-detail">{message}</span> : null}
-    </span>
-  );
-}
 
 export function DocsDetail({ docId, nodes, canManage, canComment, currentAdminId, refreshNonce, autoFocusTitle, onTitleFocused, onOpenPath, onDirtyChange, onTreeChanged }: DocsDetailProps) {
   const [detail, setDetail] = useState<DocDetail | null>(null);
@@ -463,44 +440,22 @@ export function DocsDetail({ docId, nodes, canManage, canComment, currentAdminId
 
   return (
     <div className="docs-detail">
-      <header className="docs-workbar">
-        <nav className="docs-breadcrumb" aria-label="文档位置">
-          <button type="button" onClick={() => onOpenPath("/docs")}>内部文档</button>
-          {ancestors.map((ancestor) => (
-            <span key={ancestor.id} className="docs-breadcrumb-item">
-              <span aria-hidden="true">/</span>
-              <button type="button" onClick={() => onOpenPath(docPath(ancestor.id), ancestor.title)}>{ancestor.title}</button>
-            </span>
-          ))}
-        </nav>
-        <div className="docs-head-actions">
-          {!canManage ? <Badge variant="unknown">只读</Badge> : null}
-          {canManage ? <SaveStatus phase={autosave.phase} savedAt={autosave.savedAt} message={autosave.message} /> : null}
-          {canComment ? (
-            <Button ref={commentsButton} type="button" variant={overviewOpen ? "secondary" : "ghost"} size="sm" aria-expanded={overviewOpen} aria-haspopup="dialog" aria-controls={overviewOpen ? "internal-doc-comments" : undefined} onClick={(event) => {
-              if (overviewOpen) closeComments();
-              else setPanel({ view: { kind: "overview" }, trigger: event.currentTarget });
-            }}>
-              <MessageSquareText size={15} aria-hidden="true" />评论
-            </Button>
-          ) : null}
-          <Button type="button" variant="ghost" size="sm" onClick={() => setVersionsOpen(true)}>
-            <History size={15} aria-hidden="true" />版本历史
-          </Button>
-          {canManage && !conflict ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label="更多文档操作" />}>
-                <MoreHorizontal size={16} aria-hidden="true" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="docs-overlay">
-                <DropdownMenuItem variant="destructive" disabled={dirty} onClick={() => { setActionError(null); setDeleteOpen(true); }}>
-                  <Trash2 size={14} aria-hidden="true" />删除
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-        </div>
-      </header>
+      <DocsDetailWorkbar
+        ancestors={ancestors}
+        onOpenPath={onOpenPath}
+        canManage={canManage}
+        autosave={autosave}
+        canComment={canComment}
+        commentsButton={commentsButton}
+        overviewOpen={overviewOpen}
+        closeComments={closeComments}
+        setPanel={setPanel}
+        setVersionsOpen={setVersionsOpen}
+        conflict={conflict}
+        dirty={dirty}
+        setActionError={setActionError}
+        setDeleteOpen={setDeleteOpen}
+      />
 
       <div className="docs-detail-main plate-page-canvas">
       <div className="docs-title-block">
@@ -677,29 +632,17 @@ export function DocsDetail({ docId, nodes, canManage, canComment, currentAdminId
         onConflict={() => autosaveRef.current.conflict()}
       />
 
-      <Dialog open={reloadOpen} onOpenChange={setReloadOpen}>
-        <DialogContent role="alertdialog" className="docs-overlay">
-          <DialogTitle>读取最新正文？</DialogTitle>
-          <DialogDescription>读取服务端正文会放弃当前未保存的输入。</DialogDescription>
-          <DialogFooter>
-            <Button type="button" variant="secondary" autoFocus onClick={() => setReloadOpen(false)}>继续保留输入</Button>
-            <Button type="button" variant="danger" onClick={() => { setReloadOpen(false); void load(); }}>放弃并读取</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={deleteOpen} onOpenChange={(open) => { if (!deleting) setDeleteOpen(open); }}>
-        <DialogContent role="alertdialog" className="docs-overlay">
-          <DialogTitle>删除「{node.title}」？</DialogTitle>
-          <DialogDescription>
-            将删除该文档及其子文档（共 {Math.max(1, subtreeCount)} 篇），进入回收站保留 30 天，到期永久清理。恢复需要管理权限。
-          </DialogDescription>
-          <DialogFooter>
-            <Button type="button" variant="secondary" autoFocus disabled={deleting} onClick={() => setDeleteOpen(false)}>取消</Button>
-            <Button type="button" variant="danger" loading={deleting} onClick={() => void confirmDelete()}>删除整棵子树</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DocsDetailDialogs
+        reloadOpen={reloadOpen}
+        setReloadOpen={setReloadOpen}
+        load={() => void load()}
+        deleteOpen={deleteOpen}
+        setDeleteOpen={setDeleteOpen}
+        deleting={deleting}
+        node={node}
+        subtreeCount={subtreeCount}
+        confirmDelete={() => void confirmDelete()}
+      />
     </div>
   );
 }

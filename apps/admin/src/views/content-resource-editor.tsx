@@ -18,6 +18,7 @@ import { adminMediaUrl, buildPlatePayload, readPlateDocument, resourcePreset, Co
 import type { ContentResource } from "@zzsh/content";
 import type { PlateEditorHandle } from "../components/plate/plate-editor";
 import PlateEditor from "../components/plate/plate-editor-loader";
+import { ContentResourceDialogs } from "./content-resource-dialogs";
 
 type DocumentResource = Extract<ContentResource, { kind: "guide" | "notice" }>;
 export type ContentEditorProps = {
@@ -378,40 +379,6 @@ function DocumentEditor({ detail, initial, canEdit, canPublish, locked, busy, pe
   const showReleaseBlock = canPublish && !canRelease && (!inHelpWorkspace || Boolean(detail.draft && !dirty && !locked));
   const releaseMessage = !conflict && showReleaseBlock ? releaseReason : "";
 
-  const settingsContent = <>{kind === "guide" ? <fieldset disabled={readOnly} className="content-settings-panel">
-      <div className="content-settings-item">
-        <ContentText label="摘要" value={model.summary} onChange={summary => patch({ summary })} max={500} multiline />
-        <p className="content-settings-help">在列表和搜索结果中展示的一句话简介，最多 500 字。</p>
-      </div>
-      {!inHelpWorkspace ? <div className="content-settings-item">
-        <ContentField label="所属分类" hint="决定文章在帮助中心的归类。"><ContentSelect ariaLabel="所属分类" value={model.category} onChange={category => patch({ category })} disabled={readOnly} options={Object.entries(RESOURCE_CATEGORY_LABEL).map(([value, label]) => ({ value, label }))} /></ContentField>
-      </div> : null}
-      <div className="content-settings-item">
-        <span className="content-settings-label" id="content-audience-label">适用对象</span>
-        <div className="content-settings-audience" role="group" aria-labelledby="content-audience-label">{(["all", "renter", "owner"] as const).map((value, index) => <label key={value} className="content-check"><Checkbox disabled={readOnly} id={`audience-${value}`} checked={model.audience.includes(value)} onCheckedChange={checked => patch({ audience: checked === true ? [...model.audience, value] : model.audience.filter(item => item !== value) })} />{["所有用户", "租客", "号主"][index]}</label>)}</div>
-        <p className="content-settings-help">在帮助页标明适用对象；此设置不限制文章访问。</p>
-      </div>
-      <div className="content-settings-item">
-        <ContentField label="搜索关键词" hint="用于帮助中心搜索，每个最多 100 字。"><ContentKeywordChips value={model.keywords} onChange={keywords => patch({ keywords })} disabled={readOnly} max={30} maxLength={100} /></ContentField>
-      </div>
-      <div className="content-settings-item">
-        <div className="content-related-heading"><span className="content-settings-label" id="help-related-label">相关阅读</span>{inHelpWorkspace ? <span className="content-settings-help">已选 {model.related.length} 篇</span> : null}</div>
-        <p className="content-settings-help">所选文章会显示在正文末尾。</p>
-        {inHelpWorkspace && relatedCandidates.length ? <div className="help-related-search"><Search size={15} aria-hidden="true" /><Input aria-label="搜索相关阅读" type="search" placeholder="搜索文章标题" value={relatedQuery} onChange={event => setRelatedQuery(event.target.value)} /></div> : null}
-        <div className="content-related-list" role="group" aria-labelledby="help-related-label">
-          {matchedRelated.map(option => <label key={option.slug} className="content-related-row">
-            <Checkbox disabled={readOnly} id={`related-${option.slug}`} checked={model.related.includes(option.slug)} onCheckedChange={checked => patch({ related: checked === true ? [...model.related, option.slug] : model.related.filter(item => item !== option.slug) })} />
-            <span className="content-related-title">{option.title}</span>
-          </label>)}
-          {!matchedRelated.length ? <span className="content-related-empty">{relatedCandidates.length ? "未找到匹配的文章。" : "有其他文章后即可添加相关阅读。"}</span> : null}
-        </div>
-      </div>
-      <div className="content-settings-item">
-        <label className="content-check"><Checkbox disabled={readOnly} id="guide-contact-cta" checked={model.contactCta} onCheckedChange={checked => patch({ contactCta: checked === true })} />显示联系客服入口</label>
-        <p className="content-settings-help">开启后在文章末尾显示联系客服入口，方便用户求助。</p>
-      </div>
-    </fieldset> : <p className="content-settings-note">这段说明用于固定业务位置；报价、资格和订单条款仍由对应业务模块维护。</p>}</>;
-  const historyContent = <><div className="mt-4 space-y-4">{!inHelpWorkspace ? <p className="text-xs text-muted-foreground break-all">{detail.key} · 并发版本 {detail.item?.revision ?? "未创建"}</p> : null}{historyLoading ? <p className="text-sm" role="status">读取历史版本…</p> : null}<StatusMessage error={historyError} /><div className="table-wrap"><table className="data-table"><thead><tr><th>版本</th><th>状态</th><th>发布 / 更新时间</th><th>操作</th></tr></thead><tbody>{detail.versions.map(version => <tr key={version.id}><td>v{version.sequence}</td><td>{{ PUBLISHED: "线上", DRAFT: "草稿", SUPERSEDED: "历史", WITHDRAWN: "已撤回" }[version.state] ?? version.state}</td><td className="text-[11px]"><span className="block">{version.publishedAt ? `发布 ${contentTime(version.publishedAt)}` : "未发布"}</span><span className="block text-muted-foreground">更新 {contentTime(version.updatedAt)}</span></td><td><div className="flex gap-1"><Button type="button" size="sm" variant="ghost" disabled={historyLoading} onClick={() => void readHistory(version)}>查看原版本</Button>{version.state !== "DRAFT" && canEdit ? <Button type="button" size="sm" variant="secondary" disabled={locked} onClick={() => setRestore(version)}><FileClock size={13} aria-hidden="true" />恢复为草稿</Button> : null}</div></td></tr>)}</tbody></table></div>{detail.published && canPublish ? <Button type="button" size="sm" variant="danger" disabled={locked || dirty} onClick={() => setWithdraw(true)}>撤回线上版本</Button> : null}</div></>;
 
   return <section className={inHelpWorkspace ? "help-editor content-document-editor content-notion-editor" : "section-panel content-document-editor content-notion-editor"} aria-label="内容编辑器">
     {inHelpWorkspace ? (
@@ -502,75 +469,16 @@ function DocumentEditor({ detail, initial, canEdit, canPublish, locked, busy, pe
     {!inHelpWorkspace && inspection?.issues.length ? <div className="space-y-2 rounded-lg border border-warning/40 p-4" role="status"><p className="font-medium text-sm">{inspection.blocking ? "可保存原稿，处理以下内容后才能发布" : "发布前提示"}</p><ul className="space-y-2 text-sm">{inspection.issues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message}</li>)}</ul></div> : null}
     {!inHelpWorkspace && !publishCheck.ok && detail.draft ? <StatusMessage tone="warning" error={`发布校验未通过：${publishCheck.errors.slice(0, 5).map(issue => `${issue.path} ${issue.message}`).join("；")}`} /> : null}
     {invalid ? <StatusMessage error={invalid} /> : null}
-    <Dialog open={insertMedia} onOpenChange={open => { if (!open) closeImagePicker(); }}>
-      <DialogContent size="md" className="help-article-dialog" closeLabel="关闭插入图片" finalFocus={false}>
-        <DialogHeader className="help-dialog-header">
-          <DialogTitle>插入图片</DialogTitle>
-          <DialogDescription>所选图片会插在打开菜单的内容块之后。</DialogDescription>
-        </DialogHeader>
-        <div className="help-dialog-scroll">
-          <StatusMessage error={insertError} />
-          {insertMedia ? <ContentMediaField pickerOnly label="选择图片" value={null} hint="" disabled={readOnly}
-            canUpload={canUpload} canReview={canReview} onChange={id => { if (id) insertImage(id); }} /> : null}
-        </div>
-        <DialogFooter className="help-dialog-footer"><Button type="button" variant="secondary" onClick={() => closeImagePicker()}>取消</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-    {inHelpWorkspace ? <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-      <DialogContent size="md" className="help-article-dialog help-settings-dialog" closeLabel="关闭文章设置" initialFocus={false}>
-        <DialogHeader className="help-dialog-header">
-          <DialogTitle>文章设置</DialogTitle>
-          <DialogDescription>{editable ? "设置随草稿自动保存。发布后会更新用户侧文章。" : "正在查看当前设置。开始编辑后可修改。"}</DialogDescription>
-        </DialogHeader>
-        <div className="help-dialog-scroll">{settingsContent}</div>
-        <DialogFooter className="help-dialog-footer help-settings-footer">
-          {editable ? saveStatus : null}
-          <Button type="button" variant="secondary" onClick={() => setSettingsOpen(false)}>完成</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog> : !preview ? <details className="content-detail-secondary content-doc-settings"><summary>文档设置</summary>{settingsContent}</details> : null}
-    {inHelpWorkspace ? <Dialog open={historyOpen} onOpenChange={setHistoryOpen}>
-      <DialogContent size="lg" className="help-article-dialog help-history-dialog" closeLabel="关闭版本历史" initialFocus={false}>
-        <DialogHeader className="help-dialog-header">
-          <DialogTitle>版本历史</DialogTitle>
-          <DialogDescription>选择一条记录查看当时的正文。恢复后可继续编辑草稿。</DialogDescription>
-        </DialogHeader>
-        {detail.versions.length ? <div className="help-history-layout">
-          <ul className="help-history-list" aria-label="文章版本列表">
-            {detail.versions.map(version => (
-              <li key={version.id}>
-                <button type="button" className="help-history-row" aria-pressed={historySelection === version.id} onClick={() => void readHistory(version)}>
-                  <span>{version.state === "DRAFT" ? "当前草稿" : version.publishedAt ? `v${version.sequence}` : "旧草稿"}
-                    {version.publishedAt ? <span className="help-history-state">{version.state === "PUBLISHED" ? "线上" : version.state === "WITHDRAWN" ? "已撤回" : "历史发布"}</span> : null}
-                  </span>
-                  <time dateTime={version.publishedAt ?? version.updatedAt}>{contentTime(version.publishedAt ?? version.updatedAt)}</time>
-                </button>
-              </li>
-            ))}
-          </ul>
-          <div className="help-history-preview" aria-label="版本正文">
-            {historyLoading ? <div className="space-y-3" role="status" aria-label="读取版本正文"><Skeleton className="h-7 w-3/4" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-5/6" /></div>
-              : historyError ? <div className="space-y-3"><StatusMessage error={historyError} />{chosenVersion ? <Button type="button" size="sm" variant="secondary" onClick={() => void readHistory(chosenVersion)}>重试</Button> : null}</div>
-              : historyDocument && history ? <>
-                <h3 className="help-history-title">{history.payload.title}</h3>
-                {"summary" in history.payload && history.payload.summary ? <p className="help-preview-summary">{history.payload.summary}</p> : null}
-                {historyProjection?.plainText || historyProjection?.mediaIds.length
-                  ? <PlateDocument document={historyDocument} mediaUrls={historyUrls} anchorPrefix="help-history-" />
-                  : <p className="text-sm text-muted-foreground">此版本的正文为空。</p>}
-              </> : null}
-          </div>
-        </div> : <p className="help-dialog-scroll text-sm text-muted-foreground">保存草稿或发布后，版本会显示在这里。</p>}
-        <DialogFooter className="help-dialog-footer">
-          {detail.published && canPublish && !dirty ? <Button type="button" size="sm" variant="ghost" disabled={locked} onClick={() => { setHistoryOpen(false); setWithdraw(true); }}>撤回线上版本</Button> : null}
-          {canEdit && historyDocument && history && !["DRAFT", "PUBLISHED"].includes(history.version.state) ? <Button type="button" size="sm" disabled={locked} onClick={() => { setHistoryOpen(false); setRestore(history.version); }}>恢复为草稿</Button> : null}
-          <Button type="button" size="sm" variant="secondary" onClick={() => setHistoryOpen(false)}>完成</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog> : canViewHistory && !preview ? <details className="content-detail-secondary"><summary>版本历史</summary>{historyContent}</details> : null}
-    <Dialog open={issuesOpen} onOpenChange={setIssuesOpen}><DialogContent><DialogTitle>发布问题</DialogTitle><DialogDescription>处理后可再次发布；草稿仍会保留。</DialogDescription><p className="text-sm">{releaseError || releaseReason}</p>{releaseMediaIds.map(id => <div key={id} className="text-sm">素材 {id} {issueLocation(findMediaBlock(id))}</div>)}{inspection?.issues.length ? <ul className="space-y-2 text-sm">{inspection.issues.map((issue, index) => <li key={`${issue.code}:${index}`}>{issue.message} {issue.mediaId ? issueLocation(findMediaBlock(issue.mediaId)) : null}</li>)}</ul> : null}{!publishCheck.ok ? <ul className="space-y-2 text-sm">{publishCheck.errors.slice(0, 5).map(issue => { const match = /^\$\.value\[(\d+)\]/.exec(issue.path); return <li key={`${issue.path}:${issue.message}`}>{issue.message} {match ? issueLocation(Number(match[1])) : issue.path}</li>; })}</ul> : null}{checkError ? <Button type="button" size="sm" variant="secondary" disabled={checking} onClick={() => setCheckNonce(value => value + 1)}>重新检查正文</Button> : null}</DialogContent></Dialog>
-    <Dialog open={!inHelpWorkspace && Boolean(history)} onOpenChange={open => { if (!open) setHistory(null); }}><DialogContent size="lg"><DialogTitle>历史版本 v{history?.version.sequence}</DialogTitle><DialogDescription>按此版本原有 plate 文档读取。这里只预览，不更改线上版本。</DialogDescription><div className="max-h-[65vh] overflow-auto p-2">{historyDocument ? <PlateDocument document={historyDocument} mediaUrls={Object.fromEntries(history!.media.filter((row): row is { id: string; url: string } => typeof row.url === "string").map(row => [row.id, row.url]))} /> : <p>此版本不是文档。</p>}</div></DialogContent></Dialog>
-    <Dialog open={Boolean(restore)} onOpenChange={open => { if (!open) setRestore(null); }}><DialogContent role="alertdialog"><DialogTitle>将 v{restore?.sequence} 恢复为新草稿？</DialogTitle><DialogDescription>{detail.draft || dirty ? "当前工作副本会被替换，已有草稿保留为历史记录。" : "将复制此版本的正文、元数据和媒体引用。"}保存或恢复草稿不会改变线上内容。</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setRestore(null)}>取消</Button><Button type="button" disabled={locked} onClick={() => { const value = restore; setRestore(null); if (value) void versionAction("content.resource.draft.restore", { sourceVersionId: value.id, expectedRevision: detail.item!.revision }); }}>恢复为新草稿</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={withdraw} onOpenChange={setWithdraw}><DialogContent role="alertdialog"><DialogTitle>撤回当前线上内容？</DialogTitle><DialogDescription>用户侧将不再读取此版本；历史保留，恢复后需重新发布。</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setWithdraw(false)}>取消</Button><Button type="button" variant="danger" disabled={locked} onClick={() => { setWithdraw(false); void versionAction("content.resource.withdraw", { versionId: detail.published!.id, expectedRevision: detail.item!.revision }); }}>确认撤回</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={discard} onOpenChange={setDiscard}><DialogContent role="alertdialog"><DialogTitle>丢弃草稿，回到线上版本？</DialogTitle><DialogDescription>{detail.published ? `丢弃后会回到线上 v${detail.published.sequence}。草稿里的全部修改将永久删除。` : discardReason}</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setDiscard(false)}>继续编辑</Button><Button type="button" variant="danger" disabled={locked || !canDiscard} onClick={() => { setDiscard(false); if (canDiscard && detail.draft && detail.item) void versionAction("content.resource.draft.discard", { versionId: detail.draft.id, expectedRevision: detail.item.revision }); }}>确认丢弃</Button></DialogFooter></DialogContent></Dialog>
+    <ContentResourceDialogs
+      insertMedia={insertMedia} closeImagePicker={closeImagePicker} insertError={insertError} readOnly={readOnly} canUpload={canUpload} canReview={canReview} insertImage={insertImage}
+      inHelpWorkspace={inHelpWorkspace} settingsOpen={settingsOpen} setSettingsOpen={setSettingsOpen} editable={editable} kind={kind} model={model} patch={patch}
+      relatedCandidates={relatedCandidates} relatedQuery={relatedQuery} setRelatedQuery={setRelatedQuery} matchedRelated={matchedRelated} saveStatus={saveStatus}
+      historyOpen={historyOpen} setHistoryOpen={setHistoryOpen} detail={detail} historySelection={historySelection} readHistory={readHistory} historyLoading={historyLoading} historyError={historyError}
+      chosenVersion={chosenVersion} historyDocument={historyDocument} history={history} historyProjection={historyProjection} historyUrls={historyUrls}
+      canPublish={canPublish} dirty={dirty} locked={locked} setWithdraw={setWithdraw} canEdit={canEdit} setRestore={setRestore} preview={preview} canViewHistory={canViewHistory}
+      issuesOpen={issuesOpen} setIssuesOpen={setIssuesOpen} releaseError={releaseError} releaseReason={releaseReason} releaseMediaIds={releaseMediaIds} issueLocation={issueLocation} findMediaBlock={findMediaBlock}
+      inspection={inspection} publishCheck={publishCheck} checkError={checkError} checking={checking} setCheckNonce={setCheckNonce} setHistory={setHistory}
+      restore={restore} versionAction={versionAction} withdraw={withdraw} discard={discard} setDiscard={setDiscard} discardReason={discardReason} canDiscard={canDiscard}
+    />
   </section>;
 }

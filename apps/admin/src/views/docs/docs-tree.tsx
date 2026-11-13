@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type KeyboardEvent, type SetStateAction } from "react";
-import { ChevronDown, ChevronRight, FileText, FolderClosed, FolderTree, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, FolderTree, Plus, Search, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { friendlyError } from "../../api";
 import { searchDocs } from "./docs-api";
 import {
-  DOC_MAX_DEPTH,
   DOC_SEARCH_MAX,
   buildDocTree,
   canMoveDoc,
@@ -19,6 +15,8 @@ import {
   searchResults,
   type DocTreeNode,
 } from "./docs-model";
+import { DocsMoveDialog } from "./docs-move-dialog";
+import { DocsTreeRow } from "./docs-tree-row";
 
 const INTERNAL_ROOT = "__internal_root";
 const EMPTY_EXPANSION = new Set<string>();
@@ -238,66 +236,9 @@ export function DocsTree({
     else rowRefs.current.delete(id);
   };
 
-  const renderRow = (node: DocTreeNode) => {
-    const children = nodes.filter((item) => item.parentId === node.id);
-    const isExpanded = expanded.has(node.id);
-    const hint = dropHint?.id === node.id ? dropHint.zone : undefined;
-    return (
-      <div key={node.id} role="none">
-        <div
-          ref={setRowRef(node.id)}
-          role="treeitem"
-          aria-level={node.depth + 1}
-          aria-selected={selectedId === node.id}
-          aria-expanded={children.length ? isExpanded : undefined}
-          tabIndex={activeId === node.id ? 0 : -1}
-          data-doc-id={node.id}
-          data-drop={hint}
-          className="docs-tree-row"
-          draggable={canManage}
-          onFocus={() => setActiveId(node.id)}
-          onClick={() => onOpen(node.id)}
-          onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); event.stopPropagation(); onOpen(node.id); } }}
-          onDragStart={(event) => { if (!canManage) return; setDragId(node.id); event.dataTransfer.setData("text/plain", node.id); event.dataTransfer.effectAllowed = "move"; }}
-          onDragEnd={() => { setDragId(null); setDropHint(null); }}
-          onDragOver={(event) => onRowDragOver(event, node)}
-          onDragLeave={() => setDropHint((current) => (current?.id === node.id ? null : current))}
-          onDrop={(event) => onRowDrop(event, node)}
-          style={{ paddingInlineStart: `${0.55 + (node.depth - 1) * 0.65}rem` }}
-        >
-          {children.length ? (
-            <button
-              type="button"
-              className="docs-tree-twisty"
-              aria-label={isExpanded ? `折叠「${node.title}」` : `展开「${node.title}」`}
-              tabIndex={-1}
-              onClick={(event) => { event.stopPropagation(); toggleExpanded(node.id); }}
-            >
-              {isExpanded ? <ChevronDown size={13} aria-hidden="true" /> : <ChevronRight size={13} aria-hidden="true" />}
-            </button>
-          ) : <span className="docs-tree-twisty" aria-hidden="true" />}
-          {children.length > 0 ? <FolderClosed size={14} aria-hidden="true" className="docs-tree-icon" /> : <FileText size={14} aria-hidden="true" className="docs-tree-icon" />}
-          <span className="docs-tree-title" title={node.title}>{node.title}</span>
-          {canManage ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className="docs-tree-menu"
-                aria-label={`「${node.title}」操作`}
-                onClick={(event) => event.stopPropagation()}
-              >
-                <MoreHorizontal size={14} aria-hidden="true" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="docs-overlay" onClick={(event) => event.stopPropagation()}>
-                {node.depth < DOC_MAX_DEPTH ? <DropdownMenuItem onClick={() => onCreate(node.id)}>新建子文档</DropdownMenuItem> : null}
-                <DropdownMenuItem onClick={() => openMoveDialog(node.id)}>移动到…</DropdownMenuItem>
-                <DropdownMenuItem variant="destructive" onClick={() => onDelete(node.id)}>删除</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-        </div>
-        {children.length && isExpanded ? <div role="group">{siblingsOf(node.id).map((child) => renderRow(child))}</div> : null}
-      </div>
-    );
+  const rowShared = {
+    nodes, expanded, dropHint, selectedId, activeId, canManage, siblingsOf, setRowRef, setActiveId, onOpen,
+    setDragId, setDropHint, onRowDragOver, onRowDrop, toggleExpanded, onCreate, openMoveDialog, onDelete,
   };
 
   return (
@@ -374,7 +315,7 @@ export function DocsTree({
                     <p>还没有内部文档</p>
                     {canManage ? <Button type="button" size="sm" variant="secondary" onClick={() => onCreate(null)}><Plus size={14} aria-hidden="true" />新建文档</Button> : null}
                   </div>
-                ) : roots.map((root) => renderRow(root.node))}
+                ) : roots.map((root) => <DocsTreeRow key={root.node.id} {...rowShared} node={root.node} />)}
               </div>
             ) : null}
           </div>
@@ -388,32 +329,17 @@ export function DocsTree({
         </Button>
       </div>
 
-      <Dialog open={moveId !== null} onOpenChange={(open) => { if (!open) setMoveId(null); }}>
-        <DialogContent className="docs-overlay">
-          <DialogTitle>移动到…</DialogTitle>
-          <DialogDescription>拖拽排序的键盘替代：选择新父目录与插入位置。最多三层，服务端会再次校验。</DialogDescription>
-          <div className="docs-move-fields">
-            <label className="docs-move-field">
-              <span>目标目录</span>
-              <Select value={moveParent} items={moveParentOptions} onValueChange={(value) => { setMoveParent(value === null ? "" : String(value)); setMoveAfter(""); }}>
-                <SelectTrigger aria-label="目标目录"><SelectValue /></SelectTrigger>
-                <SelectContent className="docs-overlay">{moveParentOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </label>
-            <label className="docs-move-field">
-              <span>插入位置</span>
-              <Select value={moveAfter} items={movePositionOptions} onValueChange={(value) => setMoveAfter(value === null ? "" : String(value))}>
-                <SelectTrigger aria-label="插入位置"><SelectValue /></SelectTrigger>
-                <SelectContent>{movePositionOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </label>
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => setMoveId(null)}>取消</Button>
-            <Button type="button" onClick={() => { if (!moveId) return; onMove(moveId, moveParent || null, moveAfter || null); setMoveId(null); }}>移动</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DocsMoveDialog
+        moveId={moveId}
+        setMoveId={setMoveId}
+        moveParent={moveParent}
+        setMoveParent={setMoveParent}
+        moveAfter={moveAfter}
+        setMoveAfter={setMoveAfter}
+        moveParentOptions={moveParentOptions}
+        movePositionOptions={movePositionOptions}
+        onMove={onMove}
+      />
     </div>
   );
 }
