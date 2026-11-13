@@ -359,7 +359,7 @@ export type ListingDetailPrefetch = {
   hasPublication?: boolean;
   shared?: ListingPageShared;
   marketPricing?: MarketPricing;
-  marketPrice?: MarketPrice | null;
+  marketPriceForVersion?: (versionId: string) => MarketPrice | null;
   /** This request's public projection of one account. The admin detail path and
    *  the supervision facts path need the same account's public listing, and the
    *  projection is one expensive read; the memo serves both. A null result
@@ -373,7 +373,7 @@ export type ListingDetailPrefetch = {
  *  probe are read a window at a time instead of one round trip per candidate.
  *  The window is the caller's own page size, so a small limit never loads rows it
  *  will not project, and a rejected candidate just moves the window forward. */
-export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing) {
+export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing, priceSelection: "CURRENT_VERSION" | "PUBLIC_DETAIL" = "CURRENT_VERSION") {
   const shared = listingPageShared(client);
   const accounts = new Map<string, PublishingAccount | undefined>();
   const versions = new Map<string, ListingVersion | null>();
@@ -398,8 +398,9 @@ export function listingCandidatePage(client: PoolClient, pricing?: MarketPricing
         versions.set(id, account ? byAccount.get(id) ?? null : null);
       }
       if (pricing) {
-        const versionIds = [...byAccount.values()].filter(v => v.schema_version === 2 || v.schema_version === 4).map(v => v.id);
-        for (const [versionId, price] of await readCandidateMarketPrices(client, versionIds, pricing)) prices.set(versionId, price);
+        const idsToPrice = priceSelection === "PUBLIC_DETAIL" ? [...found.keys()]
+          : [...byAccount.values()].filter(v => v.schema_version === 2 || v.schema_version === 4).map(v => v.id);
+        for (const [versionId, price] of await readCandidateMarketPrices(client, idsToPrice, pricing, priceSelection)) prices.set(versionId, price);
       }
       await shared.primeRetiredLegacy(pending);
       if (!withPublications) return;
@@ -2324,7 +2325,7 @@ export async function listingDetail(
       const target = marketPriceTarget(payload, market, publication?.source === "OWNER_DIRECT");
       if (target.scheduled) {
         const live = target.priceId && market.ready
-          ? prefetch?.marketPrice === undefined ? await readMarketPrice(client, payload, a.game_id, target.priceId) : prefetch.marketPrice
+          ? prefetch?.marketPriceForVersion ? prefetch.marketPriceForVersion(v.id) : await readMarketPrice(client, payload, a.game_id, target.priceId)
           : null;
         quote = quote ? applyMarketPrice(quote, live) : null;
         if (availability === "RENTABLE" && (!quote || payload.schemaVersion === 4 || !SCHEDULED_SPREAD_ORDER_ENABLED)) {

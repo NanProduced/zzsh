@@ -1,3 +1,4 @@
+import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
 import { compatRule } from "./pricing-compat-fixture";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -60,6 +61,29 @@ function accountFixture(id: string, owner: string, facts: Partial<Facts> = {}) {
   const publication = () => ({ id: `publication-${id}`, version_id: version.id, account_id: id, owner_user_id: owner,
     game_id: GAME, rule_release_id: version.rule_release_id, content_hash: version.content_hash, source: "OWNER_DIRECT", published_at: new Date("2026-10-01T00:00:00Z") });
   return { id, owner, state, account, version, publication };
+}
+
+function scheduledFixture(id: string, model: "FIXED_FEE" | "SPREAD" = "SPREAD", gameId = GAME, facts: Partial<Facts> = {}) {
+  const fixture = accountFixture(id, "owner", facts);
+  const payload = fixture.version.payload!;
+  const { compatibility, ...rule } = compatRule();
+  const fixed = model === "FIXED_FEE";
+  const result = computeQuote({ priceVersionId: "price-a", mode: fixed ? "PERCENT" : "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1",
+    ...(fixed ? { fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, commissionRate: "0.1" } : {}),
+    haffRule: { ...rule, dailyDeltaByTermOption: { daily: "0" }, ...(fixed ? { schema: "haff-ratio-v3", fixedModes: compatibility!.modes } : { compatibility }) },
+    conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily", rentalPricing: { rentalMode: "ordinary" } },
+    termOption: { code: "daily", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
+    lines: [{ itemId: "haff-a", quantity: "1000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" }] });
+  assert(result.quotable);
+  fixture.account.game_id = gameId;
+  fixture.version.schema_version = fixed ? 4 : 2;
+  fixture.version.payload = normalizeContentPayload({ ...payload, gameId, schemaVersion: fixed ? 4 : 2,
+    declaration: { ...payload.declaration, pricingOptionCode: "", attributes: { ...payload.declaration.attributes, rentalPricing: { rentalMode: "ordinary" } } },
+    quoteValues: { ...result.quote, ruleReleaseId: "release-a" },
+    ...(fixed ? { pricingPolicy: { schema: "pricing-policy-v1", pricingModel: model, scheduleId: "initial-plan",
+      generation: "1", effectiveAt: "2026-10-01T00:00:00Z", priceVersionId: "price-a" } } : {}) });
+  fixture.version.content_hash = computeContentHash(fixture.version.payload);
+  return fixture;
 }
 
 type Fixture = ReturnType<typeof accountFixture>;
@@ -181,22 +205,7 @@ test("a native market page reads each shared dimension once, not once per candid
 
 test("latest and core quantity batch scheduled prices for the same native or mixed candidate window", async t => {
   for (const [sort, mode] of [["latest", "native"], ["coreQuantity", "native"], ["latest", "mixed"], ["coreQuantity", "mixed"]] as const) {
-    const fixtures = ["a", "b", "c"].map(id => {
-      const fixture = accountFixture(id, "owner");
-      const payload = fixture.version.payload!;
-      const result = computeQuote({ priceVersionId: "price-a", mode: "SPREAD", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1",
-        haffRule: { ...compatRule(), dailyDeltaByTermOption: { daily: "0" } },
-        conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily", rentalPricing: { rentalMode: "ordinary" } },
-        termOption: { code: "daily", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
-        lines: [{ itemId: "haff-a", quantity: "1000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" }] });
-      assert(result.quotable);
-      fixture.version.schema_version = 2;
-      fixture.version.payload = normalizeContentPayload({ ...payload, schemaVersion: 2,
-        declaration: { ...payload.declaration, pricingOptionCode: "", attributes: { ...payload.declaration.attributes, rentalPricing: { rentalMode: "ordinary" } } },
-        quoteValues: { ...result.quote, ruleReleaseId: "release-a" } });
-      fixture.version.content_hash = computeContentHash(fixture.version.payload);
-      return fixture;
-    });
+    const fixtures = ["a", "b", "c"].map(id => scheduledFixture(id));
     const search = new URLSearchParams({ queryVersion: "2", gameId: GAME, sort, limit: "4", ...(sort === "coreQuantity" ? { coreItemId: "haff-a" } : {}) });
     const { page, priceReads, scheduleReads } = await marketPage(t, fixtures, search, mode, { "version-a": "2.50", "version-b": "2.50", "version-c": null });
     assert.deepEqual(priceReads, [["version-a", "version-b", "version-c"]]);
@@ -348,6 +357,58 @@ test("favorites read the private set once per page and hide objects that lost pu
   (options.userAuth.api.getSession as unknown as () => Promise<{ user: { id: string }; session: { id: string } }>) = (async () => ({ user: { id: "reader-b" }, session: { id: "session-b" } })) as never;
   await handleFavorites({ method: "GET", headers: {} } as never, other.response as never, options as never, "req_fixture", "/me/favorites", new URLSearchParams());
   assert.deepEqual(other.result.body.items, [], "another reader never sees this set");
+});
+
+test("favorites batch current prices across games and keep missing and private listings separate", async () => {
+  const fixtures = [
+    scheduledFixture("fixed", "FIXED_FEE"),
+    scheduledFixture("spread", "SPREAD", "game-b"),
+    scheduledFixture("unknown", "SPREAD", "game-b"),
+    scheduledFixture("hidden", "FIXED_FEE", GAME, { restricted: true }),
+    scheduledFixture("outside", "FIXED_FEE"),
+  ];
+  const favoriteRows = fixtures.map((f, i) => ({ account_id: f.id, savedAt: "2026-10-0" + (5 - i) + "T00:00:00.000000Z" }));
+  const { client, gate } = clientFor(fixtures, userId => userId === "reader-a" ? favoriteRows : []);
+  const original = client.query;
+  const priceReads: unknown[][] = [];
+  const spread = fixtures[1]!;
+  spread.account.current_version_id = "unreviewed-draft";
+  client.query = (async (sql: string, args: unknown[] = []) => {
+    if (sql.includes("market-pricing-schema")) return { rows: [{ schedules: true, ready: true }] };
+    if (sql.includes("DISTINCT ON (game_id,pricing_model)")) return { rows: [
+      { gameId: GAME, model: "FIXED_FEE", price: "fixed-live", id: "fixed-plan" },
+      { gameId: "game-b", model: "SPREAD", price: "spread-live", id: "spread-plan" },
+    ] };
+    if (sql.includes("public_market_price(")) {
+      priceReads.push(args);
+      const price = (amount: string) => ({ amount, ratio: "40", lines: [{ itemId: "haff-a", amount, unitAmount: amount + "000000" }] });
+      return { rows: [
+        { id: "version-fixed", price: price("2.50") }, { id: "version-spread", price: price("3.00") },
+        { id: "version-unknown", price: null }, { id: "version-hidden", price: price("9.99") },
+      ] };
+    }
+    if (sql.includes("SELECT v.* FROM zzsh_supply.listing_version") && args[0] === spread.id) return { rows: [spread.version] };
+    if (sql.includes("SELECT * FROM zzsh_supply.listing_publication") && args[1] === spread.id)
+      return { rows: [{ ...spread.publication(), game_id: spread.account.game_id }] };
+    return original(sql, args);
+  }) as never;
+  const options = { pool: { query: client.query, connect: async () => client }, supplyGateReader: gate,
+    userAuth: { api: { getSession: async () => ({ user: { id: "reader-a" }, session: { id: "session-fixture" } }) } } };
+  const capture = responseCapture();
+  await handleFavorites({ method: "GET", headers: {} } as never, capture.response as never, options as never,
+    "req_fixture", "/me/favorites", new URLSearchParams("limit=4"));
+  assert.equal(capture.result.status, 200);
+  assert.equal(priceReads.length, 1);
+  assert.deepEqual(priceReads[0]![0], ["fixed", "spread", "unknown", "hidden"]);
+  assert.deepEqual(JSON.parse(String(priceReads[0]![1])), { [GAME]: { fixed: "fixed-live" }, "game-b": { spread: "spread-live" } });
+  const { items, nextCursor } = capture.result.body;
+  assert.deepEqual(items.map((row: any) => [row.accountId, row.state, row.listing?.quote?.resourceTotal?.amount ?? null]), [
+    ["fixed", "AVAILABLE", "2.50"], ["spread", "AVAILABLE", "3.00"], ["unknown", "AVAILABLE", null], ["hidden", "UNAVAILABLE", null],
+  ]);
+  assert.equal(items[1].listing.versionId, "version-spread", "prior publication uses its own price");
+  assert.equal(items[3].listing, null);
+  assert(!JSON.stringify(items).includes("9.99"));
+  assert.equal(JSON.parse(Buffer.from(nextCursor, "base64url").toString()).user, "reader-a");
 });
 
 // The v1 public list is the same reader chain as the market page but keeps its own

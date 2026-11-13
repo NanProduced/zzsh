@@ -78,13 +78,30 @@ export function candidateMarketPrice(pricing: MarketPricing | undefined, bind: (
       THEN ${from ? "(market.market_price->>'amount')::numeric" : "NULL::numeric"} ELSE (${frozen}) END` };
 }
 
-/** Non-price sorts first select their candidate window. Price sorts already carry this projection. */
-export async function readCandidateMarketPrices(client: PoolClient, versionIds: readonly string[], pricing: MarketPricing) {
-  const values: unknown[] = [versionIds];
+/** Price sorts already carry the projection. Detail reads may select a prior public version. */
+export async function readCandidateMarketPrices(
+  client: PoolClient, ids: readonly string[], pricing: MarketPricing, selection: "CURRENT_VERSION" | "PUBLIC_DETAIL" = "CURRENT_VERSION",
+) {
+  const values: unknown[] = [ids];
   const market = candidateMarketPrice(pricing, value => { values.push(value); return "$" + values.length; });
-  if (!versionIds.length || !market.projected) return new Map<string, MarketPrice | null>();
+  if (!ids.length || !market.projected) return new Map<string, MarketPrice | null>();
+  const source = selection === "PUBLIC_DETAIL"
+    ? `FROM zzsh_supply.rental_account a
+       JOIN LATERAL (
+         SELECT v.id AS version_id, pub.id AS publication_id FROM zzsh_supply.listing_publication pub
+         JOIN zzsh_supply.listing_version v ON v.id=pub.version_id AND v.account_id=pub.account_id
+         WHERE pub.account_id=a.id AND pub.owner_user_id=a.owner_user_id AND pub.game_id=a.game_id
+           AND pub.rule_release_id=v.rule_release_id AND pub.content_hash=v.content_hash
+           AND ${effectivePublicationStateSql("v", "pub")}
+         ORDER BY (v.id IS NOT DISTINCT FROM a.current_version_id) DESC, pub.published_at DESC, v.sequence DESC, v.id
+         LIMIT 1
+       ) selected ON true
+       JOIN zzsh_supply.listing_version v ON v.id=selected.version_id
+       JOIN zzsh_supply.listing_publication pub ON pub.id=selected.publication_id`
+    : PUBLIC_CANDIDATE_FROM;
+  const where = selection === "PUBLIC_DETAIL" ? "a.id=ANY($1::text[]) AND v.schema_version IN (2,4)" : "v.id=ANY($1::text[])";
   const rows = (await client.query<{ id: string; price: MarketPrice | null }>(
-    `SELECT v.id,market.market_price AS price ${PUBLIC_CANDIDATE_FROM} ${market.from} WHERE v.id=ANY($1::text[])`, values,
+    `SELECT v.id,market.market_price AS price ${source} ${market.from} WHERE ${where}`, values,
   )).rows;
   return new Map(rows.map(row => [row.id, row.price]));
 }

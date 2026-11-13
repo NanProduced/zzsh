@@ -417,7 +417,7 @@ export async function handlePublishingRoute(
                 undefined,
                 false,
                 "RENTABLE",
-                { version: page.version(row.id), shared: page.shared, marketPricing: market, marketPrice: page.marketPrice(row.version_id) },
+                { version: page.version(row.id), shared: page.shared, marketPricing: market, marketPriceForVersion: page.marketPrice },
               ),
             );
           } catch (error) {
