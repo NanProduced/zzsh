@@ -114,7 +114,7 @@ export function PricingSchedulesPanel({ gameId, active, canSchedule, command }: 
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h3 className="text-base font-semibold">调价排期</h3>
-        <p className="mt-1 text-sm text-muted-foreground">价格计划影响该模式下的新订单。已创建订单沿用原价。</p>
+        <p className="mt-1 text-sm text-muted-foreground">价格计划仅用于生效后正式上架的账号。已上架账号和已有订单继续按各自确认的规则计价。</p>
         {data ? <p className="mt-1 text-xs text-muted-foreground">截至北京时间 {formatBeijing(data.asOf)}</p> : null}
       </div>
       <Button type="button" size="sm" variant="outline" disabled={command.locked || (!data && !state.error)} onClick={reload}>刷新排期</Button>

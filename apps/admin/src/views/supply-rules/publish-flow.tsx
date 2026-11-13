@@ -171,7 +171,7 @@ export function PublishBar({ rules, command, dirty, isBoss, canEdit, onOpenSecti
       const r = await command.write({ operation: RULES_RELEASE_OPERATION, resourceId: rules.game.id, gameId: rules.game.id, path: "/supply/releases", method: "POST", body: { gameId: rules.game.id, priceVersionId: sealed.id, termVersionId: release.termVersionId, agreementVersionId: release.agreementVersionId, expectedGeneration: release.generation } });
       if (!r) return;
       setReceipt({ at: r.fresh.release?.activatedAt ?? new Date().toISOString(), changes });
-      setToast("已生效，新订单按新价格计算。");
+      setToast("已生效，之后正式上架的账号采用新价格。");
     } catch (failure) { setError(friendlyError(failure)); }
   };
 

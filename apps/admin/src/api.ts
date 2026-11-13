@@ -799,6 +799,7 @@ export type AdminOrder = {
   renterName: string;
   gameId: string;
   releaseId: string;
+  priceVersionId?: string;
   contentHash: string;
   revision: string;
   fulfillmentAssignment?: {

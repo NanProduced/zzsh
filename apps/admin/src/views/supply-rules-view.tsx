@@ -295,7 +295,7 @@ export function SupplyRulesView({
     try {
       const r = await command.write({ operation: RULES_RELEASE_OPERATION, resourceId: gameId, gameId, path: "/supply/releases", method: "POST", body: { gameId, priceVersionId: release.priceVersionId, termVersionId: release.termVersionId, agreementVersionId: id, expectedGeneration: release.generation } });
       if (!r) return;
-      setAgreementReceipt({ at: r.fresh.release?.activatedAt ?? new Date().toISOString(), text: "已生效。新订单使用这份协议，已有订单不变。" });
+      setAgreementReceipt({ at: r.fresh.release?.activatedAt ?? new Date().toISOString(), text: "已生效。之后正式上架的账号使用这份协议。" });
     } catch (failure) { setError(friendlyError(failure)); }
   };
 

@@ -14,7 +14,7 @@ export function FixedFeePriceFacts({ price, part }: { price: PriceVersionRecord;
     : [["按租期选项调整比例", "dailyDeltaByTermOption"]];
   return <section className="section-panel space-y-3" aria-label="固定手续费计价">
     <h3 className="text-base font-semibold">{part === "modes" ? "固定手续费率与出租方式" : part === "base" ? "固定手续费基础计价" : "固定手续费租期比例"}</h3>
-    <p className="text-sm text-muted-foreground">当前组合引用价目 <span className="break-all">{price.id}</span>。新订单使用对应模式的生效价目。</p>
+    <p className="text-sm text-muted-foreground">当前组合引用价目 <span className="break-all">{price.id}</span>。新上架账号的生效价目见「调价排期」。</p>
     {rule?.schema !== "haff-ratio-v3" ? <p role="status">当前哈夫币规则无法核对。</p> : part === "modes" ? <dl className="grid gap-3 sm:grid-cols-3">
       {Object.entries(names).map(([key, label]) => {
         const mode = key as keyof typeof names, entry = modes?.[mode], rate = price.fixedFeeRates?.[mode];

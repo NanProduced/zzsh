@@ -680,8 +680,8 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
         <DialogHeader><DialogTitle>{done ? "已收到生效回执" : pending ? "核对原生效请求" : "选择版本并确认生效"}</DialogTitle><DialogDescription>只能选已提交的版本。关闭窗口不会改变线上规则。</DialogDescription></DialogHeader>
         {done ? (
           <div role="status" className="space-y-2 text-sm">
-            <p>已生效，新订单按新规则计算。</p>
-            <p className="text-sm text-muted-foreground">{state.receipt.affectedCount === undefined ? "原回执未提供受影响账号数量，不按 0 显示。" : <>生效时，本游戏有 <b className="text-foreground">{state.receipt.affectedCount}</b> 个启用中的账号尚未绑定新规则。已有订单沿用冻结版本。</>}</p>
+            <p>已生效，之后正式上架的账号采用新规则。</p>
+            <p className="text-sm text-muted-foreground">{state.receipt.affectedCount === undefined ? "原回执未提供受影响账号数量，不按 0 显示。" : <>生效时，本游戏有 <b className="text-foreground">{state.receipt.affectedCount}</b> 个未发布账号尚未绑定新规则。已有订单沿用冻结版本。</>}</p>
           </div>
         ) : (
           <>
@@ -710,8 +710,8 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
               <Info className="mt-0.5 size-4 shrink-0 text-amber-500" />
               <div className="space-y-0.5">
                 <p className="font-medium text-foreground">生效影响说明</p>
-                {fixedFee ? <p>保留当前固定手续费价目。已有订单继续使用下单时的租期与协议。</p> : null}
-                <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
+                {fixedFee ? <p>本操作即时更新新上架账号的租期或协议。已有订单沿用下单时的版本。</p> : null}
+                <p>已上架账号继续使用原规则。尚未上架的草稿需按新规则重新核价并确认。</p>
                 <p>已冻结报价的订单按冻结时的报价结算。</p>
               </div>
             </div>
