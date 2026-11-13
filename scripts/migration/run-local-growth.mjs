@@ -221,7 +221,7 @@ try {
         assert.equal(legacy.assessLegacyCoverageRecord(record, own).state, item.coverageState);
         if (item.coverageState !== "COMPLETE") {
           pending++;
-          if (projectTiers) { pendingIds.push(item.userId); if (pendingIds.length === 500) await checkPending(); }
+          pendingIds.push(item.userId); if (pendingIds.length === 500) await checkPending();
           continue;
         }
         complete++;
@@ -235,7 +235,7 @@ try {
           if (!samples.has(before.effectiveTier)) samples.set(before.effectiveTier, { item, now });
         lifetime += BigInt(before.lifetimeCents); rolling += BigInt(before.rollingCents);
       }
-      if (projectTiers) await checkPending();
+      await checkPending();
       assert.deepEqual({ complete, pending }, { complete: plan.summary.complete, pending: plan.summary.pending });
       if (projectTiers) assert.deepEqual({ lifetimeCents: String(lifetime), rollingCents: String(rolling), tiers }, { lifetimeCents: plan.summary.lifetimeCents, rollingCents: plan.summary.rollingCents, tiers: plan.summary.tiers });
       else assert(plan.summary.lifetimeCents === null && plan.summary.rollingCents === null && plan.summary.tiers === null && plan.summary.knownZero === null && plan.summary.positive === null, "GROWTH_POLICY_PROJECTION_UNEXPECTED");
@@ -245,7 +245,7 @@ try {
         if (now) { assert.equal(response.growth.effectiveTier, now.effectiveTier); assert.equal(response.growth.benefitsState, "CONFIGURED"); }
         else assert.equal(response.growth.rollingPoints, null);
       }
-      result.summary = { coverage: coverage.length, contributions: rows.length, complete, pending, currentTiers: projectTiers ? currentTiers : null, policyObservation: projectTiers ? "BOUND" : policy.state, policyProjection: projectTiers ? "COMPUTED" : "NOT_ASSESSED", officialReaderSamples: projectTiers ? samples.size + pending : 0, officialReaderCalls: projectTiers ? samples.size + pendingReaderCalls : 0, officialReaderStatus: projectTiers ? "ALL_PENDING_AND_COMPLETE_SAMPLES" : "NOT_RUN_POLICY_UNBOUND" };
+      result.summary = { coverage: coverage.length, contributions: rows.length, complete, pending, currentTiers: projectTiers ? currentTiers : null, policyObservation: projectTiers ? "BOUND" : policy.state, policyProjection: projectTiers ? "COMPUTED" : "NOT_ASSESSED", officialReaderSamples: pending + (projectTiers ? samples.size : 0), officialReaderCalls: pendingReaderCalls + (projectTiers ? samples.size : 0), officialReaderStatus: projectTiers ? "ALL_PENDING_AND_COMPLETE_SAMPLES" : "ALL_PENDING_COMPLETE_NOT_RUN_POLICY_UNBOUND" };
     });
     assert(result.readOnlyRollbackAck && result.readOnlyClientClosed);
     result.status = "EXACT_ALL_RECORDS_AND_FACTS_VERIFIED";
