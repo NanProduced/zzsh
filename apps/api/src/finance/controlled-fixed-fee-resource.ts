@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { ConfigurationError, type AppConfig } from "../config/config";
 import { SecurityApiError } from "../auth/security-core";
 import { assertBusinessRuntimeIdentity } from "../database/business";
-import { fixedFeeSettlementSchemaReady } from "./fixed-fee-settlement-schema";
+import { fixedFeeTradeSchemaReady } from "./fixed-fee-settlement-schema";
 
 export const fixedFeeTestResource = Object.freeze({
   name: "zzsh_test_supply_fixed_fee",
@@ -62,6 +62,6 @@ export async function assertFixedFeeTestListingAdmission(client: PoolClient, adm
     || input.actorId !== (input.role === "OWNER" ? binding.ownerUserId : binding.renterUserId))
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee test listing not admitted");
   await assertFixedFeeTestResource(client);
-  if (!await fixedFeeSettlementSchemaReady(client))
-    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee test accounting guards unavailable");
+  if (!await fixedFeeTradeSchemaReady(client))
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee test trade guards unavailable");
 }

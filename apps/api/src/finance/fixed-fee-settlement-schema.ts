@@ -61,6 +61,66 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
  return row?.ready===true;
 }
 
+/** New publication and reservation also need the single-publication and v5 write contracts. */
+export async function fixedFeeTradeSchemaReady(client: Pick<PoolClient, "query">): Promise<boolean> {
+  const row = (await client.query(`SELECT
+    NOT EXISTS (
+      SELECT 1 FROM (VALUES
+        ('listing_publication', 'listing_publication_shape', 'guard_listing_publication_shape', 7, false),
+        ('listing_publication', 'listing_publication_immutable', 'guard_listing_publication_immutable', 27, false),
+        ('listing_publication', 'listing_publication_consistency', 'guard_listing_publication_consistency', 29, true),
+        ('listing_publication', 'listing_publication_effective_rule_guard', 'guard_publication_effective_rule', 7, false),
+        ('listing_publication', 'listing_legacy_delta_republication_guard', 'guard_legacy_delta_republication', 7, false),
+        ('listing_version', 'listing_version_publication', 'guard_listing_version_publication', 21, true),
+        ('rental_order', 'rental_order_guard', 'guard_rental_order', 23, false)
+      ) required(relation, name, signature, type, deferred)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid
+        JOIN pg_namespace n ON n.oid=c.relnamespace AND n.oid=p.pronamespace
+        WHERE c.oid=to_regclass((CASE WHEN required.relation='rental_order' THEN 'zzsh_order.' ELSE 'zzsh_supply.' END)||required.relation)
+          AND t.tgname=required.name AND p.proname=required.signature AND p.pronargs=0 AND p.proowner=c.relowner AND NOT p.prosecdef
+          AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.type AND t.tgqual IS NULL
+          AND t.tgdeferrable=required.deferred AND t.tginitdeferred=required.deferred
+      )
+    )
+    AND EXISTS (
+      SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('zzsh_supply.listing_publication_one_per_account')
+        AND i.indrelid=to_regclass('zzsh_supply.listing_publication') AND i.indisvalid AND i.indisready AND i.indisunique
+        AND i.indpred IS NULL AND i.indnkeyatts=1 AND pg_get_indexdef(i.indexrelid,1,true)='account_id'
+    )
+    AND EXISTS (
+      SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('zzsh_order.rental_order_single_occupancy')
+        AND i.indrelid=to_regclass('zzsh_order.rental_order') AND i.indisvalid AND i.indisready AND i.indisunique
+        AND i.indnkeyatts=1 AND pg_get_indexdef(i.indexrelid,1,true)='account_id'
+        AND pg_get_expr(i.indpred,i.indrelid)='(status = ANY (ARRAY[''PENDING_PAYMENT''::text, ''PAID''::text]))'
+    )
+    AND EXISTS (
+      SELECT 1 FROM pg_constraint c JOIN pg_index i ON i.indexrelid=c.conindid
+      WHERE c.conrelid=to_regclass('zzsh_order.rental_order') AND c.conname='rental_order_confirmation_unique'
+        AND c.contype='u' AND c.convalidated AND i.indisvalid AND pg_get_indexdef(i.indexrelid,1,true)='confirmation_id'
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM (VALUES
+        ('zzsh_order.assert_fixed_fee_personal_order_v5(zzsh_order.rental_order)'),
+        ('zzsh_order.assert_personal_growth_for_fixed_fee_v5(zzsh_order.rental_order,text)')
+      ) required(signature)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pg_proc p JOIN pg_class c ON c.oid=to_regclass('zzsh_order.rental_order')
+        WHERE p.oid=to_regprocedure(required.signature) AND p.proowner=c.relowner AND NOT p.prosecdef
+          AND has_function_privilege(current_user,p.oid,'EXECUTE')
+      )
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM (VALUES
+        ('zzsh_supply.listing_publication','SELECT'), ('zzsh_supply.listing_publication','INSERT'),
+        ('zzsh_supply.rule_acceptance','SELECT'), ('zzsh_supply.rule_acceptance','INSERT'),
+        ('zzsh_order.rental_order','SELECT'), ('zzsh_order.rental_order','INSERT')
+      ) required(relation,privilege)
+      WHERE NOT COALESCE(has_table_privilege(current_user,to_regclass(required.relation),required.privilege),false)
+    ) AS ready`)).rows[0];
+  return row?.ready === true && await fixedFeeSettlementSchemaReady(client);
+}
+
 /** Scheduled spread also needs the versioned insertion and full-payout readers. */
 export async function scheduledSpreadSettlementSchemaReady(client: Pick<PoolClient, "query">): Promise<boolean> {
   const shape = (await client.query(`SELECT
