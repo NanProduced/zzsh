@@ -46,9 +46,14 @@ test('current catalog membership overrides an older priced label and keeps unkno
     ['missing','六级头盔','PIECE',null,false,'ready'],
   ]);
   assert.equal(inventoryPriceHint(ready[0]),null);
-  const unknownPrice=inventoryEditorRows({items:[{id:'kept',name:'目录内物品',unit:'PIECE'}]},[{itemId:'kept',quantity:'4'}]);
+  const unknownPrice=inventoryEditorRows({items:[{id:'kept',name:'目录内物品',unit:'PIECE',priced:null}]},[{itemId:'kept',quantity:'4'}]);
   assert.equal(unknownPrice[0].priced,null);
   assert.equal(inventoryPriceHint(unknownPrice[0]),'当前价目状态尚未确认，暂不能报价');
+  const unavailable = inventoryEditorRows({ blockers: [{ code: "PRICING_POLICY_UNAVAILABLE" }],
+    items: [{ id: "kept", name: "目录内物品", unit: "PIECE", priced: false }] }, inventory, labels);
+  assert(unavailable.every(row => row.priced === null));
+  assert.equal(unavailable.find(row => row.itemId === "kept").quantity, inventory.find(row => row.itemId === "kept").quantity);
+
 });
 test('supply recovery locates groups and never overwrites stale drafts',()=>{
   assert.equal(groupForField('inventory[2].quantity'),'inventory');assert.equal(groupForField('mediaBindings.0.assetId'),'media');assert.equal(groupForField('attributes.vit_level'),'basics');

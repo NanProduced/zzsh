@@ -10,7 +10,7 @@ import { SecurityApiError } from "./security-core";
 import { canonicalize } from "../supply/content-hash";
 import { projectUnifiedMembershipPricing } from "./membership-unified-pricing";
 import { DELTA_HAFF_FIXED_SCHEMA } from "../supply/delta-rental";
-import { fixedFeeAllowsPayableRatio, parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
+import { parseFixedFeeRates, type FixedFeeRates } from "../supply/fixed-fee";
 import { lockFixedFeePolicyChange } from "./fixed-fee-policy-timeline";
 import { assertFixedFeeMembershipChange } from "../supply/pricing-policy-schedule";
 
@@ -92,7 +92,7 @@ export async function assertSealedRuleRelease(client: PoolClient, ruleReleaseId:
   return { gameId: row.gameId, termVersionId: row.termVersionId, enabledModes, releaseMode: row.mode, haffSchema: typeof haffRule.schema === "string" ? haffRule.schema : null, ...(fixedFeeRates ? { fixedFeeRates } : {}), catalog: { safeBoxes, materials, resources: resources.map(({ itemId, name, unit, pricingKind }) => ({ itemId, name, unit, pricingKind })) } };
 }
 
-type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string; enabledModes: RentalMode[]; fixedFeeRates?: FixedFeeRates };
+type ApprovedPolicyPayload = { id: string; version: number; policy: GrowthBenefitPolicy; sourceRef: string; enabledModes: RentalMode[] };
 
 async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: string): Promise<ApprovedPolicyPayload> {
   // Approved policy versions are append-only for runtime; entitlement FK keeps the referenced version.
@@ -103,9 +103,9 @@ async function loadApprovedPolicy(client: PoolClient, policyId: string, gameId: 
   )).rows[0];
   if (!row) conflict("Approved membership policy is unavailable");
   const sealed = await assertSealedRuleRelease(client, row.ruleReleaseId, row.priceVersionId);
-  const validation = validateBenefitPolicy(row.policyPayload, { enabledModes: sealed.enabledModes, fixedFeeRates: sealed.fixedFeeRates });
+  const validation = validateBenefitPolicy(row.policyPayload, { enabledModes: sealed.enabledModes });
   if (!validation.valid || !validation.publishable) conflict("Approved membership policy is not publishable");
-  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef, enabledModes: sealed.enabledModes, fixedFeeRates: sealed.fixedFeeRates };
+  return { id: row.id, version: row.version, policy: row.policyPayload, sourceRef: row.sourceRef, enabledModes: sealed.enabledModes };
 }
 
 type DraftPolicyForApproval = { id: string; version: number; status: string; effectiveAt: string | null; ruleReleaseId: string; priceVersionId: string; sourceRef: string; policyPayload: GrowthBenefitPolicy; payloadHash: string; approvedPayloadHash?: string };
@@ -150,7 +150,7 @@ export async function validateUnifiedMembershipPolicySubmission(client: PoolClie
   const draft = await loadDraftPolicyForApproval(client, payload);
   const sealed = await assertSealedRuleRelease(client, draft.ruleReleaseId, draft.priceVersionId);
   if (draft.policyPayload.pricingScope !== "ALL_ENABLED_RENTAL_MODES" || projectUnifiedMembershipPricing(draft.policyPayload, sealed.enabledModes).knowledge !== "KNOWN") conflict("请先保存统一总价折扣政策，再提交审批");
-  const validation = validateBenefitPolicy(draft.policyPayload, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode, fixedFeeRates: sealed.fixedFeeRates });
+  const validation = validateBenefitPolicy(draft.policyPayload, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
   if (!validation.publishable) conflict("统一会员政策仍有待配置或不符合规则的权益");
 }
 
@@ -162,12 +162,6 @@ export async function validateMembershipEntitlementPayload(client: PoolClient, p
   try {
     const validation = validateEntitlementCandidate(candidate, "UNKNOWN", policy.policy, { enabledModes: policy.enabledModes });
     if (!validation.valid) conflict(`Membership entitlement is invalid: ${validation.errors.join(",")}`);
-    if (policy.fixedFeeRates) {
-      const terms = candidate.pricing;
-      if (!isTotalDiscountContract(terms)) conflict("固定手续费模式只支持总价折扣");
-      const modes = terms.scope === "ALL_ENABLED_RENTAL_MODES" ? policy.enabledModes : [terms.mode];
-      if (modes.some(mode => !fixedFeeAllowsPayableRatio(policy.fixedFeeRates![mode], terms.payableRatio))) conflict("礼遇优惠幅度不能超过适用手续费率");
-    }
   } catch (error) {
     if (error instanceof GrowthRuleError) conflict("Membership entitlement contains invalid values");
     throw error;
@@ -239,7 +233,7 @@ export const executeMembershipGrowthOperation: ApprovalOperationExecutor = async
     const effectiveAtUtc = draft?.effectiveAt ?? text(payload, "effectiveAtUtc");
     const sourceRef = draft?.sourceRef ?? text(payload, "sourceRef");
     const sealed = await assertSealedRuleRelease(client, ruleReleaseId, priceVersionId);
-    const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode, fixedFeeRates: sealed.fixedFeeRates });
+    const result = validateBenefitPolicy(policy as GrowthBenefitPolicy, { enabledModes: sealed.enabledModes, catalog: sealed.catalog, releaseMode: sealed.releaseMode });
     if (!result.valid || !result.publishable) conflict(`Membership policy is not publishable: ${[...result.errors, ...result.warnings].slice(0, 5).join(",")}`);
     if (policy.pricingScope !== undefined && projectUnifiedMembershipPricing(policy, sealed.enabledModes).knowledge !== "KNOWN") conflict("Membership policy requires one total discount and one entitlement range across enabled rental paths");
     for (const tier of Object.values((policy as GrowthBenefitPolicy).tiers)) {

@@ -72,7 +72,7 @@ test('fee changes check current and future member policies and still-active enti
  const start='2026-10-01T00:00:00.000000Z',later='2026-10-02T00:00:00.000000Z';
  const rate={ordinary:'0.10',custom:'0.08',fast:'0.12'};
  const entitlement={startsAt:start,endsAt:later,pricing:{...candidate.pricing,payableRatio:'0.95'}};
- const timeline:FixedFeeTimelineInput={from:start,fees:[{effectiveAt:start,generation:'1',rates:rate,protectedModes:modes}],benefits:[{effectiveAt:start,version:'1',policy}],entitlements:[entitlement]};
+ const timeline:FixedFeeTimelineInput={from:start,modes:[{effectiveAt:start,generation:'1',pricingModel:'FIXED_FEE'}],fees:[{effectiveAt:start,generation:'1',rates:rate,protectedModes:modes}],benefits:[{effectiveAt:start,version:'1',policy}],entitlements:[entitlement]};
  assert.deepEqual(validateFixedFeeTimeline(timeline),{valid:true});
  const lowered={effectiveAt:later,generation:'2',rates:{...rate,custom:'0.04'},protectedModes:modes};
  assert.deepEqual(validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,lowered]}),{valid:true},'an entitlement ending at the effective instant no longer overlaps');
@@ -90,6 +90,19 @@ test('fee changes check current and future member policies and still-active enti
  const deepPolicy={...normalize(original(),deep),status:'APPROVED' as const};
  assert.equal((validateFixedFeeTimeline({...timeline,benefits:[...timeline.benefits,{effectiveAt:later,version:'2',policy:deepPolicy}]}) as any).reason,'BENEFIT_POLICY_INCOMPATIBLE');
  assert.deepEqual(validateFixedFeeTimeline({...timeline,benefits:[{effectiveAt:start,version:'4',policy},{effectiveAt:later,version:'3',policy:deepPolicy}]}),{valid:true},'older policy versions do not override a newer effective version');
+ const returnAt='2026-10-03T00:00:00.000000Z';
+ const modeSchedule=[{effectiveAt:start,generation:'1',pricingModel:'FIXED_FEE' as const},{effectiveAt:later,generation:'2',pricingModel:'SPREAD' as const}];
+ const spread={...timeline,modes:modeSchedule,benefits:[...timeline.benefits,{effectiveAt:later,version:'2',policy:deepPolicy}]};
+ assert.deepEqual(validateFixedFeeTimeline(spread),{valid:true},'a price-difference interval no longer uses the historical fee');
+ assert.deepEqual(validateFixedFeeTimeline({...spread,from:later,frozenFees:[frozen]}),{valid:false,reason:'BENEFIT_POLICY_INCOMPATIBLE',at:later});
+ assert.deepEqual(validateFixedFeeTimeline({...spread,modes:[...modeSchedule,{effectiveAt:returnAt,generation:'3',pricingModel:'FIXED_FEE'}]}),
+  {valid:false,reason:'BENEFIT_POLICY_INCOMPATIBLE',at:returnAt});
+ const restoresDiscount={...spread,benefits:[...spread.benefits,{effectiveAt:returnAt,version:'3',policy}],
+  modes:[...modeSchedule,{effectiveAt:returnAt,generation:'3',pricingModel:'FIXED_FEE' as const}]};
+ assert.deepEqual(validateFixedFeeTimeline(restoresDiscount),{valid:true},'use the benefit that applies at the exact return instant');
+ assert.deepEqual(validateFixedFeeTimeline({...restoresDiscount,entitlements:[{...futureGift,pricing:{...futureGift.pricing,payableRatio:'0.90'},endsAt:returnAt}]}),{valid:true});
+ assert.deepEqual(validateFixedFeeTimeline({...restoresDiscount,entitlements:[{...futureGift,pricing:{...futureGift.pricing,payableRatio:'0.90'},endsAt:'2026-10-03T00:00:00.000001Z'}]}),
+  {valid:false,reason:'ENTITLEMENT_DISCOUNT_EXCEEDS_FEE',at:returnAt,mode:'custom'});
  assert.equal((validateFixedFeeTimeline({...timeline,fees:[]}) as any).reason,'FEE_POLICY_UNAVAILABLE');
  assert.equal((validateFixedFeeTimeline({...timeline,benefits:[]}) as any).reason,'BENEFIT_POLICY_UNAVAILABLE');
  assert.equal((validateFixedFeeTimeline({...timeline,fees:[...timeline.fees,{...lowered,generation:'1'}]}) as any).reason,'TIMELINE_UNAVAILABLE');

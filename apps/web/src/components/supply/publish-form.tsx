@@ -58,6 +58,7 @@ import {
   editableDeclaration,
   groupForField,
   inventoryEditorRows,
+  inventoryPriceHint,
   mediaAccessUrl,
   mergeInventory,
   supplyApi,
@@ -1930,6 +1931,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (required) return { group: "account", message: required.message, target: required.target };
     if (catalogAvailability === "pending") return { group: "assets", message: "发布目录正在读取，请稍候再核对报价。" };
     if (catalogAvailability === "failed") return { group: "assets", message: "发布目录读取失败，请重试后再核价。" };
+    if (catalog?.blockers?.some(({code}) => code === "PRICING_POLICY_UNAVAILABLE" || code === "RULE_UNCONFIGURED"))
+      return { group: "assets", message: "当前上架价目暂无法核实，可先保存草稿。恢复后请重新核价。" };
     const missing = (catalog?.items ?? []).filter((item) => item.required && !draftRef.current.inventory.some((row) => row.itemId === item.id && row.quantity !== null));
     if (missing.length) return { group: "assets", message: `请先填写必填资源数量：${missing.map((item) => item.name).join("、")}。` };
     if (!draftRef.current.termOptionCode) return { group: "terms", message: "请选择每日消耗档位。" };
@@ -2907,7 +2910,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const inventoryFieldError = fieldErrors.find((item) => item.path.startsWith("inventory") && !(inventoryHaffId && item.path.includes(inventoryHaffId)));
   const inventoryRows = allInventoryRows.filter((item) => item !== haffInventoryRow).map(item=>({...item,code:catalog?.items.find(row=>row.id===item.itemId)?.code??supply?.version?.catalogItems?.find(row=>row.id===item.itemId)?.code??null}))
     .filter(item=>!retiredInsuranceCode(item.code)||draft.inventory.some(row=>row.itemId===item.itemId))
-    .map(item=>retiredInsuranceCode(item.code)?{...item,priced:false,required:false}:item);
+    .map(item=>retiredInsuranceCode(item.code)?{...item,required:false}:item);
   const missingResourceRows=catalog?[{code:"df_billable_barrett_bullet",name:"巴雷特子弹",unit:"ROUND"},{code:"df_billable_top_insure_card",name:INSURANCE_EXPERIENCE_CARD,unit:"DAY"}].filter(item=>!catalog.items.some(row=>canonicalResourceCode(row.code)===canonicalResourceCode(item.code))).map(item=>({...item,itemId:null,quantity:pendingResourceInputs[item.code]??null,priced:null,required:false,catalogState:"pending" as const})):[];
   const resourceOrder = ["df_billable_level6_bullet", "df_billable_level6_armor", "df_billable_level6_helmet", "df_billable_awm_bullet", "df_billable_barrett_bullet", "df_billable_top_insure_card", "df_billable_coffee"];
   const resourcePosition = (code: string | null) => { const index = resourceOrder.indexOf(canonicalResourceCode(code) ?? ""); return index < 0 ? resourceOrder.length : index; };
@@ -3412,7 +3415,9 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                 const inputValue=grouped&&valid?(BigInt(quantity)/60n).toString():quantity;
                 const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
                 const line=item.itemId&&ownerPreview?.lines?ownerPreview.lines.find(row=>row.itemId===item.itemId):null;
-                const unpriced=Boolean(item.itemId&&ownerPreview&&(!line||!line.ownerUnitAmount));
+                const unpriced = item.priced === false || (retiredInsurance && item.priced !== null);
+                const unknownPrice = item.priced === null;
+                const priceHint = item.itemId ? inventoryPriceHint(unpriced ? { ...item, priced: false } : item) : null;
                 const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":insuranceExperience?`按天填写${INSURANCE_EXPERIENCE_CARD}的可用天数。`:null;
                 const durabilityRequired = ["df_billable_level6_armor", "df_billable_level6_helmet"].includes(canonicalResourceCode(itemCode) ?? "");
                 return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined}>
@@ -3420,7 +3425,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                     <span className="supply-resource-art"><CatalogItemArt mediaId={"mediaId" in item ? item.mediaId : null}><InventoryIcon code={itemCode} /></CatalogItemArt></span>
                     <div className="supply-resource-info">
                       <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
-                      <div className="publish-owner-rate"><span>单价</span><strong>{line?.ownerUnitAmount ? `${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>单价按分显示，实际收入以核价和结算为准。</FieldHelp> : null}</div>
+                      <div className="publish-owner-rate"><span>单价</span><strong>{unknownPrice && item.itemId ? "待核实" : line?.ownerUnitAmount ? `${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>单价按分显示，实际收入以核价和结算为准。</FieldHelp> : null}</div>
                     </div>
                     {item.required?<span className="supply-resource-required">必填</span>:null}
                   </div>
@@ -3462,10 +3467,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
                   </div>
                   {insuranceExperience && is3x3SafeBoxSelected ? <small className="publish-resource-conflict-hint">已选择顶级安全箱(3*3)，不可与九格保险体验卡同时填写（只能二选一）</small> : null}
                   {retiredInsurance?<small className="publish-resource-state">单位需核对：历史按张申报保留原数量和停用状态，新申报请在上方按天项目填写。</small>:null}
-                  <div className="publish-resource-subtotal"><span>{ownerPreviewStale&&line?.ownerAmount?"上次预估":"本项预估"}</span><output aria-live="off">{line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:quantity===""?"未填写":!item.itemId?"待资源配置":unpriced?"价目待配置":ownerIncomePreviewPending?"计算中…":"预估暂不可用"}</output></div>
+                  <div className="publish-resource-subtotal"><span>{ownerPreviewStale&&line?.ownerAmount?"上次预估":"本项预估"}</span><output aria-live="off">{quantity===""?"未填写":!item.itemId?"待资源配置":unknownPrice?"价目待核实":line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:unpriced?"价目待配置":ownerIncomePreviewPending?"计算中…":"预估暂不可用"}</output></div>
                   {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}
                   {quantity!==""&&!valid?<FieldError text="请填写非负整数，或留空。"/>:null}
-                  {item.priced===false?<><small className="publish-resource-state">此资源尚未配置当前价目，可保存草稿，暂不能核价。</small><button type="button" className="button quiet" disabled={formDisabled} onClick={()=>setDraft(previous=>({...previous,inventory:previous.inventory.filter(row=>row.itemId!==item.itemId)}))}>不纳入本次申报</button></>:null}
+                  {priceHint ? <small className="publish-resource-state">{priceHint}</small> : null}
+                  {unpriced ? <button type="button" className="button quiet" disabled={formDisabled} onClick={()=>setDraft(previous=>({...previous,inventory:previous.inventory.filter(row=>row.itemId!==item.itemId)}))}>不纳入本次申报</button> : null}
                 </article>;
               })}</div>:null}
               {missingResourceRows.length?<p className="publish-resource-state">{missingResourceRows.map(item=>item.name).join("、")}的数量暂存本页，配置完成后可保存。</p>:null}

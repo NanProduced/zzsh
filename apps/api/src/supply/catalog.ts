@@ -948,7 +948,7 @@ export async function readPublicCatalog(
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "sort_order" AS "sortOrder",
             CASE WHEN EXISTS (SELECT 1 FROM zzsh_supply.media_asset a WHERE a.id=i.media_id AND a.game_id=i.game_id AND a.ownership_kind='PLATFORM_CATALOG' AND a.purpose='ITEM_MEDIA' AND a.review_state='APPROVED' AND a.access_class='PUBLIC_DISPLAY' AND a.public_storage_key IS NOT NULL) THEN i."media_id" ELSE NULL END AS "mediaId"${scope === "publishing" ? `,
-            EXISTS (SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=$2 AND p.item_id=i.id AND p.customer_tier='STANDARD') AS "priced"` : ""}
+            CASE WHEN $2::text IS NOT NULL THEN EXISTS (SELECT 1 FROM zzsh_supply.price_line p WHERE p.price_version_id=$2 AND p.item_id=i.id AND p.customer_tier='STANDARD') END AS "priced"` : ""}
        FROM "zzsh_supply"."billable_item" i
       WHERE "game_id" = $1 AND "enabled" = true${itemSearch ? ` AND "name" ILIKE $2 ESCAPE '\\'` : ""}
       ORDER BY "sort_order", "code", "id"`,
