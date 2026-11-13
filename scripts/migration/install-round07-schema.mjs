@@ -24,7 +24,7 @@ function checkedSecret(value){
   return rel&&!rel.startsWith('..')&&!isAbsolute(rel)?checkedPath(value,false,secretRoot):checkedPath(value);
 }
 function pinned(ref){const p=checkedPath(ref?.path),bytes=readFileSync(p);assert(hex(ref.sha256)&&sha(bytes)===ref.sha256,'SCHEMA_INPUT_CHANGED');return JSON.parse(bytes);}
-function files(rootDir,extensions=null){
+export function files(rootDir,extensions=null){
   const result={};function walk(dir,prefix=''){for(const entry of readdirSync(dir,{withFileTypes:true})){
     assert(!entry.isSymbolicLink(),'SCHEMA_LINK_REFUSED');const name=prefix+entry.name,p=join(dir,entry.name);
     if(entry.isDirectory())walk(p,name+'/');else if(entry.isFile()&&(!extensions||extensions.some(x=>name.endsWith(x))))result[name]=sha(readFileSync(p));
@@ -178,6 +178,7 @@ export async function assertInitialDatabaseReadback(client,baseline,seedProof,ta
   const expected=new Map((baseline.seedCounts??[]).map(row=>[row.table,row.count]));
   assert(expected.size===INITIAL_SEED_TABLES.size&&[...INITIAL_SEED_TABLES].every(name=>Number.isSafeInteger(expected.get(name))), 'SCHEMA_SEED_MANIFEST_INVALID');
   const schemas=['zzsh_iam','zzsh_auth_user','zzsh_auth_admin','zzsh_supply','zzsh_content','zzsh_order','zzsh_credit'];
+  if(tailSeeds)schemas.push('zzsh_docs');
   if(tailSeeds){
     const namespaces=(await client.query(`SELECT nspname name FROM pg_namespace WHERE left(nspname,5)='zzsh_' ORDER BY nspname`)).rows.map(row=>row.name);
     assert.deepEqual(namespaces,[...schemas,'zzsh_business_meta'].sort(),'SCHEMA_UNEXPECTED_BUSINESS_SCHEMA');

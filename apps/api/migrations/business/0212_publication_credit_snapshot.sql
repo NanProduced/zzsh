@@ -1,4 +1,4 @@
--- Candidate only. Paid requirements already contain their original amount and score.
+-- Paid requirements already contain their original amount and score.
 -- Only a waiver needs new evidence because no guarantee requirement exists for it.
 ALTER TABLE zzsh_supply.listing_publication
   ADD COLUMN credit_guarantee_waived boolean,
