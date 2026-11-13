@@ -2925,7 +2925,7 @@ test('the publish group map is visible and provides a real focus-return target w
   } finally { await p.close(); }
 });
 
-test("publish button runs full flow and system blockers stop publication cleanly", async () => {
+test("an unquoted draft can be priced before checking its guarantee, but an unresolved quoted guarantee blocks publication", async () => {
   const declared = completeDeclaration({
     inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "60" }],
     termOptionCode: "legacy_daily_10m",
@@ -2940,10 +2940,27 @@ test("publish button runs full flow and system blockers stop publication cleanly
   try {
     await p.render();
     assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').textContent, '确认上架');
-    assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').disabled, true, 'system blocker blocks publication up front');
-    assert.match(p.host.querySelector('[data-blocker-group="system"]')?.textContent ?? '', /系统问题，请联系客服/);
-    assert.equal(p.host.querySelector('[data-blocker-group="user"]'), null, 'QUOTE_REQUIRED never shows under user blockers');
+    assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').disabled, false, 'an unpriced guarantee cannot prevent the quote it needs');
+    await p.click('.publish-agreement-acceptance input');
+    await p.clickButton('确认上架');
+    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'quote')));
+    assert.equal(p.calls.some(call => call.op === 'confirm'), false, 'an unresolved guarantee after quoting cannot accept or publish');
+    assert.equal(p.host.querySelector('.publish-confirm button.button.primary').disabled, true);
+    assert.match(p.host.querySelector('[data-blocker-group="system"]')?.textContent ?? '', /暂时无法确认保证金状态/);
   } finally { await p.close(); }
+
+  const incomplete = await probe({
+    accountId: "account_1", mine: () => ({ ...supplyOf(declared), blockers }),
+    saveDraft: body => ({ ...supplyOf(body), blockers }),
+    quote: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: undefined }),
+  });
+  try {
+    await incomplete.render();
+    await incomplete.click('.publish-agreement-acceptance input');
+    await incomplete.clickButton('确认上架');
+    assert.ok(await incomplete.waitFor(() => incomplete.calls.some(call => call.op === 'quote')));
+    assert.equal(incomplete.calls.some(call => call.op === 'confirm'), false, 'a missing blocker list cannot authorize publication');
+  } finally { await incomplete.close(); }
 });
 
 test("quoted draft validates agreement on click and publishes once accepted", async () => {
