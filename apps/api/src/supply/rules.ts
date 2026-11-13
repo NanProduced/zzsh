@@ -5,7 +5,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
 import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingLineInput, type QuoteResult } from "./pricing";
-import { assertDeltaResourceUnit, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, validateDeltaRentalTerm, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
+import { assertDeltaResourceUnit, DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, validateDeltaRentalTerm, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
 import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
@@ -63,17 +63,18 @@ export async function listRules(
             CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NULL THEN r."activated_by_admin_id" END AS "activatedByAdminId",
             CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "activationSource", r."activated_at" AS "activatedAt"
        FROM "zzsh_supply"."rule_release" r
-      WHERE r."game_id" = $1 ORDER BY r."generation" DESC LIMIT 1`,
-    [gameId],
+      WHERE r."game_id" = $1 AND r."id" = $2`,
+    [gameId, game.rows[0].currentReleaseId],
   );
+  const current = release.rows[0];
   const priceVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."mode", v."status", v."commission_rate"::text AS "commissionRate",
             v."haff_rule" AS "haffRule", to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates", v."rounding_policy" AS "roundingPolicy", v."compensation_policy_ref" AS "compensationPolicyRef",
-            v."funding_policy" AS "fundingPolicy", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
+            v."funding_policy" AS "fundingPolicy", v."full_payout_terms_version_id" AS "fullPayoutTermsVersionId", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
             CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
        FROM "zzsh_supply"."price_version" v
-      WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
-    [gameId],
+      WHERE v."game_id" = $1 ORDER BY (v."id" IS NOT DISTINCT FROM $2) DESC, v."created_at" DESC, v."id" DESC LIMIT 20`,
+    [gameId, current?.priceVersionId ?? null],
   );
   const priceLines = await client.query(
     `SELECT l."price_version_id" AS "priceVersionId", l.customer_tier AS "customerTier", l."item_id" AS "itemId", l."pricing_kind" AS "pricingKind",
@@ -86,8 +87,9 @@ export async function listRules(
   const termVersions = await client.query(
     `SELECT v."id", v."game_id" AS "gameId", v."status", v."revision"::text AS "revision", v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
             CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
-       FROM "zzsh_supply"."term_version" v WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
-    [gameId],
+       FROM "zzsh_supply"."term_version" v WHERE v."game_id" = $1
+      ORDER BY (v."id" IS NOT DISTINCT FROM $2) DESC, v."created_at" DESC, v."id" DESC LIMIT 20`,
+    [gameId, current?.termVersionId ?? null],
   );
   const termOptions = await client.query(
     `SELECT o."version_id" AS "versionId", o."code", o."name", o."daily_consumption"::text AS "dailyConsumption", o."duration_rounding" AS "durationRounding"
@@ -100,8 +102,9 @@ export async function listRules(
     `SELECT v."id", v."game_id" AS "gameId", v."title", v."body", v."digest", v."status", v."revision"::text AS "revision",
             v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
             CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
-       FROM "zzsh_supply"."agreement_version" v WHERE v."game_id" = $1 ORDER BY v."created_at" DESC LIMIT 20`,
-    [gameId],
+       FROM "zzsh_supply"."agreement_version" v WHERE v."game_id" = $1
+      ORDER BY (v."id" IS NOT DISTINCT FROM $2) DESC, v."created_at" DESC, v."id" DESC LIMIT 20`,
+    [gameId, current?.agreementVersionId ?? null],
   );
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled", "sort_order" AS "sortOrder"
@@ -110,7 +113,7 @@ export async function listRules(
   );
   return {
     game: game.rows[0],
-    release: release.rows[0] ?? null,
+    release: current ?? null,
     priceVersions: priceVersions.rows,
     priceLines: priceLines.rows,
     termVersions: termVersions.rows,
@@ -118,7 +121,7 @@ export async function listRules(
     agreementVersions: agreementVersions.rows,
     fullPayoutTermsVersions: (await client.query(`SELECT id,policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt",
       CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS source
-      FROM zzsh_supply.full_payout_terms_version v WHERE game_id=$1 ORDER BY created_at DESC,id DESC LIMIT 20`,[gameId])).rows,
+      FROM zzsh_supply.full_payout_terms_version v WHERE game_id=$1 ORDER BY (id IS NOT DISTINCT FROM $2) DESC, created_at DESC,id DESC LIMIT 20`,[gameId, priceVersions.rows.find(v => v.id === current?.priceVersionId)?.fullPayoutTermsVersionId ?? null])).rows,
     depositCatalog: (await client.query<{ catalog: unknown }>(`
       SELECT jsonb_build_object(
         'catalogRevision', g.catalog_revision::text,
@@ -456,6 +459,19 @@ export async function assertPriceVersionResources(client:PoolClient,gameId:strin
   assertSettlementResourcePrices(mode,rows.filter(row=>row.unit!=='HAFF_BASE'));
 }
 
+export async function assertFixedFeeTermCompatibility(client: PoolClient, termVersionId: string, ...haffRules: unknown[]) {
+  const terms = (await client.query<{ code: string; dailyConsumption: string }>(
+    `SELECT code, daily_consumption::text AS "dailyConsumption" FROM zzsh_supply.term_option WHERE version_id=$1`, [termVersionId])).rows;
+  for (const haffRule of haffRules) {
+    let rule: DeltaHaffRule;
+    try { rule = validateDeltaHaffRule(haffRule, "PERCENT"); }
+    catch { throw conflict("固定手续费价目的哈夫币比例无法核对"); }
+    if (rule.schema !== "haff-ratio-v3" || !terms.length || terms.some(term => !Object.hasOwn(rule.dailyDeltaByTermOption, term.code))
+      || (rule.fixedModes?.custom.enabled && !terms.some(term => term.dailyConsumption === DELTA_CUSTOM_DAILY_CONSUMPTION)))
+      throw conflict("租期选项与固定手续费价目不兼容，请核对日耗和对应比例");
+  }
+}
+
 export async function activateRelease(
   client: PoolClient,
   adminUserId: string,
@@ -468,8 +484,17 @@ export async function activateRelease(
 ): Promise<ActivationResult> {
   if (!/^(0|[1-9]\d*)$/.test(expectedGeneration)) throw invalid("Expected generation is required");
   if (!isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Only a boss can activate a rule release");
-  const game = await client.query(`SELECT "id" FROM "zzsh_supply"."game" WHERE "id" = $1 FOR UPDATE`, [gameId]);
-  if (game.rows.length === 0) throw notFound();
+  const locked = await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`, [gameId]);
+  if (!locked.rows.length) throw notFound();
+  // Read the joined versions after acquiring the lock, including when the lock had to wait.
+  const game = (await client.query<{ id: string; priceVersionId: string | null; termVersionId: string | null; agreementVersionId: string | null; fixedFee: boolean }>(
+    `SELECT g.id, r.price_version_id AS "priceVersionId", r.term_version_id AS "termVersionId", r.agreement_version_id AS "agreementVersionId",
+      to_jsonb(p)->>'fixed_fee_rates' IS NOT NULL AS "fixedFee"
+      FROM "zzsh_supply"."game" g LEFT JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
+      LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=g.id
+      WHERE g.id=$1`, [gameId])).rows[0];
+  if (!game) throw notFound();
+  if (game.fixedFee && priceVersionId !== game.priceVersionId) throw conflict("当前固定手续费价目必须保留，价格变动请使用调价排期");
   await assertGameScope(client, adminUserId, isBoss, gameId);
   const versions = await client.query<{ id: string; status: string; gameId: string }>(
     `SELECT "id", "status", "game_id" AS "gameId" FROM "zzsh_supply"."price_version" WHERE "id" = $1
@@ -482,21 +507,37 @@ export async function activateRelease(
     if (row.gameId !== gameId) throw invalid("Rule versions must belong to this game");
     if (row.status !== "SEALED") throw conflict("Rule versions must be sealed before activation");
   }
-  const priceMeta = (await client.query<{ policy: unknown | null;mode:string;fixedFeeRates:unknown | null }>(
-    `SELECT "funding_policy" AS policy,mode,"fixed_fee_rates" AS "fixedFeeRates" FROM "zzsh_supply"."price_version" WHERE "id" = $1`, [priceVersionId],
+  const priceMeta = (await client.query<{ policy: unknown | null;mode:string;fixedFeeRates:unknown | null;haffRule:unknown }>(
+    `SELECT "funding_policy" AS policy,mode,to_jsonb(v)->'fixed_fee_rates' AS "fixedFeeRates", haff_rule AS "haffRule" FROM "zzsh_supply"."price_version" v WHERE "id" = $1`, [priceVersionId],
   )).rows[0];
   if(!priceMeta)throw invalid('价格规则不存在');
-  // shortcut: fixed-fee publication stays closed until scheduled policy and ledger guards are installed.
-  if (priceMeta.fixedFeeRates !== null && priceMeta.fixedFeeRates !== undefined) throw conflict("固定手续费政策尚未开放发布");
-  await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
-  const pricePolicy=priceMeta.policy;
-  if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
+  if (priceMeta.fixedFeeRates != null && (!game.fixedFee || game.priceVersionId !== priceVersionId))
+    throw conflict("固定手续费政策尚未开放发布");
   const nextGeneration = await client.query<{ generation: string }>(
     `SELECT (COALESCE(MAX("generation"), 0) + 1)::text AS "generation" FROM "zzsh_supply"."rule_release" WHERE "game_id" = $1`,
     [gameId],
   );
   const generation = nextGeneration.rows[0]!.generation;
   if (BigInt(generation) - 1n !== BigInt(expectedGeneration)) throw conflict("Rule release changed; reload before confirming activation");
+  if (priceMeta.fixedFeeRates != null) {
+    if (termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
+      throw conflict("租期和协议均未变化");
+    if (termVersionId !== game.termVersionId) {
+      const scheduled = (await client.query<{ haffRule: unknown }>(`WITH relevant AS (
+        (SELECT price_version_id FROM zzsh_supply.pricing_policy_schedule
+         WHERE game_id=$1 AND pricing_model='FIXED_FEE' AND effective_at<=statement_timestamp()
+         ORDER BY effective_at DESC, generation DESC LIMIT 1)
+        UNION SELECT price_version_id FROM zzsh_supply.pricing_policy_schedule
+         WHERE game_id=$1 AND pricing_model='FIXED_FEE' AND effective_at>statement_timestamp()
+      ) SELECT p.haff_rule AS "haffRule" FROM relevant s
+        LEFT JOIN zzsh_supply.price_version p ON p.id=s.price_version_id AND p.game_id=$1 AND p.status='SEALED'`, [gameId])).rows;
+      await assertFixedFeeTermCompatibility(client, termVersionId, priceMeta.haffRule, ...scheduled.map(price => price.haffRule));
+    }
+  } else {
+    await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
+  }
+  const pricePolicy=priceMeta.policy;
+  if (pricePolicy !== null && pricePolicy !== undefined) await readFullPayoutTerms(client, gameId, validateFundingPolicy(pricePolicy), priceVersionId);
   const releaseId = newSupplyId("release");
   await client.query(
     `INSERT INTO "zzsh_supply"."rule_release" ("id", "game_id", "price_version_id", "term_version_id", "agreement_version_id", "generation", "activated_by_admin_id")

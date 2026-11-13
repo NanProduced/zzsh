@@ -7,7 +7,7 @@ import { computeContentHash, normalizeQuote, normalizeTime, type ContentPayloadI
 import { fixedFeeRateForMode, parseFixedFeeRates } from "./fixed-fee";
 import { validateDeltaHaffRule } from "./delta-rental";
 import { effectivePublicationStateSql } from "./listing-query";
-import { assertPriceVersionResources } from "./rules";
+import { assertFixedFeeTermCompatibility, assertPriceVersionResources } from "./rules";
 import { conflict, invalid, newSupplyId, notFound } from "./supply-util";
 
 type PriceVersion = { id: string; mode: string; status: string; haffRule: unknown; rates: unknown; roundingPolicy: string };
@@ -79,6 +79,32 @@ export async function readPricingSchedules(client: PoolClient, gameId: string, c
     announcements:announcements.slice(0,50),announcementsTruncated:announcements.length>50,
     priceGenerations:{SPREAD:generations.find(row=>row.model==="SPREAD")?.generation??"0",FIXED_FEE:generations.find(row=>row.model==="FIXED_FEE")?.generation??"0"},
     modeGeneration,prices:prices.slice(0,100),modes:modes.slice(0,100),truncated:prices.length>100||modes.length>100};
+}
+
+export async function readSchedulePriceOptions(client: PoolClient, gameId: string, model: PricingModel, cursor: string | null) {
+  let after: { sealedAt: string; id: string } | null = null;
+  if (cursor !== null) {
+    try {
+      if (cursor.length > 512 || !/^[A-Za-z0-9_-]+$/.test(cursor)) throw new Error();
+      const [scope, mode, at, id] = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+      if (scope !== gameId || mode !== model || typeof at !== "string" || normalizeTime(at) !== at || at.startsWith("0000-")
+        || typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) throw new Error();
+      after = { sealedAt: at, id };
+    } catch { throw invalid("价格版本游标无效，请刷新"); }
+  }
+  await requirePricingScheduleSchema(client);
+  const size = 20;
+  const rows = (await client.query<{ id: string; sealedAt: string; fixedFeeRates: unknown }>(`SELECT id,
+    ${instantSql("sealed_at")} AS "sealedAt", fixed_fee_rates AS "fixedFeeRates"
+    FROM zzsh_supply.price_version WHERE game_id=$1 AND status='SEALED' AND sealed_at IS NOT NULL
+      AND rounding_policy='HALF_UP_CENT_V1'
+      AND (($2='FIXED_FEE' AND mode='PERCENT' AND fixed_fee_rates IS NOT NULL AND haff_rule->>'schema'='haff-ratio-v3')
+        OR ($2='SPREAD' AND mode='SPREAD' AND fixed_fee_rates IS NULL AND haff_rule->>'schema'='haff-ratio-v2'))
+      AND ($3::timestamptz IS NULL OR (sealed_at, id)<($3::timestamptz,$4::text))
+    ORDER BY sealed_at DESC, id DESC LIMIT $5`, [gameId, model, after?.sealedAt ?? null, after?.id ?? null, size + 1])).rows;
+  const items = rows.slice(0, size), last = items.at(-1);
+  return { items, nextCursor: last && rows.length > size
+    ? Buffer.from(JSON.stringify([gameId, model, last.sealedAt, last.id])).toString("base64url") : null };
 }
 
 /** Resolve the default for a new listing at one server-supplied instant. */
@@ -336,6 +362,11 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
   if (!current || current.generation !== input.expectedGeneration) throw conflict("价格政策版本已变化，请刷新后重试");
   const generation = (BigInt(current.generation) + 1n).toString();
   await assertPriceVersionResources(client,input.gameId,price.id,price.mode);
+  const currentTerms = (await client.query<{ id: string }>(`SELECT r.term_version_id AS id
+    FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id AND r.game_id=g.id
+    WHERE g.id=$1`, [input.gameId])).rows[0];
+  if (!currentTerms) throw conflict("固定手续费排期需要已生效的租期版本");
+  await assertFixedFeeTermCompatibility(client, currentTerms.id, price.haffRule);
   const timeline = await readFixedFeeTimeline(client, input.gameId, { from: effectiveAt, fee: { effectiveAt, generation, rates, haffRule: price.haffRule } });
   if (!timeline) throw conflict("固定手续费政策无法核实");
   const validation = validateFixedFeeTimeline(timeline);

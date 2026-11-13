@@ -73,7 +73,7 @@ import {
   updateTermDraft,
 } from "./rules";
 import { readFullPayoutTerms } from "./full-payout-terms";
-import { readPricingSchedules, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
+import { readPricingSchedules, readSchedulePriceOptions, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
@@ -897,9 +897,27 @@ async function handleAdminRead(
   if (rulesMatch) {
     const gameId = decodeId(rulesMatch[1]!);
     const result = await withTransaction(options.pool, async (client) => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const access = await requireAdminAccess(client, adminUserId);
       requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
       return listRules(client, adminUserId, access.isBoss, gameId);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
+  const priceOptionsMatch = /^\/games\/([^/]+)\/pricing-schedule-price-options$/.exec(path);
+  if (priceOptionsMatch) {
+    const gameId = decodeId(priceOptionsMatch[1]!), model = query.get("pricingModel");
+    if ((model !== "FIXED_FEE" && model !== "SPREAD") || [...query.keys()].some(key =>
+      !["pricingModel", "cursor"].includes(key) || query.getAll(key).length !== 1)) throw invalid("Unsupported price option query");
+    const result = await withTransaction(options.pool, async client => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      await assertRulesGameSupported(client, gameId);
+      return readSchedulePriceOptions(client, gameId, model, query.get("cursor"));
     });
     sendJson(response, 200, result, requestId);
     return;
@@ -1549,7 +1567,7 @@ async function handleAdminWrite(
         const result = await activateRelease(client, actor.id, access.isBoss, gameId, priceVersionId, termVersionId, agreementVersionId, requiredString(body, "expectedGeneration", 20));
         return { status: 200, body: result, details: { releaseId: result.releaseId, generation: result.generation, affectedCount: result.affectedCount } };
       },
-      "supply.rules.release_activated",
+      "supply.rules.release_activated", true,
     );
     return;
   }

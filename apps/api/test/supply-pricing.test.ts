@@ -131,7 +131,7 @@ test("fixed-fee drafts cannot be activated through the legacy immediate release 
   const calls: string[] = [];
   const client = { query: async (sql: string) => {
     calls.push(sql);
-    if (sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: "game" }] };
+    if (sql.includes("FROM zzsh_supply.game") || sql.includes('FROM "zzsh_supply"."game"')) return { rows: [{ id: "game" }] };
     if (sql.includes('UNION ALL')) return { rows: ["price", "term", "agreement"].map(id => ({ id, status: "SEALED", gameId: "game" })) };
     if (sql.includes('AS "fixedFeeRates"')) return { rows: [{ mode: "PERCENT", policy: null, fixedFeeRates: { ordinary: "0.1", custom: "0.1", fast: "0.1" } }] };
     throw new Error("unexpected query");
