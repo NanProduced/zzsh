@@ -42,6 +42,7 @@
 .payment-dialog {
   position: fixed;
   z-index: 101;
+  pointer-events: auto;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -266,5 +267,5 @@
 }
 
 /* Nested order alerts sit above the payment dialog and dim it. */
-body .ui-alert-dialog-backdrop { z-index: 110; }
-body .ui-alert-dialog { z-index: 111; }
+body .ui-alert-dialog-backdrop { z-index: 110; pointer-events: auto; }
+body .ui-alert-dialog { z-index: 111; pointer-events: auto; }

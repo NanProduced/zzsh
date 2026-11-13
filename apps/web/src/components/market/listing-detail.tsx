@@ -36,6 +36,7 @@ import {
   Share2,
   Shield,
   ShieldAlert,
+  ShieldCheck,
   Shirt,
   Sparkles,
   UserRound,
@@ -67,7 +68,7 @@ import {
 } from "@/lib/listing-view";
 import { supplyApi, SupplyRequestError } from "@/lib/supply-client";
 import { captureOrderSubject, formatOrderMoney, formatOrderTime, isOrderSubjectCurrent, orderApi, orderUrl, type Order } from "@/lib/order-client";
-import { orderAccountTitle, orderPaymentUrl, paymentEntryOpen } from "@/lib/order-display";
+import { orderAccountTitle, orderPaymentUrl, paymentEntryOpen, formatPaymentCountdown } from "@/lib/order-display";
 import { RentalConfirmPanel } from "@/components/order/rental-confirm-panel";
 import { RecommendedAccountsSection } from "./recommended-accounts";
 import { useUserSession } from "@/components/session/user-session-provider";
@@ -347,6 +348,30 @@ function linkedOrderTermText(order: Order): string {
   if (seconds % 86400 === 0) return `${seconds / 86400} 天`;
   if (seconds % 3600 === 0) return `${seconds / 3600} 小时`;
   return `${Math.floor(seconds / 60)} 分钟`;
+}
+
+function PendingOrderCountdown({ until, expired }: { until?: string | null; expired: boolean }) {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!until) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [until]);
+
+  if (expired) return <span className="account-pending-countdown-badge" data-state="expired">已到期，取消处理中</span>;
+  if (!until) return null;
+  const remaining = now === null ? null : Date.parse(until) - now;
+  if (remaining !== null && remaining <= 0) {
+    return <span className="account-pending-countdown-badge" data-state="expired">已到期，取消处理中</span>;
+  }
+  const text = remaining === null ? null : formatPaymentCountdown(remaining);
+  return (
+    <span className="account-pending-countdown-badge" data-state="active">
+      <Clock3 size={13} aria-hidden="true" />
+      <span>{text ? `支付保留 ${text}` : `支付保留至 ${formatOrderTime(until, { timeZoneName: false })}`}</span>
+    </span>
+  );
 }
 
 function ReadyDetail({ data, fromOrder, fromParty = "renter" }: { data: ListingDetailData; fromOrder?: string; fromParty?: "renter" | "owner" }) {
@@ -987,21 +1012,33 @@ function ReadyDetail({ data, fromOrder, fromParty = "renter" }: { data: ListingD
                   </div>
                   <div className="account-quote-content">
                     <p className="account-pending-order-title">{orderAccountTitle(linkedOrder)}</p>
+                    {paymentEntryOpen(linkedOrder) && linkedOrder.holdUntil ? (
+                      <div className="account-pending-countdown-wrap">
+                        <PendingOrderCountdown until={linkedOrder.holdUntil} expired={!paymentEntryOpen(linkedOrder)} />
+                      </div>
+                    ) : null}
                     <dl className="account-pending-facts">
                       <div><dt>订单号</dt><dd>{linkedOrder.displayNo ?? "暂不可用"}</dd></div>
-                      <div><dt>应付金额</dt><dd>{formatOrderMoney(linkedOrder.amounts?.totalDue)}</dd></div>
+                      <div><dt>应付金额</dt><dd className="account-pending-amount-highlight">{formatOrderMoney(linkedOrder.amounts?.totalDue)}</dd></div>
                       <div><dt>支付保留至</dt><dd>{linkedOrder.holdUntil ? formatOrderTime(linkedOrder.holdUntil, { timeZoneName: false }) : "以订单页为准"}</dd></div>
                     </dl>
                     <p className="detail-stage-note account-readonly">
                       {paymentEntryOpen(linkedOrder)
-                        ? "账号已为你保留，完成支付后客服会协助开租。关闭页面后可从订单或个人中心继续支付。"
+                        ? "账号已为你保留独占锁定，完成支付后客服将即时在专属群协助开租。关闭页面后可从订单或个人中心继续支付。"
                         : "支付入口已关闭，账号占用正在释放。你仍可查看订单记录或联系客服。"}
                     </p>
-                    {paymentEntryOpen(linkedOrder) ? <Link className="button rental-confirm-primary account-pending-pay" href={orderPaymentUrl("renter", "", data.id, linkedOrder.id)}>
-                      继续支付
-                    </Link> : null}
+                    {paymentEntryOpen(linkedOrder) ? (
+                      <Link
+                        className="button rental-confirm-primary account-pending-pay"
+                        href={orderPaymentUrl("renter", "", data.id, linkedOrder.id)}
+                      >
+                        <ShieldCheck size={17} aria-hidden="true" />
+                        <span>继续支付 · {formatOrderMoney(linkedOrder.amounts?.totalDue)}</span>
+                        <ChevronRight size={15} aria-hidden="true" />
+                      </Link>
+                    ) : null}
                     <Link className="button quiet button--sm" href={orderUrl("renter", "", data.id, linkedOrder.id)}>
-                      查看订单
+                      查看订单详情
                     </Link>
                   </div>
                 </div>

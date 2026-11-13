@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, CheckCircle2, ChevronRight, Clock3, FileText, RotateCw, ShieldCheck, WalletCards, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronRight, Clock3, FileText, Headphones, RotateCcw, RotateCw, ShieldCheck, WalletCards, X } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { orderApi, orderIntentKey, OrderRequestError, type Order, type PersonalRentalQuote, type RentalPricePreview, type FullPayoutTerms, type FullPayoutTermsAcceptance } from "@/lib/order-client";
 import { clearIntent, isIntentStale, loadIntent, saveIntent } from "@/lib/order-intents";
@@ -890,9 +890,18 @@ export function RentalConfirmPanel({
       </div>
     </div>;
 
-    if (stage.kind === "paid") return <div className="rental-confirm rental-confirm--done" role="status">
-      <p className="rental-confirm-success"><CheckCircle2 size={15} aria-hidden="true" />支付已接纳（本地测试付款记录，不代表真实到账）</p>
-      <Link className="button secondary button--sm" href={orderHref(stage.orderId)}>查看订单与开租进度</Link>
+    if (stage.kind === "paid") return <div className="rental-confirm rental-confirm--done rental-confirm--paid" role="status">
+      <div className="rental-confirm-success-hero">
+        <CheckCircle2 size={24} className="rental-confirm-success-icon" aria-hidden="true" />
+        <div className="rental-confirm-success-copy">
+          <strong>支付已接纳</strong>
+          <span>专属客服已就绪，正在为你准备开租交接与专属群</span>
+        </div>
+      </div>
+      <Link className="button rental-confirm-primary button--sm" href={orderHref(stage.orderId)}>
+        <span>查看订单与开租进度</span>
+        <ChevronRight size={15} aria-hidden="true" />
+      </Link>
     </div>;
 
     if (stage.kind === "review") return <div className="rental-confirm rental-confirm--done" role="status">
@@ -918,12 +927,34 @@ export function RentalConfirmPanel({
       const created = stage.order;
       const total = formatMoneyLabel(created.amounts?.totalDue ?? stage.quote.quote?.tenantPayableTotal ?? null);
       return <>
-        <div className="rental-confirm rental-confirm--quote">
-          <div className="rental-confirm-head"><strong>{paymentCancelled ? "订单已取消" : paymentAccepted ? "支付已接纳" : "订单已创建"}</strong><span className="rental-confirm-tier">{created.displayNo ?? "订单号待确认"}</span></div>
-          <p className="rental-confirm-total-line">本次应付 {total ?? "以服务端确认为准"}</p>
-          <p className="detail-stage-note">{paymentCancelled ? "订单已取消，账号占用已解除。可查看订单或返回账号列表。" : paymentAccepted ? "订单状态以服务端记录为准；付款后仍需客服协助确认开租。" : "订单已保留。关闭付款窗口后，可在个人中心“待支付”继续付款；付款后还需客服协助确认开租。"}</p>
+        <div className="rental-confirm rental-confirm--quote rental-confirm--created">
+          <div className="rental-confirm-head">
+            <strong>{paymentCancelled ? "订单已取消" : paymentAccepted ? "支付已接纳" : "订单已创建 · 待支付"}</strong>
+            <span className="rental-confirm-tier">{created.displayNo ?? "订单号待确认"}</span>
+          </div>
+          {!paymentAccepted && !paymentCancelled && created.holdUntil ? (
+            <div className="account-pending-countdown-wrap">
+              <span className="account-pending-countdown-badge" data-state={created.expiredAwaitingCancel ? "expired" : "active"}>
+                <Clock3 size={13} aria-hidden="true" />
+                <span>{countdown(created.holdUntil, now) ?? "支付保留中"}</span>
+              </span>
+            </div>
+          ) : null}
+          <div className="rental-created-amount-card">
+            <span className="rental-created-amount-label">本次应付</span>
+            <strong className="rental-created-amount-val">{total ?? "以服务端确认为准"}</strong>
+          </div>
+          <p className="detail-stage-note">{paymentCancelled ? "订单已取消，账号占用已解除。可查看订单或返回账号列表。" : paymentAccepted ? "订单状态以服务端记录为准；付款后专属客服将在群内协助确认开租。" : "账号已为你保留独占锁定。关闭付款窗口后，可在本页或个人中心“待支付”继续付款。"}</p>
           <div className="rental-confirm-actions">
-            {!paymentAccepted && !paymentCancelled ? <div className="rental-confirm-primary-action"><button type="button" className="button rental-confirm-primary" onClick={() => setPayOpen(true)}>继续支付{total ? ` ${total}` : ""}</button></div> : null}
+            {!paymentAccepted && !paymentCancelled ? (
+              <div className="rental-confirm-primary-action">
+                <button type="button" className="button rental-confirm-primary" onClick={() => setPayOpen(true)}>
+                  <ShieldCheck size={17} aria-hidden="true" />
+                  <span>继续支付{total ? ` · ${total}` : ""}</span>
+                  <ChevronRight size={15} aria-hidden="true" />
+                </button>
+              </div>
+            ) : null}
             <Link className="button quiet button--sm" href={orderHref(created.id)}>查看订单</Link>
           </div>
         </div>
@@ -958,39 +989,89 @@ export function RentalConfirmPanel({
         <div className="rental-confirm-total"><dt>预计合计</dt><dd>{payable}</dd></div>
       </dl>
       </> : null}
-      <PayoutTerms state={payout} accepted={payoutAccepted} locked onAccept={setPayoutAccepted} />
-      <button type="button" className="rental-terms-open" onClick={() => setTermsOpen(true)}>
-        <FileText size={14} aria-hidden="true" />查看费用与适用条款<ChevronRight size={14} aria-hidden="true" />
-      </button>
-      {termsOpen ? <Dialog.Root open onOpenChange={setTermsOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="rental-terms-dialog rental-terms-dialog--terms" aria-describedby={undefined}>
-            <div className="rental-terms-dialog-head">
-              <Dialog.Title className="rental-terms-dialog-title"><FileText size={18} aria-hidden="true" /><span>费用与适用条款</span></Dialog.Title>
-              <Dialog.Close asChild><button type="button" className="rental-terms-dialog-close-btn" aria-label="关闭条款"><X size={18} aria-hidden="true" /></button></Dialog.Close>
-            </div>
-            <div className="rental-terms-dialog-body">
-              <p className="rental-terms-dialog-copy"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
-              {stage.agreement ? <section className="rental-terms-dialog-agreement">
-                <h3>{stage.agreement.title}</h3>
-                <pre>{stage.agreement.body}</pre>
-              </section> : <p className="detail-stage-note">本单适用协议暂时无法读取。</p>}
-              {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
-            </div>
-            <div className="rental-terms-dialog-footer">
-              <Dialog.Close asChild><button type="button" className="button primary">关闭</button></Dialog.Close>
-            </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root> : null}
-      {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
-      <label className="rental-confirm-consent"><input type="checkbox" checked={agreementAccepted} disabled={!stage.agreement || Boolean(stage.agreementProblem)} onChange={(event) => setAgreementAccepted(event.target.checked)} /><span>我已阅读并同意本单适用协议{stage.agreement ? `《${stage.agreement.title}》` : ""}</span></label>
+      <div className="rental-confirm-legal-box">
+        <div className="rental-confirm-terms-bar">
+          <div className="rental-confirm-terms-info">
+            <FileText size={14} className="rental-confirm-terms-icon" aria-hidden="true" />
+            <span className="rental-confirm-terms-label">服务协议与保障</span>
+          </div>
+          <button type="button" className="rental-terms-open" onClick={() => setTermsOpen(true)}>
+            <span>查看费用与适用条款</span>
+            <ChevronRight size={13} aria-hidden="true" />
+          </button>
+        </div>
+
+        {termsOpen ? <Dialog.Root open onOpenChange={setTermsOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="modal-overlay" />
+            <Dialog.Content className="rental-terms-dialog rental-terms-dialog--terms" aria-describedby={undefined}>
+              <div className="rental-terms-dialog-head">
+                <Dialog.Title className="rental-terms-dialog-title"><FileText size={18} aria-hidden="true" /><span>费用与适用条款</span></Dialog.Title>
+                <Dialog.Close asChild><button type="button" className="rental-terms-dialog-close-btn" aria-label="关闭条款"><X size={18} aria-hidden="true" /></button></Dialog.Close>
+              </div>
+              <div className="rental-terms-dialog-body">
+                <p className="rental-terms-dialog-copy"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
+                {stage.agreement ? <section className="rental-terms-dialog-agreement">
+                  <h3>{stage.agreement.title}</h3>
+                  <pre>{stage.agreement.body}</pre>
+                </section> : <p className="detail-stage-note">本单适用协议暂时无法读取。</p>}
+                {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
+              </div>
+              <div className="rental-terms-dialog-footer">
+                <Dialog.Close asChild><button type="button" className="button primary">关闭</button></Dialog.Close>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root> : null}
+
+        <PayoutTerms state={payout} accepted={payoutAccepted} locked onAccept={setPayoutAccepted} />
+
+        {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
+
+        <label className="rental-confirm-consent">
+          <input
+            type="checkbox"
+            checked={agreementAccepted}
+            disabled={!stage.agreement || Boolean(stage.agreementProblem)}
+            onChange={(event) => setAgreementAccepted(event.target.checked)}
+          />
+          <span>我已阅读并同意本单适用协议{stage.agreement ? `《${stage.agreement.title}》` : ""}</span>
+        </label>
+      </div>
+
       {expired ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />报价已过期，请重新报价。</p> : null}
       <div className="rental-confirm-actions">
-        <div className="rental-confirm-primary-action">{dockPrice}<button type="button" className="button rental-confirm-primary" onClick={() => void sendCreate(quote)} disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || expired || (fullPayoutSelected && !payoutAcceptance)}><WalletCards size={15} aria-hidden="true" />确认并创建订单</button></div>
+        <div className="rental-confirm-primary-action">
+          {dockPrice}
+          <button
+            type="button"
+            className="button rental-confirm-primary"
+            onClick={() => void sendCreate(quote)}
+            disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || expired || (fullPayoutSelected && !payoutAcceptance)}
+          >
+            <ShieldCheck size={18} className="rental-confirm-primary-shield" aria-hidden="true" />
+            <span className="rental-confirm-primary-cta">确认并创建订单</span>
+            {payable ? <span className="rental-confirm-primary-amount">· 立即支付 {payable}</span> : null}
+            <ChevronRight size={16} className="rental-confirm-primary-arrow" aria-hidden="true" />
+          </button>
+        </div>
         {expired || priceChangeNotice ? <button type="button" className="button quiet button--sm" onClick={() => void requote()}>重新报价</button> : null}
-        <button type="button" className="button quiet button--sm" onClick={() => setStage({ kind: "idle" })}>取消</button>
+        <button type="button" className="rental-confirm-cancel-action" onClick={() => setStage({ kind: "idle" })}>取消</button>
+      </div>
+
+      <div className="rental-confirm-trust-badges" aria-label="交易安全保障">
+        <div className="rental-confirm-trust-item">
+          <ShieldCheck size={13} aria-hidden="true" />
+          <span>官方资金托管</span>
+        </div>
+        <div className="rental-confirm-trust-item">
+          <Headphones size={13} aria-hidden="true" />
+          <span>专属客服1对1协助</span>
+        </div>
+        <div className="rental-confirm-trust-item">
+          <RotateCcw size={13} aria-hidden="true" />
+          <span>押金未消耗即退</span>
+        </div>
       </div>
     </div>;
   };

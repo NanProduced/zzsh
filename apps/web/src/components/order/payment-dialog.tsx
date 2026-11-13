@@ -1,6 +1,6 @@
 "use client";
 
-import * as Dialog from "@radix-ui/react-dialog";
+import { Dialog } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { formatOrderMoney, type Order, type OrderParty } from "@/lib/order-client";
 import { orderAccountTitle, type OrderPaymentFacts } from "@/lib/order-display";
@@ -24,14 +24,11 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
   onAccepted?: () => void;
   onCancelled?: () => void;
 }) {
-  if (!open) {
-    return <Dialog.Root open={false} onOpenChange={onOpenChange} />;
-  }
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay className="modal-overlay payment-dialog-overlay" />
-        <Dialog.Content className="payment-dialog">
+        <Dialog.Backdrop className="modal-overlay payment-dialog-overlay" />
+        <Dialog.Popup className="payment-dialog">
           <header className="payment-dialog-head">
             <div>
               <Dialog.Title className="payment-dialog-title">支付订单</Dialog.Title>
@@ -39,8 +36,8 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
                 {order.displayNo ? `订单 ${order.displayNo}` : "订单号待确认"}
               </Dialog.Description>
             </div>
-            <Dialog.Close asChild>
-              <button type="button" className="payment-dialog-close" aria-label="关闭支付弹窗"><X size={18} aria-hidden="true" /></button>
+            <Dialog.Close className="payment-dialog-close" aria-label="关闭支付弹窗">
+              <X size={18} aria-hidden="true" />
             </Dialog.Close>
           </header>
 
@@ -71,7 +68,7 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
             />
             <p className="payment-dialog-footnote">关闭后仍可从个人中心“待支付”或订单列表继续付款。</p>
           </div>
-        </Dialog.Content>
+        </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
   );

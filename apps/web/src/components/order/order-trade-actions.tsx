@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { QRCodeSVG } from "qrcode.react";
-import * as Dialog from "@radix-ui/react-dialog";
+import { Dialog } from "@base-ui/react/dialog";
 import { AlertCircle, CheckCircle2, CircleSlash, Clock3, RefreshCw, WalletCards } from "lucide-react";
 import { ConfirmAlertDialog } from "@/components/ui/alert-dialog";
 import { useUserSession } from "@/components/session/user-session-provider";
@@ -424,14 +424,14 @@ function ChannelPaymentAction({ order, blocked, onChanged, onModeChange, onPendi
       {pending.state === "VALID" && !applied ? <button type="button" className="button secondary button--sm" disabled={busy || reading || blocked} onClick={() => void submit(true)}>恢复原请求回执</button> : null}
     </div>
     {cashier ? <Dialog.Root open={cashierOpen} onOpenChange={open => { if (!open && cashierPending) return; setCashierOpen(open); }}>
-      <Dialog.Portal><Dialog.Overlay className="modal-overlay" /><Dialog.Content className="order-cashier-dialog">
+      <Dialog.Portal><Dialog.Backdrop className="modal-overlay" /><Dialog.Popup className="order-cashier-dialog">
         <Dialog.Title>扫码支付</Dialog.Title>
         <Dialog.Description>订单金额 {channelMoneyText(view?.request?.amount ?? null)} · {selected === "WEIXIN_NATIVE" ? "微信支付" : "支付宝"}</Dialog.Description>
         <div className="order-cashier-code" aria-label="测试二维码区域，不可扫码" />
         <p className="order-muted">测试环境无需真实扫码，点击下方按钮模拟付款。</p>
         <DemoCheckoutAction order={order} blocked={blocked} onChanged={onChanged} onAccepted={openPaidOrderGroup} onModeChange={ignoreDemoMode} onPendingChange={setCashierPending} embedded expectedScope={cashier.scope}>{null}</DemoCheckoutAction>
-        <Dialog.Close asChild><button type="button" className="button secondary" disabled={cashierPending}>稍后支付</button></Dialog.Close>
-      </Dialog.Content></Dialog.Portal>
+        <Dialog.Close className="button secondary" disabled={cashierPending}>稍后支付</Dialog.Close>
+      </Dialog.Popup></Dialog.Portal>
     </Dialog.Root> : null}
     {!compact ? <p className="order-trade-note">打开支付页面不代表付款成功；付款状态以平台接纳记录为准，支付后仍须完成交付与开租确认。</p> : null}
   </div>;

@@ -2,12 +2,13 @@
    弹层基座为 Base UI AlertDialog（modal、禁外部点击关闭、role=alertdialog）；
    覆盖层复用全局 .modal-overlay，这里只补弹层排版、动作主次与克制危险色。 */
 
-.ui-alert-dialog-backdrop { z-index: 100; transition: opacity .16s ease; }
+.ui-alert-dialog-backdrop { z-index: 100; pointer-events: auto; transition: opacity .16s ease; }
 .ui-alert-dialog-backdrop[data-starting-style] { opacity: 0; }
 
 .ui-alert-dialog {
   position: fixed;
   z-index: 101;
+  pointer-events: auto;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
