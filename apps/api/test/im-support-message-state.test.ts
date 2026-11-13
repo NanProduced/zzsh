@@ -12,6 +12,7 @@ import {
 } from "../src/im/consultation";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "../src/im/identity-lifecycle";
 import { handleYunxinRoute, type YunxinRouteOptions } from "../src/im/yunxin-routes";
+import { readConsultationSource, readYunxinRoutesSource } from "./im-source";
 
 const APP_ID = "provider-test";
 const TRANSACTION_SQL = new Set(["BEGIN", "COMMIT", "ROLLBACK"]);
@@ -104,7 +105,7 @@ test("0135 counts support unread per side and records order-group last activity"
   assert.match(sql, /"last_message_at" timestamptz NOT NULL DEFAULT clock_timestamp\(\)/);
   assert.match(sql, /--> statement-breakpoint/);
 
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /"user_unread_count" = CASE WHEN \$4::boolean THEN c\."user_unread_count" ELSE LEAST\(c\."user_unread_count" \+ 1, 999\) END/);
   assert.match(source, /"admin_unread_count" = CASE WHEN \$4::boolean THEN LEAST\(c\."admin_unread_count" \+ 1, 999\) ELSE c\."admin_unread_count" END/);
   assert.match(source, /SET "admin_read_at" = clock_timestamp\(\), "admin_unread_count" = 0/);
@@ -164,7 +165,7 @@ test("recordSupportThreadMessage updates only the open round of the matching thr
   await recordSupportThreadMessage({ pool: pool as never, appId: APP_ID }, "user_im_1|2|900001", "你好", true);
   assert.equal(calls[0]!.values[3], true, "a user message advances first_user_message_at exactly once via COALESCE");
 
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /export async function recordSupportThreadMessage/);
   assert.ok(source.includes("const TEAM_CONVERSATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_@.-]{0,31}\\|2\\|([0-9]{1,19})$/"), "preview must reuse the strict Team conversation shape");
 });
@@ -184,7 +185,7 @@ test("user views expose preview and unread while admin views never claim unread"
   assert.equal(admin.hasUnread, false);
   assert.equal(admin.lastMessagePreview, "你好，在吗");
 
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.equal((source.match(/c\."last_message_preview" AS "lastMessagePreview"/g) ?? []).length, 2);
   assert.equal((source.match(/t\."user_read_at" AS "userReadAt"/g) ?? []).length, 2);
   assert.match(source, /lastMessagePreview: string \| null;/);
@@ -192,7 +193,7 @@ test("user views expose preview and unread while admin views never claim unread"
 });
 
 test("the admin queue hides only empty unassigned WAITING rounds", () => {
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /AND NOT \(c\."state" = 'WAITING' AND c\."assigned_admin_id" IS NULL AND c\."first_user_message_at" IS NULL\)/);
   assert.match(source, /c\."id" = \(\s*SELECT c2\."id"/, "the queue keeps one row per persistent thread");
   assert.match(source, /c2\."state" <> 'CLOSED' OR NOT EXISTS/, "a closed round is returned only when the thread has no open round");
@@ -228,7 +229,7 @@ test("a user read marks only their own thread and stays idempotent", async () =>
   const missing = fakePool((sql) => userAuth()(sql));
   await assert.rejects(markUserConsultationRead({ pool: missing.pool, appId: APP_ID } as never, userContext, "consult_2"), (error: { status?: number }) => error.status === 404);
 
-  const source = readFileSync(resolve("src/im/consultation.ts"), "utf8");
+  const source = readConsultationSource();
   assert.match(source, /export async function markUserConsultationRead/);
   assert.match(source, /"user_read_at" = clock_timestamp\(\)/);
   assert.match(source, /Consultation is not owned by the current user/);
@@ -236,7 +237,7 @@ test("a user read marks only their own thread and stays idempotent", async () =>
 });
 
 test("read routes are POST-only and forwarded by the web proxy", () => {
-  const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
+  const routes = readYunxinRoutesSource();
   assert.ok(routes.includes("\\/user\\/consultations\\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\\/read$"));
   assert.ok(routes.includes("handleUserConsultationRead("));
   assert.ok(routes.includes("markUserConsultationRead(options.consultation, context, consultationId)"));
@@ -254,7 +255,7 @@ test("read routes are POST-only and forwarded by the web proxy", () => {
 });
 
 test("user and admin sends record best-effort previews only after transport success", () => {
-  const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
+  const routes = readYunxinRoutesSource();
   assert.equal((routes.match(/recordSupportPreview\(options, input\.conversationId, input\.text/g) ?? []).length, 3, "text and reply on both ends");
   assert.equal((routes.match(/MEDIA_MESSAGE_PREVIEW\[media\.kind\]/g) ?? []).length, 2);
   assert.equal((routes.match(/recordSupportPreview\(options, input\.conversationId, "\[图片\]"/g) ?? []).length, 2);
@@ -264,7 +265,7 @@ test("user and admin sends record best-effort previews only after transport succ
 });
 
 test("a user message marks the first user message and wakes auto-assign exactly once", async () => {
-  const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
+  const routes = readYunxinRoutesSource();
   const userSection = routes.slice(routes.indexOf("async function handleUserMessages"), routes.indexOf("async function handleAdminMessages"));
   const adminSection = routes.slice(routes.indexOf("async function handleAdminMessages"), routes.indexOf("async function handleImage"));
   assert.equal((userSection.match(/wakeConsultationAutoAssign\(options\)/g) ?? []).length, 4, "text, media, image and verified real receipt each trigger one wake");

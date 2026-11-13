@@ -10,7 +10,7 @@ import {
 import { assertAdminContextInTransaction, type AdminContext } from "../auth/auth-security";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
 import { buildYunxinIdentityMarker, deriveYunxinAccountId } from "./identity-lifecycle";
-import type { SupportAvailability, SupportConnectionState } from "./consultation";
+import type { SupportAvailability, SupportConnectionState } from "./consultation-internals";
 import { supportDispatchablePresenceSql } from "./support-presence-policy";
 import { reapSupportPresenceSessions } from "./support-dispatch";
 import { convergeSupportPresenceForAdmin } from "./support-presence-convergence";
