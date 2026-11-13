@@ -15,7 +15,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ActionTooltip } from "@/components/ui/tooltip";
 import { Icons } from "../components/icons";
 import { Button } from "@/components/ui/button";
 import { StatusMessage } from "../components/ui-elements";
@@ -106,9 +106,9 @@ const BOSS_ONLY_REASON = "仅 Boss 账号持有，不能通过角色授予。";
 
 function BossOnlyTag() {
   return (
-    <span title={BOSS_ONLY_REASON} className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1 py-px align-middle text-[10px] font-medium leading-4">
-      仅 Boss
-    </span>
+    <ActionTooltip content={BOSS_ONLY_REASON}>
+      <span className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1.5 py-px align-middle text-xs font-medium leading-4">仅 Boss</span>
+    </ActionTooltip>
   );
 }
 
@@ -139,13 +139,14 @@ function MatrixGroup({
         <th
           scope="rowgroup"
           colSpan={roles.length + 1}
-          className="sticky left-0 border-y border-border/60 bg-foreground/[0.05] px-2 py-1.5 text-left"
+          data-role-group={group.id}
+          className="sticky left-0 scroll-mt-16 border-y border-border/60 bg-foreground/[0.05] px-2 py-1.5 text-left"
         >
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
             aria-expanded={expanded}
-            className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-2 py-0.5 text-left hover:bg-foreground/[0.04]"
+            className="flex w-full cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5 rounded px-2 py-0.5 text-left hover:bg-foreground/[0.04]"
           >
             <Icons.ChevronDown size={13} className={`shrink-0 text-muted-foreground transition-transform ${expanded ? "" : "-rotate-90"}`} aria-hidden />
             <span className="text-xs font-semibold text-foreground">{group.label}</span>
@@ -225,6 +226,7 @@ function CapabilityMatrix({
   const [query, setQuery] = useState("");
   const [diffOnly, setDiffOnly] = useState(true);
   const [showHint, setShowHint] = useState(false);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const catalog = permissionByCode(permissions);
   const allGroups = groupAdminPermissions(permissions);
   const total = allGroups.reduce((sum, group) => sum + group.codes.length, 0);
@@ -250,6 +252,13 @@ function CapabilityMatrix({
       .filter((group) => group.sections.length > 0);
   }, [allGroups, catalog, diffOnly, query, roles]);
   const shown = groups.reduce((sum, group) => sum + group.sections.reduce((s, section) => s + section.codes.length, 0), 0);
+  const scrollToGroup = (id: string) => {
+    const scroller = scrollerRef.current;
+    const target = scroller?.querySelector<HTMLElement>(`[data-role-group="${id}"]`);
+    if (!scroller || !target) return;
+    const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 58;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+  };
 
   return (
     <div className="min-w-0 space-y-3">
@@ -260,7 +269,6 @@ function CapabilityMatrix({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索权限名称或说明"
-            className="focus-visible:outline-none!"
           />
           {query.trim() ? <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{shown}/{total}</span> : null}
         </div>
@@ -270,8 +278,11 @@ function CapabilityMatrix({
         </div>
       </div>
       <p className="text-xs text-muted-foreground">所有生效管理员默认拥有「订单核心读取」，下表不再列出。</p>
+      {groups.length > 1 ? <div className="flex flex-wrap gap-1.5" role="navigation" aria-label="权限分组">
+        {groups.map((group) => <Button key={group.id} type="button" size="xs" variant="outline" className="cursor-pointer" onClick={() => scrollToGroup(group.id)}>{group.label}</Button>)}
+      </div> : null}
       <div className="overflow-hidden rounded-lg border border-border/70">
-        <div className="max-h-[70vh] overflow-auto">
+        <div ref={scrollerRef} className="max-h-[70vh] overflow-auto [contain:layout_paint]">
           <table className="w-full min-w-[560px] table-fixed border-collapse bg-surface">
             <colgroup>
               <col />
@@ -288,9 +299,9 @@ function CapabilityMatrix({
                   const active = role.code === highlightCode;
                   return (
                     <th key={role.id} scope="col" className={`bg-surface px-2 py-2 text-center ${active ? "border-x-2 border-foreground/30" : "border-l border-border/40"}`}>
-                      <button type="button" onClick={() => onHighlight(role.code)} className="flex w-full flex-col items-center gap-0.5 py-1">
+                      <button type="button" onClick={() => onHighlight(role.code)} className="flex w-full cursor-pointer flex-col items-center gap-0.5 py-1">
                         <span className={`truncate text-xs ${active ? "font-semibold text-foreground" : "text-muted-foreground"}`}>{role.name}</span>
-                        <span className="text-[11px] tabular-nums text-muted-foreground/80">{role.permissionCodes.length}</span>
+                        <span className="text-xs tabular-nums text-muted-foreground/80">{role.permissionCodes.length} 项</span>
                       </button>
                     </th>
                   );
@@ -413,7 +424,7 @@ function PermissionGroupBlock({
                   const locked = Boolean(permission.bossOnly) && !checked;
                   const off = disabled || locked;
                   return (
-                    <label key={code} title={permission.bossOnly ? BOSS_ONLY_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 cursor-pointer select-none ${off ? "cursor-not-allowed opacity-60" : "hover:bg-foreground/[0.05]"}`}>
+                    <label key={code} className={`flex items-start gap-2.5 rounded-md px-2 py-2 cursor-pointer select-none ${off ? "cursor-not-allowed opacity-60" : "hover:bg-foreground/[0.05]"}`}>
                       <Checkbox
                         name={code}
                         className="mt-0.5"
@@ -563,7 +574,7 @@ function RoleFormDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) closeDialog(); }}>
       {/* 固定高度：展开分组时只滚内部，弹窗不跳尺寸 */}
-      <DialogContent className="flex h-[88vh] w-full flex-col gap-0 p-0 sm:max-w-4xl" showCloseButton={!saving}>
+      <DialogContent className="flex h-[88vh] flex-col gap-0 p-0 sm:max-w-4xl" showCloseButton={!saving}>
         <DialogHeader className="shrink-0 px-6 pb-4 pt-6">
           <DialogTitle>{editing ? `${readOnly ? "查看" : "编辑"}角色「${editing.name}」` : "新建角色"}</DialogTitle>
           <DialogDescription>{readOnly ? "角色资料与权限仅供查看。" : editing ? "改动在下一次请求立即生效。" : "先填岗位名称，再勾选这个岗位需要的权限。"}</DialogDescription>
@@ -578,7 +589,7 @@ function RoleFormDialog({
                   value={form.name}
                   readOnly={readOnly}
                   onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
-                  className="h-9 focus-visible:outline-none!"
+                  className="h-9"
                   required
                 />
               </label>
@@ -591,7 +602,7 @@ function RoleFormDialog({
                     items={STATUS_ITEMS}
                     disabled={readOnly}
                   >
-                    <SelectTrigger className="h-9 w-full focus-visible:outline-none!">
+                    <SelectTrigger className="h-9 w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -614,7 +625,7 @@ function RoleFormDialog({
                     items={{ "": "不复制，从空白开始", ...copyItems }}
                     disabled={readOnly}
                   >
-                    <SelectTrigger className="h-9 w-full focus-visible:outline-none!">
+                    <SelectTrigger className="h-9 w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -653,7 +664,7 @@ function RoleFormDialog({
                   readOnly={readOnly}
                   onChange={(event) => setForm((prev) => ({ ...prev, code: event.target.value }))}
                   placeholder="如 finance_ops"
-                  className="h-9 max-w-sm font-mono focus-visible:outline-none!"
+                  className="h-9 max-w-sm font-mono"
                   required
                 />
                 <span className="mt-1.5 block text-xs leading-relaxed text-muted-foreground">
@@ -681,8 +692,7 @@ function RoleFormDialog({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="搜索权限名称或说明"
-                className="focus-visible:outline-none!"
-              />
+                  />
               {groups.length === 0 ? (
                 <p className="rounded-md bg-foreground/[0.04] px-3 py-8 text-center text-sm text-muted-foreground">
                   没有匹配"{query.trim()}"的权限。
@@ -720,10 +730,10 @@ function RoleFormDialog({
             <span className="mr-auto text-xs text-muted-foreground">
               {closeBlocked ? "有未保存的修改，选择“放弃修改”才会关闭。" : dirty ? "有未保存的修改" : editing ? "没有未保存的修改" : "尚未选择权限"}
             </span>
-            <Button type="button" size="sm" variant="secondary" disabled={saving} onClick={() => closeDialog(true)}>
+            <Button type="button" size="sm" variant="secondary" className="max-xl:min-h-11" disabled={saving} onClick={() => closeDialog(true)}>
               {dirty ? "放弃修改" : "关闭"}
             </Button>
-            {!readOnly ? <Button type="submit" size="sm" loading={saving} disabled={!dirty}>
+            {!readOnly ? <Button type="submit" size="sm" className="max-xl:min-h-11" loading={saving} disabled={!dirty}>
               {editing ? "保存更改" : "创建角色"}
             </Button> : null}
           </div>
@@ -757,7 +767,7 @@ export function RoleConfigView({
   const [memberCounts, setMemberCounts] = useState<Map<string, number> | null>(null);
   const [bossCount, setBossCount] = useState<number | null>(null);
   const [highlightCode, setHighlightCode] = useState("");
-  const [dialog, setDialog] = useState<{ kind: "create" } | { kind: "edit"; role: AdminRoleRecord } | null>(null);
+  const [dialog, setDialog] = useState<{ kind: "create" } | { kind: "edit"; role: AdminRoleRecord } | { kind: "view"; role: AdminRoleRecord } | null>(null);
   const [error, setError] = useState<string>();
   const [message, setMessage] = useState<string>();
   const [ready, setReady] = useState(false);
@@ -809,7 +819,7 @@ export function RoleConfigView({
   }, [initialCode, objectOnly, roles]);
 
   useEffect(() => {
-    onDirtyChange?.(Boolean(dialog));
+    onDirtyChange?.(Boolean(dialog && dialog.kind !== "view"));
   }, [dialog, onDirtyChange]);
 
   const highlighted = roles.find((role) => role.code === highlightCode);
@@ -854,12 +864,13 @@ export function RoleConfigView({
               type="button"
               size="sm"
               variant="secondary"
+              className="max-xl:min-h-11"
               disabled={!highlighted}
-              onClick={() => highlighted && setDialog({ kind: "edit", role: highlighted })}
+              onClick={() => highlighted && setDialog({ kind: canConfigure ? "edit" : "view", role: highlighted })}
             >
               {canConfigure ? `编辑「${highlighted?.name}」` : `查看「${highlighted?.name}」权限`}
             </Button>
-            {canConfigure ? <Button type="button" size="sm" onClick={() => setDialog({ kind: "create" })}>
+            {canConfigure ? <Button type="button" size="sm" className="max-xl:min-h-11" onClick={() => setDialog({ kind: "create" })}>
               新建角色
             </Button> : null}
           </div>
@@ -890,45 +901,36 @@ export function RoleConfigView({
           ) : null}
         </div>
       ) : (
-        <div className="grid gap-5 lg:grid-cols-[240px_minmax(0,1fr)]">
-          <aside className="min-w-0">
+        <div className="grid gap-5 xl:grid-cols-[240px_minmax(0,1fr)]">
+          <aside className="min-w-0 xl:sticky xl:top-4 xl:self-start">
             {/* Boss 是账号身份而非角色：可显示，但不可选、不可编辑 */}
-            <TooltipProvider delay={300}>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <div className="role-boss" />
-                  }
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="role-boss-mark">
-                        <Icons.ShieldCheck size={15} aria-hidden />
-                      </span>
-                      <span className="truncate text-sm font-semibold text-foreground">Boss</span>
+            <ActionTooltip content="Boss 不是角色，由系统直接配置，不能创建、编辑或停用。Boss 账号持有平台全部权限，业务范围恒为全部游戏，且不能自行修改。">
+              <div className="role-boss">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span className="role-boss-mark">
+                      <Icons.ShieldCheck size={15} aria-hidden />
                     </span>
-                    <span className="role-boss-badge shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium">最高权限</span>
-                  </div>
-                  <p className="role-boss-note mt-2 text-xs">拥有全部权限</p>
-                  <p className="mt-1 text-xs tabular-nums text-muted-foreground">使用成员 {bossCount ?? "—"}</p>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="max-w-64 leading-relaxed">
-                  Boss 不是角色，由系统直接配置，不能创建、编辑或停用。Boss 账号持有平台全部权限，业务范围恒为全部游戏，且不能自行修改。
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+                    <span className="truncate text-sm font-semibold text-foreground">Boss</span>
+                  </span>
+                  <span className="role-boss-badge shrink-0 rounded-full px-2 py-0.5 text-xs font-medium">最高权限</span>
+                </div>
+                <p className="role-boss-note mt-2 text-xs">拥有全部权限</p>
+                <p className="mt-1 text-xs tabular-nums text-muted-foreground">使用成员 {bossCount === null ? "—" : `${bossCount} 人`}</p>
+              </div>
+            </ActionTooltip>
             <ul className="mt-3 space-y-2">
               {roles.map((role) => {
                 const active = role.code === highlightCode;
                 return (
-                  <li key={role.id}>
+                  <li key={role.id} className={`rounded-lg border transition-colors ${
+                    active ? "border-foreground/35 bg-foreground/[0.06]" : "border-border/60 hover:border-foreground/20 hover:bg-foreground/[0.03]"
+                  }`}>
                     <button
                       type="button"
                       onClick={() => setHighlightCode(role.code)}
                       aria-current={active ? "true" : undefined}
-                      className={`w-full rounded-lg border p-3 text-left transition-colors ${
-                        active ? "border-foreground/35 bg-foreground/[0.06]" : "border-border/60 hover:border-foreground/20 hover:bg-foreground/[0.03]"
-                      }`}
+                      className="w-full cursor-pointer p-3 text-left"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <span className="min-w-0 truncate text-sm font-medium text-foreground">{role.name}</span>
@@ -937,16 +939,19 @@ export function RoleConfigView({
                       <dl className="mt-2.5 flex flex-wrap gap-x-5 gap-y-1">
                         <div className="flex items-baseline gap-1.5">
                           <dt className="text-xs text-muted-foreground">权限</dt>
-                          <dd className="text-xs font-medium tabular-nums text-foreground">{role.permissionCodes.length}</dd>
+                          <dd className="text-xs font-medium tabular-nums text-foreground">{role.permissionCodes.length} 项</dd>
                         </div>
                         <div className="flex items-baseline gap-1.5">
                           <dt className="text-xs text-muted-foreground">使用成员</dt>
                           <dd className="text-xs font-medium tabular-nums text-foreground">
-                            {memberCounts ? (memberCounts.get(role.code) ?? 0) : "—"}
+                            {memberCounts ? `${memberCounts.get(role.code) ?? 0} 人` : "—"}
                           </dd>
                         </div>
                       </dl>
                     </button>
+                    <div className="flex justify-end border-t border-border/50 px-3 py-2 xl:hidden">
+                      <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11" onClick={() => { setHighlightCode(role.code); setDialog({ kind: "view", role }); }}>查看权限</Button>
+                    </div>
                   </li>
                 );
               })}
@@ -955,7 +960,7 @@ export function RoleConfigView({
               <p className="mt-3 text-xs leading-relaxed text-muted-foreground">你可以查看角色，但不能修改。需要调整请联系平台安全管理员。</p>
             ) : null}
           </aside>
-          <div className="hidden min-w-0 lg:block">
+          <div className="hidden min-w-0 xl:block">
             <CapabilityMatrix
               roles={roles}
               permissions={permissions}
@@ -963,18 +968,17 @@ export function RoleConfigView({
               onHighlight={setHighlightCode}
             />
           </div>
-          <p className="text-sm text-muted-foreground lg:hidden">选中角色后，用页面上方的按钮查看完整权限。</p>
         </div>
       )}
 
       {dialog ? (
         <RoleFormDialog
-          key={dialog.kind === "edit" ? dialog.role.code : "create"}
+          key={dialog.kind === "create" ? "create" : dialog.role.code}
           open
-          mode={dialog}
+          mode={dialog.kind === "view" ? { kind: "edit", role: dialog.role } : dialog}
           roles={roles}
           permissions={permissions}
-          readOnly={!canConfigure}
+          readOnly={!canConfigure || dialog.kind === "view"}
           onClose={() => setDialog(null)}
           onSaved={(text, created) => {
             setDialog(null);
