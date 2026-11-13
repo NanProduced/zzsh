@@ -42,6 +42,17 @@ function loadComponent(relativePath, session, extra) {
     if (name === "./payment-dialog" || name === "@/components/order/payment-dialog") return { PaymentDialog: ({ open }) => open ? React.createElement("div", { "data-testid": "payment-dialog" }, "payment-dialog-open") : null };
     if (name === "@/components/ui/tooltip") return { Tooltip: props => React.createElement(React.Fragment, null, props.children), TooltipTrigger: props => React.createElement(React.Fragment, null, props.children), TooltipContent: () => null };
     if (name.endsWith(".css")) return {};
+    if (name.startsWith("./") || name.startsWith("../")) {
+      const baseDir = path.dirname(file);
+      let target = path.resolve(baseDir, name);
+      if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+        if (fs.existsSync(target + ".tsx")) target += ".tsx";
+        else if (fs.existsSync(target + ".ts")) target += ".ts";
+      }
+      if (fs.existsSync(target) && fs.statSync(target).isFile() && /\.tsx?$/.test(target)) {
+        return loadComponent(path.relative(tree, target).split(path.sep).join("/"), session, extra);
+      }
+    }
     return requireFromTree(name);
   };
   module.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(module.require.bind(module));

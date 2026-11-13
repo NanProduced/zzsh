@@ -6,10 +6,39 @@ import {createRequire,Module} from 'node:module';
 import {fileURLToPath} from 'node:url';
 import {test} from 'node:test';
 const tree=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../..'),rq=createRequire(tree+'/package.json'),React=rq('react'),ts=rq('typescript'),{Window}=rq('happy-dom');
-function accountTitleHelpers(){const file=tree+'/apps/web/src/lib/account-title.ts',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='./listing-filters'||n==='./listing-filters.ts'||n==='@/lib/listing-filters'?{canonicalResourceCode:c=>({level6_armor:'df_billable_level6_armor',level6_helmet:'df_billable_level6_helmet',level6_round:'df_billable_level6_bullet',awm_round:'df_billable_awm_bullet',coffee:'df_billable_coffee'})[c]??c}:rq(n);m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+const ownedSiblingCache = new WeakMap();
+function loadOwnedSibling(importerFile, specifier, stubRequire) {
+  if (typeof specifier !== 'string' || (!specifier.startsWith('./') && !specifier.startsWith('../'))) return undefined;
+  const baseName = specifier.split('/').pop() ?? '';
+  if (!baseName.startsWith('listing-detail-') && !baseName.startsWith('rental-confirm-')) return undefined;
+  const base = path.dirname(importerFile);
+  let target = path.resolve(base, specifier);
+  if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+    if (fs.existsSync(target + '.tsx')) target += '.tsx';
+    else if (fs.existsSync(target + '.ts')) target += '.ts';
+    else return undefined;
+  }
+  let cache = ownedSiblingCache.get(stubRequire);
+  if (!cache) { cache = new Map(); ownedSiblingCache.set(stubRequire, cache); }
+  if (cache.has(target)) return cache.get(target);
+  const child = new Module(target);
+  child.filename = target;
+  child.paths = Module._nodeModulePaths(tree);
+  cache.set(target, child.exports);
+  child.require = (name) => {
+    if (name === './recommended-accounts') return { RecommendedAccountsSection: () => null };
+    const nested = loadOwnedSibling(target, name, stubRequire);
+    if (nested !== undefined) return nested;
+    return contentFixtureDependency(name) ?? stubRequire(name);
+  };
+  const source = fs.readFileSync(target, 'utf8');
+  child._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, target);
+  return child.exports;
+}
+function accountTitleHelpers(){const file=tree+'/apps/web/src/lib/account-title.ts',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='./listing-filters'||n==='./listing-filters.ts'||n==='@/lib/listing-filters'?{canonicalResourceCode:c=>({level6_armor:'df_billable_level6_armor',level6_helmet:'df_billable_level6_helmet',level6_round:'df_billable_level6_bullet',awm_round:'df_billable_awm_bullet',coffee:'df_billable_coffee'})[c]??c}:rq(n);m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);return m.exports;}
 const accountTitle=accountTitleHelpers();
-function cardHelpers(){const file=tree+'/apps/web/src/components/delta/account-card.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n==='@/lib/account-title'||n==='./account-title'?accountTitle:n.startsWith('@/')||n.startsWith('./')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+function cardHelpers(){const file=tree+'/apps/web/src/components/delta/account-card.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n==='@/lib/account-title'||n==='./account-title'?accountTitle:n.startsWith('@/')||n.startsWith('./')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);return m.exports;}
 // Radix selects its layout effect on the first account-card or HeroUI import.
 const radixBootstrap=new Window();
@@ -21,7 +50,7 @@ const Pass=props=>React.createElement(React.Fragment,null,props.children);
 const tooltip={Tooltip:Pass,TooltipTrigger:Pass,TooltipContent:()=>null};
 async function gallery(media){const window=new Window({url:'http://127.0.0.1:3100/accounts/example'});Object.assign(globalThis,{window,document:window.document,HTMLElement:window.HTMLElement,Element:window.Element,Node:window.Node,DocumentFragment:window.DocumentFragment,MutationObserver:window.MutationObserver,ResizeObserver:window.ResizeObserver,requestAnimationFrame:window.requestAnimationFrame.bind(window),cancelAnimationFrame:window.cancelAnimationFrame.bind(window),CustomEvent:window.CustomEvent,NodeFilter:window.NodeFilter,IS_REACT_ACT_ENVIRONMENT:true,getComputedStyle:window.getComputedStyle.bind(window)});Object.defineProperty(globalThis,'navigator',{value:window.navigator,configurable:true});
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='@/lib/account-title'?accountTitle:n==='@/lib/order-client'?rq(tree+'/apps/web/src/lib/order-client.ts'):n==='@/lib/order-display'?rq(tree+'/apps/web/src/lib/order-display.ts'):n.startsWith('@/')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);
- const source=fs.readFileSync(file,'utf8').replace('function DetailGallery(','export function DetailGallery(').replace('function entitlementExpiryLabel(','export function entitlementExpiryLabel(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ const source=fs.readFileSync(file,'utf8').replace('function DetailGallery(','export function DetailGallery(').replace('function entitlementExpiryLabel(','export function entitlementExpiryLabel(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const host=window.document.createElement('div');window.document.body.append(host);const root=rq('react-dom/client').createRoot(host);await React.act(async()=>root.render(React.createElement(m.exports.DetailGallery,{title:'公开样本',media})));
  return{host,window,expiryLabel:m.exports.entitlementExpiryLabel,async click(label){const b=host.querySelector(`[aria-label="${label}"]`);assert.ok(b);await React.act(async()=>b.click());},async close(){await React.act(async()=>root.unmount());await window.happyDOM.abort();}};
@@ -44,7 +73,7 @@ test('combined detail keeps rental version binding and remounts confirmation on 
  let session={status:'authenticated',userId:'A',identityVersion:1},mounts=0,lastProps;
  function Panel(props){lastProps=props;const [instance]=React.useState(()=>++mounts);return React.createElement('div',{'data-confirmation-instance':instance});}
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='@/components/order/rental-confirm-panel'?{RentalConfirmPanel:Panel}:n==='@/components/session/user-session-provider'?{useUserSession:()=>session}:n==='@/lib/order-client'?rq(tree+'/apps/web/src/lib/order-client.ts'):n==='@/lib/order-display'?rq(tree+'/apps/web/src/lib/order-display.ts'):n==='@/components/favorites/favorite-button'?{FavoriteButton:()=>null,FavoriteNotice:()=>null}:n==='@/components/ui/tooltip'?tooltip:n==='@/components/delta/login-method-icon'?{LoginMethodIcon:()=>null}:n==='@/components/delta/account-card'?{accountHref:card.accountHref,composeGridTitle:card.composeGridTitle,isHaff:()=>false,orderedQuoteResources:()=>[],skinChipTone:()=>'',moneyValue:(v,f)=>v??f}:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);
- m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(fs.readFileSync(file,'utf8').replace('function ReadyDetail(','export function ReadyDetail('),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const host=window.document.createElement('div');window.document.body.append(host);const root=rq('react-dom/client').createRoot(host),data={id:'account',gameId:'game',versionId:'version',releaseId:'release',title:'combined',displayNo:'TEST',conditionLines:[],resourceLines:[],skinTags:[],media:[],entitlementNames:[],termLabel:'1天',resourceTotalLabel:'¥295.91',payableTotalLabel:'¥945.91',haffRentLabel:'¥256.41',itemResourceTotalLabel:'¥39.50'};
  const render=async(extra={})=>React.act(async()=>root.render(React.createElement(m.exports.ReadyDetail,{data,back:{href:'/',label:'返回'},activeAnchor:'detail-info',...extra})));
@@ -66,7 +95,7 @@ test('detail presentation keeps fields unique, copy bound to public number, and 
  const view=await import('../src/lib/listing-view.ts'), filters=await import('../src/lib/listing-filters.ts');
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);
  m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='next/link'?props=>React.createElement('a',props):n==='@/components/order/rental-confirm-panel'?{RentalConfirmPanel:props=>React.createElement('div',null,React.createElement('p',{className:'account-reference-price'},props.reference.total),React.createElement('button',null,'本人报价'))}:n==='@/components/session/user-session-provider'?{useUserSession:()=>({status:'guest'})}:n==='@/components/favorites/favorite-button'?{FavoriteButton:()=>null,FavoriteNotice:()=>null}:n==='@/lib/listing-view'?view:n==='@/lib/listing-filters'?filters:n==='@/components/ui/tooltip'?tooltip:n==='@/components/delta/login-method-icon'?{LoginMethodIcon:()=>null}:n==='@/components/delta/account-card'?{accountHref:card.accountHref,composeGridTitle:card.composeGridTitle,isHaff:l=>l.unitLabel==='哈夫币',orderedQuoteResources:d=>d.resourceLines.filter(l=>l.unitLabel!=='哈夫币'),skinChipTone:()=>'',moneyValue:v=>v??'待确认'}:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:rq(n);
- const source=fs.readFileSync(file,'utf8').replace('function ReadyDetail(','export function ReadyDetail(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ const source=fs.readFileSync(file,'utf8').replace('function ReadyDetail(','export function ReadyDetail(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const host=window.document.createElement('div');window.document.body.append(host);const root=rq('react-dom/client').createRoot(host);
  const line={itemId:'six',code:'level6_round',name:'六级子弹',quantity:'60',quantityLabel:'1组（60发）',unitLabel:'发',costAmount:'10.00',costLabel:'¥10.00',unitPriceLabel:'¥10.00000000 / 60 发'};
@@ -136,7 +165,7 @@ test('detail presentation keeps fields unique, copy bound to public number, and 
 
 test('SK6-R1-04 withheld skin note states a count without claiming a reason',()=>{
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',source=fs.readFileSync(file,'utf8'),m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);
- m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const note=m.exports.withheldSkinsNote;assert.equal(typeof note,'function');
  assert.equal(note(2),'另有 2 项已申报皮肤当前未公开展示。');
@@ -146,7 +175,7 @@ test('SK6-R1-04 withheld skin note states a count without claiming a reason',()=
 
 test('rank parser handles peak and known subranks without guessing for unknown', async () => {
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',source=fs.readFileSync(file,'utf8'),m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);
- m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const { parseRank } = m.exports;
  assert.deepEqual(parseRank('巅峰'), { text: '巅峰', iconSrc: '/art/delta/ranks/peak.webp' });
@@ -162,7 +191,7 @@ test('rank parser handles peak and known subranks without guessing for unknown',
 test('supply item formatting distinguishes real 0 from null/unknown', async () => {
  const filters=await import('../src/lib/listing-filters.ts'), view=await import('../src/lib/listing-view.ts');
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',source=fs.readFileSync(file,'utf8'),m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='@/lib/listing-filters'?filters:n==='@/lib/listing-view'?view:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:n==='next/link'?props=>React.createElement('a',props):rq(n);
- m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const { formatSupplyItem } = m.exports;
  const sixBullet = { itemId: '1', code: 'df_billable_level6_bullet', name: '六级子弹', quantity: '120', quantityLabel: '2组（120发）', unitLabel: '发', costAmount: '20', costLabel: '¥20' };
@@ -202,7 +231,7 @@ async function feedbackFixture(writeText){
  const view=await import('../src/lib/listing-view.ts'),filters=await import('../src/lib/listing-filters.ts');
  const file=tree+'/apps/web/src/components/market/listing-detail.tsx',m=new Module(file);m.filename=file;m.paths=Module._nodeModulePaths(tree);
  m.require=n=>n==='@heroui/react/toast'?heroToast:n.endsWith('.css')?{}:n==='next/link'?props=>React.createElement('a',props):n==='@/components/order/rental-confirm-panel'?{RentalConfirmPanel:()=>null}:n==='@/components/session/user-session-provider'?{useUserSession:()=>({status:'guest'})}:n==='@/components/favorites/favorite-button'?{FavoriteButton:()=>null,FavoriteNotice:()=>null}:n==='@/lib/listing-view'?view:n==='@/lib/listing-filters'?filters:n==='@/components/ui/tooltip'?tooltip:n==='@/components/delta/account-card'?{accountHref:card.accountHref,isHaff:()=>false,orderedQuoteResources:d=>d.resourceLines,moneyValue:v=>v??'待确认'}:n==='@/lib/account-title'?accountTitle:n.startsWith('@/')?{}:rq(n);
- const source=fs.readFileSync(file,'utf8').replace('function ReadyDetail(','export function ReadyDetail(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+ const source=fs.readFileSync(file,'utf8').replace('function ReadyDetail(','export function ReadyDetail(');m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,file);
  const host=window.document.createElement('div');window.document.body.append(host);const root=rq('react-dom/client').createRoot(host);
  let data={id:'feedback-a',displayNo:'ZZ_TEST_A',publicTitle:'公开测试账号',gameName:'三角洲行动',publishedAt:'2026-10-25T00:00:00Z',resourceLines:[],conditionLines:[],skinTags:[],media:[],entitlementNames:[],resourceTotalLabel:null,haffRentLabel:null,itemResourceTotalLabel:null,depositLabel:null,payableTotalLabel:null,description:null},mounted=true;
@@ -297,7 +326,7 @@ test('B2 deriveDetailTitle builds primary segments (haff, safebox, rank, level) 
   m.paths = Module._nodeModulePaths(tree);
   m.require = n => n === '@heroui/react/toast' ? heroToast : n.endsWith('.css') ? {} : n === '@/lib/listing-view' ? view : n === '@/lib/listing-filters' ? filters : n === '@/lib/account-title' ? accountTitle : n === '@/components/delta/account-card' ? { accountHref: card.accountHref, composeGridTitle: card.composeGridTitle, isHaff: l => l.unitLabel === '哈夫币', orderedQuoteResources: d => d.resourceLines.filter(l => l.unitLabel !== '哈夫币'), skinChipTone: () => '', moneyValue: v => v ?? '待确认' } : n.startsWith('@/') ? {} : n === 'next/link' ? () => null : rq(n);
   const source = fs.readFileSync(file, 'utf8');
-  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
   const { deriveDetailTitle, parseSafeBox } = m.exports;
 
@@ -381,7 +410,7 @@ test('B2 hero attributes retain label-on-top values, safebox prominence and the 
   m.paths = Module._nodeModulePaths(tree);
   m.require = n => n === '@heroui/react/toast' ? heroToast : n.endsWith('.css') ? {} : n === 'next/link' ? props => React.createElement('a', props) : n === '@/components/order/rental-confirm-panel' ? { RentalConfirmPanel: () => null } : n === '@/components/session/user-session-provider' ? { useUserSession: () => ({ status: 'guest' }) } : n === '@/components/favorites/favorite-button' ? { FavoriteButton: () => null, FavoriteNotice: () => null } : n === '@/lib/listing-view' ? view : n === '@/lib/listing-filters' ? filters : n === '@/lib/account-title' ? accountTitle : n === '@/components/ui/tooltip' ? tooltip : n === '@/components/delta/login-method-icon' ? { LoginMethodIcon: () => null } : n === '@/components/delta/account-card' ? { accountHref: card.accountHref, composeGridTitle: card.composeGridTitle, isHaff: l => l.unitLabel === '哈夫币', orderedQuoteResources: d => d.resourceLines.filter(l => l.unitLabel !== '哈夫币'), skinChipTone: () => '', moneyValue: v => v ?? '待确认' } : n.startsWith('@/') ? {} : rq(n);
   const source = fs.readFileSync(file, 'utf8').replace('function ReadyDetail(', 'export function ReadyDetail(');
-  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
 
   const host = window.document.createElement('div');
@@ -460,7 +489,7 @@ async function round2DetailHelpers() {
   m.filename = file;
   m.paths = Module._nodeModulePaths(tree);
   m.require = name => name === '@heroui/react/toast' ? heroToast : name.endsWith('.css') ? {} : name === '@/lib/listing-view' ? view : name === '@/lib/listing-filters' ? filters : name === '@/lib/account-title' ? accountTitle : name === '@/components/delta/account-card' ? card : name.startsWith('@/') ? {} : name === 'next/link' ? () => null : rq(name);
-  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? original(name))(m.require.bind(m));
+  m.require = ((original) => (name) => name === "./recommended-accounts" ? { RecommendedAccountsSection: () => null } : contentFixtureDependency(name) ?? loadOwnedSibling(m.filename, name, original) ?? original(name))(m.require.bind(m));
  m._compile(ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, file);
   return { ...m.exports, conditionLines: view.conditionLines };
 }
@@ -625,7 +654,9 @@ test('real skin preview restores its clicked trigger after Escape and close, alo
       if (name === '@/lib/account-title') return load('apps/web/src/lib/account-title.ts');
       if (name.startsWith('./') || name.startsWith('../')) {
         const relative = path.posix.normalize(path.posix.join(path.posix.dirname(file), name));
-        return load(/\.tsx?$/.test(relative) ? relative : relative + '.ts');
+        if (/\.tsx?$/.test(relative)) return load(relative);
+        if (fs.existsSync(path.join(tree, relative + '.tsx'))) return load(relative + '.tsx');
+        return load(relative + '.ts');
       }
       if (name.startsWith('@/')) return {};
       return rq(name);
