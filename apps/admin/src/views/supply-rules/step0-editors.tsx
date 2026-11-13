@@ -230,19 +230,19 @@ export function BasePricingEditor({ rules, command, draftId, canEdit, onDirtyCha
     {sourceHaff ? <div className="grid gap-4 lg:grid-cols-2">
       {keys.map(k => <div key={k} className="min-w-0 space-y-2">
         <div className="flex items-center gap-1.5">
-          <h3 className="text-sm font-semibold">{MAP_LABEL[k].title}</h3>
+          <h3 className="text-sm font-semibold">{fixed && k === "baseBySafeBox" ? "保险箱基础比例" : MAP_LABEL[k].title}</h3>
           <HelpTip label={`${MAP_LABEL[k].title}说明`}>
-            以数值增减直接影响号主基准比例，数值变化将同步作用于最终租客支付测算。
+            {fixed ? "数值增减会影响本单双方采用的哈夫币比例。" : "以数值增减直接影响号主基准比例，数值变化将同步作用于最终租客支付测算。"}
           </HelpTip>
         </div>
-        <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left"><Table><TableHeader><TableRow><TableHead className="font-medium text-foreground">{MAP_LABEL[k].key}</TableHead><TableHead className="text-right">当前生效</TableHead><TableHead className="text-right font-medium text-foreground">{sealedView ? "待生效" : "草稿"}</TableHead></TableRow></TableHeader><TableBody>
+        <div className="rules-items-table overflow-x-auto rounded-md border border-border max-sm:overflow-visible max-sm:border-0 max-sm:[&_thead]:hidden max-sm:[&_table]:block max-sm:[&_tbody]:grid max-sm:[&_tbody]:gap-3 max-sm:[&_tr]:grid max-sm:[&_tr]:grid-cols-2 max-sm:[&_tr]:gap-x-3 max-sm:[&_tr]:gap-y-2 max-sm:[&_tr]:rounded-md max-sm:[&_tr]:border max-sm:[&_tr]:border-border max-sm:[&_tr]:p-3 max-sm:[&_td]:block max-sm:[&_td]:p-0 max-sm:[&_td]:text-left"><Table><TableHeader><TableRow><TableHead className="font-medium text-foreground">{MAP_LABEL[k].key}</TableHead><TableHead className="text-right">{fixed && current?.mode === "SPREAD" ? "生效价差参考" : "当前生效"}</TableHead><TableHead className="text-right font-medium text-foreground">{sealedView ? "待生效" : "草稿"}</TableHead></TableRow></TableHeader><TableBody>
           {[...new Set([...Object.keys(form.value.maps[k] ?? {}), ...(configuredKeys[k] ?? [])])].map(key => {
             const before = currentHaff?.[k]?.[key];
             const after = form.value.maps[k]?.[key] ?? "";
             const changed = before !== undefined && before !== after.trim();
             return <TableRow key={key}>
               <TableCell className="max-sm:col-span-2 font-medium">{keyLabel(k, key)}</TableCell>
-              <TableCell data-label="当前生效" className={`text-right tabular-nums text-muted-foreground ${ML}`}>{before ?? "—"}</TableCell>
+              <TableCell data-label={fixed && current?.mode === "SPREAD" ? "生效价差参考" : "当前生效"} className={`text-right tabular-nums text-muted-foreground ${ML}`}>{before ?? "—"}</TableCell>
               <TableCell data-label="草稿" className={`w-36 ${ML}`}>
                 <div className="flex flex-col items-end gap-1">
                   <Input
@@ -455,7 +455,7 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
             <TableHead className="w-44">
               <span className="inline-flex items-center gap-1">计价基数 N <HelpTip label="计费基数说明">物资按每 N 个单位单次计价与结算</HelpTip></span>
             </TableHead>
-            <TableHead className="text-right">{fixed ? "当前统一单价" : "当前租客单价"}</TableHead>
+            <TableHead className="text-right">{fixed ? current?.mode === "SPREAD" ? "生效价差租客价（参考）" : "当前统一单价" : "当前租客单价"}</TableHead>
             <TableHead className="text-right font-semibold text-foreground">{fixed ? "统一单价（元）" : sealedView ? "待生效租客价（元）" : "草稿租客价（元）"}</TableHead>
             {mode === "SPREAD" ? (
               <>
@@ -517,14 +517,14 @@ export function PriceItemsEditor({ rules, command, draftId, canEdit, onDirtyChan
                     </div>
                   )}
                 </TableCell>
-                <TableCell data-label="当前租客单价" className={`text-right tabular-nums text-muted-foreground ${ML}`}>
+                <TableCell data-label={fixed && current?.mode === "SPREAD" ? "生效价差租客价（参考）" : fixed ? "当前统一单价" : "当前租客单价"} className={`text-right tabular-nums text-muted-foreground ${ML}`}>
                   {haff ? "—" : cur?.buyerUnitAmount ? referenceUnitYuan(cur.buyerUnitAmount) : <span className="text-muted-foreground/50">未配置</span>}
                 </TableCell>
-                <TableCell data-label={sealedView ? "待生效租客价（元）" : "草稿租客价（元）"} className={`min-w-28 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
+                <TableCell data-label={fixed ? "统一单价（元）" : sealedView ? "待生效租客价（元）" : "草稿租客价（元）"} className={`min-w-28 ${ML} ${haff ? "max-sm:hidden" : ""}`}>
                   {haff ? "—" : (
                     <div className="flex flex-col items-end gap-1">
                       <Input
-                        aria-label={`${item?.name} 租客单价`}
+                        aria-label={`${item?.name} ${fixed ? "统一单价" : "租客单价"}`}
                         inputMode="decimal"
                         maxLength={19}
                         value={r.buyerUnitAmount}
