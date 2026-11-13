@@ -1,37 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AlertTriangle, ChevronRight, RefreshCw, ShieldAlert, Upload } from "lucide-react";
-
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
-
 import { SupplyWriteLockError, withSupplyWriteLock } from "@/lib/supply-write-lock";
 import { cn } from "@/lib/utils";
 
 import { adminRequest, friendlyError, hasPermission, type MediaAssetReview, type MediaReviewPage, type SessionSnapshot, type SupplyGame, type UploadedAssetResponse } from "../api";
 import { Lightbox } from "./supply-review/lightbox";
-import { mediaContentUrl, type ZoomTarget } from "./supply-review/model";
+import { type ZoomTarget } from "./supply-review/model";
 import { MediaDetailPanel } from "./supply-media/detail-panel";
 import {
   actionsFor,
   isExemptReview,
-  objectName,
   OWNERSHIP_LABELS,
   PURPOSE_LABELS,
   queueParams,
   REVIEWED_STATES,
   reviewReasonError,
   STATE_LABELS,
-  timeShort,
   visibilityReasonError,
-  VISIBILITY_LABELS,
   type MediaAction,
   type OwnershipFilter,
   type QueueState,
@@ -48,7 +33,6 @@ import {
   newIdempotencyKey,
   PersistBlockedError,
   readOperationResult,
-  recordPhaseText,
   recoveryQuery,
   requestFingerprint,
   saveRecord,
@@ -62,6 +46,9 @@ import {
   type UploadWriteRecord,
   type WriteRecord,
 } from "./supply-media/write-intent";
+import { MediaAbandonSheet, MediaConfirmDialog, MediaNarrowDetailDialog } from "./supply-media-review-dialogs";
+import { MediaReviewHeader } from "./supply-media-review-header";
+import { MediaReviewQueue } from "./supply-media-review-queue";
 
 type Snapshot = Extract<SessionSnapshot, { authenticated: true }>;
 
@@ -80,21 +67,6 @@ function useIsWide(): boolean {
   return wide;
 }
 
-function Thumb({ asset }: { asset: MediaAssetReview }) {
-  const [failed, setFailed] = useState(false);
-  return (
-    <span className="relative block size-12 shrink-0 overflow-hidden rounded-md border border-border/80 bg-surface-raised shadow-xs group-hover:border-primary/40 transition-colors">
-      {failed ? <span className="absolute inset-0 flex items-center justify-center text-[10px] text-muted-foreground">加载失败</span> : null}
-      <img
-        src={mediaContentUrl(asset.id)}
-        alt=""
-        loading="lazy"
-        className="relative size-full object-contain transition-transform duration-200"
-        onError={() => setFailed(true)}
-      />
-    </span>
-  );
-}
 
 const lockNotice = (failure: unknown): string =>
   failure instanceof SupplyWriteLockError
@@ -105,15 +77,17 @@ const lockNotice = (failure: unknown): string =>
 
 type ReviewScope = "all" | "reviewable" | "exempt";
 
+export type Props = {
+  snapshot: Snapshot;
+  refreshNonce?: number;
+  onOpenPath?: (path: string) => void;
+};
+
 export function SupplyMediaReviewView({
   snapshot,
   refreshNonce = 0,
   onOpenPath,
-}: {
-  snapshot: Snapshot;
-  refreshNonce?: number;
-  onOpenPath?: (path: string) => void;
-}) {
+}: Props) {
   const canRead = hasPermission(snapshot, "supply.review.read");
   const canDecide = hasPermission(snapshot, "supply.review.decide");
   const canUpload = hasPermission(snapshot, "supply.catalog.manage");
@@ -700,251 +674,13 @@ export function SupplyMediaReviewView({
     />
   ) : null;
 
-  const reviewBadge = (asset: MediaAssetReview) => {
-    if (isExemptReview(asset)) {
-      return <Badge variant="outline" className="gap-1 font-medium"><span className="size-1.5 rounded-full bg-sky-500" />免审核对</Badge>;
-    }
-    const variant = asset.reviewState === "APPROVED" ? "success" as const : asset.reviewState === "PENDING" ? "warning" as const : "destructive" as const;
-    const dot = asset.reviewState === "APPROVED" ? "bg-emerald-500" : asset.reviewState === "PENDING" ? "bg-amber-500 motion-safe:animate-pulse" : "bg-rose-500";
-    return <Badge variant={variant} className="gap-1 font-medium"><span className={`size-1.5 rounded-full ${dot}`} />{STATE_LABELS[asset.reviewState] ?? asset.reviewState}</Badge>;
-  };
-  const visibilityBadge = (asset: MediaAssetReview) => (
-    <Badge variant={asset.accessClass === "PUBLIC_DISPLAY" ? "info" : "secondary"} className="gap-1 font-medium">
-      <span className={`size-1.5 rounded-full ${asset.accessClass === "PUBLIC_DISPLAY" ? "bg-sky-500" : "bg-muted-foreground/50"}`} />
-      {VISIBILITY_LABELS[asset.accessClass] ?? asset.accessClass}
-    </Badge>
-  );
-  const queueEmptyState = (
-    <div className="mx-auto my-6 mt-4 max-w-2xl space-y-3 p-8 text-center">
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/60 text-muted-foreground/80">
-        <ShieldAlert className="size-6 text-primary" />
-      </div>
-      <p className="text-sm font-semibold">
-        {filterSummary}：当前筛选下没有{reviewScope === "reviewable" ? "可审核素材" : reviewScope === "exempt" ? "免审核对素材" : "素材"}。
-      </p>
-      <p className="mx-auto max-w-md text-xs leading-relaxed text-muted-foreground">
-        {tab === "pending"
-          ? reviewScope === "exempt"
-            ? "账号展示图免发布前预审，请在来源账号核对。"
-            : "可切换处理范围、状态或刷新队列。"
-          : "可切换状态或刷新队列。"}
-      </p>
-      <div className="flex flex-wrap justify-center gap-2 pt-1">
-        {reviewScope === "reviewable" && exemptCount > 0 ? <Button type="button" size="sm" variant="secondary" onClick={() => { setReviewScope("exempt"); setSelected(null); }}>查看免审核对</Button> : null}
-        {reviewScope === "exempt" && reviewableCount > 0 ? <Button type="button" size="sm" variant="secondary" onClick={() => { setReviewScope("reviewable"); setSelected(null); }}>查看可审核</Button> : null}
-        {tab === "pending" ? (
-          <Button type="button" size="sm" variant="secondary" onClick={() => { setTab("reviewed"); setReviewedState("APPROVED"); }}>查看已通过</Button>
-        ) : (
-          <Button type="button" size="sm" variant="secondary" onClick={() => setTab("pending")}>查看待审核</Button>
-        )}
-      </div>
-    </div>
-  );
 
   return (
     <div className="space-y-4">
-      <section ref={headingRef} className="section-panel">
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/60">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2.5">
-              <h1 className="text-xl leading-8 font-semibold tracking-tight">素材审核</h1>
-            </div>
-            <p className="text-xs text-muted-foreground">审核决定与公开范围分开记录；公开需显式授权。</p>
-          </div>
-          {canUpload ? (
-            <Button type="button" size="sm" variant={pageItems.length > 0 ? "outline" : "default"} className="h-9 gap-1.5 shadow-sm" onClick={() => setUploadState({ ...emptyUploadDialog(), open: true })} disabled={writeLocked}>
-              <Upload className="size-4" /> 上传平台素材
-            </Button>
-          ) : null}
-        </div>
-
-        {writeRecord ? (
-          <div className="mt-3 space-y-2 rounded border border-amber-500/40 bg-amber-500/5 p-3">
-            <p className="flex items-center gap-2 text-xs font-medium"><AlertTriangle className="size-3.5 text-amber-500" />{recordPhaseText(writeRecord)}：{writeRecord.targetLabel}</p>
-            <p className="text-xs text-muted-foreground">
-              原命令与原幂等键已保留；本地记录不是授权依据，恢复仍由服务端校验。不能把当前状态恰好相同当作该命令成功，也不能把未查到记录解释为未执行。
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {writeRecord.phase !== "accepted_readback" ? (
-                <Button type="button" size="sm" variant="secondary" disabled={writeBusy} onClick={() => void replayWrite()}>
-                  <RefreshCw /> {isUploadRecord(writeRecord) && writeRecord.intent.status === "accepted" && !writeRecord.bytes.fingerprint ? "继续上传" : "按原请求重放"}
-                </Button>
-              ) : null}
-              {writeRecord.phase === "accepted_readback" ? (
-                <Button type="button" size="sm" variant="secondary" disabled={writeBusy} onClick={() => void readbackAgain()}>重新读取</Button>
-              ) : null}
-              {writeRecord.phase !== "accepted_readback" && writeRecord.recoverable ? (
-                <Button type="button" size="sm" variant="secondary" disabled={writeBusy} onClick={() => void runRecoveryCheck(writeRecord)}>核对原结果</Button>
-              ) : null}
-              <Button type="button" size="sm" variant="ghost" disabled={writeBusy} onClick={() => setAbandonOpen(true)}>放弃恢复</Button>
-            </div>
-            {writeRecord.phase === "unknown" && !recoveryChecked ? <p className="text-xs text-muted-foreground">恢复检查中，完成前不允许发起新命令。</p> : null}
-            {!isUploadRecord(writeRecord) && !writeRecord.recoverable ? <p className="text-xs text-muted-foreground">{writeRecord.recoverNote}</p> : null}
-            {isUploadRecord(writeRecord) && !uploadMemory.current?.file.size ? <p className="text-xs text-muted-foreground">上传凭据或文件已失效（刷新后不保留），无法继续字节上传；上传未完成，不生成新上传冒充恢复。</p> : null}
-          </div>
-        ) : null}
-        {storedProblem ? (
-          <div className="mt-3 space-y-2 rounded border border-destructive/40 bg-destructive/5 p-3">
-            <p className="text-xs font-medium">本地恢复记录{storedProblem === "corrupt" ? "已损坏，无法解析或摘要不符" : "不属于当前身份"}，已阻止所有新命令。</p>
-            <p className="text-xs text-muted-foreground">不能直接删除后重新提交；请先在列表核对相关对象当前状态，再显式确认清除。</p>
-            <Button type="button" size="sm" variant="secondary" onClick={acknowledgeStoredProblem}>我已在列表核对，清除该记录</Button>
-          </div>
-        ) : null}
-        {unresolvedNotice ? <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">{unresolvedNotice}</p> : null}
-        {notice ? <p role="status" aria-live="polite" className="mt-2 text-xs text-muted-foreground">{notice}</p> : null}
-
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <Tabs value={tab} onValueChange={(value) => setTab(value as ReviewTab)} className="mr-2">
-            <TabsList aria-label="审核任务">
-              <TabsTrigger value="pending">待审核</TabsTrigger>
-              <TabsTrigger value="reviewed">已审核</TabsTrigger>
-            </TabsList>
-          </Tabs>
-          {tab === "reviewed" ? (
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              子状态
-              <Select value={reviewedState} items={REVIEWED_STATES.map((value) => ({ value, label: STATE_LABELS[value] }))} onValueChange={(value) => setReviewedState(value as ReviewedState)}>
-                <SelectTrigger className="h-8 w-28 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {REVIEWED_STATES.map((value) => <SelectItem key={value} value={value}>{STATE_LABELS[value]}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </label>
-          ) : null}
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            归属
-            <Select value={ownershipKind} items={[{ value: "PLATFORM_CATALOG", label: "平台目录素材" }, { value: "USER_SUPPLY", label: "用户供给图片与凭证" }]} onValueChange={(value) => setOwnershipKind(value as OwnershipFilter)}>
-              <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="PLATFORM_CATALOG">平台目录素材</SelectItem>
-                <SelectItem value="USER_SUPPLY">用户供给图片与凭证</SelectItem>
-              </SelectContent>
-            </Select>
-          </label>
-          <span className="text-xs text-muted-foreground">仅显示当前授权范围</span>
-        </div>
-      </section>
+      <MediaReviewHeader headingRef={headingRef} canUpload={canUpload} pageItems={pageItems} writeLocked={writeLocked} setUploadState={setUploadState} writeRecord={writeRecord} writeBusy={writeBusy} replayWrite={replayWrite} readbackAgain={readbackAgain} runRecoveryCheck={runRecoveryCheck} setAbandonOpen={setAbandonOpen} recoveryChecked={recoveryChecked} uploadMemory={uploadMemory} storedProblem={storedProblem} acknowledgeStoredProblem={acknowledgeStoredProblem} unresolvedNotice={unresolvedNotice} notice={notice} tab={tab} setTab={setTab} reviewedState={reviewedState} setReviewedState={setReviewedState} ownershipKind={ownershipKind} setOwnershipKind={setOwnershipKind}/>
 
       <div className={cn("grid grid-cols-1 gap-5", showAside ? "xl:grid-cols-[minmax(0,1fr)_360px] 2xl:grid-cols-[minmax(0,1fr)_420px]" : "w-full")}>
-        <section className="section-panel min-w-0">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold tracking-tight">审核队列</h2>
-              <span className="text-xs text-muted-foreground">{filterSummary}{page ? ` · 本页 ${pageItems.length} 条` : ""}</span>
-            </div>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {page && pageItems.length > 0 ? (
-                <div role="group" aria-label="处理范围" className="flex items-center gap-0.5 rounded-md border border-border/70 p-0.5">
-                  {([
-                    ["all", `全部 ${pageItems.length}`],
-                    ["reviewable", `可审核 ${reviewableCount}`],
-                    ["exempt", `免审 ${exemptCount}`],
-                  ] as const).map(([value, label]) => (
-                    <Button key={value} type="button" size="sm" variant={reviewScope === value ? "secondary" : "ghost"} aria-pressed={reviewScope === value} className="h-7 px-2 text-xs" onClick={() => { setReviewScope(value); setSelected(null); }}>{label}</Button>
-                  ))}
-                </div>
-              ) : null}
-              <Button type="button" size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs" disabled={loading} onClick={() => void loadQueue(cursorNow(), true)}>
-                <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />刷新
-              </Button>
-            </div>
-          </div>
-          {listError ? (
-            <div className="mt-3 space-y-2">
-              <p className="text-xs text-destructive">{listError}</p>
-              <Button type="button" size="sm" variant="secondary" onClick={() => void loadQueue(cursorNow())}>重新读取</Button>
-            </div>
-          ) : loading && !page ? (
-            <div className="mt-3 space-y-2">
-              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-14 w-full" />)}
-            </div>
-          ) : page && page.items.length > 0 && visibleItems.length > 0 ? (
-            <>
-              {wide ? (
-                <div className="mt-2 overflow-x-auto">
-                  <Table className="min-w-[680px]">
-                    <TableHeader>
-                      <TableRow className="bg-muted/30">
-                        <TableHead className="min-w-[260px]">素材</TableHead>
-                        <TableHead className="w-20 whitespace-nowrap">游戏</TableHead>
-                        <TableHead className="w-28 whitespace-nowrap">审核状态</TableHead>
-                        <TableHead className="w-28 whitespace-nowrap">当前可见性</TableHead>
-                        <TableHead className="w-28 whitespace-nowrap">上传时间</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {visibleItems.map((asset) => (
-                        <TableRow
-                          key={asset.id}
-                          data-selected={selected?.id === asset.id ? "true" : undefined}
-                          className={`group transition-colors ${selected?.id === asset.id ? "bg-primary/5 ring-1 ring-inset ring-primary/20" : "hover:bg-muted/40"}`}
-                        >
-                          <TableCell>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              className="h-auto w-full min-w-0 justify-start gap-2.5 p-0 text-left font-normal hover:bg-transparent"
-                              aria-label={`查看素材 ${PURPOSE_LABELS[asset.purpose] ?? asset.purpose} ${timeShort(asset.createdAt)}`}
-                              onClick={() => setSelected(asset)}
-                            >
-                              <Thumb asset={asset} />
-                              <span className="min-w-0">
-                                <span className="block truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
-                                <span className="block truncate text-xs text-muted-foreground">{objectName(asset, gameNames)}</span>
-                              </span>
-                            </Button>
-                          </TableCell>
-                          <TableCell className="whitespace-nowrap text-xs font-medium">{gameNames.get(asset.gameId) ?? "游戏名未提供"}</TableCell>
-                          <TableCell>{reviewBadge(asset)}</TableCell>
-                          <TableCell>{visibilityBadge(asset)}</TableCell>
-                          <TableCell>
-                            <span className="whitespace-nowrap text-xs text-muted-foreground">{timeShort(asset.createdAt)}</span>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <div className="mt-3 space-y-2">
-                  {visibleItems.map((asset) => (
-                    <button
-                      key={asset.id}
-                      type="button"
-                      className="flex w-full items-start gap-3 rounded-lg border border-border/70 bg-card/40 p-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      aria-label={`查看素材 ${PURPOSE_LABELS[asset.purpose] ?? asset.purpose} ${timeShort(asset.createdAt)}`}
-                      onClick={() => setSelected(asset)}
-                    >
-                      <Thumb asset={asset} />
-                      <span className="min-w-0 flex-1 space-y-1">
-                        <span className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-sm font-semibold text-foreground">{PURPOSE_LABELS[asset.purpose] ?? asset.purpose}</span>
-                          {reviewBadge(asset)}
-                        </span>
-                        <span className="block truncate text-xs text-muted-foreground">{objectName(asset, gameNames)}</span>
-                        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-                          <span>{gameNames.get(asset.gameId) ?? "游戏名未提供"}</span>
-                          <span>·</span>
-                          <span>{timeShort(asset.createdAt)}</span>
-                          <span>·</span>
-                          {visibilityBadge(asset)}
-                        </span>
-                      </span>
-                      <ChevronRight className="mt-1 size-4 shrink-0 text-muted-foreground/60" aria-hidden />
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">本页 {pageItems.length} 条{reviewScope !== "all" ? ` · ${scopeLabel} ${visibleItems.length} 条` : ""}</span>
-                <div className="flex gap-2">
-                  <Button type="button" size="sm" variant="secondary" disabled={pageIndex === 0 || loading} onClick={goPrev}>上一页</Button>
-                  <Button type="button" size="sm" variant="secondary" disabled={!page.nextCursor || loading} onClick={goNext}>下一页</Button>
-                </div>
-              </div>
-            </>
-          ) : queueEmptyState}
-        </section>
+        <MediaReviewQueue filterSummary={filterSummary} page={page} pageItems={pageItems} reviewScope={reviewScope} setReviewScope={setReviewScope} setSelected={setSelected} reviewableCount={reviewableCount} exemptCount={exemptCount} loading={loading} loadQueue={loadQueue} cursorNow={cursorNow} listError={listError} wide={wide} visibleItems={visibleItems} selected={selected} gameNames={gameNames} tab={tab} setTab={setTab} setReviewedState={setReviewedState} pageIndex={pageIndex} goPrev={goPrev} goNext={goNext} scopeLabel={scopeLabel}/>
 
         {wide && showAside ? (
           <aside
@@ -957,15 +693,7 @@ export function SupplyMediaReviewView({
           </aside>
         ) : null}
         {!wide ? (
-          <Dialog open={Boolean(selected) && !confirm} onOpenChange={(open) => { if (!open && !confirm) setSelected(null); }}>
-            <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] flex-col overflow-hidden sm:max-w-2xl" closeLabel="关闭素材详情">
-              <DialogHeader className="shrink-0 border-b border-border pb-3">
-                <DialogTitle>素材详情</DialogTitle>
-                <DialogDescription>审核与公开是两个独立动作；技术与绑定未返回的事实显示未提供。</DialogDescription>
-              </DialogHeader>
-              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{detail}</div>
-            </DialogContent>
-          </Dialog>
+          <MediaNarrowDetailDialog selected={selected} confirm={confirm} setSelected={setSelected} detail={detail}/>
         ) : null}
       </div>
 
@@ -985,69 +713,9 @@ export function SupplyMediaReviewView({
       {zoom ? <Lightbox {...zoom} onClose={() => setZoom(undefined)} /> : null}
 
       {/* 审核确认：父级承载（完整 assetId＋action 锚定），切换右栏/Sheet 不丢失。 */}
-      <Dialog open={confirm !== null} onOpenChange={(open) => { if (!open) setConfirm(null); }}>
-        <DialogContent className="sm:max-w-md" closeLabel="关闭确认">
-          {confirm ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>确认{confirm.action.label}</DialogTitle>
-                <DialogDescription>{confirm.action.effect}</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-2 text-xs">
-                <div className="flex items-center gap-2">
-                  <img src={mediaContentUrl(confirm.asset.id)} alt="" className="size-12 rounded border border-border object-contain" />
-                  <div className="min-w-0">
-                    <p className="truncate font-medium">{PURPOSE_LABELS[confirm.asset.purpose] ?? confirm.asset.purpose} · {objectName(confirm.asset, gameNames)}</p>
-                    <p className="break-all text-muted-foreground">{confirm.asset.id}</p>
-                    <p className="truncate text-muted-foreground">{OWNERSHIP_LABELS[confirm.asset.ownershipKind] ?? confirm.asset.ownershipKind}</p>
-                  </div>
-                </div>
-                {confirm.action.kind !== "cover" ? (
-                  <label className="block space-y-1">
-                    <span className="text-muted-foreground">{confirm.action.kind === "review" && confirm.action.reasonRequired ? "原因（必填 2–500 字）" : "说明（可选 2–500 字）"}</span>
-                    <Textarea value={reasonFor(confirm.asset)} onChange={(event) => setReasonFor(confirm.asset, event.target.value)} maxLength={500} rows={2} placeholder="请填写本次核对说明" />
-                  </label>
-                ) : null}
-                {confirmReasonError ? <p className="text-destructive">{confirmReasonError}</p> : null}
-              </div>
-              <DialogFooter>
-                <Button type="button" variant="ghost" onClick={() => setConfirm(null)}>取消</Button>
-                <Button
-                  type="button"
-                  variant={confirm.action.kind === "review" && confirm.action.decision === "REJECT" ? "destructive" : "default"}
-                  disabled={Boolean(confirmReasonError)}
-                  onClick={() => {
-                    const target = confirm.asset;
-                    const action = confirm.action;
-                    setConfirm(null);
-                    void startSimpleWrite(action, target);
-                  }}
-                >
-                  {confirm.action.kind === "review" && confirm.action.decision === "QUARANTINE" ? <ShieldAlert /> : null}
-                  确认{confirm.action.label}
-                </Button>
-              </DialogFooter>
-            </>
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <MediaConfirmDialog confirm={confirm} setConfirm={setConfirm} gameNames={gameNames} reasonFor={reasonFor} setReasonFor={setReasonFor} confirmReasonError={confirmReasonError} startSimpleWrite={startSimpleWrite}/>
 
-      <Sheet open={abandonOpen} onOpenChange={setAbandonOpen}>
-        <SheetContent className="w-full gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-[420px]" closeLabel="关闭放弃恢复">
-          <SheetHeader className="shrink-0 border-b border-border">
-            <SheetTitle>放弃恢复</SheetTitle>
-            <SheetDescription>放弃后不再跟踪该写入的原结果；若服务端实际已处理，重复发起会产生第二次效果。</SheetDescription>
-          </SheetHeader>
-          <div className="space-y-3 px-4 py-4">
-            <p className="text-xs">对象：{writeRecord?.targetLabel ?? "未知"}</p>
-            <p className="text-xs text-muted-foreground">请先在审核队列核对对象当前状态。列表未找到或状态相同都不能证明原命令是否执行。</p>
-            <div className="flex gap-2">
-              <Button type="button" variant="destructive" size="sm" onClick={abandonRecovery}>我已核对，放弃恢复</Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setAbandonOpen(false)}>返回</Button>
-            </div>
-          </div>
-        </SheetContent>
-      </Sheet>
+      <MediaAbandonSheet abandonOpen={abandonOpen} setAbandonOpen={setAbandonOpen} writeRecord={writeRecord} abandonRecovery={abandonRecovery}/>
     </div>
   );
 }
