@@ -169,6 +169,18 @@ async function authorizeImport(client: PoolClient, actor: LegacyContinuationActo
   await assertGameScope(client, actor.userId, access?.isBoss === true, binding.gameId);
 }
 export type LegacyContinuationImport = { orderId: string; sourceDigest: string; sourceAsOf: string; evidenceRef: string; source: LegacyContinuationSource; commissionEvidence: LegacyCommissionEvidence[] };
+/** A system import can only build on the same run's original legacy order and audit. */
+export async function readSystemLegacyOrderOrigin(client: PoolClient, actor: SystemOrderMigrationActor, binding: LegacyOrderBinding): Promise<string> {
+  const source=(await client.query<{bindingDigest:string}>(`SELECT o.binding_digest AS "bindingDigest" FROM zzsh_order.legacy_order_read_snapshot o
+    WHERE o.id=$1 AND o.source_digest=$2 AND o.created_by_migration_id=$3 AND o.migration_manifest_sha256=$4
+      AND EXISTS (SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_type='rental_order' AND e.object_id=o.id
+        AND e.action='order.legacy.read_imported' AND e.outcome='SUCCESS' AND e.actor_type='system' AND e.actor_id=$3
+        AND e.session_id IS NULL AND e.legacy_migration_manifest_sha256=$4 AND e.details->>'legacyId'=o.legacy_id
+        AND e.details->>'sourceDigest'=o.source_digest AND e.details->>'bindingDigest'=o.binding_digest)`,
+    [binding.id,binding.sourceDigest,actor.id,actor.sourceDatasetSha256])).rows[0];
+  if (!source) throw conflict("LEGACY_SYSTEM_ORDER_SOURCE_UNPROVEN");
+  return source.bindingDigest;
+}
 /** Trusted, separately scoped maintenance caller owns the transaction. No public import endpoint. */
 export async function importLegacyContinuationEvidence(client: PoolClient, actor: LegacyContinuationActor | SystemOrderMigrationActor, input: LegacyContinuationImport) {
   input = structuredClone(input);
@@ -185,19 +197,12 @@ export async function importLegacyContinuationEvidence(client: PoolClient, actor
   const operation = "order.legacy.continuation.import";
   const key = sha256Hex(JSON.stringify([input.orderId, sealed.digest])), fingerprint = fingerprintRequest(operation, input.orderId, input);
   const payloadDigest = sha256Hex(canonicalize(input));
-  const source = systemActor ? (await client.query<{bindingDigest:string}>(`SELECT o.binding_digest AS "bindingDigest" FROM zzsh_order.legacy_order_read_snapshot o
-    WHERE o.id=$1 AND o.source_digest=$2 AND o.created_by_migration_id=$3 AND o.migration_manifest_sha256=$4
-      AND EXISTS (SELECT 1 FROM zzsh_iam.audit_event e WHERE e.object_type='rental_order' AND e.object_id=o.id
-        AND e.action='order.legacy.read_imported' AND e.outcome='SUCCESS' AND e.actor_type='system' AND e.actor_id=$3
-        AND e.session_id IS NULL AND e.legacy_migration_manifest_sha256=$4 AND e.details->>'legacyId'=o.legacy_id
-        AND e.details->>'sourceDigest'=o.source_digest AND e.details->>'bindingDigest'=o.binding_digest)`,
-    [input.orderId,input.sourceDigest,systemActor.id,systemActor.sourceDatasetSha256])).rows[0] : null;
-  if (systemActor && !source) throw conflict("LEGACY_SYSTEM_ORDER_SOURCE_UNPROVEN");
+  const bindingDigest = systemActor ? await readSystemLegacyOrderOrigin(client,systemActor,binding) : null;
   return withIdempotency(client, { realm: systemActor ? "system" : "admin", principalId: systemActor?.id ?? adminActor!.userId, operation, resourceId: input.orderId }, key, fingerprint,
     async replay => {
       if (!systemActor) return authorizeImport(client, adminActor!, binding);
       await authorizeSystemOrderMigration(client, systemActor, {orderId:input.orderId,legacyId:binding.legacyId,sourceDigest:input.sourceDigest,
-        bindingDigest:source!.bindingDigest,operation:"CONTINUATION",payloadDigest});
+        bindingDigest:bindingDigest!,operation:"CONTINUATION",payloadDigest});
       const existing = (await client.query<{id:string;sourceDigest:string;factsDigest:string;admission:string;actorId:string|null;manifest:string|null}>(`SELECT id,source_digest AS "sourceDigest",facts_digest AS "factsDigest",admission,
         created_by_migration_id AS "actorId",migration_manifest_sha256 AS manifest FROM zzsh_order.legacy_continuation_evidence
         WHERE order_id=$1 AND source_kind='SOURCE_IMPORT'`,[input.orderId])).rows;
@@ -214,7 +219,7 @@ export async function importLegacyContinuationEvidence(client: PoolClient, actor
           || row.actorId!==systemActor.id || row.manifest!==systemActor.sourceDatasetSha256
           || audit?.actor_type!=="system" || audit.actor_id!==systemActor.id || audit.session_id!==null || audit.manifest!==systemActor.sourceDatasetSha256
           || detail?.evidenceId!==row.id || detail.sourceDigest!==input.sourceDigest || detail.factsDigest!==sealed.digest
-          || detail.bindingDigest!==source!.bindingDigest || detail.payloadDigest!==payloadDigest || detail.admission!==row.admission
+          || detail.bindingDigest!==bindingDigest || detail.payloadDigest!==payloadDigest || detail.admission!==row.admission
           || detail.sourceSystem!=="legacy_mysql_restore" || detail.sourceEntity!=="la_order" || detail.legacyId!==binding.legacyId
           || detail.sourceDatasetSha256!==systemActor.sourceDatasetSha256 || detail.migrationRunDigest!==systemActor.id.slice("legacy-order-migration:".length)
           || !Array.isArray(detail.isolated) || detail.isolated.length!==0
@@ -252,7 +257,7 @@ export async function importLegacyContinuationEvidence(client: PoolClient, actor
       await recordAudit(client, { actorType: systemActor ? "system" : "admin", actorId: systemActor?.id ?? adminActor!.userId,
         ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:adminActor!.sessionId}),
         requestId: actor.requestId, action: operation, objectType: "rental_order", objectId: input.orderId, outcome: "SUCCESS", details: { evidenceId: id, sourceDigest: input.sourceDigest, factsDigest: sealed.digest, admission: facts.evidence.admission, isolated,
-          ...(systemActor ? {sourceSystem:"legacy_mysql_restore",sourceEntity:"la_order",legacyId:binding.legacyId,bindingDigest:source!.bindingDigest,payloadDigest,
+          ...(systemActor ? {sourceSystem:"legacy_mysql_restore",sourceEntity:"la_order",legacyId:binding.legacyId,bindingDigest,payloadDigest,
             sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-order-migration:".length)} : {}) } });
       return { status: 200, body: { evidenceId: id, admission: facts.evidence.admission, isolated } };
     });

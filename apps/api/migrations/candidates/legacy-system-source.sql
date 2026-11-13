@@ -75,6 +75,17 @@ BEGIN
        OR COALESCE(NEW.details->>'evidenceId','')='' THEN
       RAISE EXCEPTION 'legacy continuation source is invalid' USING ERRCODE='42501';
     END IF;
+  ELSIF NEW.action='order.legacy.liability.import' THEN
+    actor_prefix:='legacy-order-migration:'; source_entity:='la_order';
+    IF NEW.object_type IS DISTINCT FROM 'rental_order' OR COALESCE(NEW.details->>'bindingDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'payloadDigest','') !~ '^[a-f0-9]{64}$'
+       OR NEW.details->>'parentSourceDigest' IS DISTINCT FROM NEW.details->>'sourceDigest'
+       OR COALESCE(NEW.details->>'classification','') NOT IN ('COMPLETED_UNREFUNDED','DETAINED','POSTED_CONFISCATION','REFUND_RECORD_EXISTS')
+       OR NEW.details->>'channelState' IS DISTINCT FROM 'UNKNOWN'
+       OR COALESCE(NEW.details#>>'{settlementRecord,digest}','') !~ '^[a-f0-9]{64}$'
+       OR encode(sha256(convert_to(NEW.details#>>'{settlementRecord,canonical}','UTF8')),'hex') IS DISTINCT FROM NEW.details#>>'{settlementRecord,digest}' THEN
+      RAISE EXCEPTION 'legacy liability source is invalid' USING ERRCODE='42501';
+    END IF;
   ELSIF NEW.action='finance.history.empty_batch.imported' THEN
     actor_prefix:='legacy-finance-migration:'; source_entity:='EMPTY_FINANCE_COVERAGE';
     IF NEW.object_type IS DISTINCT FROM 'personal_finance_observation_coverage_batch'

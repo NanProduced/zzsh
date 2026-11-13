@@ -66,3 +66,44 @@ REVOKE ALL ON FUNCTION zzsh_order.check_legacy_system_continuation_audit() FROM 
 COMMENT ON COLUMN zzsh_order.legacy_continuation_evidence.created_by_migration_id IS '系统迁移执行身份；管理员和后续业务记录为空。';
 COMMENT ON COLUMN zzsh_order.legacy_continuation_evidence.migration_manifest_sha256 IS '系统迁移的源数据集摘要；其他记录为空。';
 COMMENT ON FUNCTION zzsh_order.check_legacy_system_continuation_audit() IS '校验旧单续办依据与系统迁移来源审计匹配。';
+
+CREATE FUNCTION zzsh_order.check_legacy_system_liability_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE o zzsh_order.legacy_order_read_snapshot; d zzsh_order.legacy_order_duty; s jsonb; r jsonb; classification text;
+BEGIN
+  SELECT * INTO o FROM zzsh_order.legacy_order_read_snapshot WHERE id=NEW.object_id;
+  classification:=NEW.details->>'classification';s:=(NEW.details#>>'{settlementRecord,canonical}')::jsonb;
+  IF o.id IS NULL OR o.source_pay_status IS DISTINCT FROM 1 OR s IS NULL OR jsonb_typeof(s) IS DISTINCT FROM 'object'
+    OR o.created_by_migration_id IS DISTINCT FROM NEW.actor_id OR o.migration_manifest_sha256 IS DISTINCT FROM NEW.legacy_migration_manifest_sha256
+    OR NEW.details->>'bindingDigest' IS DISTINCT FROM o.binding_digest OR NEW.details->>'sourceDigest' IS DISTINCT FROM o.source_digest
+    OR NEW.details->>'legacyId' IS DISTINCT FROM o.legacy_id OR NEW.details->>'sourceStatus' IS DISTINCT FROM s->>'is_settle' OR NOT (s @> o.source_snapshot)
+    OR (classification<>'REFUND_RECORD_EXISTS' AND NEW.details->'refundRecord' IS DISTINCT FROM 'null'::jsonb)
+    OR (SELECT count(*) FROM zzsh_iam.audit_event a WHERE a.object_type='rental_order' AND a.object_id=o.id
+      AND a.action='order.legacy.liability.import' AND a.outcome='SUCCESS')<>1
+  THEN RAISE EXCEPTION 'Legacy system liability order or audit mismatch' USING ERRCODE='23514'; END IF;
+  IF classification='REFUND_RECORD_EXISTS' THEN
+    r:=(NEW.details#>>'{refundRecord,canonical}')::jsonb;
+    IF o.source_order_status<>5 OR COALESCE((s->>'return_order_money')::numeric,0)<=0 OR NEW.details->>'dutyId' IS NOT NULL
+      OR COALESCE(NEW.details#>>'{refundRecord,digest}','') !~ '^[a-f0-9]{64}$'
+      OR encode(sha256(convert_to(NEW.details#>>'{refundRecord,canonical}','UTF8')),'hex') IS DISTINCT FROM NEW.details#>>'{refundRecord,digest}'
+      OR r->>'order_id' IS DISTINCT FROM o.legacy_id OR COALESCE(r->>'id','') !~ '^[1-9][0-9]{0,23}$'
+    THEN RAISE EXCEPTION 'Legacy refund source evidence mismatch' USING ERRCODE='23514'; END IF;
+  ELSE
+    SELECT * INTO d FROM zzsh_order.legacy_order_duty WHERE id=NEW.details->>'dutyId' AND order_id=o.id;
+    IF d.id IS NULL OR d.source IS DISTINCT FROM 'LEGACY_IMPORT' OR d.source_record_id IS DISTINCT FROM o.legacy_id
+      OR d.source_status IS DISTINCT FROM classification OR d.source_digest IS DISTINCT FROM o.source_digest
+      OR (classification='POSTED_CONFISCATION' AND (s->>'is_settle' IS DISTINCT FROM '3' OR d.kind<>'DEPOSIT_COMPENSATION'
+        OR d.counterparty_user_id IS DISTINCT FROM o.owner_user_id OR d.amount_cents IS DISTINCT FROM o.deposit_amount_cents
+        OR d.status<>'SETTLED' OR d.settled_by IS DISTINCT FROM 'LEGACY_RECORDS'))
+      OR (classification IN ('COMPLETED_UNREFUNDED','DETAINED') AND (o.source_order_status<>4 OR d.kind<>'RENTER_REFUND'
+        OR d.counterparty_user_id IS DISTINCT FROM o.renter_user_id OR d.status<>'PENDING' OR d.settled_by IS NOT NULL
+        OR s->>'is_settle' IS DISTINCT FROM CASE classification WHEN 'DETAINED' THEN '2' ELSE '0' END
+        OR d.amount_cents IS DISTINCT FROM ((s->>'return_order_money')::numeric-GREATEST(COALESCE((s->>'detain_money')::numeric,0),0))*100))
+    THEN RAISE EXCEPTION 'Legacy system liability duty mismatch' USING ERRCODE='23514'; END IF;
+  END IF;
+  RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER legacy_system_liability_audit AFTER INSERT ON zzsh_iam.audit_event
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.legacy_migration_manifest_sha256 IS NOT NULL AND NEW.action='order.legacy.liability.import')
+  EXECUTE FUNCTION zzsh_order.check_legacy_system_liability_audit();
+REVOKE ALL ON FUNCTION zzsh_order.check_legacy_system_liability_audit() FROM PUBLIC;
+COMMENT ON FUNCTION zzsh_order.check_legacy_system_liability_audit() IS '校验旧退款责任与系统来源及历史记录一致，不表示渠道到账。';

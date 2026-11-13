@@ -640,26 +640,29 @@ function systemDisplayAdapter(){
       });
     };
 }
-function systemContinuationAdapter(){
-    const writer=mod('order/legacy-continuation-evidence').importLegacyContinuationEvidence,canonical=mod('supply/content-hash').canonicalize;
-    if(typeof writer!=='function')throw new Error('NEXT_SYSTEM_CONTINUATION_ADAPTER_REQUIRED');
+function systemOrderEvidenceAdapter(operation){
+    if(!['CONTINUATION','LIABILITY'].includes(operation))throw new Error('NEXT_SYSTEM_ORDER_OPERATION_INVALID');
+    const writer=operation==='CONTINUATION'?mod('order/legacy-continuation-evidence').importLegacyContinuationEvidence:mod('order/legacy-liability-intake').importLegacyHistoricalLiability;
+    const canonical=mod('supply/content-hash').canonicalize;
+    if(typeof writer!=='function')throw new Error('NEXT_SYSTEM_ORDER_EVIDENCE_ADAPTER_REQUIRED');
     return async entries=>{
       if(!fenceHeld||!fenceEpoch||!Array.isArray(entries)||!entries.length||entries.length>20||new Set(entries.map(row=>row.body?.orderId)).size!==entries.length)
-        throw new Error('NEXT_SYSTEM_CONTINUATION_BATCH_INVALID');
+        throw new Error('NEXT_SYSTEM_ORDER_EVIDENCE_BATCH_INVALID');
       const epoch=fenceEpoch,ids=entries.map(row=>row.body?.orderId);
       const parents=(await client.query(`SELECT id,legacy_id,source_digest,binding_digest FROM zzsh_order.legacy_order_read_snapshot WHERE id=ANY($1::text[])`,[ids])).rows;
       const byId=new Map(parents.map(row=>[row.id,row])),admitted=new Set();
       for(const row of entries){
-        const parent=byId.get(row.body?.orderId);
-        if(!parent||parent.legacy_id!==row.sourceId||row.body.source?.legacyOrderId!==row.sourceId||parent.source_digest!==row.body.sourceDigest)
-          throw new Error('LEGACY_SYSTEM_CONTINUATION_SOURCE_BINDING_INVALID');
+        const parent=byId.get(row.body?.orderId),legacyId=operation==='CONTINUATION'?row.sourceId:/^la_order:[1-9][0-9]{0,23}$/.test(row.sourceId??'')?row.sourceId.slice(9):null;
+        const sourceDigest=operation==='CONTINUATION'?row.body.sourceDigest:row.body.parentSourceDigest;
+        if(!parent||parent.legacy_id!==legacyId||operation==='CONTINUATION'&&row.body.source?.legacyOrderId!==legacyId||parent.source_digest!==sourceDigest)
+          throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_BINDING_INVALID');
         admitted.add(JSON.stringify({orderId:parent.id,legacyId:parent.legacy_id,sourceDigest:parent.source_digest,bindingDigest:parent.binding_digest,
-          operation:'CONTINUATION',payloadDigest:sha(canonical(row.body))}));
+          operation,payloadDigest:sha(canonical(row.body))}));
       }
       const orderActor={kind:'SYSTEM_ORDER_MIGRATION',id:systemOrderId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
         requestId:'core-legacy-dataset-'+expectedOid,assertMigrationFence:async targetClient=>{assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');
           await assertMigrationFenceHeld(targetClient,registered,epoch);assertRoundWindow();},
-        assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_CONTINUATION_SOURCE_NOT_ADMITTED');}};
+        assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_NOT_ADMITTED');}};
       return systemUserMigration.withSystemOrderMigrationBatch(client,orderActor,async()=>{
         const results=[];for(const row of entries)results.push(await writer(client,orderActor,row.body));return results;
       });
@@ -789,7 +792,8 @@ try {
                     isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE,
                     systemFinance: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemFinanceAdapter() : null,
                     systemInvitation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemInvitationAdapter() : null,
-                    systemContinuation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemContinuationAdapter() : null,
+                    systemContinuation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemOrderEvidenceAdapter('CONTINUATION') : null,
+                    systemLiability: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemOrderEvidenceAdapter('LIABILITY') : null,
                     targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -44,6 +44,20 @@ test('system continuation readback rejects missing, duplicated or changed receip
  assert.equal(matchesSystemContinuationReceipt([row],expected),true);
  for(const rows of [[],[row,row],[{...row,request_fingerprint:'d'.repeat(64)}],[{...row,publish_required:true}],[{...row,response_body:{...row.response_body,isolated:[{}]}}]])
   assert.equal(matchesSystemContinuationReceipt(rows,expected),false);
+});
+test('system liability readback preserves original refund evidence and unknown channel result',()=>{
+ const actorId='legacy-order-migration:'+'a'.repeat(64),manifestSha256='b'.repeat(64),bindingDigest='c'.repeat(64),fingerprint='d'.repeat(64),dutyId='duty-1';
+ const input={orderId:'order-1',parentSourceDigest:'e'.repeat(64),classification:'DETAINED',evidenceRef:'synthetic',settlementRecord:{canonical:'{"is_settle":"2"}',digest:'f'.repeat(64)}};
+ const details={sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId:'1',sourceDigest:input.parentSourceDigest,sourceDatasetSha256:manifestSha256,
+  migrationRunDigest:'a'.repeat(64),bindingDigest,payloadDigest:createHash('sha256').update(JSON.stringify(input)).digest('hex'),classification:input.classification,
+  sourceStatus:'2',parentSourceDigest:input.parentSourceDigest,evidenceRef:input.evidenceRef,settlementRecord:input.settlementRecord,refundRecord:null,dutyId,channelState:'UNKNOWN'};
+ const audit={object_id:input.orderId,action:'order.legacy.liability.import',actor_type:'system',actor_id:actorId,session_id:null,source_manifest:manifestSha256,details};
+ const receipt={scope_key:JSON.stringify(['system',actorId,'order.legacy.liability.import',input.orderId]),key:createHash('sha256').update(input.orderId).digest('hex'),
+  request_fingerprint:fingerprint,response_status:200,publish_required:false,response_body:{classification:input.classification,dutyId,channelState:'UNKNOWN'}};
+ const expected={actorId,manifestSha256,legacyId:'1',bindingDigest,input,dutyId,fingerprint,canonicalize:JSON.stringify};
+ assert.equal(matchesSystemLiabilityEvidence([audit],[receipt],expected),true);
+ for(const [a,r] of [[[],[receipt]],[[audit],[]],[[audit,audit],[receipt]],[[{...audit,details:{...details,channelState:'SUCCESS'}}],[receipt]],[[audit],[{...receipt,publish_required:true}]]])
+  assert.equal(matchesSystemLiabilityEvidence(a,r,expected),false);
 });
 
 test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {

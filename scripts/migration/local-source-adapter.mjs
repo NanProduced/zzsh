@@ -338,6 +338,7 @@ const SYSTEM_AUDIT_DOMAINS = Object.freeze({
     display: {objectType:"rental_account", actions:["supply.legacy.display_snapshot_recorded"]},
     orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
     continuation: {objectType:"rental_order", actions:["order.legacy.continuation.import"]},
+    liability: {objectType:"rental_order", actions:["order.legacy.liability.import"]},
 });
 
 /** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
@@ -380,6 +381,22 @@ export function matchesSystemContinuationReceipt(rows,{actorId,orderId,key,finge
     const row=rows[0],scope=JSON.stringify(["system",actorId,"order.legacy.continuation.import",orderId]);
     return row.scope_key===scope&&row.key===key&&row.request_fingerprint===fingerprint&&row.response_status===200&&row.publish_required===false
       &&canonicalize(row.response_body)===canonicalize({evidenceId,admission,isolated:[]});
+}
+export function matchesSystemLiabilityEvidence(audits,receipts,{actorId,manifestSha256,legacyId,bindingDigest,input,dutyId,fingerprint,canonicalize}){
+    if(typeof canonicalize!=="function"||!input)return false;
+    let source;try{source=JSON.parse(input.settlementRecord?.canonical);}catch{return false;}
+    const audit=audits?.[0],detail=audit?.details,scope=JSON.stringify(["system",actorId,"order.legacy.liability.import",input.orderId]);
+    if(!matchesSystemMigrationAudit(audits,{objectId:input.orderId,action:'order.legacy.liability.import',actorId,manifestSha256,
+      sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId,sourceDigest:input.parentSourceDigest,bindingDigest,
+      payloadDigest:createHash('sha256').update(canonicalize(input)).digest('hex')}))return false;
+    if(!detail||!detail.settlementRecord||!Object.hasOwn(detail,'refundRecord')||detail.classification!==input.classification||detail.sourceStatus!==source?.is_settle||detail.parentSourceDigest!==input.parentSourceDigest||detail.evidenceRef!==input.evidenceRef
+      ||detail.dutyId!==dutyId||detail.channelState!=='UNKNOWN'||canonicalize(detail.settlementRecord)!==canonicalize(input.settlementRecord)
+      ||canonicalize(detail.refundRecord)!==canonicalize(input.refundRecord??null))return false;
+    if(!Array.isArray(receipts)||receipts.length!==1)return false;
+    const receipt=receipts[0];
+    return receipt.scope_key===scope&&receipt.key===createHash('sha256').update(input.orderId).digest('hex')&&receipt.request_fingerprint===fingerprint
+      &&receipt.response_status===200&&receipt.publish_required===false
+      &&canonicalize(receipt.response_body)===canonicalize({classification:input.classification,dutyId,channelState:'UNKNOWN'});
 }
 function assertRegularSourceFile(file) {
     const stat = lstatSync(file);

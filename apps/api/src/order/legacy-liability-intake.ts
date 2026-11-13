@@ -5,22 +5,69 @@ import { recordAudit } from "../auth/security-core";
 import { canonicalize } from "../supply/content-hash";
 import { assertGameScope, conflict, fingerprintRequest, invalid, newSupplyId, sha256Hex, withIdempotency } from "../supply/supply-util";
 import { legacyOwnerUserId } from "../supply/legacy-user-migration";
+import { authorizeSystemOrderMigration, type SystemOrderMigrationActor } from "../legacy-load/system-user-migration";
 import { legacyEconomicDutyId, legacyOrderAdvisoryKey, legacyPlanYuanToCents, type LegacyContinuationActor } from "./legacy-continuation-model";
-import { lockLegacyContinuationOrder, readLegacyContinuationBinding } from "./legacy-continuation-evidence";
+import { lockLegacyContinuationOrder, readLegacyContinuationBinding, readSystemLegacyOrderOrigin } from "./legacy-continuation-evidence";
 
 type HistoricalDisposition = "COMPLETED_UNREFUNDED" | "DETAINED" | "POSTED_CONFISCATION" | "REFUND_RECORD_EXISTS";
 export type LegacyHistoricalLiabilityInput = { orderId: string; parentSourceDigest: string; classification: HistoricalDisposition; evidenceRef: string; settlementRecord: { canonical: string; digest: string }; refundRecord?: { canonical: string; digest: string } };
 /** Separately reviewed maintenance input. No public import or channel execution. */
-export async function importLegacyHistoricalLiability(client: PoolClient, actor: LegacyContinuationActor, input: LegacyHistoricalLiabilityInput) {
+export async function importLegacyHistoricalLiability(client: PoolClient, actor: LegacyContinuationActor | SystemOrderMigrationActor, input: LegacyHistoricalLiabilityInput) {
   input = structuredClone(input);
   if (!input || !["COMPLETED_UNREFUNDED", "DETAINED", "POSTED_CONFISCATION", "REFUND_RECORD_EXISTS"].includes(input.classification) || !input.evidenceRef || input.evidenceRef.length > 512) throw invalid("LIABILITY_SOURCE_INVALID");
   const binding = await readLegacyContinuationBinding(client, input.orderId), operation = "order.legacy.liability.import";
-  return withIdempotency(client, { realm: "admin", principalId: actor.userId, operation, resourceId: input.orderId }, sha256Hex(input.orderId), fingerprintRequest(operation, input.orderId, input), async () => {
-    if (actor.realm !== "admin") throw conflict("IMPORT_NOT_AUTHORIZED");
-    await assertAdminContextInTransaction(client, actor);
-    const access = await loadEffectiveAdminAccess(client, actor.userId); requirePermission(access, "supply.catalog.manage"); requirePermission(access, "order.read");
-    await assertGameScope(client, actor.userId, access?.isBoss === true, binding.gameId);
+  const systemActor="kind" in actor && actor.kind==="SYSTEM_ORDER_MIGRATION" ? actor : null,adminActor=systemActor ? null : actor as LegacyContinuationActor;
+  const bindingDigest=systemActor ? await readSystemLegacyOrderOrigin(client,systemActor,binding) : null;
+  const key=sha256Hex(input.orderId),fingerprint=fingerprintRequest(operation,input.orderId,input),payloadDigest=sha256Hex(canonicalize(input));
+  return withIdempotency(client, { realm: systemActor ? "system" : "admin", principalId: systemActor?.id ?? adminActor!.userId, operation, resourceId: input.orderId }, key, fingerprint, async replay => {
+    if(systemActor)await authorizeSystemOrderMigration(client,systemActor,{orderId:input.orderId,legacyId:binding.legacyId,sourceDigest:input.parentSourceDigest,
+      bindingDigest:bindingDigest!,operation:"LIABILITY",payloadDigest});
+    else {
+      if (adminActor!.realm !== "admin") throw conflict("IMPORT_NOT_AUTHORIZED");
+      await assertAdminContextInTransaction(client, adminActor!);
+      const access = await loadEffectiveAdminAccess(client, adminActor!.userId); requirePermission(access, "supply.catalog.manage"); requirePermission(access, "order.read");
+      await assertGameScope(client, adminActor!.userId, access?.isBoss === true, binding.gameId);
+    }
     if (binding.sourceDigest !== input.parentSourceDigest || binding.sourcePayStatus !== 1) throw conflict("LIABILITY_SOURCE_BINDING");
+    if(systemActor){
+      const audits=(await client.query<{actor_id:string;actor_type:string;session_id:string|null;manifest:string|null;details:Record<string,unknown>}>(`SELECT actor_id,actor_type,session_id,legacy_migration_manifest_sha256 AS manifest,details
+        FROM zzsh_iam.audit_event WHERE object_type='rental_order' AND object_id=$1 AND action=$2 AND outcome='SUCCESS'`,[input.orderId,operation])).rows;
+      const kind=input.classification==='POSTED_CONFISCATION'?'DEPOSIT_COMPENSATION':'RENTER_REFUND';
+      const duties=(await client.query<{id:string;kind:string;amount:string;status:string;beneficiary:string|null;source:string;sourceStatus:string|null;sourceDigest:string;settledBy:string|null}>(`SELECT id,kind,amount_cents::text AS amount,status,counterparty_user_id AS beneficiary,
+        source,source_status AS "sourceStatus",source_digest AS "sourceDigest",settled_by AS "settledBy" FROM zzsh_order.legacy_order_duty
+        WHERE order_id=$1 AND kind IN ('RENTER_REFUND','DEPOSIT_COMPENSATION') AND source_record_id=$2`,[input.orderId,binding.legacyId])).rows;
+      if(!replay){if(audits.length||duties.length)throw conflict("LEGACY_SYSTEM_LIABILITY_RECEIPT_MISSING");return;}
+      const receipts=(await client.query<{request_fingerprint:string;response_status:number;response_body:unknown;publish_required:boolean}>(`SELECT request_fingerprint,response_status,response_body,publish_required
+        FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`,[JSON.stringify(["system",systemActor.id,operation,input.orderId]),key])).rows;
+      const audit=audits[0],detail=audit?.details,dutyId=input.classification==='REFUND_RECORD_EXISTS'?null:legacyEconomicDutyId(input.orderId,kind,binding.legacyId);
+      if(replay.publishRequired||audits.length!==1||receipts.length!==1||audit?.actor_type!=="system"||audit.actor_id!==systemActor.id||audit.session_id!==null
+        ||audit.manifest!==systemActor.sourceDatasetSha256||detail?.classification!==input.classification||detail.dutyId!==dutyId||detail.channelState!=="UNKNOWN"
+        ||detail.parentSourceDigest!==input.parentSourceDigest||detail.sourceDigest!==input.parentSourceDigest||detail.bindingDigest!==bindingDigest||detail.payloadDigest!==payloadDigest
+        ||detail.sourceSystem!=="legacy_mysql_restore"||detail.sourceEntity!=="la_order"||detail.legacyId!==binding.legacyId
+        ||detail.sourceDatasetSha256!==systemActor.sourceDatasetSha256||detail.migrationRunDigest!==systemActor.id.slice("legacy-order-migration:".length)
+        ||canonicalize(detail.settlementRecord)!==canonicalize(input.settlementRecord)||canonicalize(detail.refundRecord)!==canonicalize(input.refundRecord??null)
+        ||receipts[0]!.request_fingerprint!==fingerprint||receipts[0]!.response_status!==200||receipts[0]!.publish_required!==false
+        ||canonicalize(receipts[0]!.response_body)!==canonicalize({classification:input.classification,dutyId,channelState:"UNKNOWN"}))
+        throw conflict("LEGACY_SYSTEM_LIABILITY_RECEIPT_DIFFERS");
+      if(dutyId===null){if(duties.length)throw conflict("LEGACY_SYSTEM_LIABILITY_DUTY_DIFFERS");return;}
+      let amount:string;
+      try {
+        const record=JSON.parse(input.settlementRecord.canonical) as Record<string,string|null>;
+        if(kind==='DEPOSIT_COMPENSATION'){
+          const row=(await client.query<{amount:string|null}>(`SELECT deposit_amount_cents::text AS amount FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1`,[input.orderId])).rows[0];
+          if(row?.amount===null||row?.amount===undefined)throw Error();amount=row.amount;
+        }else{
+          const gross=BigInt(legacyPlanYuanToCents(record.return_order_money!)),raw=record.detain_money;
+          const detain=raw===null||raw===undefined||/^-(0|[1-9]\d{0,21})(?:\.\d{1,2})?$/.test(raw)?0n:BigInt(legacyPlanYuanToCents(raw));
+          if(gross<detain)throw Error();amount=(gross-detain).toString();
+        }
+      }catch{throw conflict("LEGACY_SYSTEM_LIABILITY_DUTY_DIFFERS");}
+      const duty=duties[0],validState=kind==='DEPOSIT_COMPENSATION'?duty?.status==='SETTLED'&&duty.settledBy==='LEGACY_RECORDS':
+        duty?.status==='PENDING'&&duty.settledBy===null||duty?.status==='SETTLED'&&duty.settledBy==='FINANCE';
+      if(duties.length!==1||duty?.id!==dutyId||duty.kind!==kind||duty.amount!==amount||duty.beneficiary!==(kind==='RENTER_REFUND'?binding.renterUserId:binding.ownerUserId)
+        ||duty.source!=="LEGACY_IMPORT"||duty.sourceStatus!==input.classification||duty.sourceDigest!==input.parentSourceDigest||!validState)
+        throw conflict("LEGACY_SYSTEM_LIABILITY_DUTY_DIFFERS");
+    }
   }, async () => {
     await lockLegacyContinuationOrder(client, input.orderId);
     const row = (await client.query<{ source: Record<string, string | null>; deposit: string | null }>(`SELECT source_snapshot AS source,deposit_amount_cents::text AS deposit FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1`, [input.orderId])).rows[0];
@@ -57,7 +104,11 @@ export async function importLegacyHistoricalLiability(client: PoolClient, actor:
       if (!existing) await client.query(`INSERT INTO zzsh_order.legacy_order_duty(id,order_id,kind,source_record_id,counterparty_user_id,amount_cents,currency,status,source,source_status,source_digest,settled_by)
         VALUES($1,$2,$3,$4,$5,$6,'CNY',$7,'LEGACY_IMPORT',$8,$9,$10)`, [dutyId,input.orderId,kind,binding.legacyId,refund ? binding.renterUserId : binding.ownerUserId,amount,refund ? "PENDING" : "SETTLED",input.classification,input.parentSourceDigest,refund ? null : "LEGACY_RECORDS"]);
     }
-    await recordAudit(client, { actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_order", objectId: input.orderId, outcome: "SUCCESS", details: { classification: input.classification, sourceStatus: detained, parentSourceDigest: input.parentSourceDigest, evidenceRef: input.evidenceRef, settlementRecord: input.settlementRecord, refundRecord: input.refundRecord ?? null, dutyId, channelState: "UNKNOWN" } });
+    await recordAudit(client, { actorType: systemActor?"system":"admin", actorId: systemActor?.id??adminActor!.userId,
+      ...(systemActor?{legacyMigrationManifestSha256:systemActor.sourceDatasetSha256}:{sessionId:adminActor!.sessionId}),
+      requestId: actor.requestId, action: operation, objectType: "rental_order", objectId: input.orderId, outcome: "SUCCESS", details: { classification: input.classification, sourceStatus: detained, parentSourceDigest: input.parentSourceDigest, evidenceRef: input.evidenceRef, settlementRecord: input.settlementRecord, refundRecord: input.refundRecord ?? null, dutyId, channelState: "UNKNOWN",
+        ...(systemActor?{sourceSystem:"legacy_mysql_restore",sourceEntity:"la_order",legacyId:binding.legacyId,sourceDigest:input.parentSourceDigest,bindingDigest,payloadDigest,
+          sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-order-migration:".length)}:{}) } });
     return { status: 200, body: { classification: input.classification, dutyId, channelState: "UNKNOWN" } };
   });
 }

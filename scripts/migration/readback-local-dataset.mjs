@@ -3,7 +3,7 @@ import { acquireMigrationTransactionFence, advisoryLockSql, assertCoreSystemMigr
 import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
-import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
@@ -744,7 +744,53 @@ try {
     if (!binding) continue;
     const phaseBytes = readFileSync(join(phaseDirectory, "phases", phaseName + ".json"));
     if (hash(phaseBytes) !== binding.sha256) throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
-    reviewedEffects.push(...JSON.parse(phaseBytes).filter(row => row.effect).map(row => ({...row.effect,...(row.body?.commission?{level:row.body.commission.level,ratio:row.body.commission.ratio,sourceRecordId:row.body.commission.id}:{})})));
+    const phaseRows=JSON.parse(phaseBytes);
+    reviewedEffects.push(...phaseRows.filter(row => row.effect).map(row => ({...row.effect,...(row.body?.commission?{level:row.body.commission.level,ratio:row.body.commission.ratio,sourceRecordId:row.body.commission.id}:{})})));
+    if(phaseName==='liabilityDuties'){
+      const systemLiability=binding.receiptMode==='SYSTEM_ORDER_V1';
+      if(binding.receiptMode!==undefined&&!systemLiability||state.binding.systemOrderId&&!systemLiability||systemLiability&&!systemCore)
+        throw new Error('SYSTEM_LIABILITY_RECEIPT_MODE_UNCONFIRMED');
+      if(systemLiability){
+        const sourceRows=[],entry=manifest.files.liabilities;
+        if(entry)for await(const row of readBoundSourceRows(join(dataset,entry.file),entry))sourceRows.push(row);
+        const parents=[],audits=new Map(),receipts=new Map(),duties=new Map();
+        for(let index=0;index<sourceRows.length;index+=500)parents.push(...(await query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",
+          binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",
+          owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId" FROM zzsh_order.legacy_order_read_snapshot
+          WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=ANY($1::text[])`,[sourceRows.slice(index,index+500).map(row=>row.sourceId)])).rows);
+        const byLegacy=new Map(parents.map(parent=>[parent.legacyId,parent])),byOrder=new Map(parents.map(parent=>[parent.parentOrderId,parent]));
+        const assembly=mod('finance/legacy-finance-source-preparation').assembleLegacyLiabilityBatch({batchId:'full-liabilities-'+state.binding.oid,parents,current:null,
+          rows:sourceRows.map(row=>({classification:row.classification,legacyOrderId:row.sourceId,mappedOrderId:byLegacy.get(row.sourceId)?.parentOrderId??null,
+            originalOrder:row.originalOrder,refundRecord:row.refundRecords.length===1?row.refundRecords[0]:null,evidenceRef:manifest.sourceRef+':liability:'+row.sourceId}))});
+        const rebuilt=assembly.rows.filter(row=>row.command).map(row=>({sourceId:row.sourceKey,body:row.command.body,effect:row.effect}));
+        const sourceReconstructed=rebuilt.length===sourceRows.length&&canonical(rebuilt)===canonical(phaseRows);
+        if(!sourceReconstructed)difference('liabilityDuties','SOURCE','LIABILITY_SOURCE_RECONSTRUCTION_DRIFT');
+        for(let index=0;index<phaseRows.length;index+=500){
+          const ids=phaseRows.slice(index,index+500).map(row=>row.body.orderId),grouped=await readSystemMigrationAudits(query,'liability',ids);
+          for(const [id,values] of grouped)audits.set(id,values);
+          const scopes=ids.map(id=>JSON.stringify(['system',state.binding.systemOrderId,'order.legacy.liability.import',id]));
+          for(const row of (await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required
+            FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows){const group=receipts.get(row.scope_key)??[];group.push(row);receipts.set(row.scope_key,group);}
+          for(const row of (await query(`SELECT order_id,id,kind,source_record_id,amount_cents::text AS amount,status,counterparty_user_id AS beneficiary,
+            settled_by,source,source_status,source_digest FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])
+            AND kind IN ('RENTER_REFUND','DEPOSIT_COMPENSATION')`,[ids])).rows){const group=duties.get(row.order_id)??[];group.push(row);duties.set(row.order_id,group);}
+        }
+        let matched=0;
+        for(const row of phaseRows){
+          const input=row.body,parent=byOrder.get(input.orderId),actorId=state.binding.systemOrderId,scope=JSON.stringify(['system',actorId,'order.legacy.liability.import',input.orderId]);
+          const candidates=(duties.get(input.orderId)??[]).filter(duty=>duty.source_record_id===parent?.legacyId),effect=row.effect;
+          const duty=effect?candidates[0]:null,dutyMatches=effect?candidates.length===1&&duty.id===effect.dutyId&&duty.kind===effect.kind&&duty.amount===effect.amountCents
+            &&duty.status===effect.status&&duty.beneficiary===effect.beneficiaryUserId&&duty.settled_by===effect.settledBy&&duty.source==='LEGACY_IMPORT'
+            &&duty.source_status===input.classification&&duty.source_digest===input.parentSourceDigest:candidates.length===0;
+          const good=parent&&dutyMatches&&matchesSystemLiabilityEvidence(audits.get(input.orderId),receipts.get(scope),{actorId,manifestSha256:state.binding.datasetSha256,
+            legacyId:parent.legacyId,bindingDigest:parent.bindingDigest,input,dutyId:effect?.dutyId??null,
+            fingerprint:mod('supply/supply-util').fingerprintRequest('order.legacy.liability.import',input.orderId,input),canonicalize:canonical});
+          if(good)matched++;else difference('liabilityDuties',row.sourceId,'LIABILITY_SYSTEM_ATTRIBUTION_DRIFT');
+        }
+        report.liabilityDuties={expected:phaseRows.length,matched,sourceReconstructed,channelArrivalVerified:false,
+          systemAttribution:{status:sourceReconstructed&&matched===phaseRows.length?'VERIFIED':'MISMATCH',expected:phaseRows.length,matched}};
+      }
+    }
   }
   if(state.fundsSupplement&&state.generatedPhases?.continuationEvidence){
     const phase = state.generatedPhases.continuationEvidence, bytes = readFileSync(join(phaseDirectory, "phases/continuationEvidence.json"));
