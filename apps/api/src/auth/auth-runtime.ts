@@ -15,6 +15,7 @@ import { OrderTeamLifecycle } from "../im/order-team";
 import type { YunxinOrderTeamApi } from "../im/yunxin-provider";
 import { mountUserSupplyBff } from "../bff/user-supply-bff";
 import type { ListingCursorKey } from "../supply/listing-cursor";
+import type { FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import { mountRentalMembership } from "./rental-membership-routes";
 import { mountWithdrawalBankBinding } from "../finance/withdrawal-bank-binding-routes";
 import { mountPersonalWithdrawalHistory } from "../finance/withdrawal-history-routes";
@@ -188,6 +189,8 @@ export type AuthRuntimeOptions = AuthRuntimeConfig & {
   /** Reviewed source/target coverage supplied by trusted startup, never by HTTP or environment defaults. */
   publicTradeActivityBindings?: TradeActivityBindings;
   testConfirmationFundingReader?: ConfirmationFundingReader;
+  /** Explicit, exact-listing admission for the fixed-fee rehearsal. */
+  fixedFeeTestListingAdmission?: FixedFeeTestListingAdmission;
   /** Explicit product capability: only enabled assemblies consume credit/guarantee state in supply gates. */
   creditGuaranteeEnabled?: boolean;
   /** Explicit local scheduler; omitted by default, never inferred from environment flags. */
@@ -958,6 +961,9 @@ export async function mountAuthHandlers(
   options: AuthRuntimeOptions,
 ): Promise<AuthSecurityOptions & { settlementRecordingEnabled: boolean }> {
   // Validate the whole scope before any optional channel lifecycle can start.
+  if (options.fixedFeeTestListingAdmission && (!options.testOperationsEnabled || process.env.NODE_ENV === "production")) {
+    throw new ConfigurationError("Fixed-fee listing admission requires test operations capability");
+  }
   assertLocalNativeDistributionRegistrationAssembly(options.distributionRegistrationScope, options.distributionReadScope);
   assertLocalNativeDistributionReadOnlyAssembly(options.distributionReadScope, options.distributionScope, options);
   assertDistributionManagementAssembly(options.distributionManagement,options.distributionReadScope,options);
@@ -1503,7 +1509,8 @@ export async function mountAuthHandlers(
       },
     } : {}),
   });
-  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey});
+  const fixedFeeTestAdmission = options.fixedFeeTestListingAdmission;
+  mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey,fixedFeeTestAdmission});
   mountSupplyHandlers(app, {
     ...securityOptions,
     mediaStorage,
@@ -1511,6 +1518,7 @@ export async function mountAuthHandlers(
     listingCursorKey:options.listingCursorKey,
     legacyPublicAdmission,
     legacyPublicAdmissionDetail,
+    fixedFeeTestAdmission,
   });
   mountProfileAvatarHandlers(app, { ...securityOptions, mediaStorage });
   mountLegalHandlers(app, securityOptions);
@@ -1550,7 +1558,7 @@ export async function mountAuthHandlers(
   const membershipGrowthReader = membershipGrowthEnabled()
     ? readMembershipGrowthQuoteCandidates
     : async () => ({ knowledge: "UNKNOWN" as const, reason: "MEMBERSHIP_FEATURE_DISABLED" });
-  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, membershipGrowthReader };
+  const personalConfirmationOptions = { gate: supplyGateReader, key: options.confirmationKey, fundingReader, membershipGrowthReader, fixedFeeTestAdmission };
   mountPersonalConfirmations(app, securityOptions, personalConfirmationOptions);
   mountPersonalOrders(app, securityOptions, { ...personalConfirmationOptions, holdSeconds: orderHoldSeconds });
   if (options.orderTeams) {
