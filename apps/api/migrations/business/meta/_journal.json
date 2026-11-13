@@ -1513,6 +1513,13 @@
       "when": 1794456000017,
       "tag": "0215_fixed_fee_contracts",
       "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1794456000018,
+      "tag": "0216_legacy_system_migration",
+      "breakpoints": true
     }
   ]
 }
