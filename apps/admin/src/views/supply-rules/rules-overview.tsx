@@ -1,3 +1,4 @@
+import { FixedFeeItemPrices, FixedFeePriceFacts } from "./fixed-fee-price-facts";
 import { useMemo, useState, type ReactNode } from "react";
 import { CircleAlert, CircleHelp, ChevronDownIcon, ChevronRightIcon, Clock, Info, TriangleAlert } from "lucide-react";
 
@@ -145,7 +146,7 @@ function DiffTable({ rows, empty }: { rows: RuleDiffRow[]; empty: string }) {
  * 规则与价目 · 第一片：只读总览 + 版本条 + 服务端试算 + Boss 确认生效。
  * 价格只读后端返回值，不在页面里写死；每 1M 金额只是按比例换算的显示辅助。
  */
-export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = false, onOpenSkin, onOpenSettlement }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; isBoss: boolean; canPreview: boolean; canEdit?: boolean; onOpenSkin?: () => void; onOpenSettlement?: () => void }) {
+export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = false, canActivate = isBoss, onOpenSkin, onOpenSettlement }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; isBoss: boolean; canPreview: boolean; canEdit?: boolean; canActivate?: boolean; onOpenSkin?: () => void; onOpenSettlement?: () => void }) {
   const [trialOpen, setTrialOpen] = useState(false);
   const V = (_key: string, display: ReactNode, _opts?: { unit?: string; wide?: boolean }) => display;
   const release = rules.release;
@@ -155,10 +156,12 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
   const curPrice = release ? rules.priceVersions.find((v) => v.id === release.priceVersionId) : undefined;
   const curTerm = release ? rules.termVersions.find((v) => v.id === release.termVersionId) : undefined;
   const curAgreement = release ? rules.agreementVersions.find((v) => v.id === release.agreementVersionId) : undefined;
-  const latestPrice = rules.priceVersions[0];
-  const latestTerm = rules.termVersions[0];
-  const latestAgreement = rules.agreementVersions[0];
-  const priceChanged = Boolean(latestPrice && latestPrice.id !== curPrice?.id);
+  const fixedFee = Boolean(curPrice?.fixedFeeRates);
+  const latest = <T extends { createdAt: string }>(list: T[]) => [...list].sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const latestPrice = latest(rules.priceVersions.filter(price => !price.fixedFeeRates));
+  const latestTerm = latest(rules.termVersions);
+  const latestAgreement = latest(rules.agreementVersions);
+  const priceChanged = Boolean(!fixedFee && latestPrice && latestPrice.id !== curPrice?.id);
   const termChanged = Boolean(latestTerm && latestTerm.id !== curTerm?.id);
   const agreementChanged = Boolean(latestAgreement && latestAgreement.id !== curAgreement?.id);
   const haff = asHaffV2(curPrice?.haffRule);
@@ -169,8 +172,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
   const openCompare = (rows: RuleDiffRow[]) => { setCompareRows(rows); setDialog("compare"); };
   const sealedAfter = (list: { status: string; sealedAt: string | null; id: string }[], currentId?: string) =>
     list.filter((v) => v.status === "SEALED" && v.id !== currentId && (!release || (v.sealedAt ?? "") > release.activatedAt)).length;
-  const sealedPending = sealedAfter(rules.priceVersions, curPrice?.id) + sealedAfter(rules.termVersions, curTerm?.id) + sealedAfter(rules.agreementVersions, curAgreement?.id);
-  const inProgress = draftDiff(rules, activePriceDraft(rules)).length > 0;
+  const sealedPending = (fixedFee ? 0 : sealedAfter(rules.priceVersions.filter(price => !price.fixedFeeRates), curPrice?.id)) + sealedAfter(rules.termVersions, curTerm?.id) + sealedAfter(rules.agreementVersions, curAgreement?.id);
+  const inProgress = !fixedFee && draftDiff(rules, activePriceDraft(rules)).length > 0;
   const changeBadge = (changed: boolean, rows: () => RuleDiffRow[]) => changed ? (
     <Button type="button" variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => openCompare(rows())}>
       <Badge variant="warning">有未生效调整</Badge><span className="ml-1 underline-offset-2 hover:underline">查看对比</span>
@@ -219,8 +222,8 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
           </div>
           <div className="ml-auto flex flex-wrap gap-2">
             {canEdit && !skinV2Ready ? <Button type="button" variant="secondary" onClick={onOpenSkin}>配置新版皮肤押金</Button> : null}
-            <Button type="button" variant="outline" disabled={!canPreview || !release} title={!canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
-            {isBoss ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
+            <Button type="button" variant="outline" disabled={!canPreview || !release || fixedFee} title={fixedFee ? "当前试算工具仅支持价差模式" : !canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
+            {canActivate ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认生效</Button> : null}
           </div>
         </div>
         <div className="mt-3 flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
@@ -232,6 +235,10 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
       {!release ? <section className="section-panel"><Hint>还没有生效的规则。请联系平台管理员配置初始生效规则，提交后由 Boss 确认生效。</Hint></section> : (
         <>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {fixedFee && curPrice ? <>
+              <FixedFeePriceFacts price={curPrice} part="modes" />
+              <FixedFeeItemPrices rules={rules} priceId={curPrice.id} />
+            </> : <>
             <Card
               wide
               title="哈夫币计价规则"
@@ -387,6 +394,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
               )}
             </Card>
 
+            </>}
             <Card
               title="押金规则"
               note="系统根据账号属性与装备推荐押金，实际以号主设定为准（受上下限约束）"
@@ -494,7 +502,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
             </div>
           </section>
 
-          <SettlementRules />
+          <SettlementRules fixedFee={fixedFee} />
           <History rules={rules} />
         </>
       )}
@@ -513,13 +521,13 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
         </DialogContent>
       </Dialog>
 
-      {trialOpen && release ? <TrialWindow rules={rules} onClose={() => setTrialOpen(false)} /> : null}
+      {trialOpen && release && !fixedFee ? <TrialWindow rules={rules} onClose={() => setTrialOpen(false)} /> : null}
       {dialog === "confirm" ? <ConfirmDialog rules={rules} command={command} onOpenSettlement={onOpenSettlement} onClose={() => { setDialog("none"); command.dismissResult(); }} /> : null}
     </div>
   );
 }
 
-export function SettlementRules() {
+export function SettlementRules({ fixedFee = false }: { fixedFee?: boolean }) {
   const [open, setOpen] = useState(false);
   const W = 360, H = 140, L = 36, R = 350, T = 18, B = 112;
   const x = (c: number) => L + (R - L) * c, y = (v: number) => B - (B - T) * v;
@@ -561,13 +569,13 @@ export function SettlementRules() {
                 </TableBody>
               </Table>
             </ScrollTable>
-            <p className="mt-2 text-[11px] text-muted-foreground">服务费归平台单独记账，不计入日常常规租金价差。</p>
+            <p className="mt-2 text-[11px] text-muted-foreground">包赔服务费单独记账，不计入普通手续费或价差。</p>
           </div>
           <div className="min-w-0">
             <div className="mb-2 flex items-center gap-1.5">
-              <h4 className="text-xs font-semibold text-foreground">租客主动提前结束 · 哈夫币价差补交梯度</h4>
+              <h4 className="text-xs font-semibold text-foreground">租客主动提前结束 · {fixedFee ? "哈夫币手续费补足梯度" : "哈夫币价差补交梯度"}</h4>
               <HelpTip label="提前结束补差说明">
-                租客主动提前结束租赁时，需按实际已消耗比例阶梯补交哈夫币价差，消耗达到 70% 及以上时免交补差。
+                {fixedFee ? "按订单冻结费率计算全量哈夫币手续费，再乘以对应的补足比例。" : "按实际消耗比例阶梯补交哈夫币价差。"} 消耗达到 70% 及以上时免交。
               </HelpTip>
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-md text-foreground" role="img" aria-label="补差比例：消耗0%补100%，50%补50%，60%补25%，70%及以上为0">
@@ -580,7 +588,7 @@ export function SettlementRules() {
               {[0, 0.5, 0.7, 1].map((c) => <text key={c} x={x(c)} y={B + 14} fontSize={10} textAnchor="middle" className="fill-muted-foreground">{c * 100}%</text>)}
               <text x={R} y={B + 26} fontSize={10} textAnchor="end" className="fill-muted-foreground">哈夫币已消耗</text>
             </svg>
-            <p className="mt-2 text-[11px] text-muted-foreground">租客主动提前结束时，按消耗比例梯度补交价差；达到 70% 时该项补差为 0。号主原因提前结束不产生补差。</p>
+            <p className="mt-2 text-[11px] text-muted-foreground">号主原因提前结束不产生此项费用。</p>
           </div>
         </div>
       </CollapsibleContent>
@@ -592,7 +600,10 @@ export function SettlementRules() {
 function payoutName(rules: RulesResponse, price: RulesResponse["priceVersions"][number] | undefined): string | null {
   const fp = price?.fundingPolicy;
   if (!fp?.fullPayoutPolicyRef) return null;
-  return (rules.fullPayoutTermsVersions ?? []).find(t => t.policyRef === fp.fullPayoutPolicyRef && t.policyVersion === fp.fullPayoutPolicyVersion)?.title ?? "已设置";
+  const terms = (rules.fullPayoutTermsVersions ?? []).find(t => t.status === "SEALED" &&
+    (price?.fullPayoutTermsVersionId !== undefined ? t.id === price.fullPayoutTermsVersionId
+      : t.policyRef === fp.fullPayoutPolicyRef && t.policyVersion === fp.fullPayoutPolicyVersion));
+  return terms?.title ?? "条款待核对";
 }
 
 /** 租期档位名：旧数据的名字是代码（如 legacy_daily_10m）时，换成“每天 10M”。 */
@@ -638,10 +649,15 @@ function History({ rules }: { rules: RulesResponse }) {
 function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; onClose: () => void; onOpenSettlement?: () => void }) {
   const release = rules.release;
   const sealed = <T extends { status: string }>(list: T[]) => list.filter((v) => v.status === "SEALED");
-  const first = (list: { id: string; status: string }[], current?: string) => sealed(list)[0]?.id ?? current ?? "";
+  const first = (list: { id: string; status: string; createdAt?: string }[], current?: string) =>
+    sealed(list).sort((a,b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""))[0]?.id ?? current ?? "";
   const { state, pending } = command;
   const isRelease = pending?.operation === RULES_RELEASE_OPERATION;
-  const [priceId, setPriceId] = useState(() => isRelease ? String(pending.body.priceVersionId) : first(rules.priceVersions, release?.priceVersionId));
+  const currentPrice = rules.priceVersions.find(price => price.id === release?.priceVersionId);
+  const fixedFee = Boolean(currentPrice?.fixedFeeRates);
+  const eligiblePrices = rules.priceVersions.filter(price => fixedFee ? price.id === currentPrice?.id : !price.fixedFeeRates);
+  const [selectedPriceId, setPriceId] = useState(() => isRelease ? String(pending.body.priceVersionId) : first(eligiblePrices, release?.priceVersionId));
+  const priceId = fixedFee && release ? release.priceVersionId : selectedPriceId;
   const [termId, setTermId] = useState(() => isRelease ? String(pending.body.termVersionId) : first(rules.termVersions, release?.termVersionId));
   const [agreementId, setAgreementId] = useState(() => isRelease ? String(pending.body.agreementVersionId) : first(rules.agreementVersions, release?.agreementVersionId));
   const label = (v: { revision: string; sealedAt: string | null; id: string }, current?: string, title?: string) => `${title ? title + " · " : ""}${v.sealedAt ? formatDate(v.sealedAt) + " 提交" : "草稿"}${v.id === current ? "（当前生效）" : ""}`;
@@ -665,13 +681,13 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
         {done ? (
           <div role="status" className="space-y-2 text-sm">
             <p>已生效，新订单按新规则计算。</p>
-            <p className="text-sm text-muted-foreground">{state.receipt.affectedCount === undefined ? "原回执未提供受影响账号数量，不按 0 显示。" : <>生效时，本游戏有 <b className="text-foreground">{state.receipt.affectedCount}</b> 个启用中的账号尚未接受新规则，需号主重新确认后才能继续使用新规则。</>}</p>
+            <p className="text-sm text-muted-foreground">{state.receipt.affectedCount === undefined ? "原回执未提供受影响账号数量，不按 0 显示。" : <>生效时，本游戏有 <b className="text-foreground">{state.receipt.affectedCount}</b> 个启用中的账号尚未绑定新规则。已有订单沿用冻结版本。</>}</p>
           </div>
         ) : (
           <>
             {pending ? <p className="rounded-md bg-muted/50 p-3 text-sm">原请求：游戏 {pending.gameId}{isRelease ? ` · 基线第 ${String(pending.body.expectedGeneration)} 版组合` : " · 高级草稿维护"}；保留原 key，不自动重发。{crossGame ? "请切回原游戏后核对。" : ""}</p> : null}
             <div className="grid grid-cols-1 gap-3 rounded-lg border border-border/70 bg-card/40 p-3.5 sm:grid-cols-3">
-              <Pick label="价格版本" value={priceId} onChange={setPriceId} disabled={command.locked} options={sealed(rules.priceVersions).map((v) => ({ value: v.id, label: label(v, release?.priceVersionId) }))} />
+              <Pick label="价格版本" value={priceId} onChange={setPriceId} disabled={command.locked || fixedFee} options={sealed(eligiblePrices).map((v) => ({ value: v.id, label: label(v, release?.priceVersionId) }))} />
               <Pick label="租期版本" value={termId} onChange={setTermId} disabled={command.locked} options={sealed(rules.termVersions).map((v) => ({ value: v.id, label: label(v, release?.termVersionId) }))} />
               <Pick label="出租协议" value={agreementId} onChange={setAgreementId} disabled={command.locked} options={sealed(rules.agreementVersions).map((v) => ({ value: v.id, label: label(v, release?.agreementVersionId, v.title) }))} />
             </div>
@@ -694,6 +710,7 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
               <Info className="mt-0.5 size-4 shrink-0 text-amber-500" />
               <div className="space-y-0.5">
                 <p className="font-medium text-foreground">生效影响说明</p>
+                {fixedFee ? <p>保留当前固定手续费价目。已有订单继续使用下单时的租期与协议。</p> : null}
                 <p>切换后，依赖旧规则的后续操作需重新确认；具体数量在生效后显示。</p>
                 <p>已冻结报价的订单按冻结时的报价结算。</p>
               </div>
@@ -710,7 +727,7 @@ function ConfirmDialog({ rules, command, onClose, onOpenSettlement }: { rules: R
           {done ? <Button type="button" onClick={onClose}>完成</Button> : (
             <>
               <Button type="button" variant="outline" disabled={busy} onClick={onClose}>{pending ? "关闭（保留原请求）" : "暂不生效"}</Button>
-              {pending ? <Button type="button" disabled={busy || crossGame} aria-busy={busy || undefined} onClick={() => void command.recover()}>{busy ? "核对中…" : "核对原回执"}</Button> : <Button type="button" disabled={same || command.locked || state.kind === "conflict" || !priceId || !termId || !agreementId} aria-busy={busy || undefined} onClick={() => void activate()}>{busy ? "生效中…" : "确认生效"}</Button>}
+              {pending ? <Button type="button" disabled={busy || crossGame} aria-busy={busy || undefined} onClick={() => void command.recover()}>{busy ? "核对中…" : "核对原回执"}</Button> : <Button type="button" disabled={same || command.locked || state.kind === "conflict" || !eligiblePrices.some(price => price.id === priceId && price.status === "SEALED") || !termId || !agreementId} aria-busy={busy || undefined} onClick={() => void activate()}>{busy ? "生效中…" : "确认生效"}</Button>}
             </>
           )}
         </DialogFooter>

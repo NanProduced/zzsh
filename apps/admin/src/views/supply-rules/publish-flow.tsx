@@ -40,12 +40,12 @@ export function StageBadge({ stage, at }: { stage: PublishStage; at?: string | n
 export function activePriceDraft(rules: RulesResponse): PriceVersionRecord | undefined {
   // 已提交待生效的版本之前留下的旧草稿不算"进行中"，否则封版后会误把旧空草稿当成编辑目标。
   const s = pendingSealedPrice(rules);
-  return rules.priceVersions.filter(v => v.status === "DRAFT" && (!s || v.createdAt > (s.sealedAt ?? ""))).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  return rules.priceVersions.filter(v => v.status === "DRAFT" && !v.fixedFeeRates && (!s || v.createdAt > (s.sealedAt ?? ""))).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
 }
 /** 已提交（封存）但还没生效、且比线上新的价格版本。 */
 export function pendingSealedPrice(rules: RulesResponse): PriceVersionRecord | undefined {
   const r = rules.release;
-  return rules.priceVersions.filter(v => v.status === "SEALED" && v.id !== r?.priceVersionId && (!r || (v.sealedAt ?? "") > r.activatedAt)).sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))[0];
+  return rules.priceVersions.filter(v => v.status === "SEALED" && !v.fixedFeeRates && v.id !== r?.priceVersionId && (!r || (v.sealedAt ?? "") > r.activatedAt)).sort((a, b) => (b.sealedAt ?? "").localeCompare(a.sealedAt ?? ""))[0];
 }
 export function priceStage(rules: RulesResponse, dirty: boolean): PublishStage {
   // 草稿和线上一样时不算「待发布」，避免显示「已保存草稿 · 0 项」。

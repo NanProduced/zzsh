@@ -10,11 +10,13 @@ import { draftCommand, type useRulesWrite } from "./rules-write";
 import { DraftLine, type EnsureDraft, MONEY2 } from "./step0-editors";
 import { buildSkinDepositPolicy, skinDepositDraft, skinDepositIssues, skinDepositSaveBody, SKIN_DEPOSIT_TYPES, type SkinDepositDraft } from "./skin-deposit-policy";
 
-export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId, ensureDraft }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; onDirtyChange: (dirty: boolean) => void; draftId: string; ensureDraft: EnsureDraft }) {
+export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId, ensureDraft, readOnly = false }: { rules: RulesResponse; command: ReturnType<typeof useRulesWrite>; onDirtyChange: (dirty: boolean) => void; draftId: string; ensureDraft: EnsureDraft; readOnly?: boolean }) {
   const id = draftId;
   const selected = rules.priceVersions.find(version => version.id === id);
   const current = rules.priceVersions.find(version => version.id === rules.release?.priceVersionId);
-  const base = selected?.fundingPolicy ? selected : (current?.fundingPolicy ? current : rules.priceVersions.find(version => version.status === "SEALED" && version.fundingPolicy));
+  const base = rules.release
+    ? (!readOnly && selected?.fundingPolicy ? selected : current)
+    : selected?.fundingPolicy ? selected : rules.priceVersions.find(version => version.status === "SEALED" && !version.fixedFeeRates && version.fundingPolicy);
   const legacyV1 = Boolean(base?.fundingPolicy && base.fundingPolicy.recommendation.schema !== "deposit-recommendation-v2");
   const initial = useMemo(() => base?.fundingPolicy ? skinDepositDraft(base.fundingPolicy) : null, [base]);
   const [draft, setDraft] = useState<SkinDepositDraft | null>(initial);
@@ -27,7 +29,7 @@ export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId
   const dirty = JSON.stringify(draft) !== baseline;
   const issues = draft ? skinDepositIssues(draft) : [];
   const catalog = rules.depositCatalog;
-  const locked = command.locked || (selected ? selected.status !== "DRAFT" : false); const sealedView = !!selected && selected.status !== "DRAFT";
+  const locked = readOnly || command.locked || (selected ? selected.status !== "DRAFT" : false); const sealedView = readOnly || (!!selected && selected.status !== "DRAFT");
   useEffect(() => { onDirtyChange(dirty); return () => onDirtyChange(false); }, [dirty, onDirtyChange]);
   useEffect(() => { if (!dirty) return; const stop = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; }; window.addEventListener("beforeunload", stop); return () => window.removeEventListener("beforeunload", stop); }, [dirty]);
   useEffect(() => {
@@ -57,7 +59,7 @@ export function SkinDepositPolicyEditor({ rules, command, onDirtyChange, draftId
   const updateRow = (index: number, key: "first" | "subsequent", value: string) => setDraft(previous => previous ? { ...previous, rules: previous.rules.map((row, i) => i === index ? { ...row, [key]: value } : row) } : previous);
   return <section id={`skin-deposit-policy-${rules.game.id}`} tabIndex={-1} className="section-panel scroll-mt-20 space-y-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="皮肤推荐押金配置">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-base font-semibold">皮肤推荐押金</h2><p className="mt-1 text-xs text-muted-foreground">配置皮肤类型与品质的阶梯押金加价规则（首件加价与后续每件加价）。</p></div></div>
-    {legacyV1 ? <div role="note" className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-950 dark:text-amber-200">线上皮肤押金是旧写法，保存后按下表重新生成。填 0 表示不加价，留空表示还没配。</div> : null}
+    {legacyV1 && !readOnly ? <div role="note" className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-950 dark:text-amber-200">线上皮肤押金是旧写法，保存后按下表重新生成。填 0 表示不加价，留空表示还没配。</div> : null}
     {!base?.fundingPolicy ? <p role="status" className="text-sm text-muted-foreground">尚无可复用的资金政策。请先完成原资金约束配置；此处不代填保险箱、属性、保证金或押金上限。</p> : <>
       <div className="grid gap-3 sm:grid-cols-2">
         <DraftLine selected={selected} locked={command.locked} />

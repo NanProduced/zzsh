@@ -67,7 +67,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   const originalFetch = globalThis.fetch, { createRoot } = await import("react-dom/client");
   const vite = await createOfflineAdminSource({ root: fileURLToPath(new URL("..", import.meta.url)) });
   let root, el, View, model, writes, reads, policy, quotes, recovery, readResume;
-  const snapshot = { authenticated: true, adminUserId: "admin-a", session: { id: "session-a" }, security: { isBoss: true, status: "ACTIVE" }, permissions: ["supply.rules.edit", "supply.quote.internal.read"] };
+  const snapshot = { authenticated: true, adminUserId: "admin-a", session: { id: "session-a" }, security: { isBoss: true, status: "ACTIVE" }, permissions: ["supply.rules.edit", "supply.rules.activate", "supply.quote.internal.read"] };
   const fresh = () => {
     const haffRule = { schema: "haff-ratio-v2", baseBySafeBox: { "box-a": "50" }, vitalityDeltaByLevel: { "6": "0", "7": "-1" }, bearDeltaByLevel: { "6": "0" }, dailyDeltaByTermOption: { d10: "0" }, compatibility: { ordinary: { spreadDelta: "8", discounts: { STANDARD: "0", VIP: "1", SVIP: "2", DISCOUNT_USER: "1" } }, fast: { spreadDelta: "12", discounts: { STANDARD: "0" } }, modes: { ordinary: { enabled: true }, custom: { enabled: true, min: { base: "C", value: "-3" }, max: { base: "C", value: "-1" } }, fast: { enabled: true, min: { base: "C", value: "6" }, max: { base: "ABSOLUTE", value: "99" } } } } };
     const price = { id: "p1", gameId: "g1", mode: "SPREAD", status: "SEALED", revision: "2", createdAt: "2026-10-01T00:00:00Z", sealedAt: "2026-10-01T00:00:00Z", commissionRate: null, compensationPolicyRef: null, roundingPolicy: "HALF_UP_CENT_V1", haffRule, fundingPolicy: null };
@@ -118,7 +118,7 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
   try {
     ({ SupplyRulesView: View } = await vite.ssrLoadModule("/src/views/supply-rules-view.tsx"));
     await t.test("pricing schedules open lazily and show an uninstalled policy without write controls", async () => {
-      await mount({ section: "pricing", permissions: [...snapshot.permissions, "supply.rules.activate"] });
+      await mount({ section: "pricing", permissions: snapshot.permissions });
       assert.equal(reads.some(read => read.path.endsWith("/pricing-schedules")), false);
       const original = globalThis.fetch;
       let pricingReads = 0;
@@ -137,6 +137,33 @@ test("rules writes and trial window preserve uncertainty across lifecycle change
         assert.equal(byText("核对排期", panel), undefined);
         assert.equal(businessWrites().length, 0);
       } finally { globalThis.fetch = original; }
+    });
+    await t.test("first fixed fee release shows its funding facts and leaves price editing read-only", async () => {
+      const funding = fundingPolicyFixture("NOT_REQUIRED");
+      await mount({ section: "deposit", permissions: snapshot.permissions });
+      Object.assign(model.priceVersions.find(price => price.id === "p1"), { mode: "PERCENT",
+        fixedFeeRates: { ordinary: "0.10", custom: "0.08", fast: "0.12" }, haffRule: { schema: "haff-ratio-v3" }, fundingPolicy: funding });
+      model.priceVersions.find(price => price.id === "p2").fundingPolicy = {
+        ...funding, ownerDepositRules: { ...funding.ownerDepositRules, capCents: "999999" },
+      };
+      await mount({ preserve: true, section: "deposit", permissions: snapshot.permissions });
+      const current = el.querySelector('[aria-label="当前押金上限（元）"]');
+      assert.equal(current.value, "1000.00");
+      assert.equal(current.disabled, true);
+      assert.equal(byText("保存押金上限", el), undefined);
+      assert.doesNotMatch(el.textContent, /尚无资金政策，无法配置押金上限/);
+      await mount({ preserve: true, section: "overview", permissions: snapshot.permissions });
+      assert.match(el.textContent, /固定手续费率与出租方式/);
+      assert.match(el.textContent, /物资统一单价/);
+      assert.doesNotMatch(el.textContent, /平台价差\/单位/);
+      assert.equal(byText("试算一单", el).disabled, true);
+      model.termVersions.unshift({ ...model.termVersions[0], id: "t2", createdAt: "2026-11-01T00:00:00Z" });
+      model.agreementVersions.unshift({ ...model.agreementVersions[0], id: "a2", createdAt: "2026-11-01T00:00:00Z" });
+      await mount({ preserve: true, section: "overview", permissions: snapshot.permissions });
+      await activate();
+      assert.deepEqual(businessWrites().at(-1).body, {
+        gameId: "g1", priceVersionId: "p1", termVersionId: "t2", agreementVersionId: "a2", expectedGeneration: "1",
+      });
     });
     await t.test("overview keeps trial and activation and does not offer an unsavable preview editor", async () => {
       await mount();

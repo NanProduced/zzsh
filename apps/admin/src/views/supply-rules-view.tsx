@@ -1,5 +1,5 @@
 import { versionTime } from "./supply-rules/publish-flow";
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps, type FormEvent, type ReactNode } from "react";
 import { CircleAlert, TriangleAlert } from "lucide-react";
 
 import { adminRequest, friendlyError, hasPermission, type RulesResponse, type SessionSnapshot, type SupplyGame } from "../api";
@@ -15,6 +15,7 @@ import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
 import { draftCommand, isPricingScheduleOperation, RULES_RELEASE_OPERATION, useRulesWrite } from "./supply-rules/rules-write";
+import { FixedFeeItemPrices, FixedFeePriceFacts } from "./supply-rules/fixed-fee-price-facts";
 import { PricingSchedulesPanel } from "./supply-rules/pricing-schedules-panel";
 import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 import { RentalModeEditor } from "./supply-rules/rental-mode-editor";
@@ -79,8 +80,8 @@ function kindLabel(kind: string): string {
   return kind === "HAFF_RATIO" ? "按哈夫币规则推算" : kind === "FIXED_UNIT" ? "固定单价" : kind;
 }
 
-function latestSealed<T extends { id: string; status: string; sealedAt: string | null }>(versions: T[]): string {
-  const sealed = versions.find((version) => version.status === "SEALED");
+function latestSealed<T extends { id: string; status: string; sealedAt: string | null; createdAt: string }>(versions: T[]): string {
+  const sealed = versions.filter(version => version.status === "SEALED").sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   return sealed?.id ?? "";
 }
 
@@ -109,10 +110,10 @@ export function SupplyRulesView({
   const canSchedule = isBoss && canEdit && hasPermission(snapshot, "supply.rules.activate");
   const [games, setGames] = useState<SupplyGame[]>([]);
   const [gameId, setGameId] = useState("");
-  const [allRules, setRules] = useState<RulesResponse | null>(null);
-  // Fixed-fee price versions enter through the schedule, never through combined rule activation.
-  const rules = useMemo(() => allRules && { ...allRules,
-    priceVersions: allRules.priceVersions.filter(version => !version.fixedFeeRates) }, [allRules]);
+  const [rules, setRules] = useState<RulesResponse | null>(null);
+  const currentPrice = rules?.priceVersions.find(version => version.id === rules.release?.priceVersionId);
+  const fixedFee = Boolean(currentPrice?.fixedFeeRates);
+  const priceEditable = canEdit && !fixedFee && (!rules?.release || Boolean(currentPrice));
   const [pricingTab, setPricingTab] = useState<typeof PRICING_TABS[number][0]>("base");
   const [termId, setTermId] = useState("");
   const [agreementId, setAgreementId] = useState("");
@@ -193,9 +194,10 @@ export function SupplyRulesView({
     if (!sameReadScope(scope, sequence)) return;
     if (result.game.id !== targetGameId) throw new Error("规则响应不属于当前游戏");
     setRules(result);
-    const nextTerm = latestSealed(result.termVersions) || result.termVersions[0]?.id || "";
+    const currentFixed = result.priceVersions.some(price => price.id === result.release?.priceVersionId && price.fixedFeeRates);
+    const nextTerm = (currentFixed ? result.release?.termVersionId : latestSealed(result.termVersions)) || result.termVersions[0]?.id || "";
     applyTerm(nextTerm, result.termOptions);
-    const nextAgreement = latestSealed(result.agreementVersions) || result.agreementVersions[0]?.id || "";
+    const nextAgreement = (currentFixed ? result.release?.agreementVersionId : latestSealed(result.agreementVersions)) || result.agreementVersions[0]?.id || "";
     setAgreementId(nextAgreement);
     const agreement = result.agreementVersions.find((version) => version.id === nextAgreement);
     setAgreementTitle(agreement?.title ?? "");
@@ -344,9 +346,9 @@ export function SupplyRulesView({
   const show = (name: RulesSection) => (section === name ? undefined : true);
   const editorKey = `${snapshot.adminUserId}:${snapshot.session?.id}:${rules?.game.id}:${resetNonce}`;
   // 只有一份进行中的价格草稿：自动取它；没有时显示线上值，第一次保存时自动新建。
-  const draftId = rules ? activePriceDraft(rules)?.id ?? pendingSealedPrice(rules)?.id ?? "" : "";
+  const draftId = rules && priceEditable ? activePriceDraft(rules)?.id ?? pendingSealedPrice(rules)?.id ?? "" : "";
   const ensureDraft: EnsureDraft = async () => {
-    if (!rules) return null;
+    if (!rules || !priceEditable) return null;
     const existing = activePriceDraft(rules);
     if (existing) return { rules, draft: existing };
     const source = sourcePriceVersion(rules);
@@ -354,7 +356,7 @@ export function SupplyRulesView({
     const draft = result?.fresh.priceVersions.find(v => v.id === result.receipt.id);
     return result && draft ? { rules: result.fresh, draft } : null;
   };
-  const editorProps = rules ? { rules, command, draftId, canEdit, ensureDraft } : null;
+  const editorProps = rules ? { rules, command, draftId, canEdit: priceEditable, ensureDraft } : null;
   const commitSwitch = () => {
     if (!switchAsk || !rules) return;
     if (switchAsk.kind === "term") applyTerm(switchAsk.id, rules.termOptions);
@@ -373,7 +375,7 @@ export function SupplyRulesView({
       <section className="section-panel">
         <div className="min-w-0 max-w-3xl">
           <h2 className="flex flex-wrap items-center gap-2 text-2xl leading-9 font-semibold">{RULES_SECTION_LABEL[section]}{rules ? <span className="rounded-full border border-border px-2 py-0.5 text-xs font-normal text-muted-foreground">{rules.game.name}</span> : null}</h2>
-          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的价差补交规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : showSchedules ? "" : deltaSection ? "线上运行与草稿修改相互隔离：保存改动进入草稿，提交后由 Boss 确认正式生效。" : ""}</p>
+          <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{section === "overview" ? "线上正在运行的规则与版本历史。" : section === "settlement" ? "全额包赔承担方及提前结束时的补足规则。" : section === "agreement" ? "租客下单时查阅的标准出租协议。" : showSchedules ? "" : deltaSection ? "线上运行与草稿修改相互隔离：保存改动进入草稿，提交后由 Boss 确认正式生效。" : ""}</p>
         </div>
         <StatusMessage themeAware error={error} success={success} className="mt-3" />
         {command.locked ? (
@@ -415,18 +417,18 @@ export function SupplyRulesView({
         </section>
       ) : null}
 
-      {rules && allRules && editorProps && rules.game.id === gameId ? (
+      {rules && editorProps && rules.game.id === gameId ? (
         <div className="space-y-6">
-          {deltaSection && !showSchedules ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={isBoss} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
-          <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={canEdit} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
+          {deltaSection && !showSchedules && priceEditable ? <PublishBar rules={rules} command={command} dirty={priceDirty} canEdit={canEdit} isBoss={isBoss} onOpenSection={(name) => onOpenPath?.(`/supply/rules?section=${name}`)} /> : null}
+          <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={priceEditable} canActivate={isBoss && hasPermission(snapshot, "supply.rules.activate")} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
           <div hidden={show("deposit")}><DepositCapEditor key={`cap:${editorKey}`} {...editorProps} onDirtyChange={setCapDirty} /></div>
-          <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = allRules.priceVersions.find(v => v.id === rules.release?.priceVersionId)?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion } : null; })()} onReload={reload} /></div>
+          <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules fixedFee={fixedFee} /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = currentPrice?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion, id: currentPrice?.fullPayoutTermsVersionId } : null; })()} onReload={reload} /></div>
           <div hidden={show("pricing")} className="space-y-4">
             <div role="tablist" aria-label="租赁定价" className="flex flex-wrap gap-2">{PRICING_TABS.map(([value, label]) => <Button key={value} type="button" role="tab" aria-selected={pricingTab === value} variant={pricingTab === value ? "secondary" : "ghost"} onClick={() => setPricingTab(value)}>{label}</Button>)}</div>
-            <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${snapshot.adminUserId}:${snapshot.session?.id}:${gameId}`} rules={allRules} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
-            <div hidden={pricingTab !== "base" || undefined}><BasePricingEditor key={`base:${editorKey}`} {...editorProps} part="base" onDirtyChange={setBaseDirty} /></div>
-            <div hidden={pricingTab !== "mode" || undefined}><RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={canEdit} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} /></div>
-            <div hidden={pricingTab !== "term" || undefined} className="space-y-6"><BasePricingEditor key={`daily:${editorKey}`} {...editorProps} part="term" onDirtyChange={setDailyDirty} />
+            <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${snapshot.adminUserId}:${snapshot.session?.id}:${gameId}`} gameId={gameId} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
+            <div hidden={pricingTab !== "base" || undefined}>{fixedFee && currentPrice ? <FixedFeePriceFacts price={currentPrice} part="base" /> : <BasePricingEditor key={`base:${editorKey}`} {...editorProps} part="base" onDirtyChange={setBaseDirty} />}</div>
+            <div hidden={pricingTab !== "mode" || undefined}>{fixedFee && currentPrice ? <FixedFeePriceFacts price={currentPrice} part="modes" /> : <RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={priceEditable} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} />}</div>
+            <div hidden={pricingTab !== "term" || undefined} className="space-y-6">{fixedFee && currentPrice ? <FixedFeePriceFacts price={currentPrice} part="term" /> : <BasePricingEditor key={`daily:${editorKey}`} {...editorProps} part="term" onDirtyChange={setDailyDirty} />}
         <section className="section-panel">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">租期版本</h3>
@@ -470,8 +472,8 @@ export function SupplyRulesView({
         </section>
             </div>
           </div>
-          <div hidden={show("items")}><PriceItemsEditor key={`items:${editorKey}`} {...editorProps} onDirtyChange={setItemsDirty} /></div>
-          <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
+          <div hidden={show("items")}>{fixedFee && currentPrice ? <FixedFeeItemPrices rules={rules} priceId={currentPrice.id} /> : <PriceItemsEditor key={`items:${editorKey}`} {...editorProps} onDirtyChange={setItemsDirty} />}</div>
+          <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} readOnly={!priceEditable} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
           <div hidden={show("agreement")} className="space-y-6">
         <section className="section-panel">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -486,7 +488,7 @@ export function SupplyRulesView({
               {selectedAgreement?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="提交后锁定，Boss 确认生效后替换线上" busyText="提交中…" onClick={() => setSealAsk({ kind: "agreement", id: selectedAgreement.id, revision: selectedAgreement.revision, label: selectedAgreement.title })}>提交发布</BusyButton> : null}
             </div>
           )}
-          {selectedAgreement ? (() => { const live = selectedAgreement.id === rules.release?.agreementVersionId; const st = docStage(selectedAgreement, { dirty, live, after: rules.release?.activatedAt }); return <div className="mt-3"><DocStatusRow stage={st} at={live ? rules.release?.activatedAt : null} receipt={agreementReceipt} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交，等你确认生效" : "已提交，等 Boss 确认生效") : st === "live" ? "租客下单时看到的就是这份" : "旧版本，只读"}>{st === "sealed" && isBoss ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked || !rules.release} onClick={() => setActivateAsk(selectedAgreement.id)}>确认生效</BusyButton> : null}</DocStatusRow></div>; })() : null}
+          {selectedAgreement ? (() => { const live = selectedAgreement.id === rules.release?.agreementVersionId; const st = docStage(selectedAgreement, { dirty, live, after: rules.release?.activatedAt }); return <div className="mt-3"><DocStatusRow stage={st} at={live ? rules.release?.activatedAt : null} receipt={agreementReceipt} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交，等你确认生效" : "已提交，等 Boss 确认生效") : st === "live" ? "租客下单时看到的就是这份" : "旧版本，只读"}>{st === "sealed" && isBoss && hasPermission(snapshot, "supply.rules.activate") ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked || !rules.release} onClick={() => setActivateAsk(selectedAgreement.id)}>确认生效</BusyButton> : null}</DocStatusRow></div>; })() : null}
           {selectedAgreement ? (
             <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveAgreement(event)); }} className="mt-4 space-y-3">
               <Field label="标题"><Input value={agreementTitle} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>

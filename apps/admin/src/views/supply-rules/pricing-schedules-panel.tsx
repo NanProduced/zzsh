@@ -1,36 +1,34 @@
 import { useEffect, useRef, useState } from "react";
-import { adminRequest, friendlyError, type PricingModel, type PricingSchedules, type RulesResponse } from "../../api";
+import { adminRequest, friendlyError, type PricingModel, type PricingSchedules, type SchedulePriceOptions } from "../../api";
 import { Button } from "../../components/ui/button";
 import { Field } from "../../components/ui/field";
 import { Input } from "../../components/ui/input";
 import { Skeleton } from "../../components/ui/skeleton";
 import { SupplySelect } from "../../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../../components/ui/table";
+import { fixedFeePercent } from "./rules-model";
 import { beijingLocalToIso, formatBeijing } from "../../lib/audit-labels";
 import { isPricingScheduleOperation, pricingScheduleCommand, pricingSchedulesPath, type useRulesWrite } from "./rules-write";
 
 const modelLabel: Record<PricingModel, string> = { FIXED_FEE: "固定手续费", SPREAD: "价差" };
 const modeOptions = [{ value: "price", label: "价格版本" }, { value: "mode", label: "新上架默认抽成模式" }];
-function formatRate(value: string) {
-  const match = /^0(?:\.(\d{1,8}))?$/.exec(value);
-  if (!match) return "待核对";
-  const digits = (match[1] ?? "").padEnd(2, "0");
-  const fraction = digits.slice(2).replace(/0+$/, "");
-  return `${Number(digits.slice(0, 2))}${fraction ? "." + fraction : ""}%`;
-}
 
-export function PricingSchedulesPanel({ rules, active, canSchedule, command }: {
-  rules: RulesResponse;
+export function PricingSchedulesPanel({ gameId, active, canSchedule, command }: {
+  gameId: string;
   active: boolean;
   canSchedule: boolean;
   command: ReturnType<typeof useRulesWrite>;
 }) {
-  const { id: gameId } = rules.game;
   const [state, setState] = useState<{ data?: PricingSchedules; error?: string }>({});
   const [refresh, setRefresh] = useState(0);
   const [kind, setKind] = useState<"price" | "mode">("price");
   const [model, setModel] = useState<PricingModel>("FIXED_FEE");
   const [priceId, setPriceId] = useState("");
+  const [optionPages, setOptionPages] = useState<(SchedulePriceOptions & { model: PricingModel })>();
+  const [pageAfter, setPageAfter] = useState<string | null>(null);
+  const [optionsError, setOptionsError] = useState<string>();
+  const [loadingOptions, setLoadingOptions] = useState(false);
+  const [optionsRetry, setOptionsRetry] = useState(0);
   const [announcementId, setAnnouncementId] = useState("");
   const [localTime, setLocalTime] = useState("");
   const [review, setReview] = useState(false);
@@ -60,10 +58,28 @@ export function PricingSchedulesPanel({ rules, active, canSchedule, command }: {
   const data = state.data;
   const schedules = data?.available ? data : null;
   const blockedByConflict = command.state.kind === "conflict" && refresh <= conflictRead.current;
-  const prices = rules.priceVersions.filter(price => price.gameId === gameId && price.status === "SEALED"
-    && price.roundingPolicy === "HALF_UP_CENT_V1" && (model === "FIXED_FEE"
-      ? price.mode === "PERCENT" && price.fixedFeeRates && price.haffRule?.schema === "haff-ratio-v3"
-      : price.mode === "SPREAD" && !price.fixedFeeRates && price.haffRule?.schema === "haff-ratio-v2"));
+  const readOptions = active && Boolean(schedules) && canSchedule && kind === "price";
+  useEffect(() => {
+    if (!readOptions) return;
+    const request = new AbortController();
+    const query = new URLSearchParams({ pricingModel: model, ...(pageAfter ? { cursor: pageAfter } : {}) });
+    setLoadingOptions(true);
+    setOptionsError(undefined);
+    void adminRequest<SchedulePriceOptions>(`/supply/games/${encodeURIComponent(gameId)}/pricing-schedule-price-options?${query}`,
+      undefined, "GET", {}, request.signal).then(page => {
+      if (request.signal.aborted) return;
+      setOptionPages(previous => {
+        const items = pageAfter && previous?.model === model ? previous.items : [];
+        return { model, items: [...items, ...page.items.filter(item => !items.some(existing => existing.id === item.id))], nextCursor: page.nextCursor };
+      });
+    }).catch(error => {
+      if (!request.signal.aborted) setOptionsError(friendlyError(error));
+    }).finally(() => {
+      if (!request.signal.aborted) setLoadingOptions(false);
+    });
+    return () => request.abort();
+  }, [readOptions, gameId, model, pageAfter, refresh, optionsRetry]);
+  const prices = optionPages?.model === model ? optionPages.items : [];
   const price = prices.find(version => version.id === priceId);
   const announcement = schedules?.announcements.find(version => version.id === announcementId);
   const effectiveAt = beijingLocalToIso(localTime);
@@ -89,6 +105,8 @@ export function PricingSchedulesPanel({ rules, active, canSchedule, command }: {
   };
   const reload = () => {
     setReview(false);
+    setPageAfter(null);
+    setOptionPages(undefined);
     setRefresh(n => n + 1);
   };
 
@@ -141,12 +159,19 @@ export function PricingSchedulesPanel({ rules, active, canSchedule, command }: {
           <Field label="抽成模式" composite>
             <SupplySelect label="抽成模式" value={model} disabled={command.locked || review}
               options={[{ value: "FIXED_FEE", label: modelLabel.FIXED_FEE }, { value: "SPREAD", label: modelLabel.SPREAD, disabled: !schedules.spreadSchedulingEnabled }]}
-              onValueChange={value => { if (value === "SPREAD" || value === "FIXED_FEE") { setModel(value); setPriceId(""); } }} />
+              onValueChange={value => { if (value === "SPREAD" || value === "FIXED_FEE") { setModel(value); setPriceId(""); setPageAfter(null); setOptionPages(undefined); setOptionsError(undefined); } }} />
           </Field>
-          {kind === "price" ? <Field label="已封存价目" composite required hint={!prices.length ? "当前模式还没有可选的已封存价目。" : undefined}>
+          {kind === "price" ? <Field label="已封存价目" composite required hint={loadingOptions ? "正在读取价目…" : optionsError ? undefined : !prices.length ? "当前模式还没有可选的已封存价目。" : undefined}>
             <SupplySelect label="已封存价目" value={price ? priceId : ""} disabled={command.locked || review || !prices.length}
               options={[{ value: "", label: "请选择价目", disabled: true }, ...prices.map(version => ({ value: version.id, label: `${version.id} · ${formatBeijing(version.sealedAt)}` }))]} onValueChange={setPriceId} />
           </Field> : null}
+          {kind === "price" && (optionsError || (optionPages?.model === model && optionPages.nextCursor)) ? <div className="space-y-2 self-end">
+            {optionsError ? <p role="alert" className="text-sm text-destructive">{optionsError}</p> : null}
+            <Button type="button" size="sm" variant="outline" disabled={command.locked || review || loadingOptions}
+              onClick={() => optionsError ? setOptionsRetry(n => n + 1) : setPageAfter(optionPages!.nextCursor)}>
+              {optionsError ? "重试读取价目" : "加载更多封存价目"}
+            </Button>
+          </div> : null}
           <Field label="调价公告" composite required hint={!schedules.announcements.length ? "请先在「平台动态」发布适用于该游戏的公告，并确认公告已对用户可见。" : schedules.announcementsTruncated ? "仅显示最新 50 条当前可见公告。" : undefined}>
             <SupplySelect label="调价公告" value={announcement ? announcementId : ""} disabled={command.locked || review || !schedules.announcements.length}
               options={[{ value: "", label: "请选择已公开公告", disabled: true }, ...schedules.announcements.map(version => ({ value: version.id, label: `${version.title} · ${formatBeijing(version.publishedAt)}` }))]}
@@ -156,7 +181,7 @@ export function PricingSchedulesPanel({ rules, active, canSchedule, command }: {
             <Input type="datetime-local" value={localTime} disabled={command.locked || review} required onChange={event => { setLocalTime(event.target.value); setTimeError(""); }} />
           </Field>
         </div>
-        {kind === "price" && price?.fixedFeeRates ? <p className="text-sm text-muted-foreground">普通 {formatRate(price.fixedFeeRates.ordinary)} · 自定义 {formatRate(price.fixedFeeRates.custom)} · 极速 {formatRate(price.fixedFeeRates.fast)}</p> : null}
+        {kind === "price" && price?.fixedFeeRates ? <p className="text-sm text-muted-foreground">普通 {fixedFeePercent(price.fixedFeeRates.ordinary)} · 自定义 {fixedFeePercent(price.fixedFeeRates.custom)} · 极速 {fixedFeePercent(price.fixedFeeRates.fast)}</p> : null}
         {kind === "mode" ? <p className="text-sm text-muted-foreground">仅影响生效后新上架的账号。目标模式届时须有生效价目。</p> : null}
         {!schedules.spreadSchedulingEnabled ? <p className="text-sm text-muted-foreground">价差排期暂未开放。</p> : null}
         {review ? <div className="space-y-2 rounded-md border border-border p-3 text-sm">

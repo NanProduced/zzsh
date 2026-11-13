@@ -488,7 +488,9 @@ const toCents = (y: string) => { const [i = "0", f = ""] = y.trim().split("."); 
 export function DepositCapEditor({ rules, command, draftId, canEdit, onDirtyChange, ensureDraft }: EditorProps) {
   const selected = rules.priceVersions.find(v => v.id === draftId);
   const current = currentPrice(rules);
-  const policy: FundingPolicy | null | undefined = selected?.fundingPolicy ?? current?.fundingPolicy ?? rules.priceVersions.find(v => v.status === "SEALED" && v.fundingPolicy)?.fundingPolicy;
+  const policy: FundingPolicy | null | undefined = rules.release
+    ? (canEdit ? selected?.fundingPolicy ?? current?.fundingPolicy : current?.fundingPolicy)
+    : selected?.fundingPolicy ?? rules.priceVersions.find(v => v.status === "SEALED" && !v.fixedFeeRates && v.fundingPolicy)?.fundingPolicy;
   const initial = policy ? centsYuan(policy.ownerDepositRules.capCents).replace(/[^\d.]/g, "") : "";
   const roundingText = depositRoundingText(policy);
   const locked = !canEdit || command.locked || (selected ? selected.status !== "DRAFT" : false) || !policy; const sealedView = !!selected && selected.status !== "DRAFT";
@@ -549,13 +551,13 @@ export function DepositCapEditor({ rules, command, draftId, canEdit, onDirtyChan
       </dl>
       <label className="block max-w-xs space-y-1.5 text-xs">
         <span className="text-muted-foreground">
-          草稿押金上限（元）
+          {canEdit ? "草稿押金上限（元）" : "当前押金上限（元）"}
           {current?.fundingPolicy && valid && toCents(form.value) !== current.fundingPolicy.ownerDepositRules.capCents ? (
             <Badge variant="outline" className="ml-1.5 border-primary/40 bg-primary/10 text-primary text-[10px] font-normal py-0 px-1">已修改</Badge>
           ) : null}
         </span>
         <Input
-          aria-label="草稿押金上限（元）"
+          aria-label={canEdit ? "草稿押金上限（元）" : "当前押金上限（元）"}
           inputMode="decimal"
           value={form.value}
           disabled={locked}

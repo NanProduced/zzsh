@@ -33,6 +33,14 @@ export function asHaffV2(rule: PriceVersionRecord["haffRule"] | undefined): Haff
   return rule as unknown as HaffV2;
 }
 
+export function fixedFeePercent(value: string) {
+  const match = /^0(?:\.(\d{1,8}))?$/.exec(value);
+  if (!match) return "待核对";
+  const digits = (match[1] ?? "").padEnd(2, "0");
+  const fraction = digits.slice(2).replace(/0+$/, "");
+  return `${Number(digits.slice(0, 2))}${fraction ? "." + fraction : ""}%`;
+}
+
 export function num(value: string | null | undefined): number | null {
   if (value === null || value === undefined || value.trim() === "") return null;
   const n = Number(value);

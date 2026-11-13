@@ -591,7 +591,13 @@ export type PricingSchedules = { asOf: string } & (
     announcementsTruncated: boolean }
 );
 
+export type SchedulePriceOptions = {
+  items: { id: string; sealedAt: string; fixedFeeRates: PriceVersionRecord["fixedFeeRates"] }[];
+  nextCursor: string | null;
+};
+
 export type PriceVersionRecord = {
+  fullPayoutTermsVersionId?: string | null;
   fixedFeeRates?: Record<"ordinary" | "custom" | "fast", string> | null;
   id: string;
   gameId: string;

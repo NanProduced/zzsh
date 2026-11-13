@@ -16,7 +16,8 @@ export function standardLineBodies(lines: PriceLineRecord[], mode: PriceVersionR
 
 /** 编辑基线来源：当前生效价格版本，缺省时取最新封存版本。 */
 export function sourcePriceVersion(rules: RulesResponse): PriceVersionRecord | undefined {
-  return rules.priceVersions.find(v => v.id === rules.release?.priceVersionId) ?? rules.priceVersions.find(v => v.status === "SEALED");
+  return rules.release ? rules.priceVersions.find(v => v.id === rules.release?.priceVersionId)
+    : rules.priceVersions.find(v => v.status === "SEALED" && !v.fixedFeeRates);
 }
 
 export function draftHasLines(rules: RulesResponse, id: string): boolean {
