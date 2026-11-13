@@ -22,7 +22,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-const ORDER_COMPONENTS = new Set(["order-detail", "order-list", "order-presentation", "order-trade-actions"]);
+const ORDER_COMPONENTS = new Set(["order-detail", "order-detail-progress", "order-detail-amount", "order-detail-refund", "order-list", "order-presentation", "order-trade-actions"]);
 
 /** Resolve the internal order view modules from source, with the trade panel stubbed to a no-op. */
 function loadWorkspace(session, router, legacyContinuationPanel = () => null) {
