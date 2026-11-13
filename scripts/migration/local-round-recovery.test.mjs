@@ -14,7 +14,18 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, openingSourcePreflightMatches, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+
+test('NEXT completion requires the exact independently checked stored-balance sources',()=>{
+ const input={dataset:{sha256:'a'.repeat(64)},source:{sha256:'b'.repeat(64)},funds:{sha256:'c'.repeat(64)},openings:{sha256:'d'.repeat(64)}};
+ const expected={source:{files:{users:{sha256:'e'.repeat(64)}}},openings:{sha256:'f'.repeat(64),stats:{subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750'}}};
+ const proof={status:'SOURCE_VALUE_AND_SUBJECT_VERIFIED',datasetManifestSha256:input.dataset.sha256,sourceReceiptSha256:input.source.sha256,fundsReceiptSha256:input.funds.sha256,openingManifestSha256:input.openings.sha256,
+  openingSha256:expected.openings.sha256,sourceUsersSha256:expected.source.files.users.sha256,subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750',sourceConnections:0,targetConnections:0,targetWrites:0};
+ assert.equal(openingSourcePreflightMatches(input,expected,proof),true);
+ for(const change of [{sourceUsersSha256:'0'.repeat(64)},{candidateAvailableCents:'0'},{targetWrites:1},{subjects:1},{openingSha256:undefined}])
+  assert.equal(openingSourcePreflightMatches(input,expected,{...proof,...change}),false);
+ assert.equal(openingSourcePreflightMatches({...input,funds:{}},expected,{...proof,fundsReceiptSha256:undefined}),false);
+});
 
 test("readback checks every core system identity against the registered target",()=>{
   const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};

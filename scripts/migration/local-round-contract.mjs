@@ -452,6 +452,19 @@ export function systemCompletedCommissionAttributionMatches(checkpoint,readback)
   &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
 }
 
+export function openingSourcePreflightMatches(input,expected,p){
+ const opening=expected?.openings,stats=opening?.stats;
+ const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),count=value=>Number.isSafeInteger(value)&&value>=0;
+ return [input?.dataset?.sha256,input?.source?.sha256,input?.funds?.sha256,input?.openings?.sha256,opening?.sha256,expected?.source?.files?.users?.sha256].every(hex)
+  &&p?.status==='SOURCE_VALUE_AND_SUBJECT_VERIFIED'&&p.datasetManifestSha256===input.dataset?.sha256
+  &&p.sourceReceiptSha256===input.source?.sha256&&p.fundsReceiptSha256===input.funds?.sha256
+  &&p.openingManifestSha256===input.openings?.sha256&&p.openingSha256===opening?.sha256
+  &&p.sourceUsersSha256===expected?.source?.files?.users?.sha256&&[stats?.subjects,stats?.candidate,stats?.reviewRequired].every(count)
+  &&stats.candidate+stats.reviewRequired===stats.subjects&&typeof stats.candidateAvailableCents==='string'&&/^(0|[1-9]\d*)$/.test(stats.candidateAvailableCents)
+  &&p.subjects===stats.subjects&&p.candidate===stats.candidate&&p.reviewRequired===stats.reviewRequired
+  &&p.candidateAvailableCents===stats.candidateAvailableCents&&p.sourceConnections===0&&p.targetConnections===0&&p.targetWrites===0;
+}
+
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true, requireCurrentLegacyListed = true }) {
   const issues = [], target = input.target;
@@ -491,6 +504,10 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       ||p.ratio?.known!==display?.accountBaseRatio?.known||p.ratio?.unknown!==display?.accountBaseRatio?.unknown
       ||['selected','unselected','unknown'].some(key=>p.payout?.[key]!==display?.accountFullPayout?.[key]))
       issues.push('ROUND_DISPLAY_CAPTURE_PREFLIGHT_UNCONFIRMED');
+  }
+  if(!input.resume&&expected?.dataset?.identityProfiles&&target.migrationProfile===NEXT_MIGRATION_PROFILE){
+    if(!openingSourcePreflightMatches(input,expected,receipt?.openingSourcePreflight))
+      issues.push('ROUND_OPENING_SOURCE_PREFLIGHT_UNCONFIRMED');
   }
   if (expected?.dataset?.identityProfiles && input.growth?.packageLayout === 'PACKED_V2') {
     const proof = receipt?.distributionSourcePreflight, source = expected.source;

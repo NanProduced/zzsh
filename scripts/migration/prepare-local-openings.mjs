@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { readBoundSourceRows, sourceJsonLine } from "./local-source-adapter.mjs";
-import { prepareLocalStoredOpening } from "./local-opening-proof.mjs";
+import { prepareLocalStoredOpening, capturedOpeningUser, assertOpeningUserSource, verifyPreparedOpeningUsers } from "./local-opening-proof.mjs";
 
 const args = process.argv.slice(2);
 const required = ["--dataset", "--dataset-sha", "--funds-source", "--funds-source-sha", "--api-dist", "--out"];
@@ -48,6 +48,19 @@ async function* checkedRows(dir, meta) {
   assert(meta.file === basename(meta.file), "OPENING_INPUT_FILENAME_INVALID");
   yield* readBoundSourceRows(privatePath(join(dir, meta.file)), meta);
 }
+const apiDist = resolve(options["--api-dist"]), require = createRequire(import.meta.url), mod = n => require(join(apiDist, n + ".js"));
+const canonical = mod("supply/content-hash").canonicalize, cutoff = new Date(m.sourceCutoff).toISOString();
+const openingModules = { preparation: mod("finance/legacy-finance-source-preparation"), proof: mod("finance/legacy-finance-source-evidence"), canonical,
+  legacyOwnerUserId: mod("supply/legacy-user-migration").legacyOwnerUserId, financeRead: mod("finance/personal-finance-read") };
+const capturedUsers = new Map(), plannedUsers = new Map();
+for await (const raw of checkedRows(source, base.files.users)) {
+  const user = capturedOpeningUser(raw, openingModules);
+  assert(!capturedUsers.has(user.sourceId), "OPENING_CAPTURED_USER_DUPLICATE"); capturedUsers.set(user.sourceId, user);
+}
+for await (const user of checkedRows(dataset, m.files.users)) {
+  assert(typeof user.sourceId === "string" && !plannedUsers.has(user.sourceId), "OPENING_PLANNED_USER_DUPLICATE");
+  plannedUsers.set(user.sourceId, { sourceId: user.sourceId, userId: user.userId, sourceDigest: user.sourceDigest });
+}
 const maps = { logs: new Map(), orders: new Map(), withdraws: new Map(), distributions: new Map() };
 for (const [dir, file, map] of [
   [supplement, funds.files.earnings, maps.logs], [source, base.files.orders, maps.orders],
@@ -63,10 +76,8 @@ for (const [dir, file, map] of [
     }
   }
 }
-const apiDist = resolve(options["--api-dist"]), require = createRequire(import.meta.url), mod = n => require(join(apiDist, n + ".js"));
-const canonical = mod("supply/content-hash").canonicalize, cutoff = new Date(m.sourceCutoff).toISOString();
 const inputSha256 = sha(canonical({ datasetSha256, sourceReceiptSha256: m.sourceReceiptSha256, supplementReceiptSha256, cutoff }));
-const ctx = { modules: { preparation: mod("finance/legacy-finance-source-preparation"), proof: mod("finance/legacy-finance-source-evidence"), canonical }, ...maps, cutoff, inputSha256, sourceExtractSha256: funds.files.earnings.sha256 };
+const ctx = { modules: openingModules, ...maps, cutoff, inputSha256, sourceExtractSha256: funds.files.earnings.sha256 };
 const sid = /S-1-5-[0-9-]+/.exec(spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).stdout)?.[0];
 assert(sid, "OPENING_OUTPUT_SID_REQUIRED");
 mkdirSync(out);
@@ -74,8 +85,11 @@ assert.equal(spawnSync("icacls", [out, "/inheritance:r", "/grant:r", `*${sid}:(O
 const file = "openings.jsonl", fd = openSync(join(out, file), "wx"), hash = createHash("sha256");
 const stats = { subjects: 0, candidate: 0, reviewRequired: 0, positiveSource: 0, candidatePositive: 0, reasons: {} };
 let sourceAvailableCents = 0n, candidateAvailableCents = 0n, reviewAvailableCents = 0n;
+const seenBalances = new Set();
 try {
   for await (const balance of checkedRows(dataset, m.files["stored-balances"])) {
+    assert(!seenBalances.has(balance.sourceId), "OPENING_SOURCE_BALANCE_DUPLICATE"); seenBalances.add(balance.sourceId);
+    assertOpeningUserSource(balance, capturedUsers.get(balance.sourceId), plannedUsers.get(balance.sourceId), openingModules);
     const amount = BigInt(balance.amounts.earnings), row = prepareLocalStoredOpening(balance, ctx);
     stats.subjects++;
     sourceAvailableCents += amount;
@@ -97,7 +111,12 @@ assert.equal(stats.subjects, m.domains.users.ready);
 assert.equal(sourceAvailableCents.toString(), m.storedBalanceTotals.mappedEarningsCents);
 assert.equal(candidateAvailableCents + reviewAvailableCents, sourceAvailableCents);
 Object.assign(stats, { sourceAvailableCents: String(sourceAvailableCents), candidateAvailableCents: String(candidateAvailableCents), reviewAvailableCents: String(reviewAvailableCents) });
-const report = { status: "REVIEWED_CANDIDATES_TARGET_NOT_RUN", datasetSha256, sourceCutoff: cutoff, file, sha256: hash.digest("hex"), stats, wallMs: performance.now() - started, sourceInputSha256: inputSha256, proofRule: "ORIGINAL_STORED_BALANCE_NEVER_FLOW_SUM", targetWrites: 0 };
+const fileSha256 = hash.digest("hex");
+const sourceUsers = await verifyPreparedOpeningUsers({ balances: checkedRows(dataset, m.files["stored-balances"]),
+  openings: checkedRows(out, { file, sha256: fileSha256, rows: stats.subjects }), capturedUsers, plannedUsers, modules: openingModules, inputSha256, cutoff });
+assert(sourceUsers.subjects === stats.subjects && sourceUsers.candidate === stats.candidate && sourceUsers.reviewRequired === stats.reviewRequired
+  && sourceUsers.candidateAvailableCents === stats.candidateAvailableCents, "OPENING_SOURCE_RECONCILIATION_CHANGED");
+const report = { status: "REVIEWED_CANDIDATES_TARGET_NOT_RUN", datasetSha256, sourceCutoff: cutoff, file, sha256: fileSha256, stats, wallMs: performance.now() - started, sourceInputSha256: inputSha256, proofRule: "ORIGINAL_STORED_BALANCE_NEVER_FLOW_SUM", sourceUsers: { ...sourceUsers, sha256: base.files.users.sha256, matched: sourceUsers.subjects }, targetWrites: 0 };
 const manifest = JSON.stringify(report, null, 2) + "\n";
 writeFileSync(join(out, "manifest.json"), manifest, { flag: "wx" });
 console.log(JSON.stringify({ ...report, manifestSha256: sha(manifest) }));

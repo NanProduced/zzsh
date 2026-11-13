@@ -1,7 +1,84 @@
 import { createHash } from "node:crypto";
-import { sourceFinanceObservation } from "./local-source-adapter.mjs";
+import { basename, join } from "node:path";
+import { sourceFinanceObservation, readBoundSourceRows } from "./local-source-adapter.mjs";
 
 const sha = value => createHash("sha256").update(value).digest("hex");
+
+/** Retain only the source fields needed to independently check a prepared balance. */
+export function capturedOpeningUser(raw, { canonical, legacyOwnerUserId }) {
+  if (!raw || typeof raw.id !== "string" || !raw.id) throw new Error("OPENING_CAPTURED_USER_INVALID");
+  return { sourceId: raw.id, userId: legacyOwnerUserId("legacy_mysql_restore", "la_user", raw.id),
+    sourceDigest: sha(canonical(raw)), hasAmounts: Object.hasOwn(raw, "money") && Object.hasOwn(raw, "earnings"),
+    source: { id: raw.id, money: raw.money, earnings: raw.earnings } };
+}
+
+/** Compare with captured la_user rather than trusting the prepared balance's own digest. */
+export function assertOpeningUserSource(balance, captured, planned, { canonical, financeRead }) {
+  if (!balance || !captured || !captured.hasAmounts || !planned || balance.sourceId !== captured.sourceId || planned.sourceId !== captured.sourceId
+    || balance.userId !== captured.userId || planned.userId !== captured.userId
+    || balance.sourceDigest !== captured.sourceDigest || planned.sourceDigest !== captured.sourceDigest
+    || canonical(balance.source) !== canonical(captured.source)
+    || balance.amounts?.earnings !== financeRead.sourceYuanToCents(captured.source.earnings)
+    || balance.amounts?.money !== financeRead.sourceSignedYuanToCents(captured.source.money))
+    throw new Error("OPENING_CAPTURED_BALANCE_MISMATCH");
+}
+
+/** Match every prepared candidate to its captured stored balance without summing transaction flows. */
+export async function verifyPreparedOpeningUsers({ balances, openings, capturedUsers, plannedUsers, modules, inputSha256, cutoff }) {
+  const iterator = openings[Symbol.asyncIterator](), seen = new Set(); let subjects = 0, candidate = 0, reviewRequired = 0, amount = 0n;
+  for await (const balance of balances) {
+    if (seen.has(balance.sourceId)) throw new Error("OPENING_SOURCE_BALANCE_DUPLICATE");
+    seen.add(balance.sourceId);
+    const captured = capturedUsers.get(balance.sourceId), planned = plannedUsers.get(balance.sourceId);
+    assertOpeningUserSource(balance, captured, planned, modules);
+    const next = await iterator.next(), row = next.value;
+    if (next.done || row?.sourceId !== balance.sourceId || row.userId !== balance.userId) throw new Error("OPENING_PREPARED_SUBJECT_MISMATCH");
+    if (row.state === "CANDIDATE") {
+      const input = row.input, proof = input?.proof;
+      const sourceDigest = sha(JSON.stringify({ id: captured.source.id, earnings: captured.source.earnings, money: captured.source.money }));
+      if (input?.inputSha256 !== inputSha256 || input.cutoff !== cutoff || input.sourceCanonical !== modules.canonical(captured.source)
+        || proof?.userId !== captured.userId || proof.source?.sourceSystem !== "legacy_mysql_restore" || proof.source?.sourceEntity !== "la_user"
+        || proof.source?.sourceId !== captured.sourceId || proof.source?.identityDigest !== captured.sourceDigest
+        || proof.sourceDigest !== sourceDigest || proof.availableCents !== balance.amounts.earnings) throw new Error("OPENING_PREPARED_SOURCE_MISMATCH");
+      candidate++; amount += BigInt(proof.availableCents);
+    } else if (row.state === "REVIEW_REQUIRED" && typeof row.reason === "string" && row.reason) reviewRequired++;
+    else throw new Error("OPENING_PREPARED_STATE_INVALID");
+    subjects++;
+  }
+  if (!(await iterator.next()).done) throw new Error("OPENING_PREPARED_SUBJECT_MISMATCH");
+  return { status: "SOURCE_VALUE_AND_SUBJECT_VERIFIED", subjects, candidate, reviewRequired, candidateAvailableCents: amount.toString() };
+}
+
+/** Re-read source, planned users, balances and the opening package before target writes. */
+export async function verifyOpeningUserCapture({ datasetDir, sourceDir, openingDir, dataset, source, opening, datasetSha256, sourceReceiptSha256, fundsReceiptSha256, modules, privatePath }) {
+  const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+  if (![datasetSha256,sourceReceiptSha256,fundsReceiptSha256].every(hex)||typeof privatePath!=='function'
+    ||dataset?.sourceReceiptSha256!==sourceReceiptSha256||source?.status!=='CAPTURED_READ_ONLY'||source.rollbackConfirmed!==true||source.clientClosed!==true
+    ||opening?.status!=='REVIEWED_CANDIDATES_TARGET_NOT_RUN'||opening.datasetSha256!==datasetSha256
+    ||opening.sourceUsers?.status!=='SOURCE_VALUE_AND_SUBJECT_VERIFIED'||opening.sourceUsers.sha256!==source.files?.users?.sha256
+    ||opening.sourceUsers.matched!==opening.stats?.subjects||opening.sourceCutoff!==new Date(dataset.sourceCutoff).toISOString())
+    throw new Error('OPENING_SOURCE_CAPTURE_BINDING_INVALID');
+  const expectedInputSha=sha(modules.canonical({datasetSha256,sourceReceiptSha256,supplementReceiptSha256:fundsReceiptSha256,cutoff:opening.sourceCutoff}));
+  if(opening.sourceInputSha256!==expectedInputSha)throw new Error('OPENING_SOURCE_CAPTURE_BINDING_INVALID');
+  const read=(dir,meta)=>{
+    if(!meta||typeof meta.file!=='string'||meta.file!==basename(meta.file))throw new Error('OPENING_SOURCE_CAPTURE_BINDING_INVALID');
+    return readBoundSourceRows(privatePath(join(dir,meta.file)),meta);
+  };
+  const capturedUsers=new Map(),plannedUsers=new Map();
+  for await(const raw of read(sourceDir,source.files.users)){
+    const user=capturedOpeningUser(raw,modules);if(capturedUsers.has(user.sourceId))throw new Error('OPENING_CAPTURED_USER_DUPLICATE');capturedUsers.set(user.sourceId,user);
+  }
+  for await(const user of read(datasetDir,dataset.files.users)){
+    if(typeof user.sourceId!=='string'||plannedUsers.has(user.sourceId))throw new Error('OPENING_PLANNED_USER_DUPLICATE');
+    plannedUsers.set(user.sourceId,{sourceId:user.sourceId,userId:user.userId,sourceDigest:user.sourceDigest});
+  }
+  const proof=await verifyPreparedOpeningUsers({balances:read(datasetDir,dataset.files['stored-balances']),
+    openings:read(openingDir,{file:opening.file,sha256:opening.sha256,rows:opening.stats?.subjects}),capturedUsers,plannedUsers,modules,inputSha256:expectedInputSha,cutoff:opening.sourceCutoff});
+  if(proof.subjects!==opening.stats.subjects||proof.candidate!==opening.stats.candidate||proof.reviewRequired!==opening.stats.reviewRequired
+    ||proof.candidateAvailableCents!==opening.stats.candidateAvailableCents||proof.subjects!==dataset.domains?.users?.ready)
+    throw new Error('OPENING_SOURCE_RECONCILIATION_CHANGED');
+  return {...proof,sourceUsersSha256:source.files.users.sha256,openingSha256:opening.sha256};
+}
 
 /** Same frozen physical-source extraction used for the accepted local stored-opening package.
  * This chooses original evidence only; the API's formal proof validator decides completeness. */
