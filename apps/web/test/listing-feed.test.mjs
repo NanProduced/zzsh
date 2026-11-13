@@ -803,6 +803,11 @@ async function skin12MarketProbe(browse, {searchParams={game:'game_1'},feedState
   const actualSupply=require(path.join(repoRoot,'apps/web/src/lib/supply-client.ts')), feed={status:'ready',items:[],nextCursor:null,error:null,requestedCursors:[null],scanBudgetReached:false,loadMore(){},reload(){},reloadFirstPage(){},...feedState};
   function load(file){const module=new Module(file);module.filename=file;module.paths=Module._nodeModulePaths(repoRoot);module.require=name=>{const contentDependency=contentFixtureDependency(name);if(contentDependency)return contentDependency;
     if(name.endsWith('.css'))return{};if(name==='next/link')return({children,href})=>React.createElement('a',{href},children);if(name==='@heroui/react')return{Button:pass,Drawer};if(name==='@heroui/react/list-box')return{ListBox};if(name==='@heroui/react/select')return{Select};if(name==='@radix-ui/react-popover')return Object.fromEntries(['Root','Trigger','Portal','Content'].map(k=>[k,pass]));if(name==='embla-carousel-react')return()=>[()=>{}];
+    if(name.startsWith('./market-')){
+      const candidates=[path.join(path.dirname(file),`${name.slice(2)}.tsx`),path.join(path.dirname(file),`${name.slice(2)}.ts`)];
+      const target=candidates.find((f)=>fs.existsSync(f));
+      if(target)return load(target);
+    }
     if(name==='@/components/market/market-filter-controls')return load(path.join(repoRoot,'apps/web/src/components/market/market-filter-controls.tsx'));
     if(name==='@/components/supply/skin-media-thumb'){
       const media=load(path.join(repoRoot,'apps/web/src/components/supply/skin-media-thumb.tsx'));

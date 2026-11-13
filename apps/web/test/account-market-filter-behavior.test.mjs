@@ -68,6 +68,24 @@ function loadControls() {
   module.filename = path.join(tree, "market-filter-controls-probe.cjs");
   module.paths = Module._nodeModulePaths(tree);
   module.require = (name) => {
+    if (name.startsWith("./market-")) {
+      const candidates = [
+        path.join(tree, "apps/web/src/components/market", `${name.slice(2)}.tsx`),
+        path.join(tree, "apps/web/src/components/market", `${name.slice(2)}.ts`),
+      ];
+      const target = candidates.find((f) => fs.existsSync(f));
+      if (target) {
+        const child = new Module(target);
+        child.filename = target;
+        child.paths = Module._nodeModulePaths(tree);
+        child.require = module.require;
+        const code = fs.readFileSync(target, "utf8");
+        child._compile(ts.transpileModule(code, {
+          compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+        }).outputText, target);
+        return child.exports;
+      }
+    }
     if (name === "@radix-ui/react-popover") return { Root: ({ children }) => React.createElement(React.Fragment, null, children), Trigger: ({ children }) => children, Portal: ({ children }) => React.createElement(React.Fragment, null, children), Content: ({ children }) => React.createElement("div", null, children) };
     if (name === "@heroui/react/list-box") return listBoxStub;
     if (name === "@heroui/react/select") return selectStub;

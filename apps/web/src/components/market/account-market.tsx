@@ -2,16 +2,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Button, Drawer } from "@heroui/react";
-import useEmblaCarousel from "embla-carousel-react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Coins, LayoutGrid, List, Moon, RotateCw, SlidersHorizontal, TrendingUp, X } from "lucide-react";
-import { ManagedMarketBanner, ManagedMarketContact } from "@/components/content/market-content";
+import { RotateCw, SlidersHorizontal, X } from "lucide-react";
 import { AccountCard } from "@/components/delta/account-card";
 import { AccountCardSkeleton } from "@/components/delta/account-card-skeleton";
 import { AccountCardEmpty } from "@/components/delta/account-card-empty";
 import { FavoriteNotice } from "@/components/favorites/favorite-button";
 import { FavoritesProvider } from "@/components/favorites/favorites-context";
 import { ServiceShell } from "@/components/layout/service-shell";
-import { MarketFilterControls, MarketSelect } from "@/components/market/market-filter-controls";
+import { MarketFilterControls } from "@/components/market/market-filter-controls";
 import {
   activeListingFilterCount,
   LISTING_PAGE_SIZE,
@@ -22,13 +20,8 @@ import {
   listingUrlRejectedValues,
   parseListingFilters,
   reconcileListingFilters,
-  resourceInputFromBase,
-  resourceItemDisplayName,
-  resourceUnitShort,
   resolveSkinOwner,
-  skinGroupKey,
   skinGroupOptions,
-  toggleSkinId,
   withFilterChange,
   normalizeListingQuery,
   exactAccountLookupQuery,
@@ -37,11 +30,18 @@ import {
 import { consumeAccountReturnSnapshot, type AccountReturnSnapshot } from "@/lib/account-return";
 import { toListingCard } from "@/lib/listing-view";
 import { SupplyRequestError, supplyApi } from "@/lib/supply-client";
-import type { PublicCatalog, PublicListingFilterMetadata, SupplyFieldError, SupplyGame } from "@/lib/supply-types";
+import type { PublicCatalog, PublicListingFilterMetadata, SupplyGame } from "@/lib/supply-types";
 import { useListingFeed } from "./use-listing-feed";
+import { DeltaBanner } from "./market-banner";
+import { type Directory, resultError } from "./market-error-display";
+import {
+  MarketResultsToolbar,
+  MarketSortBar,
+  MarketActiveChips,
+  useMarketSort,
+  useActiveListingTags,
+} from "./market-toolbar";
 import "./market.css";
-
-type Directory<T> = { status: "idle" | "loading" | "ready" | "error"; data: T | null; error?: SupplyRequestError | null };
 
 function searchParamsRecord(search: string): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
@@ -52,50 +52,9 @@ function searchParamsRecord(search: string): Record<string, string | string[]> {
   return result;
 }
 
-function DeltaBanner() {
-  const [viewport] = useEmblaCarousel({ loop: false, watchDrag: false, watchFocus: false });
-  return <div className="market-banner-layout">
-    <div className="market-banner-carousel" role="region" aria-roledescription="轮播" aria-label="三角洲行动专区宣传">
-      <div className="market-banner-viewport" ref={viewport}>
-        <div className="market-banner-track">
-          <div className="market-banner-slide" role="group" aria-roledescription="幻灯片" aria-label="三角洲行动资源账号租赁">
-            <ManagedMarketBanner />
-          </div>
-        </div>
-      </div>
-    </div>
-    <div className="market-contact-templates" aria-label="联系二维码">
-      <ManagedMarketContact channel="MARKET_PLAYER_GROUP" />
-      <ManagedMarketContact channel="MARKET_COOPERATION" />
-    </div>
-  </div>;
-}
-
 export function AccountMarket({ searchParams }: { searchParams: Record<string, string | string[] | undefined> }) {
   const initialFilters = parseListingFilters(searchParams);
   return <FavoritesProvider><MarketView initialFilters={initialFilters} /></FavoritesProvider>;
-}
-
-function errorForPath(details: SupplyFieldError[], metadata: PublicListingFilterMetadata | null): string[] {  return details.map((detail) => {
-    const label = metadata?.fields.find((entry) => detail.path.toLowerCase().includes(entry.key.toLowerCase()))?.label;
-    return `${label ?? "筛选条件"}：请检查或移除该条件后重试。`;
-  }).filter((message, index, all) => all.indexOf(message) === index);
-}
-
-function resultError(error: { status: number; code: string; details: SupplyFieldError[]; message?: string } | null, metadata: PublicListingFilterMetadata | null, exactLookup: boolean): { title: string; description: string; kind: "retry" | "adjust" } | null {
-  if (!error) return null;
-  if (exactLookup) {
-    if ([401, 403, 404].includes(error.status)) return { title: "未找到可公开查看的账号", description: "请核对完整编号；也可以清空编号后改用关键词搜索。", kind: "adjust" };
-    if (error.status === 400) return { title: "编号格式未被接受", description: "请输入完整账号编号后重试。", kind: "adjust" };
-    if (error.status === 409) return { title: "该编号暂无法唯一核定", description: "请确认游戏范围与完整编号后重试。", kind: "retry" };
-    if (error.status >= 500) return { title: "编号查询暂不可用", description: "服务暂时无法处理查询，请稍后重试；这不代表账号不存在。", kind: "retry" };
-    return { title: "编号查找未完成", description: "请检查连接后重试；这不代表账号不存在。", kind: "retry" };
-  }
-  if (error.code === "LISTING_URL_TOO_LONG") return { title: "筛选条件过多，未发起请求", description: error.message ?? "请减少部分筛选条件后重试。", kind: "adjust" };
-  if (error.status === 400) return { title: "有筛选条件未被接受", description: errorForPath(error.details, metadata).join(" ") || "请检查筛选条件后重试。", kind: "adjust" };
-  if (error.status === 409) return { title: "筛选规则刚刚更新", description: "已尝试刷新可用条件；如仍无法读取，请重试。", kind: "retry" };
-  if (error.status === 503) return { title: "账号目录暂不可用", description: "服务恢复后可继续浏览，当前筛选条件会保留。", kind: "retry" };
-  return { title: "账号列表加载失败", description: "请检查网络连接后重试。", kind: "retry" };
 }
 
 /** Mobile gets one compact list; the URL keeps view so a shared desktop link still restores. */
@@ -214,7 +173,6 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
     enabled: filterSourceReady && (lookupNumber !== null || (restoreReady && metadata.status === "ready" && Boolean(metadata.data?.available))),
     replayCursors: returnSnapshot?.filterKey === filterKey ? returnSnapshot.pageCursors : undefined,
   });
-
 
   const navigate = useCallback((next: ListingFilters, options: { push?: boolean } = {}) => {
     const address = listingFiltersUrl(next);
@@ -531,242 +489,17 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   }, [compact, mobileFiltersOpen]);
   const effectiveViewMode = compact ? "list" : filters.viewMode;
   const resultCount = feed.items.length;
-  const sortOptions = useMemo(() => activeMetadata?.sorts.filter((sort) => sort.enabled).sort((a, b) => a.order - b.order) ?? [], [activeMetadata]);
-  const selectedSort = activeMetadata?.sorts.find((sort) => sort.key === filters.sort);
-  const coreOptions = selectedSort?.itemIds?.map((id) => activeMetadata?.items.find((item) => item.id === id)).filter((item): item is NonNullable<typeof item> => Boolean(item)) ?? [];
 
-  const haffItem = useMemo(
-    () => activeMetadata?.items.find((i) => i.unit === "HAFF_BASE" || i.code === "haff_base" || i.code === "df_billable_haff" || i.code === "haff"),
-    [activeMetadata]
-  );
-  const awmItem = useMemo(
-    () => activeMetadata?.items.find((i) => i.code === "awm_round" || i.code === "df_billable_awm_bullet" || i.code === "awm"),
-    [activeMetadata]
-  );
-  const helmetItem = useMemo(
-    () => activeMetadata?.items.find((i) => i.code === "level6_helmet" || i.code === "df_billable_level6_helmet" || i.code === "helmet"),
-    [activeMetadata]
-  );
-  const armorItem = useMemo(
-    () => activeMetadata?.items.find((i) => i.code === "level6_armor" || i.code === "df_billable_level6_armor" || i.code === "armor"),
-    [activeMetadata]
-  );
+  const {
+    isSmallAmountActive,
+    toggleSmallAmount,
+    isHighRatioActive,
+    toggleHighRatio,
+    isLingchenActive,
+    toggleLingchen,
+    sortTabs,
+  } = useMarketSort(filters, navigate, activeMetadata);
 
-  const isSmallAmountActive = Boolean(
-    filters.filters.resources?.some(
-      (r) => (r.itemId === haffItem?.id || r.itemId === "haff" || r.itemId === "haff_base" || r.itemId === "df_billable_haff") && r.maxQuantity === "150000000"
-    )
-  );
-  const isHighRatioActive = filters.sort === "ratio" && filters.direction === "DESC";
-  const isLingchenActive = Boolean(
-    filters.filters.serviceWindow &&
-    filters.filters.serviceWindow.startMinute === 0 &&
-    filters.filters.serviceWindow.endMinute === 480
-  );
-
-  const toggleSmallAmount = useCallback(() => {
-    const existing = filters.filters.resources ?? [];
-    const filtered = existing.filter(
-      (r) => !(r.itemId === haffItem?.id || r.itemId === "haff" || r.itemId === "haff_base" || r.itemId === "df_billable_haff")
-    );
-    if (!isSmallAmountActive) {
-      filtered.push({
-        itemId: haffItem?.id ?? "haff",
-        maxQuantity: "150000000",
-      });
-    }
-    navigate(
-      withFilterChange(filters, {
-        filters: {
-          ...filters.filters,
-          resources: filtered.length ? filtered : undefined,
-        },
-      })
-    );
-  }, [filters, haffItem?.id, isSmallAmountActive, navigate]);
-
-  const toggleHighRatio = useCallback(() => {
-    if (isHighRatioActive) {
-      navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
-    } else {
-      navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
-    }
-  }, [filters, haffItem?.id, isHighRatioActive, navigate]);
-
-  const toggleLingchen = useCallback(() => {
-    if (isLingchenActive) {
-      const nextConditions = { ...filters.filters };
-      delete nextConditions.serviceWindow;
-      navigate(withFilterChange(filters, { filters: nextConditions }));
-    } else {
-      navigate(
-        withFilterChange(filters, {
-          filters: {
-            ...filters.filters,
-            serviceWindow: {
-              startMinute: 0,
-              endMinute: 480,
-              crossMidnight: false,
-              timezone: "Asia/Shanghai",
-            },
-          },
-        })
-      );
-    }
-  }, [filters, isLingchenActive, navigate]);
-
-  const sortTabs = useMemo(() => {
-    const isLatestActive = filters.sort === "latest";
-    const isHaffActive = filters.sort === "coreQuantity" && (!filters.coreItemId || filters.coreItemId === haffItem?.id);
-    const isMoneyActive = filters.sort === "resourceTotal";
-    const isRatioActive = filters.sort === "ratio";
-    const isAwmActive = Boolean(awmItem && filters.sort === "coreQuantity" && filters.coreItemId === awmItem.id);
-    const isHelmetActive = Boolean(helmetItem && filters.sort === "coreQuantity" && filters.coreItemId === helmetItem.id);
-    const isArmorActive = Boolean(armorItem && filters.sort === "coreQuantity" && filters.coreItemId === armorItem.id);
-
-    return [
-      {
-        id: "default",
-        label: "默认排序",
-        isActive: isLatestActive,
-        direction: isLatestActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "最新发布" : "最早发布",
-        title: isLatestActive
-          ? `默认排序：当前${filters.direction === "DESC" ? "最新发布优先" : "最早发布优先"}，点击切换为${filters.direction === "DESC" ? "最早发布" : "最新发布"}`
-          : "点击按最新发布排序",
-        ariaLabel: isLatestActive
-          ? `默认排序，当前${filters.direction === "DESC" ? "最新发布" : "最早发布"}，点击切换方向`
-          : "默认排序，点击激活",
-        onClick: () => {
-          if (isLatestActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "latest", direction: "DESC", coreItemId: null }));
-          }
-        },
-      },
-      {
-        id: "haff",
-        label: "哈夫币排序",
-        isActive: isHaffActive,
-        direction: isHaffActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
-        title: isHaffActive
-          ? `哈夫币排序：当前从${filters.direction === "DESC" ? "高到低（多币优先）" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
-          : "点击按哈夫币从高到低排序（多币优先）",
-        ariaLabel: isHaffActive
-          ? `哈夫币排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
-          : "哈夫币排序，点击激活",
-        onClick: () => {
-          if (isHaffActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
-          }
-        },
-      },
-      {
-        id: "money",
-        label: "价格排序",
-        isActive: isMoneyActive,
-        direction: isMoneyActive ? filters.direction : null,
-        directionText: filters.direction === "ASC" ? "从低到高" : "从高到低",
-        title: isMoneyActive
-          ? `价格排序：当前从${filters.direction === "ASC" ? "低到高（便宜优先）" : "高到低"}，点击切换为从${filters.direction === "ASC" ? "高到低" : "低到高"}`
-          : "点击按价格从低到高排序（便宜优先）",
-        ariaLabel: isMoneyActive
-          ? `价格排序，当前从${filters.direction === "ASC" ? "低到高" : "高到低"}，点击切换方向`
-          : "价格排序，点击激活",
-        onClick: () => {
-          if (isMoneyActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "ASC" ? "DESC" : "ASC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "resourceTotal", direction: "ASC", coreItemId: null }));
-          }
-        },
-      },
-      {
-        id: "ratio",
-        label: "比例排序",
-        isActive: isRatioActive,
-        direction: isRatioActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
-        title: isRatioActive
-          ? `比例排序：当前从${filters.direction === "DESC" ? "高到低（高性价比优先）" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
-          : "点击按比例从高到低排序（高性价比优先）",
-        ariaLabel: isRatioActive
-          ? `比例排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
-          : "比例排序，点击激活",
-        onClick: () => {
-          if (isRatioActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "ratio", coreItemId: haffItem?.id ?? null, direction: "DESC" }));
-          }
-        },
-      },
-      ...(awmItem ? [{
-        id: "awm",
-        label: "AWM排序",
-        isActive: isAwmActive,
-        direction: isAwmActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
-        title: isAwmActive
-          ? `AWM排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
-          : "点击按AWM子弹从高到低排序",
-        ariaLabel: isAwmActive
-          ? `AWM排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
-          : "AWM排序，点击激活",
-        onClick: () => {
-          if (isAwmActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: awmItem.id, direction: "DESC" }));
-          }
-        },
-      }] : []),
-      ...(helmetItem ? [{
-        id: "helmet",
-        label: "六头排序",
-        isActive: isHelmetActive,
-        direction: isHelmetActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
-        title: isHelmetActive
-          ? `六头排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
-          : "点击按六级头盔从高到低排序",
-        ariaLabel: isHelmetActive
-          ? `六头排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
-          : "六头排序，点击激活",
-        onClick: () => {
-          if (isHelmetActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: helmetItem.id, direction: "DESC" }));
-          }
-        },
-      }] : []),
-      ...(armorItem ? [{
-        id: "armor",
-        label: "六甲排序",
-        isActive: isArmorActive,
-        direction: isArmorActive ? filters.direction : null,
-        directionText: filters.direction === "DESC" ? "从高到低" : "从低到高",
-        title: isArmorActive
-          ? `六甲排序：当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换为从${filters.direction === "DESC" ? "低到高" : "高到低"}`
-          : "点击按六级护甲从高到低排序",
-        ariaLabel: isArmorActive
-          ? `六甲排序，当前从${filters.direction === "DESC" ? "高到低" : "低到高"}，点击切换方向`
-          : "六甲排序，点击激活",
-        onClick: () => {
-          if (isArmorActive) {
-            navigate(withFilterChange(filters, { direction: filters.direction === "DESC" ? "ASC" : "DESC" }));
-          } else {
-            navigate(withFilterChange(filters, { sort: "coreQuantity", coreItemId: armorItem.id, direction: "DESC" }));
-          }
-        },
-      }] : []),
-    ];
-  }, [filters, haffItem?.id, awmItem, helmetItem, armorItem, navigate]);
   const breadcrumbs = game
     ? [{ label: "首页", href: "/" }, { label: game.name }, { label: "租号" }]
     : [{ label: "首页", href: "/" }, { label: "三角洲行动" }, { label: "租号" }];
@@ -793,118 +526,7 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
   }, [feed.status, readyToBrowse, refreshing]);
   const currentError = resultError(feed.error ?? feed.loadMoreError, activeMetadata, lookupNumber !== null);
 
-  const activeTags = useMemo(() => {
-    if (!activeMetadata || filterCount === 0) return [];
-    const tags: { id: string; label: string; onRemove: () => void }[] = [];
-    const selected = filters.filters;
-    if (filters.q) {
-      tags.push({
-        id: "q",
-        label: `搜索: ${filters.q}`,
-        onRemove: () => navigate(withFilterChange(filters, { q: null })),
-      });
-    }
-    const safeBoxField = activeMetadata.fields.find((f) => f.key === "safeBoxCodes");
-    for (const code of selected.safeBoxCodes ?? []) {
-      const label = safeBoxField?.options?.find((o) => o.value === code)?.label ?? code;
-      tags.push({
-        id: `safeBox-${code}`,
-        label: `安全箱: ${label}`,
-        onRemove: () => {
-          const next = (selected.safeBoxCodes ?? []).filter((c) => c !== code);
-          navigate(withFilterChange(filters, { filters: { ...selected, safeBoxCodes: next.length ? next : undefined } }));
-        },
-      });
-    }
-    const gradingField = activeMetadata.fields.find((f) => f.key === "gradingCodes");
-    for (const code of selected.gradingCodes ?? []) {
-      const label = gradingField?.options?.find((o) => o.value === code)?.label ?? code;
-      tags.push({
-        id: `grading-${code}`,
-        label: `段位: ${label}`,
-        onRemove: () => {
-          const next = (selected.gradingCodes ?? []).filter((c) => c !== code);
-          navigate(withFilterChange(filters, { filters: { ...selected, gradingCodes: next.length ? next : undefined } }));
-        },
-      });
-    }
-    const loginField = activeMetadata.fields.find((f) => f.key === "loginMethodCodes");
-    for (const code of selected.loginMethodCodes ?? []) {
-      const label = loginField?.options?.find((o) => o.value === code)?.label ?? code;
-      tags.push({
-        id: `login-${code}`,
-        label: `登录: ${label}`,
-        onRemove: () => {
-          const next = (selected.loginMethodCodes ?? []).filter((c) => c !== code);
-          navigate(withFilterChange(filters, { filters: { ...selected, loginMethodCodes: next.length ? next : undefined } }));
-        },
-      });
-    }
-    if (selected.vitality) {
-      tags.push({
-        id: "vitality",
-        label: `体力 ≥ ${selected.vitality.min}`,
-        onRemove: () => navigate(withFilterChange(filters, { filters: { ...selected, vitality: undefined } })),
-      });
-    }
-    if (selected.bear) {
-      tags.push({
-        id: "bear",
-        label: `负重 ≥ ${selected.bear.min}`,
-        onRemove: () => navigate(withFilterChange(filters, { filters: { ...selected, bear: undefined } })),
-      });
-    }
-    if (selected.serviceWindow) {
-      const sw = selected.serviceWindow;
-      const fmt = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
-      tags.push({
-        id: "serviceWindow",
-        label: `上号时间: ${fmt(sw.startMinute)}—${sw.crossMidnight ? "次日 " : ""}${fmt(sw.endMinute)}`,
-        onRemove: () => navigate(withFilterChange(filters, { filters: { ...selected, serviceWindow: undefined } })),
-      });
-    }
-    for (const region of selected.regions ?? []) {
-      tags.push({
-        id: `region-${region.province}-${region.city}`,
-        label: `${region.province}·${region.city}`,
-        onRemove: () => {
-          const next = (selected.regions ?? []).filter((r) => r.province !== region.province || r.city !== region.city);
-          navigate(withFilterChange(filters, { filters: { ...selected, regions: next.length ? next : undefined } }));
-        },
-      });
-    }
-    for (const res of selected.resources ?? []) {
-      const item = activeMetadata.items.find((i) => i.id === res.itemId);
-      const name = item?.unit === "HAFF_BASE" ? "哈夫币" : resourceItemDisplayName(item, { gameCode: game?.code, itemId: res.itemId });
-      const display = (value: string) => {
-        const quantity = item ? resourceInputFromBase(value, item) ?? value : value;
-        const unit = item ? resourceUnitShort(item) : "";
-        return unit ? `${quantity} ${unit}` : quantity;
-      };
-      const rangeLabel = res.minQuantity !== undefined && res.maxQuantity !== undefined
-        ? res.minQuantity === res.maxQuantity ? display(res.minQuantity) : `${display(res.minQuantity)}–${display(res.maxQuantity)}`
-        : res.minQuantity !== undefined ? `≥ ${display(res.minQuantity)}` : `≤ ${display(res.maxQuantity!)}`;
-      tags.push({
-        id: `resource-${res.itemId}`,
-        label: `${name}: ${rangeLabel}`,
-        onRemove: () => {
-          const next = (selected.resources ?? []).filter((r) => r.itemId !== res.itemId);
-          navigate(withFilterChange(filters, { filters: { ...selected, resources: next.length ? next : undefined } }));
-        },
-      });
-    }
-    for (const group of selected.skinGroups ?? []) {
-      for (const skinId of group.ids) {
-        const skinName = catalog.data?.skins?.find((s) => s.id === skinId)?.name ?? "已选皮肤";
-        tags.push({
-          id: `skin-${skinId}`,
-          label: `皮肤: ${skinName}`,
-          onRemove: () => navigate(toggleSkinId(filters, skinGroupKey(group), skinId)),
-        });
-      }
-    }
-    return tags;
-  }, [activeMetadata, catalog.data, filterCount, filters, game?.code, navigate]);
+  const activeTags = useActiveListingTags(filters, activeMetadata, catalog.data, game?.code, navigate);
 
   return <ServiceShell surface="browse" contextLabel={null} showPageHeading={false} topContent={game?.code === "delta" ? <DeltaBanner /> : null}
     breadcrumbs={breadcrumbs} title={game ? `${game.name}账号租赁` : "三角洲行动账号租赁"}
@@ -994,105 +616,40 @@ function MarketView({ initialFilters }: { initialFilters: ListingFilters }) {
         {recoveryNotice && <p className="market-recovery-note" role="status">{recoveryNotice}</p>}
         {catalog.status === "error" && activeMetadata && !lookupNumber ? <p className="market-catalog-note" role="status">皮肤目录暂不可用；已选条件和其他筛选仍可继续使用。</p> : null}
         <FavoriteNotice />
-        <div className="market-results-toolbar">
-          <div><h2>{lookupNumber ? "编号查询结果" : "账号列表"}</h2><p className="sr-only" aria-live="polite" aria-atomic="true">{feed.status === "ready" ? (resultCount ? `已加载 ${resultCount} 条` : "暂时没有符合条件的账号") : feed.status === "error" ? currentError?.title ?? "结果读取失败" : listingNotOpen ? "暂未开放选号" : readyToBrowse ? "正在读取结果" : "正在准备账号列表"}{feed.nextCursor ? " · 还有更多可继续加载" : ""}</p></div>
-          <div className="market-results-controls">
-            <div className="market-results-actions">
-              <button type="button" className="market-toolbar-action" onClick={refreshResults} disabled={!readyToBrowse || refreshing} aria-busy={refreshing || undefined} aria-label={refreshing ? "正在刷新结果" : "刷新结果"} title={refreshing ? "正在刷新结果" : "刷新结果"}><RotateCw size={15} aria-hidden="true" /><span className="market-toolbar-action-label">{refreshing ? "刷新中…" : "刷新结果"}</span></button>
-            </div>
-            {!compact && <div className="market-view-toggle" role="group" aria-label="账号展示方式">
-              <button type="button" aria-pressed={filters.viewMode === "list"} onClick={() => navigate({ ...filters, viewMode: "list" })}><List size={16} aria-hidden="true" /><span>列表</span></button>
-              <button type="button" aria-pressed={filters.viewMode === "grid"} onClick={() => navigate({ ...filters, viewMode: "grid" })}><LayoutGrid size={16} aria-hidden="true" /><span>卡片</span></button>
-            </div>}
-          </div>
-        </div>
+        <MarketResultsToolbar
+          lookupNumber={Boolean(lookupNumber)}
+          feedStatus={feed.status}
+          resultCount={resultCount}
+          currentError={currentError}
+          listingNotOpen={Boolean(listingNotOpen)}
+          readyToBrowse={Boolean(readyToBrowse)}
+          hasNextCursor={Boolean(feed.nextCursor)}
+          refreshing={refreshing}
+          onRefresh={refreshResults}
+          compact={compact}
+          viewMode={effectiveViewMode}
+          onViewModeChange={(mode) => navigate({ ...filters, viewMode: mode })}
+        />
 
         {activeMetadata && !lookupNumber && (
-          <div className="market-sort-bar" role="toolbar" aria-label="专区筛选与账号排序">
-            <div className="market-zone-group" role="group" aria-label="快捷专区">
-              <button
-                type="button"
-                className={`market-zone-btn ${isSmallAmountActive ? "market-zone-btn--active" : ""}`}
-                aria-pressed={isSmallAmountActive}
-                onClick={toggleSmallAmount}
-                title="哈夫币 ≤ 150M，低门槛快捷租号"
-              >
-                <Coins size={14} aria-hidden="true" />
-                <span>小额专区</span>
-              </button>
-              <button
-                type="button"
-                className={`market-zone-btn ${isHighRatioActive ? "market-zone-btn--active" : ""}`}
-                aria-pressed={isHighRatioActive}
-                onClick={toggleHighRatio}
-                title="按哈夫币/租金比例降序排列"
-              >
-                <TrendingUp size={14} aria-hidden="true" />
-                <span>高比例</span>
-              </button>
-              <button
-                type="button"
-                className={`market-zone-btn ${isLingchenActive ? "market-zone-btn--active" : ""}`}
-                aria-pressed={isLingchenActive}
-                onClick={toggleLingchen}
-                title="服务时段覆盖 00:00–08:00 凌晨档"
-              >
-                <Moon size={14} aria-hidden="true" />
-                <span>凌晨专场</span>
-              </button>
-            </div>
-
-            <div className="market-sort-divider" aria-hidden="true" />
-
-            <div className="market-sort-items" role="group" aria-label="排序维度">
-              {sortTabs.map((tab) => {
-                const isDesc = tab.direction === "DESC";
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    className={`market-sort-tab ${tab.isActive ? "market-sort-tab--active" : ""}`}
-                    aria-pressed={tab.isActive}
-                    onClick={tab.onClick}
-                    title={tab.title}
-                    aria-label={tab.ariaLabel}
-                  >
-                    <span className="market-sort-tab-label">{tab.label}</span>
-                    {tab.isActive ? (
-                      <span className={`market-sort-dir-badge market-sort-dir-badge--${isDesc ? "desc" : "asc"}`}>
-                        {isDesc ? (
-                          <ArrowDown size={12} strokeWidth={2.5} aria-hidden="true" />
-                        ) : (
-                          <ArrowUp size={12} strokeWidth={2.5} aria-hidden="true" />
-                        )}
-                        <span>{tab.directionText}</span>
-                      </span>
-                    ) : (
-                      <ArrowUpDown size={12} className="market-sort-icon-neutral" aria-hidden="true" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          <MarketSortBar
+            isSmallAmountActive={isSmallAmountActive}
+            onToggleSmallAmount={toggleSmallAmount}
+            isHighRatioActive={isHighRatioActive}
+            onToggleHighRatio={toggleHighRatio}
+            isLingchenActive={isLingchenActive}
+            onToggleLingchen={toggleLingchen}
+            sortTabs={sortTabs}
+          />
         )}
 
         {activeTags.length > 0 && feed.items.length > 0 ? (
-          <div className="market-active-chips" role="group" aria-label="当前已选筛选条件，可单项移除">
-            {(chipsExpanded ? activeTags : activeTags.slice(0, 6)).map((tag) => (
-              <button key={tag.id} type="button" className="market-filter-chip" onClick={tag.onRemove} aria-label={`移除筛选：${tag.label}`}>
-                <span>{tag.label}</span><X size={12} aria-hidden="true" />
-              </button>
-            ))}
-            {activeTags.length > 6 ? (
-              <button type="button" className="market-filter-chip market-filter-chip--toggle" aria-expanded={chipsExpanded} onClick={() => setChipsExpanded((value) => !value)}>
-                {chipsExpanded ? "收起" : `还有 ${activeTags.length - 6} 项`}
-              </button>
-            ) : null}
-            <button type="button" className="market-filter-chip market-filter-chip--clear-all" onClick={resetFilters} aria-label="清空全部已选筛选条件">
-              <span>清空全部</span>
-            </button>
-          </div>
+          <MarketActiveChips
+            tags={activeTags}
+            expanded={chipsExpanded}
+            onToggleExpanded={() => setChipsExpanded((value) => !value)}
+            onReset={resetFilters}
+          />
         ) : null}
         {filters.q && <div className="market-search-summary" role="status">搜索“{filters.q}” · {lookupNumber ? "按完整编号精确查找" : "按账号标题关键词筛选"}<button type="button" onClick={clearSearch}>清除搜索</button></div>}
         <div className="market-results" aria-busy={feed.status === "loading" || feed.isLoadingMore}>
