@@ -107,3 +107,33 @@ CREATE CONSTRAINT TRIGGER legacy_system_liability_audit AFTER INSERT ON zzsh_iam
   EXECUTE FUNCTION zzsh_order.check_legacy_system_liability_audit();
 REVOKE ALL ON FUNCTION zzsh_order.check_legacy_system_liability_audit() FROM PUBLIC;
 COMMENT ON FUNCTION zzsh_order.check_legacy_system_liability_audit() IS '校验旧退款责任与系统来源及历史记录一致，不表示渠道到账。';
+
+CREATE OR REPLACE FUNCTION zzsh_order.check_legacy_duty_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE d zzsh_order.legacy_order_duty;l zzsh_order.legacy_order_read_snapshot;s jsonb;f jsonb;t jsonb;
+BEGIN
+ SELECT * INTO d FROM zzsh_order.legacy_order_duty WHERE id=NEW.duty_id;
+ SELECT * INTO l FROM zzsh_order.legacy_order_read_snapshot WHERE id=NEW.order_id;
+ s:=NEW.source_canonical::jsonb;f:=NEW.final_amount_evidence_canonical::jsonb;t:=NEW.time_evidence_canonical::jsonb;
+ IF d.id IS NULL OR l.source_order_status IS DISTINCT FROM 4 OR l.source_pay_status IS DISTINCT FROM 1
+  OR(d.order_id,d.kind,d.source_record_id,d.counterparty_user_id,d.amount_cents,d.currency,d.level,d.ratio,d.maturity_at,d.admission_id)
+   IS DISTINCT FROM(NEW.order_id,NEW.kind,NEW.source_record_id,NEW.counterparty_user_id,NEW.amount_cents,NEW.currency,NEW.level,NEW.ratio,NEW.maturity_at,NEW.id)
+  OR NEW.parent_source_digest IS DISTINCT FROM l.source_digest OR s->>'order_id' IS DISTINCT FROM l.legacy_id OR s->>'id' IS DISTINCT FROM NEW.source_record_id
+  OR s->>'status' IS DISTINCT FROM '1' OR(s->>'earnings')::numeric*100 IS DISTINCT FROM NEW.amount_cents
+  OR f->>'parentSourceDigest' IS DISTINCT FROM NEW.parent_source_digest OR f->>'sourceRecordDigest' IS DISTINCT FROM NEW.source_record_digest
+  OR f->>'beneficiaryLegacyId' IS DISTINCT FROM s->>'user_id' OR(f->>'amountCents')::numeric IS DISTINCT FROM NEW.amount_cents
+  OR(f->>'cutoff')::timestamptz IS DISTINCT FROM NEW.cutoff
+  OR t->>'parentSourceDigest' IS DISTINCT FROM NEW.parent_source_digest OR t->>'sourceRecordDigest' IS DISTINCT FROM NEW.source_record_digest
+  OR t->>'kind' IS DISTINCT FROM NEW.time_kind OR(t->>'at')::timestamptz IS DISTINCT FROM NEW.source_time OR(t->>'cutoff')::timestamptz IS DISTINCT FROM NEW.cutoff
+  OR t->>'sourceValue' IS DISTINCT FROM NEW.source_time_value OR t->>'sourceUnit' IS DISTINCT FROM NEW.source_time_unit
+  OR NOT EXISTS(SELECT 1 FROM zzsh_iam.user_identity_state i WHERE i.user_id=NEW.counterparty_user_id AND i.provider='legacy_mysql_restore' AND i.provider_reference='la_user:'||(s->>'user_id'))
+  OR NOT EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=NEW.order_id AND a.action='order.legacy.commission.completed-import' AND a.outcome='SUCCESS'
+   AND a.details->>'admissionId'=NEW.id AND a.details->>'admissionDigest'=NEW.admission_digest
+   AND ((a.actor_type='admin' AND a.actor_id=NEW.reviewed_by->>'userId' AND a.session_id=NEW.reviewed_by->>'sessionId')
+     OR (a.actor_type='system' AND a.session_id IS NULL AND NEW.reviewed_by->>'kind'='SYSTEM_ORDER_MIGRATION'
+       AND a.actor_id=NEW.reviewed_by->>'id' AND a.legacy_migration_manifest_sha256=NEW.reviewed_by->>'sourceDatasetSha256'
+       AND l.created_by_migration_id=a.actor_id AND l.migration_manifest_sha256=a.legacy_migration_manifest_sha256
+       AND a.details->>'bindingDigest'=l.binding_digest AND a.details->>'sourceRecordId'=NEW.source_record_id
+       AND a.details->>'sourceRecordDigest'=NEW.source_record_digest)))
+ THEN RAISE EXCEPTION 'Completed commission admission/actor/audit incomplete' USING ERRCODE='23514'; END IF;
+ RETURN NULL;
+END $$;

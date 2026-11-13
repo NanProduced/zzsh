@@ -641,20 +641,26 @@ function systemDisplayAdapter(){
     };
 }
 function systemOrderEvidenceAdapter(operation){
-    if(!['CONTINUATION','LIABILITY'].includes(operation))throw new Error('NEXT_SYSTEM_ORDER_OPERATION_INVALID');
-    const writer=operation==='CONTINUATION'?mod('order/legacy-continuation-evidence').importLegacyContinuationEvidence:mod('order/legacy-liability-intake').importLegacyHistoricalLiability;
+    if(!['CONTINUATION','LIABILITY','COMPLETED_COMMISSION'].includes(operation))throw new Error('NEXT_SYSTEM_ORDER_OPERATION_INVALID');
+    const writer=operation==='CONTINUATION'?mod('order/legacy-continuation-evidence').importLegacyContinuationEvidence:
+      operation==='LIABILITY'?mod('order/legacy-liability-intake').importLegacyHistoricalLiability:mod('order/legacy-continuation-evidence').importLegacyCompletedCommission;
     const canonical=mod('supply/content-hash').canonicalize;
     if(typeof writer!=='function')throw new Error('NEXT_SYSTEM_ORDER_EVIDENCE_ADAPTER_REQUIRED');
     return async entries=>{
-      if(!fenceHeld||!fenceEpoch||!Array.isArray(entries)||!entries.length||entries.length>20||new Set(entries.map(row=>row.body?.orderId)).size!==entries.length)
+      if(!fenceHeld||!fenceEpoch||!Array.isArray(entries)||!entries.length||entries.length>20
+        ||new Set(entries.map(row=>JSON.stringify([row.body?.orderId,operation==='COMPLETED_COMMISSION'?row.body?.commission?.id:null]))).size!==entries.length)
         throw new Error('NEXT_SYSTEM_ORDER_EVIDENCE_BATCH_INVALID');
       const epoch=fenceEpoch,ids=entries.map(row=>row.body?.orderId);
       const parents=(await client.query(`SELECT id,legacy_id,source_digest,binding_digest FROM zzsh_order.legacy_order_read_snapshot WHERE id=ANY($1::text[])`,[ids])).rows;
       const byId=new Map(parents.map(row=>[row.id,row])),admitted=new Set();
       for(const row of entries){
-        const parent=byId.get(row.body?.orderId),legacyId=operation==='CONTINUATION'?row.sourceId:/^la_order:[1-9][0-9]{0,23}$/.test(row.sourceId??'')?row.sourceId.slice(9):null;
-        const sourceDigest=operation==='CONTINUATION'?row.body.sourceDigest:row.body.parentSourceDigest;
-        if(!parent||parent.legacy_id!==legacyId||operation==='CONTINUATION'&&row.body.source?.legacyOrderId!==legacyId||parent.source_digest!==sourceDigest)
+        const parent=byId.get(row.body?.orderId);let legacyId,sourceDigest;
+        if(operation==='CONTINUATION'){legacyId=row.sourceId;sourceDigest=row.body.sourceDigest;if(row.body.source?.legacyOrderId!==legacyId)throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_BINDING_INVALID');}
+        else if(operation==='LIABILITY'){legacyId=/^la_order:[1-9][0-9]{0,23}$/.test(row.sourceId??'')?row.sourceId.slice(9):null;sourceDigest=row.body.parentSourceDigest;}
+        else {let source;try{source=JSON.parse(row.body.sourceRecord?.canonical);}catch{throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_BINDING_INVALID');}
+          if(row.sourceId!=='la_distribution_order:'+row.body.commission?.id||source?.id!==row.body.commission?.id)throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_BINDING_INVALID');
+          legacyId=source.order_id;sourceDigest=row.body.sourceDigest;}
+        if(!parent||parent.legacy_id!==legacyId||parent.source_digest!==sourceDigest)
           throw new Error('LEGACY_SYSTEM_ORDER_EVIDENCE_SOURCE_BINDING_INVALID');
         admitted.add(JSON.stringify({orderId:parent.id,legacyId:parent.legacy_id,sourceDigest:parent.source_digest,bindingDigest:parent.binding_digest,
           operation,payloadDigest:sha(canonical(row.body))}));
@@ -794,6 +800,7 @@ try {
                     systemInvitation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemInvitationAdapter() : null,
                     systemContinuation: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemOrderEvidenceAdapter('CONTINUATION') : null,
                     systemLiability: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemOrderEvidenceAdapter('LIABILITY') : null,
+                    systemCompletedCommission: registered.migrationProfile === NEXT_MIGRATION_PROFILE ? systemOrderEvidenceAdapter('COMPLETED_COMMISSION') : null,
                     targetPort: registered.port ?? registered.instance?.port ?? null, apiDist:api,fundsSource:fundsSourceBinding,refundAttemptsSource:refundAttemptsBinding });
                 state.status = "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED";
             }

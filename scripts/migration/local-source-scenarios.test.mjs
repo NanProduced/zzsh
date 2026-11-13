@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -58,6 +58,25 @@ test('system liability readback preserves original refund evidence and unknown c
  assert.equal(matchesSystemLiabilityEvidence([audit],[receipt],expected),true);
  for(const [a,r] of [[[],[receipt]],[[audit],[]],[[audit,audit],[receipt]],[[{...audit,details:{...details,channelState:'SUCCESS'}}],[receipt]],[[audit],[{...receipt,publish_required:true}]]])
   assert.equal(matchesSystemLiabilityEvidence(a,r,expected),false);
+});
+test('completed commission readback distinguishes two economic keys on one order',()=>{
+ const hash=value=>createHash('sha256').update(value).digest('hex'),actorId='legacy-order-migration:'+'a'.repeat(64),manifestSha256='b'.repeat(64),bindingDigest='c'.repeat(64),fingerprint='d'.repeat(64);
+ const input={orderId:'order-1',sourceDigest:'e'.repeat(64),commission:{id:'1'},sourceRecord:{digest:'f'.repeat(64)},finalAmountEvidenceDigest:'1'.repeat(64),time:{at:'2026-01-01T00:00:00.000000Z'},cutoff:'2026-01-02T00:00:00.000000Z'};
+ const effect={dutyId:'duty-1',beneficiaryUserId:'user-1',amountCents:'100',maturityAt:'2026-01-08T00:00:00.000000Z',maturedByCutoff:false};
+ const admissionId='legacy_admission_'+hash(effect.dutyId).slice(0,40),admissionCanonical=JSON.stringify({schema:'legacy-completed-commission-admission.v1',...input,beneficiaryUserId:effect.beneficiaryUserId,amountCents:effect.amountCents,maturityAt:effect.maturityAt}),admissionDigest=hash(admissionCanonical);
+ const details={sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId:'9',sourceDigest:input.sourceDigest,sourceDatasetSha256:manifestSha256,migrationRunDigest:'a'.repeat(64),bindingDigest,
+  payloadDigest:hash(JSON.stringify(input)),sourceRecordId:input.commission.id,sourceRecordDigest:input.sourceRecord.digest,parentSourceDigest:input.sourceDigest,admissionId,admissionDigest,
+  finalAmountEvidenceDigest:input.finalAmountEvidenceDigest,time:input.time,cutoff:input.cutoff,maturityAt:effect.maturityAt,maturedByCutoff:false};
+ const audit={object_id:input.orderId,action:'order.legacy.commission.completed-import',actor_type:'system',actor_id:actorId,session_id:null,source_manifest:manifestSha256,details};
+ const receipt={scope_key:JSON.stringify(['system',actorId,'order.legacy.commission.completed-import',input.orderId]),key:hash(input.commission.id),request_fingerprint:fingerprint,response_status:200,publish_required:false,
+  response_body:{admission:'IMPORTED',dutyId:effect.dutyId,maturityAt:effect.maturityAt}};
+ const admission={id:admissionId,duty_id:effect.dutyId,admission_digest:admissionDigest,admission_canonical:admissionCanonical,source_record_digest:input.sourceRecord.digest,
+  reviewed_by:{kind:'SYSTEM_ORDER_MIGRATION',id:actorId,sourceDatasetSha256:manifestSha256}};
+ const expected={actorId,manifestSha256,legacyId:'9',bindingDigest,input,effect,admission,fingerprint,canonicalize:JSON.stringify};
+ assert.equal(matchesSystemCompletedCommissionEvidence([audit,{...audit,details:{...details,sourceRecordId:'2'}}],[receipt,{...receipt,key:hash('2')}],expected),true);
+ assert.equal(matchesSystemCompletedCommissionEvidence([audit,audit],[receipt],expected),false);
+ assert.equal(matchesSystemCompletedCommissionEvidence([audit],[{...receipt,response_body:{...receipt.response_body,maturityAt:'2026-01-09'}}],expected),false);
+ assert.equal(matchesSystemCompletedCommissionEvidence([audit],[receipt],{...expected,admission:{...admission,source_record_digest:'0'.repeat(64)}}),false);
 });
 
 test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {

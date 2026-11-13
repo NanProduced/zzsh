@@ -14,7 +14,7 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test("readback checks every core system identity against the registered target",()=>{
   const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
@@ -72,6 +72,13 @@ test('system liability completion requires every source, audit and receipt to re
  assert.equal(systemLiabilityAttributionMatches(checkpoint,{liabilityDuties:{...readback.liabilityDuties,sourceReconstructed:false}}),false);
  assert.equal(systemLiabilityAttributionMatches(checkpoint,{liabilityDuties:{...readback.liabilityDuties,systemAttribution:{...proof,matched:1}}}),false);
  assert.equal(systemLiabilityAttributionMatches({...checkpoint,generatedPhases:{liabilityDuties:{rows:2}}},readback),false);
+});
+test('system completed commission gate requires each original economic key and source',()=>{
+ const checkpoint={binding:{systemOrderId:'legacy-order-migration:'+'a'.repeat(64)},generatedPhases:{completedCommissions:{receiptMode:'SYSTEM_ORDER_V1',rows:2}},phases:{completedCommissions:{complete:true,quarantined:0,nextIndex:2}}};
+ const proof={status:'VERIFIED',expected:2,matched:2},readback={completedCommissions:{expected:2,matched:2,sourceReconstructed:true,systemAttribution:proof}};
+ assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,readback),true);
+ assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,{completedCommissions:{...readback.completedCommissions,systemAttribution:{...proof,matched:1}}}),false);
+ assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,{completedCommissions:{...readback.completedCommissions,sourceReconstructed:false}}),false);
 });
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
@@ -291,7 +298,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
         await acting.assertSourceEvidence({orderId:normalized.id,legacyId:input.source.legacyId,sourceDigest:input.source.digest,
           bindingDigest:failure==="order-source-mismatch" ? "0".repeat(64) : normalized.bindingDigest});
         commands.push("SYNTHETIC_ORDER_IMPORT");return {orderId:normalized.id,replayed:false};} },
-    "order/legacy-continuation-evidence": {async importLegacyContinuationEvidence(){throw Error('UNEXPECTED_CONTINUATION_IMPORT');}},
+    "order/legacy-continuation-evidence": {async importLegacyContinuationEvidence(){throw Error('UNEXPECTED_CONTINUATION_IMPORT');},async importLegacyCompletedCommission(){throw Error('UNEXPECTED_COMMISSION_IMPORT');}},
     "order/legacy-liability-intake": {async importLegacyHistoricalLiability(){throw Error('UNEXPECTED_LIABILITY_IMPORT');}},
     "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, async migrateLegacyOwner(_client, row, acting) {
       if (migrationProfile === NEXT_MIGRATION_PROFILE) { assert.equal(acting.kind,"SYSTEM_USER_MIGRATION");

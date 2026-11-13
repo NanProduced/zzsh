@@ -196,9 +196,10 @@ export async function applyFinancialDomains(ctx) {
         await ctx.runBatches("liabilityDuties",liabilityRows,rows=>ctx.systemLiability(rows),20);
     }else await ctx.runItems("liabilityDuties", liabilityRows, row => mod("order/legacy-liability-intake").importLegacyHistoricalLiability(client, actor, row.body), 20);
     const pending = await arrayOf(ctx, "pending-commissions");
-    let completedRows = state.generatedPhases?.completedCommissions ? freezePhase(ctx, "completedCommissions", []) : null;
+    const commissionReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
+    let completedRows = state.generatedPhases?.completedCommissions ? freezePhase(ctx, "completedCommissions", [],commissionReceiptMode) : null;
     if (!completedRows) {
-        const target = await facts(ctx, pending.map(row => row.parentLegacyOrderId));
+        const target = await facts(ctx, pending.map(row => row.parentLegacyOrderId),next);
         const parents = new Map(target.parents.map(p => [p.legacyId, p]));
         const identities = (await client.query("SELECT split_part(i.provider_reference,':',2) AS id FROM zzsh_iam.user_identity_state i WHERE i.provider='legacy_mysql_restore' AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=i.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS' AND a.details->>'legacyId'=split_part(i.provider_reference,':',2))")).rows.map(r => r.id);
         const assembly = preparation.assembleLegacyCompletedCommissionBatch({ batchId: "full-commissions-" + state.binding.oid, cutoff: micros(sourceCutoff), parents: target.parents, current: target.current, verifiedBeneficiaries: identities, rows: pending.map(row => ({ sourceRecord: row.sourceRecord, parentLegacyOrderId: row.parentLegacyOrderId, mappedOrderId: parents.get(row.parentLegacyOrderId)?.parentOrderId ?? null, bucket: parents.get(row.parentLegacyOrderId)?.sourceSnapshot?.order_status === '4' ? "COMPLETED_PARENT" : "INFLIGHT_PARENT", evidenceRef: manifest.sourceRef + ":commission:" + row.sourceRecord.id })) });
@@ -210,9 +211,12 @@ export async function applyFinancialDomains(ctx) {
             else if (row.state !== "OBSERVE_ONLY")
                 state.quarantine.push({ domain: "completedCommissions", sourceId: row.sourceKey, code: row.reasons.join("|") || row.state });
         }
-        completedRows = freezePhase(ctx, "completedCommissions", completedRows);
+        completedRows = freezePhase(ctx, "completedCommissions", completedRows,commissionReceiptMode);
     }
-    await ctx.runItems("completedCommissions", completedRows, row => mod("order/legacy-continuation-evidence").importLegacyCompletedCommission(client, actor, row.body), 20);
+    if(next){
+        if(typeof ctx.systemCompletedCommission!=='function')throw new Error('NEXT_SYSTEM_COMPLETED_COMMISSION_ADAPTER_REQUIRED');
+        await ctx.runBatches("completedCommissions",completedRows,rows=>ctx.systemCompletedCommission(rows),20);
+    }else await ctx.runItems("completedCommissions", completedRows, row => mod("order/legacy-continuation-evidence").importLegacyCompletedCommission(client, actor, row.body), 20);
     const wanted = [...liabilityRows, ...completedRows].filter(row => row.effect).map(row=>({...row,effect:{...row.effect,...(row.body?.commission?{level:row.body.commission.level,ratio:row.body.commission.ratio,sourceRecordId:row.body.commission.id}:{} )}}));
     wanted.push(...continuationCommissionEffects(continuationRows,mod).map(effect=>({effect})));
     const ids = wanted.map(row => row.effect.dutyId);

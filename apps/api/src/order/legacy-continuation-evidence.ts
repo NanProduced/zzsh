@@ -276,10 +276,14 @@ async function insertImportedCommission(client: PoolClient, binding: LegacyOrder
 }
 export type LegacyCompletedCommissionImport = { orderId: string; sourceDigest: string; finalAmountEvidenceDigest: string; finalAmountEvidenceCanonical: string; timeEvidenceCanonical: string; evidenceRef: string; cutoff: string; time: CompletedCommissionTime; sourceTimeValue: string; sourceTimeUnit: "UNIX_SECONDS" | "RFC3339_UTC"; corroboratingTime?: { time: CompletedCommissionTime; canonical: string }; commission: LegacyContinuationSource["commissions"][number]; sourceRecord: LegacyCommissionEvidence };
 /** Independent completed-parent entry: no confirm, account divisor, or whole calc admission. */
-export async function importLegacyCompletedCommission(client: PoolClient, actor: LegacyContinuationActor, input: LegacyCompletedCommissionImport) {
+export async function importLegacyCompletedCommission(client: PoolClient, actor: LegacyContinuationActor | SystemOrderMigrationActor, input: LegacyCompletedCommissionImport) {
   input = structuredClone(input);
+  const systemActor="kind" in actor && actor.kind==="SYSTEM_ORDER_MIGRATION" ? actor : null,adminActor=systemActor?null:actor as LegacyContinuationActor;
   const binding = await readLegacyContinuationBinding(client, input.orderId);
-  await authorizeImport(client, actor, binding);
+  const bindingDigest=systemActor?await readSystemLegacyOrderOrigin(client,systemActor,binding):null,payloadDigest=sha256Hex(canonicalize(input));
+  const authorize=async()=>{if(systemActor)await authorizeSystemOrderMigration(client,systemActor,{orderId:input.orderId,legacyId:binding.legacyId,
+    sourceDigest:input.sourceDigest,bindingDigest:bindingDigest!,operation:'COMPLETED_COMMISSION',payloadDigest});else await authorizeImport(client,adminActor!,binding);};
+  await authorize();
   if (binding.sourceOrderStatus !== 4 || binding.sourcePayStatus !== 1 || binding.sourceDigest !== input.sourceDigest || input.commission.status !== "1") throw conflict("COMPLETED_COMMISSION_SOURCE_INVALID");
   assertLegacyCommissionEvidence(input.sourceRecord, binding.legacyId, input.commission);
   if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(input.time.at) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/.test(input.cutoff)) throw invalid("ISOLATED_MATURITY_EVIDENCE_MISSING");
@@ -295,20 +299,53 @@ export async function importLegacyCompletedCommission(client: PoolClient, actor:
     if (other.time.kind===input.time.kind || other.canonical!==expected || sha256Hex(expected)!==other.time.evidenceDigest || legacyCommissionMaturity(other.time,input.cutoff).maturityAt!==maturity.maturityAt
       || other.time.kind==="COMPLETED_AT" && (!binding.completedAt || legacyTimeMicros(other.time.at)!==legacyTimeMicros(binding.completedAt))) throw conflict("ISOLATED_MATURITY_EVIDENCE_CONFLICT");
   }
-  if (!beneficiary) return { admission: "ISOLATED", reason: "PARTY_UNMAPPED", sourceRecordId: input.commission.id };
+  if (!beneficiary) {if(systemActor)throw conflict("PARTY_UNMAPPED");return { admission: "ISOLATED", reason: "PARTY_UNMAPPED", sourceRecordId: input.commission.id };}
   const operation = "order.legacy.commission.completed-import";
-  return withIdempotency(client, { realm: "admin", principalId: actor.userId, operation, resourceId: input.orderId }, sha256Hex(input.commission.id), fingerprintRequest(operation, input.orderId, input),
-    async () => { await authorizeImport(client, actor, binding); }, async () => {
+  const key=sha256Hex(input.commission.id),fingerprint=fingerprintRequest(operation,input.orderId,input),dutyId=legacyEconomicDutyId(input.orderId,"COMMISSION",input.commission.id),
+    admissionId="legacy_admission_"+sha256Hex(dutyId).slice(0,40),canonical=canonicalize({schema:"legacy-completed-commission-admission.v1",...input,beneficiaryUserId:beneficiary,amountCents,maturityAt:maturity.maturityAt});
+  const reviewedBy=systemActor?{kind:"SYSTEM_ORDER_MIGRATION",id:systemActor.id,sourceDatasetSha256:systemActor.sourceDatasetSha256}:adminActor!;
+  return withIdempotency(client, { realm: systemActor?"system":"admin", principalId: systemActor?.id??adminActor!.userId, operation, resourceId: input.orderId }, key, fingerprint,
+    async replay => {
+      await authorize();if(!systemActor)return;
+      const admissions=(await client.query<{id:string;dutyId:string;digest:string;canonical:string;reviewedBy:unknown}>(`SELECT id,duty_id AS "dutyId",admission_digest AS digest,admission_canonical AS canonical,reviewed_by AS "reviewedBy"
+        FROM zzsh_order.legacy_order_duty_admission WHERE id=$1 OR duty_id=$2`,[admissionId,dutyId])).rows;
+      const duties=(await client.query<LegacyDutyRow & {sourceDigest:string}>(`SELECT ${LEGACY_DUTY_FIELDS},source_digest AS "sourceDigest" FROM zzsh_order.legacy_order_duty
+        WHERE order_id=$1 AND kind='COMMISSION' AND source_record_id=$2`,[input.orderId,input.commission.id])).rows;
+      const audits=(await client.query<{actor_id:string;actor_type:string;session_id:string|null;manifest:string|null;details:Record<string,unknown>}>(`SELECT actor_id,actor_type,session_id,legacy_migration_manifest_sha256 AS manifest,details FROM zzsh_iam.audit_event
+        WHERE object_type='rental_order' AND object_id=$1 AND action=$2 AND outcome='SUCCESS' AND details->>'sourceRecordId'=$3`,[input.orderId,operation,input.commission.id])).rows;
+      if(!replay){if(admissions.length||duties.length||audits.length)throw conflict("LEGACY_SYSTEM_COMMISSION_RECEIPT_MISSING");return;}
+      const receipts=(await client.query<{request_fingerprint:string;response_status:number;response_body:unknown;publish_required:boolean}>(`SELECT request_fingerprint,response_status,response_body,publish_required
+        FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`,[JSON.stringify(["system",systemActor.id,operation,input.orderId]),key])).rows;
+      const admission=admissions[0],duty=duties[0],audit=audits[0],details=audit?.details;
+      if(replay.publishRequired||admissions.length!==1||duties.length!==1||audits.length!==1||receipts.length!==1
+        ||admission?.id!==admissionId||admission.dutyId!==dutyId||admission.digest!==sha256Hex(canonical)||admission.canonical!==canonical
+        ||canonicalize(admission.reviewedBy)!==canonicalize(reviewedBy)
+        ||duty?.id!==dutyId||duty.counterpartyUserId!==beneficiary||duty.amountCents!==amountCents||duty.source!=="LEGACY_IMPORT"
+        ||duty.sourceStatus!=="1"||duty.sourceDigest!==input.sourceDigest||duty.level!==input.commission.level||!legacyDecimalEquals(duty.ratio,input.commission.ratio)
+        ||duty.maturityAt!==maturity.maturityAt||duty.admissionId!==admissionId
+        ||audit?.actor_type!=="system"||audit.actor_id!==systemActor.id||audit.session_id!==null||audit.manifest!==systemActor.sourceDatasetSha256
+        ||details?.sourceRecordId!==input.commission.id||details.sourceRecordDigest!==input.sourceRecord.digest||details.parentSourceDigest!==input.sourceDigest
+        ||details.admissionId!==admissionId||details.admissionDigest!==sha256Hex(canonical)||details.finalAmountEvidenceDigest!==input.finalAmountEvidenceDigest
+        ||canonicalize(details.time)!==canonicalize(input.time)||details.cutoff!==input.cutoff||details.maturityAt!==maturity.maturityAt||details.maturedByCutoff!==maturity.maturedByCutoff
+        ||details.sourceSystem!=="legacy_mysql_restore"||details.sourceEntity!=="la_order"||details.legacyId!==binding.legacyId||details.sourceDigest!==input.sourceDigest
+        ||details.bindingDigest!==bindingDigest||details.payloadDigest!==payloadDigest||details.sourceDatasetSha256!==systemActor.sourceDatasetSha256
+        ||details.migrationRunDigest!==systemActor.id.slice("legacy-order-migration:".length)
+        ||receipts[0]!.request_fingerprint!==fingerprint||receipts[0]!.response_status!==200||receipts[0]!.publish_required!==false
+        ||canonicalize(receipts[0]!.response_body)!==canonicalize({admission:"IMPORTED",dutyId,maturityAt:maturity.maturityAt}))
+        throw conflict("LEGACY_SYSTEM_COMMISSION_RECEIPT_DIFFERS");
+    }, async () => {
       await lockLegacyContinuationOrder(client, input.orderId);
-      const dutyId = legacyEconomicDutyId(input.orderId, "COMMISSION", input.commission.id), admissionId = "legacy_admission_" + sha256Hex(dutyId).slice(0, 40);
-      const canonical = canonicalize({ schema: "legacy-completed-commission-admission.v1", ...input, beneficiaryUserId: beneficiary, amountCents, maturityAt: maturity.maturityAt });
       const previous = (await client.query<{ digest: string }>(`SELECT admission_digest AS digest FROM zzsh_order.legacy_order_duty_admission WHERE id=$1`, [admissionId])).rows[0];
+      if(systemActor&&previous)throw conflict("LEGACY_SYSTEM_COMMISSION_RECEIPT_MISSING");
       if (previous && previous.digest !== sha256Hex(canonical)) throw conflict("COMMISSION_ADMISSION_CONFLICT");
       if (!previous) await client.query(`INSERT INTO zzsh_order.legacy_order_duty_admission(id,duty_id,order_id,kind,source_record_id,counterparty_user_id,amount_cents,currency,level,ratio,parent_source_digest,source_canonical,source_record_digest,final_amount_evidence_canonical,final_amount_evidence_digest,time_kind,source_time,time_evidence_canonical,time_evidence_digest,cutoff,maturity_at,evidence_ref,admission_canonical,admission_digest,reviewed_by,source_time_value,source_time_unit)
         VALUES($1,$2,$3,'COMMISSION',$4,$5,$6,'CNY',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24,$25)`,
-        [admissionId,dutyId,input.orderId,input.commission.id,beneficiary,amountCents,input.commission.level,input.commission.ratio,input.sourceDigest,input.sourceRecord.canonical,input.sourceRecord.digest,finalProof,input.finalAmountEvidenceDigest,input.time.kind,input.time.at,timeProof,input.time.evidenceDigest,input.cutoff,maturity.maturityAt,input.evidenceRef,canonical,sha256Hex(canonical),JSON.stringify(actor),input.sourceTimeValue,input.sourceTimeUnit]);
+        [admissionId,dutyId,input.orderId,input.commission.id,beneficiary,amountCents,input.commission.level,input.commission.ratio,input.sourceDigest,input.sourceRecord.canonical,input.sourceRecord.digest,finalProof,input.finalAmountEvidenceDigest,input.time.kind,input.time.at,timeProof,input.time.evidenceDigest,input.cutoff,maturity.maturityAt,input.evidenceRef,canonical,sha256Hex(canonical),JSON.stringify(reviewedBy),input.sourceTimeValue,input.sourceTimeUnit]);
       await insertImportedCommission(client, binding, input.commission, beneficiary, maturity.maturityAt, input.sourceDigest, admissionId);
-      await recordAudit(client, { actorType: "admin", actorId: actor.userId, sessionId: actor.sessionId, requestId: actor.requestId, action: operation, objectType: "rental_order", objectId: input.orderId, outcome: "SUCCESS", details: { sourceRecordId: input.commission.id, sourceRecordDigest: input.sourceRecord.digest, parentSourceDigest: input.sourceDigest, admissionId, admissionDigest: sha256Hex(canonical), finalAmountEvidenceDigest: input.finalAmountEvidenceDigest, time: input.time, cutoff: input.cutoff, maturityAt: maturity.maturityAt, maturedByCutoff: maturity.maturedByCutoff } });
+      await recordAudit(client, { actorType:systemActor?"system":"admin", actorId:systemActor?.id??adminActor!.userId,
+        ...(systemActor?{legacyMigrationManifestSha256:systemActor.sourceDatasetSha256}:{sessionId:adminActor!.sessionId}),requestId: actor.requestId, action: operation, objectType: "rental_order", objectId: input.orderId, outcome: "SUCCESS", details: { sourceRecordId: input.commission.id, sourceRecordDigest: input.sourceRecord.digest, parentSourceDigest: input.sourceDigest, admissionId, admissionDigest: sha256Hex(canonical), finalAmountEvidenceDigest: input.finalAmountEvidenceDigest, time: input.time, cutoff: input.cutoff, maturityAt: maturity.maturityAt, maturedByCutoff: maturity.maturedByCutoff,
+          ...(systemActor?{sourceSystem:"legacy_mysql_restore",sourceEntity:"la_order",legacyId:binding.legacyId,sourceDigest:input.sourceDigest,bindingDigest,payloadDigest,
+            sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-order-migration:".length)}:{}) } });
       return { status: 200, body: { admission: "IMPORTED", dutyId: legacyEconomicDutyId(input.orderId, "COMMISSION", input.commission.id), maturityAt: maturity.maturityAt } };
     });
 }

@@ -339,6 +339,7 @@ const SYSTEM_AUDIT_DOMAINS = Object.freeze({
     orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
     continuation: {objectType:"rental_order", actions:["order.legacy.continuation.import"]},
     liability: {objectType:"rental_order", actions:["order.legacy.liability.import"]},
+    completedCommission: {objectType:"rental_order", actions:["order.legacy.commission.completed-import"]},
 });
 
 /** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
@@ -397,6 +398,26 @@ export function matchesSystemLiabilityEvidence(audits,receipts,{actorId,manifest
     return receipt.scope_key===scope&&receipt.key===createHash('sha256').update(input.orderId).digest('hex')&&receipt.request_fingerprint===fingerprint
       &&receipt.response_status===200&&receipt.publish_required===false
       &&canonicalize(receipt.response_body)===canonicalize({classification:input.classification,dutyId,channelState:'UNKNOWN'});
+}
+export function matchesSystemCompletedCommissionEvidence(audits,receipts,{actorId,manifestSha256,legacyId,bindingDigest,input,effect,admission,fingerprint,canonicalize}){
+    if(typeof canonicalize!=="function"||!input?.commission||!input.sourceRecord||!effect||!admission)return false;
+    const selected=audits?.filter(row=>row.details?.sourceRecordId===input.commission.id),detail=selected?.[0]?.details;
+    const scope=JSON.stringify(['system',actorId,'order.legacy.commission.completed-import',input.orderId]),key=createHash('sha256').update(input.commission.id).digest('hex');
+    const matchingReceipts=receipts?.filter(row=>row.scope_key===scope&&row.key===key);
+    const admissionId='legacy_admission_'+createHash('sha256').update(effect.dutyId).digest('hex').slice(0,40);
+    const source=canonicalize({schema:'legacy-completed-commission-admission.v1',...input,beneficiaryUserId:effect.beneficiaryUserId,amountCents:effect.amountCents,maturityAt:effect.maturityAt});
+    const admissionDigest=createHash('sha256').update(source).digest('hex');
+    if(!matchesSystemMigrationAudit(selected,{objectId:input.orderId,action:'order.legacy.commission.completed-import',actorId,manifestSha256,
+      sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId,sourceDigest:input.sourceDigest,bindingDigest,
+      payloadDigest:createHash('sha256').update(canonicalize(input)).digest('hex')}))return false;
+    if(!detail?.time||detail.sourceRecordDigest!==input.sourceRecord.digest||detail.parentSourceDigest!==input.sourceDigest||detail.admissionId!==admissionId
+      ||detail.admissionDigest!==admissionDigest||detail.finalAmountEvidenceDigest!==input.finalAmountEvidenceDigest
+      ||canonicalize(detail.time)!==canonicalize(input.time)||detail.cutoff!==input.cutoff||detail.maturityAt!==effect.maturityAt||detail.maturedByCutoff!==effect.maturedByCutoff)return false;
+    if(admission.id!==admissionId||admission.duty_id!==effect.dutyId||admission.admission_digest!==admissionDigest||admission.admission_canonical!==source
+      ||admission.source_record_digest!==input.sourceRecord.digest||canonicalize(admission.reviewed_by)!==canonicalize({kind:'SYSTEM_ORDER_MIGRATION',id:actorId,sourceDatasetSha256:manifestSha256}))return false;
+    if(!Array.isArray(matchingReceipts)||matchingReceipts.length!==1)return false;
+    const receipt=matchingReceipts[0];return receipt.request_fingerprint===fingerprint&&receipt.response_status===200&&receipt.publish_required===false
+      &&canonicalize(receipt.response_body)===canonicalize({admission:'IMPORTED',dutyId:effect.dutyId,maturityAt:effect.maturityAt});
 }
 function assertRegularSourceFile(file) {
     const stat = lstatSync(file);
