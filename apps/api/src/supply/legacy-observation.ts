@@ -28,6 +28,7 @@ import {
   requirePermission,
 } from "../auth/admin-authorization";
 import { recordAudit } from "../auth/security-core";
+import { authorizeSystemAccountMigration, type SystemAccountMigrationActor } from "../legacy-load/system-user-migration";
 import {
   LEGACY_SKIN_FIELDS,
   type LegacySkinField,
@@ -555,7 +556,7 @@ export async function recordLegacyObservation(
   client: PoolClient,
   accountId: string,
   input: LegacyObservationInput,
-  actor: LegacyImportActor,
+  actor: LegacyImportActor | SystemAccountMigrationActor,
 ): Promise<string> {
   const normalized = normalizeLegacyObservationInput(input);
   const operation = "supply.legacy.observation";
@@ -563,16 +564,21 @@ export async function recordLegacyObservation(
     JSON.stringify([operation, normalized.sourceSystem, normalized.sourceEntity, normalized.legacyId]),
   );
   const fingerprint = fingerprintRequest(operation, accountId, normalized);
+  const systemActor = "kind" in actor && actor.kind === "SYSTEM_ACCOUNT_MIGRATION" ? actor : null;
+  const payloadDigest = sha256Hex(JSON.stringify(normalized));
   let account: PublishingAccount | undefined;
   let previous: LegacyMapRow | undefined;
   const result = await withIdempotency(
     client,
-    { realm: "admin", principalId: actor.id, operation, resourceId: accountId },
+    { realm: systemActor ? "system" : "admin", principalId: actor.id, operation, resourceId: accountId },
     idempotencyKey,
     fingerprint,
     async () => {
       account = await lockPublishingAccount(client, accountId);
-      await authorizeLegacyAdmin(client, actor, account);
+      if (systemActor) await authorizeSystemAccountMigration(client,systemActor,{operation:"OBSERVATION",accountId,
+        sourceSystem:normalized.sourceSystem,sourceEntity:normalized.sourceEntity,legacyId:normalized.legacyId,
+        sourceDigest:normalized.sourceDigest,payloadDigest});
+      else await authorizeLegacyAdmin(client, actor as LegacyImportActor, account);
       await lockLegacySource(client, normalized);
       previous = await readLegacyMap(client, normalized);
       if (previous) {
@@ -630,9 +636,9 @@ export async function recordLegacyObservation(
         [a.id, id],
       );
       await recordAudit(client, {
-        actorType: "admin",
+        actorType: systemActor ? "system" : "admin",
         actorId: actor.id,
-        sessionId: actor.sessionId,
+        ...(systemActor ? {legacyMigrationManifestSha256:systemActor.sourceDatasetSha256} : {sessionId:(actor as LegacyImportActor).sessionId}),
         requestId: actor.requestId,
         action: "supply.publication.legacy_observed",
         objectType: "rental_account",
@@ -640,6 +646,9 @@ export async function recordLegacyObservation(
         outcome: "SUCCESS",
         reason: "保留旧来源观察，不补造审核与报价",
         details: {
+          ...(systemActor ? {sourceSystem:normalized.sourceSystem,sourceEntity:normalized.sourceEntity,legacyId:normalized.legacyId,
+            sourceDigest:normalized.sourceDigest,sourceDatasetSha256:systemActor.sourceDatasetSha256,
+            migrationRunDigest:systemActor.id.slice("legacy-account-migration:".length),payloadDigest} : {}),
           before: { currentVersionId: null },
           after: {
             currentVersionId: id,

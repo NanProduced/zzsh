@@ -2,34 +2,59 @@ import { prepareLocalFundsPlan, assertFundsWriterCoverage,assertEmptyCoverageRec
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildNextContinuationRows } from "./local-source-adapter.mjs";
+import { buildNextContinuationRows, readBoundSourceRows } from "./local-source-adapter.mjs";
 import { requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { openingReviewResource } from "./local-target-opening.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 const micros = value => value.replace(/\.([0-9]{3})Z$/, (_, digits) => "." + digits + "000Z");
-async function arrayOf(ctx, name) { const result = []; const file = ctx.domainFile(name); if (file)
-    for await (const row of ctx.readRows(file))
-        result.push(row); return result; }
-export async function importEmptyCoverageChunk(module,client,actor,inputs,reviews,isNext){
+async function arrayOf(ctx, name) {
+    const result = [], file = ctx.domainFile(name);
+    if (file) {
+        const rows = ctx.isNextMigration ? readBoundSourceRows(file, ctx.manifest.files[name]) : ctx.readRows(file);
+        for await (const row of rows) result.push(row);
+    }
+    return result;
+}
+export async function importEmptyCoverageChunk(module,client,actor,inputs,reviews,isNext,systemFinance){
     if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if(isNext){
+        if(systemFinance?.receiptMode!=='SYSTEM_BATCH_V1'||typeof systemFinance.importEmpty!=='function')throw new Error('NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED');
+        return systemFinance.importEmpty(inputs);
+    }
     const scope=await module.bindReviewedEmptyFinanceObservationBatch(client,actor,inputs,reviews);
-    const result=await (isNext ? module.importReviewedCompactEmptyFinanceObservationBatch : module.importReviewedEmptyFinanceObservationBatch)(client,actor,inputs,scope);
+    const result=await module.importReviewedEmptyFinanceObservationBatch(client,actor,inputs,scope);
     return{...result.body,replayed:result.body.created===0};
 }
-function freezePhase(ctx, name, rows) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
+export function readEmptyCoverageInputs(chunk, expectedHash) {
+    const bytes = readFileSync(chunk.file);
+    if (expectedHash !== null && (!/^[a-f0-9]{64}$/.test(expectedHash ?? "") || sha(bytes) !== expectedHash))
+        throw new Error("PREPARED_CHUNK_SHA_CHANGED");
+    const rows = JSON.parse(bytes);
+    if (!Array.isArray(rows) || rows.length !== chunk.rows) throw new Error("PREPARED_CHUNK_ROWS_CHANGED");
+    return rows.map(row => row.input);
+}
+export async function runFinanceCoveragePhases(isNext,writeHistory,writeEmpty){
+    if(typeof isNext!=='boolean')throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if(isNext){await writeEmpty();await writeHistory();}else{await writeHistory();await writeEmpty();}
+}
+function freezePhase(ctx, name, rows, receiptMode) { ctx.state.generatedPhases ??= {}; const dir = join(ctx.output, "phases"); if (!existsSync(dir))
     mkdirSync(dir); const file = join(dir, name + ".json"); const previous = ctx.state.generatedPhases[name]; if (previous) {
     const bytes = readFileSync(file);
     if (sha(bytes) !== previous.sha256)
         throw new Error("PREPARED_PHASE_SHA_CHANGED");
+    if(previous.receiptMode!==receiptMode)throw new Error('FINANCE_HISTORY_RECEIPT_MODE_CHANGED');
     return JSON.parse(bytes);
-} const bytes = JSON.stringify(rows); writeFileSync(file, bytes, { flag: "wx" }); ctx.state.generatedPhases[name] = { file, sha256: sha(bytes), rows: rows.length }; ctx.save(); return rows; }
-async function facts(ctx, legacyIds) { const { client, actor } = ctx; const parents = (await client.query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId",deposit_amount_cents::text AS "depositAmountCents" FROM zzsh_order.legacy_order_read_snapshot WHERE legacy_id=ANY($1::text[])`, [legacyIds])).rows; const ids = parents.map(p => p.parentOrderId); const duties = (await client.query(`SELECT id,order_id AS "orderId",kind,source_record_id AS "sourceRecordId",amount_cents::text AS "amountCents",status,counterparty_user_id AS "counterpartyUserId",settled_by AS "settledBy",admission_id AS "admissionId" FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])`, [ids])).rows; const admissions = (await client.query(`SELECT id,duty_id AS "dutyId",order_id AS "orderId",admission_digest AS "admissionDigest" FROM zzsh_order.legacy_order_duty_admission WHERE order_id=ANY($1::text[])`, [ids])).rows; const heads = (await client.query(`SELECT order_id AS "orderId",revision::text FROM zzsh_order.legacy_continuation_version WHERE order_id=ANY($1::text[]) AND superseded_at IS NULL`, [ids])).rows; const operations = ["order.legacy.liability.import", "order.legacy.commission.completed-import", "order.legacy.continuation.import"]; const scopes = ids.flatMap(id => operations.map(op => JSON.stringify(["admin", actor.userId, op, id]))); const receipts = (await client.query('SELECT scope_key,key,request_fingerprint AS fingerprint,response_status AS "responseStatus" FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])', [scopes])).rows.map(row => { const [realm, principalId, operation, resourceId] = JSON.parse(row.scope_key); return { principalId, operation, resourceId, key: row.key, fingerprint: row.fingerprint, responseStatus: row.responseStatus }; }); const revisions = new Map(heads.map(h => [h.orderId, h.revision]));
+} const bytes = JSON.stringify(rows); writeFileSync(file, bytes, { flag: "wx" }); ctx.state.generatedPhases[name] = { file, sha256: sha(bytes), rows: rows.length, ...(receiptMode?{receiptMode}:{}) }; ctx.save(); return rows; }
+async function facts(ctx, legacyIds, system = false) { const { client, actor } = ctx,principal=system?ctx.state.binding.systemOrderId:actor.userId,realm=system?'system':'admin';
+    if(typeof principal!=='string'||!principal)throw new Error('FINANCE_SOURCE_PRINCIPAL_REQUIRED');
+    const parents = (await client.query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest",binding_digest AS "bindingDigest",source_snapshot AS "sourceSnapshot",to_char(source_completed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "sourceCompletedAt",owner_user_id AS "ownerUserId",renter_user_id AS "renterUserId",account_id AS "accountId",deposit_amount_cents::text AS "depositAmountCents" FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=ANY($1::text[])`, [legacyIds])).rows; const ids = parents.map(p => p.parentOrderId); const duties = (await client.query(`SELECT id,order_id AS "orderId",kind,source_record_id AS "sourceRecordId",amount_cents::text AS "amountCents",status,counterparty_user_id AS "counterpartyUserId",settled_by AS "settledBy",admission_id AS "admissionId" FROM zzsh_order.legacy_order_duty WHERE order_id=ANY($1::text[])`, [ids])).rows; const admissions = (await client.query(`SELECT id,duty_id AS "dutyId",order_id AS "orderId",admission_digest AS "admissionDigest" FROM zzsh_order.legacy_order_duty_admission WHERE order_id=ANY($1::text[])`, [ids])).rows; const heads = (await client.query(`SELECT order_id AS "orderId",revision::text FROM zzsh_order.legacy_continuation_version WHERE order_id=ANY($1::text[]) AND superseded_at IS NULL`, [ids])).rows; const operations = ["order.legacy.liability.import", "order.legacy.commission.completed-import", "order.legacy.continuation.import"]; const scopes = ids.flatMap(id => operations.map(op => JSON.stringify([realm, principal, op, id]))); const receipts = (await client.query('SELECT scope_key,key,request_fingerprint AS fingerprint,response_status AS "responseStatus" FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])', [scopes])).rows.map(row => { const [realm, principalId, operation, resourceId] = JSON.parse(row.scope_key); return { principalId, operation, resourceId, key: row.key, fingerprint: row.fingerprint, responseStatus: row.responseStatus }; }); const revisions = new Map(heads.map(h => [h.orderId, h.revision]));
     const dutiesByOrder = Map.groupBy(duties, d => d.orderId);
     const admissionsByOrder = Map.groupBy(admissions, a => a.orderId);
     const receiptsByOrder = Map.groupBy(receipts, r => r.resourceId);
-    const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: revisions.get(parent.parentOrderId) ?? null, depositAmountCents: parent.depositAmountCents, duties: dutiesByOrder.get(parent.parentOrderId) ?? [], admissions: admissionsByOrder.get(parent.parentOrderId) ?? [], idempotency: { principalId: actor.userId, records: receiptsByOrder.get(parent.parentOrderId) ?? [] } })); return { parents, current }; }
+    const current = parents.map(parent => ({ orderId: parent.parentOrderId, readRef: "core-dataset:" + ctx.state.binding.oid + ":" + parent.parentOrderId, headRevision: revisions.get(parent.parentOrderId) ?? null, depositAmountCents: parent.depositAmountCents, duties: dutiesByOrder.get(parent.parentOrderId) ?? [], admissions: admissionsByOrder.get(parent.parentOrderId) ?? [], idempotency: { principalId: principal, records: receiptsByOrder.get(parent.parentOrderId) ?? [] } })); return { parents, current }; }
 export async function applyInvitationDomains(ctx, reviewCommon, resource, canonical) {
     const {client,actor,mod,manifest,state}=ctx;
+    if(ctx.isNextMigration && (typeof ctx.systemInvitation?.import!=='function'||typeof ctx.systemInvitation?.closeCounts!=='function'))throw new Error('NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED');
     const packets=ctx.invitationSource ? null : ctx.invitationPackets??await arrayOf(ctx,"invitation-facts");
     const source=()=>ctx.invitationSource ? ctx.invitationSource() : packets;
     const packetCount=ctx.invitationSource ? ctx.invitationPacketCount : packets.length;
@@ -39,6 +64,7 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
     const module=mod("finance/legacy-invitation-facts-maintenance");
     await ctx.runItems("invitationFacts",source(),async packet=>{
         if(packet.input.policy!==null)throw new Error("SOURCE_INVITATION_POLICY_MUST_REMAIN_UNBOUND");
+        if(ctx.isNextMigration)return ctx.systemInvitation.import(packet);
         const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'IMPORT'));
         return module.importReviewedLegacyInvitationFacts(client,actor,packet.input,packet.bodyDigest,scope);
     },1);
@@ -46,6 +72,7 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
         if(state.phases.invitationFacts?.complete!==true || state.phases.invitationFacts.quarantined!==0
           || state.phases.invitationFacts.nextIndex!==packetCount)throw new Error("INVITATION_IMPORT_NOT_COMPLETE");
         await ctx.runItems("invitationCounts",source(),async packet=>{
+            if(ctx.isNextMigration)return ctx.systemInvitation.closeCounts(packet);
             const scope=await module.bindReviewedLegacyInvitationFacts(client,actor,review(packet,'COUNTS'));
             return module.closeReviewedLegacyInvitationCounts(client,actor,packet.input,packet.bodyDigest,scope);
         },1);
@@ -53,6 +80,8 @@ export async function applyInvitationDomains(ctx, reviewCommon, resource, canoni
 }
 export async function applyFinancialDomains(ctx) {
     if (typeof ctx.isNextMigration !== 'boolean') throw new Error('MIGRATION_PROFILE_FLAG_UNPROVEN');
+    if (ctx.isNextMigration && (ctx.systemFinance?.receiptMode !== 'SYSTEM_BATCH_V1' || typeof ctx.systemFinance.importEmpty !== 'function' || typeof ctx.systemFinance.importHistory !== 'function'))
+        throw new Error('NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED');
     if(!ctx.fundsSource||!ctx.refundAttemptsSource)throw new Error("EXACT_FINANCIAL_SUPPLEMENTS_REQUIRED");
     const { client, actor, mod, manifest, state } = ctx, preparation = mod("finance/legacy-finance-source-preparation"), canonical = mod("supply/content-hash").canonicalize;
     const sourceCutoff=new Date(manifest.sourceCutoff).toISOString();
@@ -62,28 +91,34 @@ export async function applyFinancialDomains(ctx) {
     // as it is complete, so a full-source round never holds one entry per subject and source kind.
     const emptyDir = join(ctx.output, "phases", "financeEmptyCoverage");
     if (!existsSync(emptyDir)) mkdirSync(emptyDir, { recursive: true });
-    const emptyDescriptors = [];
+    const emptyDescriptors = [], emptyContentHashes = new Map();
     const emitEmptyChunk = chunk => {
         const file = join(emptyDir, chunk.digest + ".json");
+        const content = JSON.stringify(chunk.entries), contentHash = sha(content);
+        if (ctx.isNextMigration && emptyContentHashes.has(chunk.digest)) throw new Error("PREPARED_CHUNK_DUPLICATE");
+        emptyContentHashes.set(chunk.digest, contentHash);
         if (existsSync(file)) {
-            if (sha(readFileSync(file)) !== sha(JSON.stringify(chunk.entries))) throw new Error("PREPARED_CHUNK_SHA_CHANGED");
-        } else writeFileSync(file, JSON.stringify(chunk.entries), { flag: "wx" });
+            if (sha(readFileSync(file)) !== contentHash) throw new Error("PREPARED_CHUNK_SHA_CHANGED");
+        } else writeFileSync(file, content, { flag: "wx" });
         emptyDescriptors.push({ sourceId: chunk.sourceId, digest: chunk.digest, rows: chunk.rows, domains: chunk.domains, file });
     };
     const preparationStarted = performance.now(), fundsPlan = await prepareLocalFundsPlan({ ...ctx, emitEmptyChunk });
     const preparedMs = performance.now() - preparationStarted;
     if (state.generatedPhases?.financeHistory && !state.fundsSupplement) throw new Error("FROZEN_V1_FINANCE_HISTORY_REQUIRES_SEPARATE_REVIEW");
-    const history = freezePhase(ctx, "financeHistory", fundsPlan.history);
+    const history = freezePhase(ctx, "financeHistory", fundsPlan.history,ctx.isNextMigration?'SYSTEM_BATCH_V1':undefined);
     const guarantees = freezePhase(ctx, "guaranteeHistory", fundsPlan.guaranteeHistory);
     if (state.generatedPhases?.financeEmptyCoverage) {
         const previous = state.generatedPhases.financeEmptyCoverage;
         if (previous.digest !== fundsPlan.emptyCoverage.digest || previous.rows !== fundsPlan.emptyCoverage.rows)
             throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         assertEmptyCoverageReceiptMode(previous,ctx.isNextMigration);
+        if (ctx.isNextMigration && previous.receiptMode!==ctx.systemFinance.receiptMode) throw new Error("EMPTY_COVERAGE_RECEIPT_MODE_CHANGED");
+        if (ctx.isNextMigration && JSON.stringify(previous.chunks) !== JSON.stringify(emptyDescriptors))
+            throw new Error("PREPARED_EMPTY_COVERAGE_CHANGED");
         for (const chunk of previous.chunks) if (!existsSync(chunk.file)) throw new Error("PREPARED_CHUNK_MISSING");
     } else {
         state.generatedPhases ??= {};
-        state.generatedPhases.financeEmptyCoverage = { ...fundsPlan.emptyCoverage, chunks: emptyDescriptors, ...(ctx.isNextMigration ? {receiptMode:"BATCH_V2"} : {}) };
+        state.generatedPhases.financeEmptyCoverage = { ...fundsPlan.emptyCoverage, chunks: emptyDescriptors, ...(ctx.isNextMigration ? {receiptMode:ctx.systemFinance.receiptMode} : {}) };
         ctx.save();
     }
     const coverage = assertFundsWriterCoverage(fundsPlan, history, guarantees, fundsPlan.emptyCoverage);
@@ -91,24 +126,33 @@ export async function applyFinancialDomains(ctx) {
     state.fundsSupplement = { executionProvenance:[...(priorSupplement?.executionProvenance??[]),{at:new Date().toISOString(),toolFiles:fundsPlan.binding.toolFiles,compiledModules:fundsPlan.binding.compiledModules,preparedMs,historyGroups:history.length,emptyGroups:fundsPlan.emptyCoverage.rows,emptyChunks:fundsPlan.emptyCoverage.chunks,guaranteeGroups:guarantees.length}],binding: priorSupplement?.binding??fundsPlan.binding, inputSha256: fundsPlan.inputSha256, refundAttemptCoverage:fundsPlan.refundAttemptCoverage,pendingCommissionCoverage:fundsPlan.pendingCommissionCoverage, coverage };
     ctx.save();
     await applyInvitationDomains(ctx,reviewCommon,resource,canonical);
-    await ctx.runBatches("financeHistory", history, async (rows) => { const module = mod("finance/personal-finance-observation-maintenance"); const inputs = rows.map(row => row.input); const reviews = inputs.map(input => ({ ...reviewCommon, inputSha256: input.coverage.inputSha256, bodyDigest: sha(canonical(input)), userId: input.coverage.userId, sourceKind: input.coverage.sourceKind })); const scopes = await module.bindReviewedFinanceObservationAdmissionBatch(client, actor, reviews); const result = await module.importReviewedFinanceObservationsBatchOn(client, actor, inputs, scopes); const created = result.body.created; return rows.map((_, i) => ({ replayed: i >= created })); }, 500);
-    await ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
-        const module=mod("finance/personal-finance-observation-maintenance"),inputs=JSON.parse(readFileSync(chunk.file,"utf8")).map(row=>row.input);
-        const reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
-        return importEmptyCoverageChunk(module,client,actor,inputs,reviews,ctx.isNextMigration);
+    const writeHistory=()=>ctx.runBatches("financeHistory", history, async (rows) => {
+        const inputs=rows.map(row=>row.input);
+        if(ctx.isNextMigration){const result=await ctx.systemFinance.importHistory(inputs);return rows.map(()=>({replayed:result.replayed}));}
+        const module=mod("finance/personal-finance-observation-maintenance"),reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
+        const scopes=await module.bindReviewedFinanceObservationAdmissionBatch(client,actor,reviews),result=await module.importReviewedFinanceObservationsBatchOn(client,actor,inputs,scopes),created=result.body.created;
+        return rows.map((_,i)=>({replayed:i>=created}));
+    },500);
+    const writeEmpty=()=>ctx.runItems("financeEmptyCoverage",state.generatedPhases.financeEmptyCoverage.chunks,async chunk=>{
+        const inputs=readEmptyCoverageInputs(chunk,ctx.isNextMigration ? emptyContentHashes.get(chunk.digest) : null);
+        if(ctx.isNextMigration)return importEmptyCoverageChunk(null,client,actor,inputs,null,true,ctx.systemFinance);
+        const module=mod("finance/personal-finance-observation-maintenance"),reviews=inputs.map(input=>({...reviewCommon,inputSha256:input.coverage.inputSha256,bodyDigest:sha(canonical(input)),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
+        return importEmptyCoverageChunk(module,client,actor,inputs,reviews,false);
     },5);
+    await runFinanceCoveragePhases(ctx.isNextMigration,writeHistory,writeEmpty);
     // The old listing deposit is out of scope: nothing is written for it, and the exclusion is
     // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");
     const next = ctx.isNextMigration === true;
-    let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
+    const continuationReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
+    let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", [],continuationReceiptMode) : null;
     if (!continuationRows) {
         const target = await facts(ctx, continuations.map(row => row.sourceId));
         const byLegacy = new Map(target.parents.map(p => [p.legacyId, p]));
         continuationRows = [];
         if (next) {
             continuationRows = buildNextContinuationRows({manifest, rows: continuations, parents: target.parents, sourceAsOf: micros(sourceCutoff), admit: mod("order/legacy-continuation-calc").admitLegacyEvidence});
-            const prior = state.generatedPhases?.continuationEvidence && freezePhase(ctx, "continuationEvidence", []);
+            const prior = state.generatedPhases?.continuationEvidence && freezePhase(ctx, "continuationEvidence", [],continuationReceiptMode);
             if (prior && JSON.stringify(prior) !== JSON.stringify(continuationRows)) throw new Error("CONTINUATION_FROZEN_PHASE_CHANGED");
         } else {
         for (const row of continuations) {
@@ -124,13 +168,17 @@ export async function applyFinancialDomains(ctx) {
             continuationRows.push({ sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest, sourceAsOf: micros(sourceCutoff), evidenceRef: manifest.sourceRef + ":continuation:" + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } });
         }
         }
-        continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows);
+        continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows,continuationReceiptMode);
     }
-    await ctx.runItems("continuationEvidence", continuationRows, row => mod("order/legacy-continuation-evidence").importLegacyContinuationEvidence(client, actor, row.body), 20);
+    if(next){
+        if(typeof ctx.systemContinuation!=='function')throw new Error('NEXT_SYSTEM_CONTINUATION_ADAPTER_REQUIRED');
+        await ctx.runBatches("continuationEvidence",continuationRows,rows=>ctx.systemContinuation(rows),20);
+    }else await ctx.runItems("continuationEvidence", continuationRows, row => mod("order/legacy-continuation-evidence").importLegacyContinuationEvidence(client, actor, row.body), 20);
     const liabilities = await arrayOf(ctx, "liabilities");
-    let liabilityRows = state.generatedPhases?.liabilityDuties ? freezePhase(ctx, "liabilityDuties", []) : null;
+    const liabilityReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
+    let liabilityRows = state.generatedPhases?.liabilityDuties ? freezePhase(ctx, "liabilityDuties", [],liabilityReceiptMode) : null;
     if (!liabilityRows) {
-        const target = await facts(ctx, liabilities.map(row => row.sourceId));
+        const target = await facts(ctx, liabilities.map(row => row.sourceId),next);
         const parentIds = new Map(target.parents.map(p => [p.legacyId, p.parentOrderId]));
         const assembly = preparation.assembleLegacyLiabilityBatch({ batchId: "full-liabilities-" + state.binding.oid, parents: target.parents, current: target.current, rows: liabilities.map(row => ({ classification: row.classification, legacyOrderId: row.sourceId, mappedOrderId: parentIds.get(row.sourceId) ?? null, originalOrder: row.originalOrder, refundRecord: row.refundRecords.length === 1 ? row.refundRecords[0] : null, evidenceRef: manifest.sourceRef + ":liability:" + row.sourceId })) });
         writeFileSync(join(ctx.output, "liability-assembly.json"), JSON.stringify(assembly, null, 2), { flag: "wx" });
@@ -141,13 +189,17 @@ export async function applyFinancialDomains(ctx) {
             else
                 state.quarantine.push({ domain: "liabilityDuties", sourceId: row.sourceKey, code: row.reasons.join("|") || row.state });
         }
-        liabilityRows = freezePhase(ctx, "liabilityDuties", liabilityRows);
+        liabilityRows = freezePhase(ctx, "liabilityDuties", liabilityRows,liabilityReceiptMode);
     }
-    await ctx.runItems("liabilityDuties", liabilityRows, row => mod("order/legacy-liability-intake").importLegacyHistoricalLiability(client, actor, row.body), 20);
+    if(next){
+        if(typeof ctx.systemLiability!=='function')throw new Error('NEXT_SYSTEM_LIABILITY_ADAPTER_REQUIRED');
+        await ctx.runBatches("liabilityDuties",liabilityRows,rows=>ctx.systemLiability(rows),20);
+    }else await ctx.runItems("liabilityDuties", liabilityRows, row => mod("order/legacy-liability-intake").importLegacyHistoricalLiability(client, actor, row.body), 20);
     const pending = await arrayOf(ctx, "pending-commissions");
-    let completedRows = state.generatedPhases?.completedCommissions ? freezePhase(ctx, "completedCommissions", []) : null;
+    const commissionReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
+    let completedRows = state.generatedPhases?.completedCommissions ? freezePhase(ctx, "completedCommissions", [],commissionReceiptMode) : null;
     if (!completedRows) {
-        const target = await facts(ctx, pending.map(row => row.parentLegacyOrderId));
+        const target = await facts(ctx, pending.map(row => row.parentLegacyOrderId),next);
         const parents = new Map(target.parents.map(p => [p.legacyId, p]));
         const identities = (await client.query("SELECT split_part(i.provider_reference,':',2) AS id FROM zzsh_iam.user_identity_state i WHERE i.provider='legacy_mysql_restore' AND EXISTS(SELECT 1 FROM zzsh_iam.audit_event a WHERE a.object_id=i.user_id AND a.action='user.legacy_owner.migrated' AND a.outcome='SUCCESS' AND a.details->>'legacyId'=split_part(i.provider_reference,':',2))")).rows.map(r => r.id);
         const assembly = preparation.assembleLegacyCompletedCommissionBatch({ batchId: "full-commissions-" + state.binding.oid, cutoff: micros(sourceCutoff), parents: target.parents, current: target.current, verifiedBeneficiaries: identities, rows: pending.map(row => ({ sourceRecord: row.sourceRecord, parentLegacyOrderId: row.parentLegacyOrderId, mappedOrderId: parents.get(row.parentLegacyOrderId)?.parentOrderId ?? null, bucket: parents.get(row.parentLegacyOrderId)?.sourceSnapshot?.order_status === '4' ? "COMPLETED_PARENT" : "INFLIGHT_PARENT", evidenceRef: manifest.sourceRef + ":commission:" + row.sourceRecord.id })) });
@@ -159,9 +211,12 @@ export async function applyFinancialDomains(ctx) {
             else if (row.state !== "OBSERVE_ONLY")
                 state.quarantine.push({ domain: "completedCommissions", sourceId: row.sourceKey, code: row.reasons.join("|") || row.state });
         }
-        completedRows = freezePhase(ctx, "completedCommissions", completedRows);
+        completedRows = freezePhase(ctx, "completedCommissions", completedRows,commissionReceiptMode);
     }
-    await ctx.runItems("completedCommissions", completedRows, row => mod("order/legacy-continuation-evidence").importLegacyCompletedCommission(client, actor, row.body), 20);
+    if(next){
+        if(typeof ctx.systemCompletedCommission!=='function')throw new Error('NEXT_SYSTEM_COMPLETED_COMMISSION_ADAPTER_REQUIRED');
+        await ctx.runBatches("completedCommissions",completedRows,rows=>ctx.systemCompletedCommission(rows),20);
+    }else await ctx.runItems("completedCommissions", completedRows, row => mod("order/legacy-continuation-evidence").importLegacyCompletedCommission(client, actor, row.body), 20);
     const wanted = [...liabilityRows, ...completedRows].filter(row => row.effect).map(row=>({...row,effect:{...row.effect,...(row.body?.commission?{level:row.body.commission.level,ratio:row.body.commission.ratio,sourceRecordId:row.body.commission.id}:{} )}}));
     wanted.push(...continuationCommissionEffects(continuationRows,mod).map(effect=>({effect})));
     const ids = wanted.map(row => row.effect.dutyId);

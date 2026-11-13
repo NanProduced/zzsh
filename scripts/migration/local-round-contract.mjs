@@ -365,10 +365,119 @@ export function assertRoundOpeningPartition(dataset, opening) {
 /** NEXT must prove the batch receipts as well as every original coverage row. */
 export function compactEmptyCoverageReadbackMatches(phase,readback){
  const proof=readback?.emptyFinancialCoverage,batch=proof?.batchProof;
- return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&phase.receiptMode==='BATCH_V2'&&Array.isArray(phase.chunks)
+ return phase?.schema==='zzsh.empty-coverage-chunks.v1'&&['BATCH_V2','SYSTEM_BATCH_V1'].includes(phase.receiptMode)&&Array.isArray(phase.chunks)
   &&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&proof?.sourceRebuilt===true&&proof.expected===phase.rows
   &&proof.readable===phase.rows&&proof.actual===phase.rows&&proof.chunks===phase.chunks.length
-  &&batch?.mode==='BATCH_V2'&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
+  &&batch?.mode===phase.receiptMode&&batch.expected===phase.chunks.length&&batch.matched===phase.chunks.length;
+}
+
+export function systemFinanceHistoryReadbackMatches(phase,readback){
+ const history=readback?.financialHistory,coverage=history?.coverageEvidence,batches=coverage?.batches;
+ return phase?.receiptMode==='SYSTEM_BATCH_V1'&&Number.isSafeInteger(phase.rows)&&phase.rows>=0&&history?.sourceRebuilt===true
+  &&history.walletEffectsFromObservation===false&&history.arrivalVerified===false&&coverage?.expected===phase.rows&&coverage.matched===phase.rows
+  &&batches?.expected===Math.ceil(phase.rows/500)&&batches.matched===batches.expected;
+}
+
+/** The original invitation packet is also the evidence used by qualification reads. */
+export function compareSystemInvitationPacketEvidence({packet,plan,actor,receipts,audits,countBody,canonical,sourceHash}){
+ if(!packet?.input||!plan||typeof canonical!=='function'||typeof sourceHash!=='function'||!Array.isArray(receipts)||!Array.isArray(audits)
+  ||!/^legacy-invitation-migration:[a-f0-9]{64}$/.test(actor?.id??'')||!/^[a-f0-9]{64}$/.test(actor?.sourceDatasetSha256??'')||typeof actor?.requestId!=='string'||!actor.requestId)
+  throw Error('SYSTEM_INVITATION_EVIDENCE_INPUT_INVALID');
+ const input=packet.input,digest=plan.bodyDigest,sourceDigest=sourceHash(input.source);
+ if(input.policy!==null||digest!==packet.bodyDigest||sourceHash(input)!==digest)throw Error('SYSTEM_INVITATION_EVIDENCE_INPUT_INVALID');
+ const imported={bodyDigest:digest,sourceDigest,policyVersionId:null,participants:plan.subjects.length,codes:plan.subjects.length,relations:plan.relations.length,financialEffects:false,
+  subjectProofs:plan.subjects.map(s=>({userId:s.userId,sourceDigest:s.sourceDigest}))};
+ const sourceAudit={bodyDigest:digest,source:input.source,facts:input.subjects,financialEffects:false};
+ const matches=(operation,action,body,details)=>{
+  const scope=JSON.stringify(['system',actor.id,operation,null]),selected=receipts.filter(row=>row.scope_key===scope&&row.key===plan.key),events=audits.filter(row=>row.action===action&&row.object_id===digest);
+  const row=selected[0],event=events[0],fingerprint=createHash('sha256').update(JSON.stringify([operation,null,{bodyDigest:digest}])).digest('hex');
+  return selected.length===1&&row.request_fingerprint===fingerprint&&row.response_status===200&&row.publish_required===false&&canonical(row.response_body)===canonical(body)
+   &&events.length===1&&event.object_type==='legacy_invitation_batch'&&event.outcome==='SUCCESS'&&event.actor_type==='system'&&event.actor_id===actor.id
+   &&event.session_id===null&&event.request_id===actor.requestId&&event.source_manifest===actor.sourceDatasetSha256&&canonical(event.details)===canonical(details);
+ };
+ return{importMatched:matches('distribution.legacy-facts.v2.import','distribution.legacy_facts.imported',imported,sourceAudit),
+  countMatched:countBody===null?null:matches('distribution.legacy-facts.v2.counts','distribution.legacy_facts.counts_closed',countBody,countBody)};
+}
+
+export function systemCoreAttributionMatches(checkpoint,readback){
+ const binding=checkpoint?.binding??{},pairs=[["systemUserId","legacy-user-migration"],["systemAccountId","legacy-account-migration"],["systemOrderId","legacy-order-migration"]];
+ if(pairs.every(([key])=>binding[key]===undefined)&&binding.systemFinanceId===undefined&&binding.systemInvitationId===undefined)return true;
+ if(pairs.some(([key,prefix])=>typeof binding[key]!=="string"||!new RegExp("^"+prefix+":[a-f0-9]{64}$").test(binding[key])))return false;
+ if(binding.systemFinanceId!==undefined&&!/^legacy-finance-migration:[a-f0-9]{64}$/.test(binding.systemFinanceId))return false;
+ if(binding.systemInvitationId!==undefined&&!/^legacy-invitation-migration:[a-f0-9]{64}$/.test(binding.systemInvitationId))return false;
+ const proof=readback?.systemMigrationAttribution;
+ return proof?.status==="VERIFIED"&&["users","accounts","orders"].every(domain=>Number.isSafeInteger(proof[domain]?.expected)
+  &&proof[domain].expected>=0&&proof[domain].expected===proof[domain].matched&&proof[domain].expected===readback.domains?.[domain]?.expected);
+}
+export function systemInvitationAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemInvitationId;if(id===undefined)return true;
+ const facts=checkpoint?.phases?.invitationFacts,counts=checkpoint?.phases?.invitationCounts,invitation=readback?.invitationFacts,proof=invitation?.systemAttribution;
+ return /^legacy-invitation-migration:[a-f0-9]{64}$/.test(id)&&facts?.complete===true&&facts.quarantined===0&&Number.isSafeInteger(facts.nextIndex)&&facts.nextIndex>=0
+  &&proof?.status==='VERIFIED'&&proof.expectedPackets===facts.nextIndex&&proof.importMatched===facts.nextIndex&&invitation.childProofAudits===facts.nextIndex
+  &&(counts===undefined?proof.expectedCounts===0&&proof.countsMatched===0:counts.complete===true&&counts.quarantined===0&&Number.isSafeInteger(counts.nextIndex)
+    &&counts.nextIndex===facts.nextIndex&&proof.expectedCounts===counts.nextIndex&&proof.countsMatched===counts.nextIndex);
+}
+export function systemDisplayAttributionMatches(checkpoint,readback){
+ if(checkpoint?.binding?.systemAccountId===undefined)return true;
+ const input=checkpoint?.additiveInputs?.display,phase=checkpoint?.phases?.accountDisplay,display=readback?.display,proof=display?.systemAttribution;
+ return input?.receiptMode==='SYSTEM_ACCOUNT_V1'&&Number.isSafeInteger(input.rows)&&input.rows>=0&&phase?.complete===true&&phase.quarantined===0
+  &&phase.nextIndex===input.rows&&display?.expected===input.rows&&display.matched===input.rows
+  &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
+}
+export function systemContinuationAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemOrderId;if(id===undefined)return true;
+ const input=checkpoint?.generatedPhases?.continuationEvidence,phase=checkpoint?.phases?.continuationEvidence;
+ const result=readback?.continuationEvidence,proof=result?.systemAttribution;
+ return /^legacy-order-migration:[a-f0-9]{64}$/.test(id)&&input?.receiptMode==='SYSTEM_ORDER_V1'&&Number.isSafeInteger(input.rows)&&input.rows>=0
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.rows
+  &&result?.expected===input.rows&&result.matched===input.rows&&result.total===input.rows
+  &&proof?.status==='VERIFIED'&&proof.sourceReconstructed===true&&proof.expected===input.rows&&proof.matched===input.rows;
+}
+export function systemLiabilityAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemOrderId;if(id===undefined)return true;
+ const input=checkpoint?.generatedPhases?.liabilityDuties,phase=checkpoint?.phases?.liabilityDuties;
+ const result=readback?.liabilityDuties,proof=result?.systemAttribution;
+ return /^legacy-order-migration:[a-f0-9]{64}$/.test(id)&&input?.receiptMode==='SYSTEM_ORDER_V1'&&Number.isSafeInteger(input.rows)&&input.rows>=0
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.rows
+  &&result?.expected===input.rows&&result.matched===input.rows&&result.sourceReconstructed===true
+  &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
+}
+export function systemCompletedCommissionAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemOrderId;if(id===undefined)return true;
+ const input=checkpoint?.generatedPhases?.completedCommissions,phase=checkpoint?.phases?.completedCommissions;
+ const result=readback?.completedCommissions,proof=result?.systemAttribution;
+ return /^legacy-order-migration:[a-f0-9]{64}$/.test(id)&&input?.receiptMode==='SYSTEM_ORDER_V1'&&Number.isSafeInteger(input.rows)&&input.rows>=0
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.rows
+  &&result?.expected===input.rows&&result.matched===input.rows&&result.sourceReconstructed===true
+  &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
+}
+
+export function systemOpeningAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemFinanceId,input=checkpoint?.additiveInputs?.opening,phase=checkpoint?.phases?.storedOpening;
+ if(id===undefined)return true;
+ const result=readback?.openings,proof=result?.systemAttribution,source=checkpoint?.openingSourcePreflight;
+ return /^legacy-finance-migration:[a-f0-9]{64}$/.test(id??'')&&input?.receiptMode==='SYSTEM_OPENING_V1'&&Number.isSafeInteger(input.candidateCount)&&input.candidateCount>=0
+  &&Array.isArray(input.fenceEpochs)&&input.fenceEpochs.length>0&&input.fenceEpochs.every(value=>/^[a-f0-9]{64}$/.test(value))
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.candidateCount
+  &&source?.status==='SOURCE_FINANCIAL_FACTS_VERIFIED'&&JSON.stringify(source)===JSON.stringify(readback?.openingSourceReadback)
+  &&result?.expected===input.candidateCount&&result.matched===input.candidateCount
+  &&proof?.status==='VERIFIED'&&proof.sourceReconstructed===true&&proof.expected===input.candidateCount&&proof.matched===input.candidateCount;
+}
+
+export function openingSourcePreflightMatches(input,expected,p){
+ const opening=expected?.openings,stats=opening?.stats;
+ const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),count=value=>Number.isSafeInteger(value)&&value>=0;
+ return [input?.dataset?.sha256,input?.source?.sha256,input?.funds?.sha256,input?.openings?.sha256,opening?.sha256,expected?.source?.files?.users?.sha256,
+  expected?.source?.files?.orders?.sha256,expected?.source?.files?.distributionOrders?.sha256,expected?.funds?.files?.earnings?.sha256,expected?.funds?.files?.withdraws?.sha256].every(hex)
+  &&p?.status==='SOURCE_FINANCIAL_FACTS_VERIFIED'&&p.datasetManifestSha256===input.dataset?.sha256
+  &&p.sourceReceiptSha256===input.source?.sha256&&p.fundsReceiptSha256===input.funds?.sha256
+  &&p.openingManifestSha256===input.openings?.sha256&&p.openingSha256===opening?.sha256
+  &&p.sourceUsersSha256===expected?.source?.files?.users?.sha256&&[stats?.subjects,stats?.candidate,stats?.reviewRequired].every(count)
+  &&p.sourceOrdersSha256===expected?.source?.files?.orders?.sha256&&p.sourceDistributionsSha256===expected?.source?.files?.distributionOrders?.sha256
+  &&p.fundsEarningsSha256===expected?.funds?.files?.earnings?.sha256&&p.fundsWithdrawalsSha256===expected?.funds?.files?.withdraws?.sha256
+  &&stats.candidate+stats.reviewRequired===stats.subjects&&typeof stats.candidateAvailableCents==='string'&&/^(0|[1-9]\d*)$/.test(stats.candidateAvailableCents)
+  &&p.subjects===stats.subjects&&p.candidate===stats.candidate&&p.reviewRequired===stats.reviewRequired
+  &&p.candidateAvailableCents===stats.candidateAvailableCents&&p.sourceConnections===0&&p.targetConnections===0&&p.targetWrites===0;
 }
 
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
@@ -410,6 +519,10 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       ||p.ratio?.known!==display?.accountBaseRatio?.known||p.ratio?.unknown!==display?.accountBaseRatio?.unknown
       ||['selected','unselected','unknown'].some(key=>p.payout?.[key]!==display?.accountFullPayout?.[key]))
       issues.push('ROUND_DISPLAY_CAPTURE_PREFLIGHT_UNCONFIRMED');
+  }
+  if(!input.resume&&expected?.dataset?.identityProfiles&&target.migrationProfile===NEXT_MIGRATION_PROFILE){
+    if(!openingSourcePreflightMatches(input,expected,receipt?.openingSourcePreflight))
+      issues.push('ROUND_OPENING_SOURCE_PREFLIGHT_UNCONFIRMED');
   }
   if (expected?.dataset?.identityProfiles && input.growth?.packageLayout === 'PACKED_V2') {
     const proof = receipt?.distributionSourcePreflight, source = expected.source;
@@ -517,6 +630,16 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     || target.migrationProfile === NEXT_MIGRATION_PROFILE && readback.targetFence !== "HELD_UNTIL_ROLLBACK"
     || readback.targetWrites !== 0 || !readback.rollbackConfirmed || !readback.lockReleased || !readback.connectionsClosed)) issues.push("ROUND_DATASET_READBACK_UNCONFIRMED");
   else if (requireReadback) {
+    if(!systemCoreAttributionMatches(checkpoint,readback))issues.push("ROUND_SYSTEM_SOURCE_ATTRIBUTION_UNCONFIRMED");
+    if(!systemInvitationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_INVITATION_ATTRIBUTION_UNCONFIRMED');
+    if(!systemDisplayAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_DISPLAY_ATTRIBUTION_UNCONFIRMED');
+    if(!systemContinuationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_CONTINUATION_ATTRIBUTION_UNCONFIRMED');
+    if(!systemLiabilityAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_LIABILITY_ATTRIBUTION_UNCONFIRMED');
+    if(!systemCompletedCommissionAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_COMPLETED_COMMISSION_ATTRIBUTION_UNCONFIRMED');
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&((expected?.dataset?.identityProfiles&&checkpoint?.binding?.systemFinanceId===undefined)
+      ||!systemOpeningAttributionMatches(checkpoint,readback)))issues.push('ROUND_SYSTEM_OPENING_ATTRIBUTION_UNCONFIRMED');
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&!input.resume&&expected?.dataset?.identityProfiles
+      &&JSON.stringify(receipt?.openingSourcePreflight)!==JSON.stringify(checkpoint?.openingSourcePreflight))issues.push('ROUND_SYSTEM_OPENING_SOURCE_BINDING_CHANGED');
     if (target.migrationProfile === NEXT_MIGRATION_PROFILE && (requireCurrentLegacyListed
       || Object.hasOwn(readback, "legacyListedSource") || Object.hasOwn(readback, "legacyListedSourceOrigin")
       || readback.legacyListedTarget?.sourceProofSha256 !== undefined)) {
@@ -579,6 +702,9 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
       if (!Number.isSafeInteger(count) || readback[domain]?.expected !== count || readback[domain]?.matched !== count) issues.push("ROUND_READBACK_COUNT_DRIFT:" + domain);
     }
     const empty=checkpoint?.generatedPhases?.financeEmptyCoverage;
+    if(checkpoint?.binding?.systemFinanceId&&empty?.receiptMode!=='SYSTEM_BATCH_V1')issues.push('ROUND_SYSTEM_EMPTY_RECEIPT_MODE_UNCONFIRMED');
+    if(checkpoint?.binding?.systemFinanceId&&!systemFinanceHistoryReadbackMatches(checkpoint?.generatedPhases?.financeHistory,readback))
+      issues.push('ROUND_SYSTEM_FINANCE_HISTORY_READBACK_UNCONFIRMED');
     if(empty?.schema==="zzsh.empty-coverage-chunks.v1" && (readback.emptyFinancialCoverage?.sourceRebuilt!==true
       ||readback.emptyFinancialCoverage.expected!==empty.rows||readback.emptyFinancialCoverage.readable!==empty.rows
       ||readback.emptyFinancialCoverage.actual!==empty.rows||readback.emptyFinancialCoverage.chunks!==empty.chunks?.length)) issues.push("ROUND_EMPTY_COVERAGE_READBACK_UNCONFIRMED");

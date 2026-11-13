@@ -9,6 +9,14 @@ export type UserPasswordState = "set" | "not-set" | "unavailable";
 
 export type LegacyNumberLoginTarget = Readonly<{ userId: string; username: string; throttleSubject: string }>;
 
+// The system marker is owner-written; old databases and administrator imports retain their original path.
+const TRUSTED_LEGACY_USER_SOURCE = `(e.actor_type='admin' OR (e.actor_type='system' AND e.session_id IS NULL
+  AND e.action='user.legacy_owner.migrated'
+  AND to_jsonb(e)->>'legacy_migration_manifest_sha256' ~ '^[a-f0-9]{64}$'
+  AND e.details->>'sourceDatasetSha256'=to_jsonb(e)->>'legacy_migration_manifest_sha256'
+  AND e.details->>'migrationRunDigest' ~ '^[a-f0-9]{64}$'
+  AND e.actor_id='legacy-user-migration:'||(e.details->>'migrationRunDigest')))`;
+
 /** Only a source-bound public legacy SN. Internal legacy IDs, names and email are never lookup fallbacks. */
 export async function resolveLegacyNumberLogin(db: PasswordSetupQueryable | Pool, identifier: string): Promise<LegacyNumberLoginTarget | null> {
   if (typeof identifier !== "string" || identifier !== identifier.trim() || !identifier || identifier.length > 128 || /[\x00-\x1f\x7f]/.test(identifier)) return null;
@@ -18,12 +26,12 @@ export async function resolveLegacyNumberLogin(db: PasswordSetupQueryable | Pool
     p.source_sn,p.source_digest AS projection_digest,p.source_system AS projection_system,p.source_entity AS projection_entity,p.legacy_id AS projection_id
     FROM zzsh_auth_user."user" u
     JOIN LATERAL (SELECT e.details FROM zzsh_iam.audit_event e
-      WHERE e.object_id=u.id AND e.object_type='user' AND e.actor_type='admin' AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS'
+      WHERE e.object_id=u.id AND e.object_type='user' AND ${TRUSTED_LEGACY_USER_SOURCE} AND e.action='user.legacy_owner.migrated' AND e.outcome='SUCCESS'
         AND e.details->>'sourceSystem'='legacy_mysql_restore' AND e.details->>'sourceEntity'='la_user'
       ORDER BY e.occurred_at,e.id LIMIT 1) a ON true
     JOIN LATERAL (SELECT COALESCE(e.details#>>'{contactProjection,sourceSn}',e.details->>'sourceSn') AS source_sn,
       e.details->>'sourceDigest' AS source_digest,e.details->>'sourceSystem' AS source_system,e.details->>'sourceEntity' AS source_entity,e.details->>'legacyId' AS legacy_id
-      FROM zzsh_iam.audit_event e WHERE e.object_id=u.id AND e.object_type='user' AND e.actor_type='admin' AND e.outcome='SUCCESS'
+      FROM zzsh_iam.audit_event e WHERE e.object_id=u.id AND e.object_type='user' AND ${TRUSTED_LEGACY_USER_SOURCE} AND e.outcome='SUCCESS'
         AND e.details->>'sourceDigest'=a.details->>'sourceDigest' AND e.details->>'sourceSystem'=a.details->>'sourceSystem'
         AND e.details->>'sourceEntity'=a.details->>'sourceEntity' AND e.details->>'legacyId'=a.details->>'legacyId'
         AND (e.action='user.legacy_owner.migrated' AND e.details#>>'{contactProjection,sourceSn}'=u.username

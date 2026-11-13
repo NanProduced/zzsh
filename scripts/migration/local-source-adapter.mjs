@@ -326,6 +326,149 @@ export async function readVerifiedSourceRows(file, entry, visit) {
     return count;
 }
 
+function sourceBatchDigest(rows) {
+    const hash = createHash("sha256");
+    for (const row of rows) { const encoded = JSON.stringify(row); hash.update(String(Buffer.byteLength(encoded))).update(":").update(encoded); }
+    return hash.digest("hex");
+}
+
+const SYSTEM_AUDIT_DOMAINS = Object.freeze({
+    users: {objectType:"user", actions:["user.legacy_owner.migrated"]},
+    accounts: {objectType:"rental_account", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
+    display: {objectType:"rental_account", actions:["supply.legacy.display_snapshot_recorded"]},
+    orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
+    continuation: {objectType:"rental_order", actions:["order.legacy.continuation.import"]},
+    liability: {objectType:"rental_order", actions:["order.legacy.liability.import"]},
+    completedCommission: {objectType:"rental_order", actions:["order.legacy.commission.completed-import"]},
+});
+
+/** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
+export async function readSystemMigrationAudits(query,domain,objectIds) {
+    const spec=SYSTEM_AUDIT_DOMAINS[domain];
+    if(typeof query!=="function"||!spec||!Array.isArray(objectIds)||objectIds.length>1000||objectIds.some(id=>typeof id!=="string"||!id))
+        throw new Error("SYSTEM_MIGRATION_AUDIT_QUERY_INVALID");
+    if(!objectIds.length)return new Map();
+    const rows=(await query(`SELECT e.object_id,e.action,e.actor_type,e.actor_id,e.session_id,
+      to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest,e.details FROM zzsh_iam.audit_event e
+      WHERE e.object_type=$1 AND e.outcome='SUCCESS' AND e.action=ANY($2::text[]) AND e.object_id=ANY($3::text[])`,
+      [spec.objectType,spec.actions,[...new Set(objectIds)]])).rows;
+    const grouped=new Map();for(const row of rows){const current=grouped.get(row.object_id)??[];current.push(row);grouped.set(row.object_id,current);}
+    return grouped;
+}
+
+export function matchesSystemMigrationAudit(rows, expected) {
+    if(!Array.isArray(rows)||!expected||typeof expected.actorId!=="string"||!/^[a-f0-9]{64}$/.test(expected.manifestSha256??""))return false;
+    const matching=rows.filter(row=>row.object_id===expected.objectId&&row.action===expected.action);
+    if(matching.length!==1)return false;
+    const row=matching[0],details=row.details,parts=expected.actorId.split(":");
+    if(parts.length!==2||!/^[a-f0-9]{64}$/.test(parts[1])||row.actor_type!=="system"||row.actor_id!==expected.actorId||row.session_id!==null
+      ||row.source_manifest!==expected.manifestSha256||!details||details.sourceDatasetSha256!==expected.manifestSha256
+      ||details.migrationRunDigest!==parts[1]||details.sourceSystem!==expected.sourceSystem||details.sourceEntity!==expected.sourceEntity
+      ||details.legacyId!==expected.legacyId||details.sourceDigest!==expected.sourceDigest)return false;
+    for(const field of ["evidenceDigest","payloadDigest","bindingDigest","factsDigest","evidenceId","admission"])if(expected[field]!==undefined&&details[field]!==expected[field])return false;
+    if(expected.noIsolation===true&&(!Array.isArray(details.isolated)||details.isolated.length!==0))return false;
+    if(expected.initialAvatarPresetId!==undefined&&(details.initialAvatar?.presetId!==expected.initialAvatarPresetId
+      ||details.initialAvatar?.version!=="1"||details.initialAvatar?.created!==true))return false;
+    return expected.observationVersionId===undefined||details.after?.observationVersionId===expected.observationVersionId;
+}
+export function matchesSystemDisplayReceipt(rows,{actorId,accountId,displayDigest,fingerprint,canonicalize}){
+    if(!Array.isArray(rows)||rows.length!==1||typeof canonicalize!=="function")return false;
+    const row=rows[0],scope=JSON.stringify(["system",actorId,"supply.legacy.display_snapshot_recorded",accountId]);
+    return row.scope_key===scope&&row.key==="legacy-display-v1:"+accountId&&row.request_fingerprint===fingerprint
+      &&row.response_status===200&&row.publish_required===false&&canonicalize(row.response_body)===canonicalize({accountId,displayDigest,schemaVersion:1});
+}
+export function matchesSystemContinuationReceipt(rows,{actorId,orderId,key,fingerprint,evidenceId,admission,canonicalize}){
+    if(!Array.isArray(rows)||rows.length!==1||typeof canonicalize!=="function")return false;
+    const row=rows[0],scope=JSON.stringify(["system",actorId,"order.legacy.continuation.import",orderId]);
+    return row.scope_key===scope&&row.key===key&&row.request_fingerprint===fingerprint&&row.response_status===200&&row.publish_required===false
+      &&canonicalize(row.response_body)===canonicalize({evidenceId,admission,isolated:[]});
+}
+export function matchesSystemLiabilityEvidence(audits,receipts,{actorId,manifestSha256,legacyId,bindingDigest,input,dutyId,fingerprint,canonicalize}){
+    if(typeof canonicalize!=="function"||!input)return false;
+    let source;try{source=JSON.parse(input.settlementRecord?.canonical);}catch{return false;}
+    const audit=audits?.[0],detail=audit?.details,scope=JSON.stringify(["system",actorId,"order.legacy.liability.import",input.orderId]);
+    if(!matchesSystemMigrationAudit(audits,{objectId:input.orderId,action:'order.legacy.liability.import',actorId,manifestSha256,
+      sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId,sourceDigest:input.parentSourceDigest,bindingDigest,
+      payloadDigest:createHash('sha256').update(canonicalize(input)).digest('hex')}))return false;
+    if(!detail||!detail.settlementRecord||!Object.hasOwn(detail,'refundRecord')||detail.classification!==input.classification||detail.sourceStatus!==source?.is_settle||detail.parentSourceDigest!==input.parentSourceDigest||detail.evidenceRef!==input.evidenceRef
+      ||detail.dutyId!==dutyId||detail.channelState!=='UNKNOWN'||canonicalize(detail.settlementRecord)!==canonicalize(input.settlementRecord)
+      ||canonicalize(detail.refundRecord)!==canonicalize(input.refundRecord??null))return false;
+    if(!Array.isArray(receipts)||receipts.length!==1)return false;
+    const receipt=receipts[0];
+    return receipt.scope_key===scope&&receipt.key===createHash('sha256').update(input.orderId).digest('hex')&&receipt.request_fingerprint===fingerprint
+      &&receipt.response_status===200&&receipt.publish_required===false
+      &&canonicalize(receipt.response_body)===canonicalize({classification:input.classification,dutyId,channelState:'UNKNOWN'});
+}
+export function matchesSystemCompletedCommissionEvidence(audits,receipts,{actorId,manifestSha256,legacyId,bindingDigest,input,effect,admission,fingerprint,canonicalize}){
+    if(typeof canonicalize!=="function"||!input?.commission||!input.sourceRecord||!effect||!admission)return false;
+    const selected=audits?.filter(row=>row.details?.sourceRecordId===input.commission.id),detail=selected?.[0]?.details;
+    const scope=JSON.stringify(['system',actorId,'order.legacy.commission.completed-import',input.orderId]),key=createHash('sha256').update(input.commission.id).digest('hex');
+    const matchingReceipts=receipts?.filter(row=>row.scope_key===scope&&row.key===key);
+    const admissionId='legacy_admission_'+createHash('sha256').update(effect.dutyId).digest('hex').slice(0,40);
+    const source=canonicalize({schema:'legacy-completed-commission-admission.v1',...input,beneficiaryUserId:effect.beneficiaryUserId,amountCents:effect.amountCents,maturityAt:effect.maturityAt});
+    const admissionDigest=createHash('sha256').update(source).digest('hex');
+    if(!matchesSystemMigrationAudit(selected,{objectId:input.orderId,action:'order.legacy.commission.completed-import',actorId,manifestSha256,
+      sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId,sourceDigest:input.sourceDigest,bindingDigest,
+      payloadDigest:createHash('sha256').update(canonicalize(input)).digest('hex')}))return false;
+    if(!detail?.time||detail.sourceRecordDigest!==input.sourceRecord.digest||detail.parentSourceDigest!==input.sourceDigest||detail.admissionId!==admissionId
+      ||detail.admissionDigest!==admissionDigest||detail.finalAmountEvidenceDigest!==input.finalAmountEvidenceDigest
+      ||canonicalize(detail.time)!==canonicalize(input.time)||detail.cutoff!==input.cutoff||detail.maturityAt!==effect.maturityAt||detail.maturedByCutoff!==effect.maturedByCutoff)return false;
+    if(admission.id!==admissionId||admission.duty_id!==effect.dutyId||admission.admission_digest!==admissionDigest||admission.admission_canonical!==source
+      ||admission.source_record_digest!==input.sourceRecord.digest||canonicalize(admission.reviewed_by)!==canonicalize({kind:'SYSTEM_ORDER_MIGRATION',id:actorId,sourceDatasetSha256:manifestSha256}))return false;
+    if(!Array.isArray(matchingReceipts)||matchingReceipts.length!==1)return false;
+    const receipt=matchingReceipts[0];return receipt.request_fingerprint===fingerprint&&receipt.response_status===200&&receipt.publish_required===false
+      &&canonicalize(receipt.response_body)===canonicalize({admission:'IMPORTED',dutyId:effect.dutyId,maturityAt:effect.maturityAt});
+}
+function assertRegularSourceFile(file) {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("SOURCE_BATCH_FILE_UNSAFE");
+}
+const verifiedSourceBatchProofs = new WeakSet();
+
+/** Hash each bounded batch while validating the complete source; retain no row contents. */
+export async function preflightBoundSourceBatches(file, entry, batchSize = 100) {
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 1000) throw new Error("SOURCE_BATCH_SIZE_INVALID");
+    if (!entry || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "") || !Number.isSafeInteger(entry.rows) || entry.rows < 0) throw new Error("SOURCE_STREAM_META_INVALID");
+    assertRegularSourceFile(file);
+    const hashes = [], consumed = createHash("sha256"); let batch = [], count = 0;
+    for await (const row of readSourceRows(file, bytes => consumed.update(bytes))) {
+        batch.push(row); count++;
+        if (batch.length === batchSize) { hashes.push(sourceBatchDigest(batch)); batch = []; }
+    }
+    if (count !== entry.rows || consumed.digest("hex") !== entry.sha256) throw new Error("SOURCE_STREAM_CHANGED");
+    if (batch.length) hashes.push(sourceBatchDigest(batch));
+    assertRegularSourceFile(file);
+    const proof = Object.freeze({ sourceSha256: entry.sha256, rows: count, batchSize, hashes: Object.freeze(hashes) });
+    verifiedSourceBatchProofs.add(proof);
+    return proof;
+}
+
+/** No batch is yielded until its content matches preflight; the last waits for full-file verification. */
+export async function* readBoundSourceBatches(file, entry, proof) {
+    if (!proof || !verifiedSourceBatchProofs.has(proof) || proof.sourceSha256 !== entry?.sha256 || proof.rows !== entry?.rows
+        || !Number.isSafeInteger(proof.batchSize) || proof.batchSize < 1 || proof.batchSize > 1000
+        || !Array.isArray(proof.hashes) || proof.hashes.length !== Math.ceil(proof.rows / proof.batchSize)
+        || proof.hashes.some(hash => !/^[a-f0-9]{64}$/.test(hash))) throw new Error("SOURCE_BATCH_PROOF_INVALID");
+    assertRegularSourceFile(file);
+    let batch = [], count = 0, index = 0;
+    const checked = () => {
+        if (sourceBatchDigest(batch) !== proof.hashes[index++]) throw new Error("SOURCE_BATCH_CHANGED");
+        return batch;
+    };
+    for await (const row of readBoundSourceRows(file, entry)) {
+        batch.push(row); count++;
+        if (count > proof.rows) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+        if (batch.length === proof.batchSize && count < proof.rows) {
+            for (const item of checked()) yield item;
+            batch = [];
+        }
+    }
+    assertRegularSourceFile(file);
+    if (count !== proof.rows) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+    if (batch.length) for (const item of checked()) yield item;
+    if (index !== proof.hashes.length) throw new Error("SOURCE_BATCH_COUNT_CHANGED");
+}
+
 /** Check the entire display package against the frozen source before any target write. */
 export async function verifyDisplayCaptureInputs({sourceDir,sourceEntry,accountsDir,accountsEntry,displayDir,display,canonicalize}) {
     assertDisplayCaptureCoverage(display);

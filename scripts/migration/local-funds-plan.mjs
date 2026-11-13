@@ -27,26 +27,31 @@ export const EMPTY_COVERAGE_CHUNK_SIZE = 400;
 export function emptyCoverageChunkDigest(rows) { return sha(rows.map(row => row.sourceId).join("\n")); }
 export function assertEmptyCoverageReceiptMode(phase,isNext){
  if(typeof isNext!=='boolean'||!phase||typeof phase!=='object'||Array.isArray(phase))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
- if(isNext&&phase.receiptMode!=='BATCH_V2')throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
+ if(isNext&&!['BATCH_V2','SYSTEM_BATCH_V1'].includes(phase.receiptMode))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN');
  if(!isNext&&Object.hasOwn(phase,'receiptMode'))throw Error('EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED');
 }
 
 /** Compare original batch receipts and audits without interpreting absence as success. */
 export function compareCompactCoverageEvidence(expected,receipts,audits,actor){
- if(!Array.isArray(expected)||!Array.isArray(receipts)||!Array.isArray(audits)||!actor?.userId||!actor?.sessionId
+ const system=actor?.kind==='SYSTEM_FINANCE_MIGRATION',actorId=system?actor?.id:actor?.userId,sessionId=system?null:actor?.sessionId;
+ if(!Array.isArray(expected)||!Array.isArray(receipts)||!Array.isArray(audits)||!actorId||(!system&&!sessionId)
+  ||system&&(!/^legacy-finance-migration:[a-f0-9]{64}$/.test(actorId)||!/^[a-f0-9]{64}$/.test(actor.sourceDatasetSha256??''))
   ||expected.some(row=>!/^history-empty-batch-[a-f0-9]{40}$/.test(row?.batchId??'')||!/^[a-f0-9]{64}$/.test(row?.fingerprint??'')
-   ||row.body?.schema!=='finance-empty-coverage-batch.v1'||row.body.batchId!==row.batchId||row.body.actor?.userId!==actor.userId
-   ||row.body.actor?.sessionId!==actor.sessionId||typeof row.body.requestId!=='string'||!row.body.requestId)
+   ||row.body.batchId!==row.batchId||typeof row.body.requestId!=='string'||!row.body.requestId
+   ||(system ? row.body.schema!=='finance-empty-coverage-batch.system.v1'||row.body.sourceDatasetSha256!==actor.sourceDatasetSha256
+      ||row.body.migrationRunDigest!==actorId.slice('legacy-finance-migration:'.length)||row.body.financialEffect!=='NONE'
+     : row.body.schema!=='finance-empty-coverage-batch.v1'||row.body.actor?.userId!==actorId||row.body.actor?.sessionId!==sessionId))
   ||new Set(expected.map(row=>row.batchId)).size!==expected.length)throw Error('COMPACT_COVERAGE_READBACK_INPUT_INVALID');
  const receiptById=Map.groupBy(receipts,row=>row.key),auditById=Map.groupBy(audits,row=>row.object_id),differences=[];
- const scopeKey=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]);
+ const scopeKey=JSON.stringify([system?'system':'admin',actorId,'finance.history.empty_batch.import.v1',null]);
  for(const proof of expected){
   const receipt=receiptById.get(proof.batchId)??[],audit=auditById.get(proof.batchId)??[];
   if(receipt.length!==1||receipt[0].scope_key!==scopeKey||receipt[0].request_fingerprint!==proof.fingerprint||receipt[0].response_status!==200
    ||receipt[0].publish_required!==false||!isDeepStrictEqual(receipt[0].response_body,proof.body))
    differences.push({batchId:proof.batchId,reason:'BATCH_RECEIPT_MISSING_OR_CHANGED'});
   if(audit.length!==1||audit[0].action!=='finance.history.empty_batch.imported'||audit[0].object_type!=='personal_finance_observation_coverage_batch'
-   ||audit[0].actor_type!=='admin'||audit[0].outcome!=='SUCCESS'||audit[0].actor_id!==actor.userId||audit[0].session_id!==actor.sessionId
+   ||audit[0].actor_type!==(system?'system':'admin')||audit[0].outcome!=='SUCCESS'||audit[0].actor_id!==actorId||audit[0].session_id!==sessionId
+   ||system&&audit[0].source_manifest!==actor.sourceDatasetSha256
    ||audit[0].request_id!==proof.body.requestId||!isDeepStrictEqual(audit[0].details,proof.body))
    differences.push({batchId:proof.batchId,reason:'BATCH_AUDIT_MISSING_OR_CHANGED'});
  }
@@ -56,13 +61,15 @@ export function compareCompactCoverageEvidence(expected,receipts,audits,actor){
 
 /** Independent readback queries only the exact frozen batch keys, in bounded groups. */
 export async function readCompactCoverageEvidence(query,expected,actor){
- if(typeof query!=='function'||!Array.isArray(expected)||!actor?.userId||!actor?.sessionId
+ const system=actor?.kind==='SYSTEM_FINANCE_MIGRATION',actorId=system?actor?.id:actor?.userId;
+ if(typeof query!=='function'||!Array.isArray(expected)||!actorId||(!system&&!actor?.sessionId)
   ||new Set(expected.map(row=>row.batchId)).size!==expected.length)throw Error('COMPACT_COVERAGE_READBACK_INPUT_INVALID');
  compareCompactCoverageEvidence(expected,[],[],actor);
- const scopeKey=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),differences=[];let matched=0;
+ const scopeKey=JSON.stringify([system?'system':'admin',actorId,'finance.history.empty_batch.import.v1',null]),differences=[];let matched=0;
  for(let i=0;i<expected.length;i+=500){const part=expected.slice(i,i+500),ids=part.map(row=>row.batchId);
   const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])`,[scopeKey,ids])).rows;
-  const audits=(await query(`SELECT object_id,action,object_type,actor_type,outcome,actor_id,session_id,request_id,details FROM zzsh_iam.audit_event WHERE action='finance.history.empty_batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=ANY($1::text[])`,[ids])).rows;
+  const audits=(await query(`SELECT e.object_id,e.action,e.object_type,e.actor_type,e.outcome,e.actor_id,e.session_id,e.request_id,e.details,
+    to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest FROM zzsh_iam.audit_event e WHERE e.action='finance.history.empty_batch.imported' AND e.object_type='personal_finance_observation_coverage_batch' AND e.object_id=ANY($1::text[])`,[ids])).rows;
   const checked=compareCompactCoverageEvidence(part,receipts,audits,actor);matched+=checked.matched;differences.push(...checked.differences);
  }
  const receiptTotal=(await query(`SELECT count(*)::text AS n FROM zzsh_supply.idempotency_record WHERE right(scope_key,length($1::text))=$1`,[',"finance.history.empty_batch.import.v1",null]'])).rows[0]?.n;
@@ -70,6 +77,69 @@ export async function readCompactCoverageEvidence(query,expected,actor){
  if(!/^\d+$/.test(receiptTotal??'')||!/^\d+$/.test(auditTotal??''))throw Error('COMPACT_COVERAGE_TOTAL_UNAVAILABLE');
  if(receiptTotal!==String(expected.length)||auditTotal!==String(expected.length))differences.push({batchId:'COHORT',reason:'BATCH_TOTAL_DIFFERS'});
  return{expected:expected.length,matched,differences};
+}
+
+/** The historical observation, its immutable coverage, original receipt and audit are separate facts. */
+export async function readIndividualFinanceHistoryEvidence(query,groups,actor,planFinanceObservations){
+ if(typeof query!=='function'||!Array.isArray(groups)||typeof planFinanceObservations!=='function'
+   ||![actor?.userId,actor?.sessionId,actor?.requestId,actor?.ref,actor?.attempt].every(value=>typeof value==='string'&&value))
+  throw Error('FINANCE_HISTORY_READBACK_INPUT_INVALID');
+ const planned=groups.map(group=>({input:group.input,plan:planFinanceObservations(group.input)}));
+ if(new Set(planned.map(row=>row.plan.key)).size!==planned.length||new Set(planned.map(row=>row.plan.coverage.id)).size!==planned.length)
+  throw Error('FINANCE_HISTORY_READBACK_INPUT_INVALID');
+ const scope=JSON.stringify(['admin',actor.userId,'finance.history.import',null]),differences=[];let matched=0;
+ for(let i=0;i<planned.length;i+=500){
+  const part=planned.slice(i,i+500),ids=part.map(row=>row.plan.coverage.id),keys=part.map(row=>row.plan.key);
+  const coverage=(await query(`SELECT id,user_id,source_kind,source_count,imported_count,isolated_count,body_digest,source_canonical FROM zzsh_order.personal_finance_observation_coverage WHERE id=ANY($1::text[])`,[ids])).rows;
+  const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=ANY($2::text[])`,[scope,keys])).rows;
+  const audits=(await query(`SELECT object_id,actor_type,actor_id,session_id,request_id,outcome,details FROM zzsh_iam.audit_event WHERE action='finance.history.imported' AND object_type='personal_finance_observation_coverage' AND object_id=ANY($1::text[])`,[ids])).rows;
+  const coverageById=Map.groupBy(coverage,row=>row.id),receiptByKey=Map.groupBy(receipts,row=>row.key),auditById=Map.groupBy(audits,row=>row.object_id);
+  for(const {input,plan} of part){
+   const c=plan.coverage,facts=coverageById.get(c.id)??[],receipt=receiptByKey.get(plan.key)??[],audit=auditById.get(c.id)??[],body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:c.importedCount,isolatedCount:c.isolatedCount,financialEffect:'NONE'};
+   const row=facts[0],saved=receipt[0],event=audit[0],details=event?.details;
+   if(facts.length!==1||row.user_id!==c.userId||row.source_kind!==c.sourceKind||row.source_count!==c.sourceCount||row.imported_count!==c.importedCount||row.isolated_count!==c.isolatedCount||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical){differences.push({coverageId:c.id,reason:'HISTORY_COVERAGE_MISSING_OR_CHANGED'});continue;}
+   if(receipt.length!==1||saved.scope_key!==scope||saved.request_fingerprint!==sha(JSON.stringify(['finance.history.import',c.id,input]))||saved.response_status!==200||saved.publish_required!==false||!isDeepStrictEqual(saved.response_body,body)){differences.push({coverageId:c.id,reason:'HISTORY_RECEIPT_MISSING_OR_CHANGED'});continue;}
+   if(audit.length!==1||event.actor_type!=='admin'||event.actor_id!==actor.userId||event.session_id!==actor.sessionId||event.request_id!==actor.requestId||event.outcome!=='SUCCESS'
+    ||details?.bodyDigest!==plan.bodyDigest||details?.coverageBodyDigest!==c.bodyDigest||details?.inputSha256!==c.inputSha256||details?.subjectId!==c.userId||details?.sourceKind!==c.sourceKind
+    ||details?.sourceCount!==c.sourceCount||details?.importedCount!==c.importedCount||details?.isolatedCount!==c.isolatedCount||details?.approvalRef!==actor.ref||details?.attempt!==actor.attempt||details?.financialEffect!=='NONE'){
+     differences.push({coverageId:c.id,reason:'HISTORY_AUDIT_MISSING_OR_CHANGED'});continue;}
+   matched++;
+  }
+ }
+ return{expected:planned.length,matched,differences};
+}
+
+/** Reconstruct the same system batch boundaries; a receipt never substitutes for its source coverage. */
+export async function readSystemFinanceHistoryEvidence(query,groups,actor,planFinanceObservations,buildProof,canonical){
+ if(typeof query!=='function'||!Array.isArray(groups)||typeof planFinanceObservations!=='function'||typeof buildProof!=='function'||typeof canonical!=='function'
+   ||actor?.kind!=='SYSTEM_FINANCE_MIGRATION'||!/^legacy-finance-migration:[a-f0-9]{64}$/.test(actor.id??'')||!/^[a-f0-9]{64}$/.test(actor.sourceDatasetSha256??''))
+  throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+ const plans=groups.map(group=>({input:group.input,plan:planFinanceObservations(group.input)}));
+ if(new Set(plans.map(row=>row.plan.coverage.id)).size!==plans.length)throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+ const scope=JSON.stringify(['system',actor.id,'finance.history.batch.import.v1',null]),differences=[];let matchedGroups=0,matchedBatches=0;
+ for(let i=0;i<plans.length;i+=500){
+  const part=plans.slice(i,i+500),proof=buildProof(part.map(row=>row.input),actor),ids=part.map(row=>row.plan.coverage.id);
+  if(proof.body?.schema!=='finance-history-batch.system.v1'||proof.body.batchId!==proof.batchId||proof.body.coverageCount!==part.length
+    ||proof.body.sourceDatasetSha256!==actor.sourceDatasetSha256||proof.body.inputsDigest!==sha(canonical(part.map(row=>row.input)))||proof.body.financialEffect!=='NONE')
+   throw Error('SYSTEM_FINANCE_HISTORY_READBACK_INVALID');
+  const coverage=(await query(`SELECT id,user_id,source_kind,source_count,imported_count,isolated_count,body_digest,source_canonical FROM zzsh_order.personal_finance_observation_coverage WHERE id=ANY($1::text[])`,[ids])).rows;
+  const receipts=(await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required FROM zzsh_supply.idempotency_record WHERE scope_key=$1 AND key=$2`,[scope,proof.batchId])).rows;
+  const audits=(await query(`SELECT e.object_id,e.actor_type,e.actor_id,e.session_id,e.request_id,e.outcome,e.details,to_jsonb(e)->>'legacy_migration_manifest_sha256' AS source_manifest FROM zzsh_iam.audit_event e WHERE action='finance.history.batch.imported' AND object_type='personal_finance_observation_coverage_batch' AND object_id=$1`,[proof.batchId])).rows;
+  const saved=receipts[0],audit=audits[0],batchOk=receipts.length===1&&saved.scope_key===scope&&saved.key===proof.batchId&&saved.request_fingerprint===proof.fingerprint&&saved.response_status===200&&saved.publish_required===false&&isDeepStrictEqual(saved.response_body,proof.body)
+   &&audits.length===1&&audit.actor_type==='system'&&audit.actor_id===actor.id&&audit.session_id===null&&audit.request_id===actor.requestId&&audit.outcome==='SUCCESS'&&audit.source_manifest===actor.sourceDatasetSha256&&isDeepStrictEqual(audit.details,proof.body);
+  if(batchOk)matchedBatches++;else differences.push({id:proof.batchId,reason:'SYSTEM_HISTORY_BATCH_EVIDENCE_MISSING_OR_CHANGED'});
+  const byId=Map.groupBy(coverage,row=>row.id);
+  for(const {plan} of part){const c=plan.coverage,found=byId.get(c.id)??[],row=found[0];
+   if(found.length!==1||row.user_id!==c.userId||row.source_kind!==c.sourceKind||row.source_count!==c.sourceCount||row.imported_count!==c.importedCount||row.isolated_count!==c.isolatedCount||row.body_digest!==c.bodyDigest||row.source_canonical!==c.canonical)
+    differences.push({id:c.id,reason:'HISTORY_COVERAGE_MISSING_OR_CHANGED'});
+   else if(batchOk)matchedGroups++;
+  }
+ }
+ const receiptCount=(await query(`SELECT count(*)::text n FROM zzsh_supply.idempotency_record WHERE scope_key=$1`,[scope])).rows[0]?.n;
+ const auditCount=(await query(`SELECT count(*)::text n FROM zzsh_iam.audit_event WHERE action='finance.history.batch.imported' AND object_type='personal_finance_observation_coverage_batch'`,[])).rows[0]?.n;
+ const batches=Math.ceil(plans.length/500);
+ if(receiptCount!==String(batches)||auditCount!==String(batches))differences.push({id:'COHORT',reason:'SYSTEM_HISTORY_BATCH_TOTAL_DIFFERS'});
+ return{expectedGroups:plans.length,matchedGroups,expectedBatches:batches,matchedBatches,differences};
 }
 
 /** Compare a newly derived source chunk with the exact immutable bytes the loader consumed. */

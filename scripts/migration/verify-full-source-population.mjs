@@ -11,7 +11,7 @@ import { writePrivate } from '../local-auth.mjs';
 
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const restricted=resolve('E:/zzsh-local-state/restricted');
-function privatePath(value,output=false){
+export function privatePath(value,output=false){
  assert(typeof value==='string'&&isAbsolute(value),'FULL_SCOPE_PRIVATE_PATH_REQUIRED');const file=resolve(value);
  assert(file.toLowerCase().startsWith(restricted.toLowerCase()+'\\'),'FULL_SCOPE_PRIVATE_PATH_REQUIRED');
  for(let p=output?dirname(file):file;;p=dirname(p)){assert(!lstatSync(p).isSymbolicLink(),'FULL_SCOPE_REPARSE_POINT_REFUSED');if(p.toLowerCase()===restricted.toLowerCase())break;}

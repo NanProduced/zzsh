@@ -3,17 +3,33 @@ import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {withTransaction} from '../src/auth/security-core';
 import {canonicalize} from '../src/supply/content-hash';
-import {bindReviewedEmptyFinanceObservationBatch,importReviewedEmptyFinanceObservationBatch,recoverReviewedEmptyFinanceObservationBatch,importReviewedCompactEmptyFinanceObservationBatch,recoverReviewedCompactEmptyFinanceObservationBatch,compactEmptyFinanceBatchProof,planFinanceObservations,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
+import {bindReviewedEmptyFinanceObservationBatch,importReviewedEmptyFinanceObservationBatch,recoverReviewedEmptyFinanceObservationBatch,importReviewedCompactEmptyFinanceObservationBatch,recoverReviewedCompactEmptyFinanceObservationBatch,compactEmptyFinanceBatchProof,systemCompactEmptyFinanceBatchProof,bindSystemEmptyReceiptBaseline,importSystemCompactEmptyFinanceObservationBatch,planFinanceObservations,type ObservationImportInput,type ObservationImportReview} from '../src/finance/personal-finance-observation-maintenance';
+import {systemFinanceMigrationId,withSystemFinanceMigrationBatch} from '../src/legacy-load/system-user-migration';
 
 const actor={userId:'fixture_boss',sessionId:'fixture_session',requestId:'fixture_request'},resource={host:'127.0.0.1' as const,port:55432 as const,database:'zzsh_test_order_empty',oid:42,owner:'fixture_owner',marker:'zzsh:order-reservation-test:v1',role:'fixture_owner',roleOid:43};
 const nextResource={host:'127.0.0.1' as const,port:61690,database:'zzsh_test_regression',oid:42,owner:'zzsh',marker:'zzsh:regression-test:v1',role:'zzsh_regression_migration',roleOid:43,migrationProfile:'LOCAL_MIGRATION_NEXT_V1' as const,systemIdentifier:'123456',nonce:'a'.repeat(24)};
 const sha=(value:unknown)=>createHash('sha256').update(canonicalize(value)).digest('hex');
 function inputs():ObservationImportInput[]{return ['11','12'].flatMap(legacyUserId=>(['HISTORICAL_EARNINGS_LOG','HISTORICAL_PAYMENT'] as const).map(sourceKind=>({coverage:{userId:'fixture_'+legacyUserId,legacyUserId,sourceSystem:'legacy_mysql_restore',sourceKind,cutoff:'2026-10-01T00:00:00.000Z',inputSha256:'a'.repeat(64),identityDigest:'b'.repeat(64),sourceCount:0,imported:[],isolated:[]},observations:[]})));}
+test('system empty coverage requires one protected source batch and never represents a money posting',async()=>{
+ const target={systemIdentifier:'12345',databaseOid:'42',marker:'zzsh:synthetic:v1',nonce:'c'.repeat(24),roleOid:'91'},sourceDatasetSha256='d'.repeat(64);
+ const systemActor={kind:'SYSTEM_FINANCE_MIGRATION' as const,id:systemFinanceMigrationId(sourceDatasetSha256,target),target,sourceDatasetSha256,
+  fenceEpochSha256:'e'.repeat(64),requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ const rows=inputs(),proof=systemCompactEmptyFinanceBatchProof(rows,systemActor);
+ assert.equal(proof.body.financialEffect,'NONE');assert.equal(proof.body.coverageCount,rows.length);
+ assert.notEqual(systemCompactEmptyFinanceBatchProof([...rows].reverse(),systemActor).batchId,proof.batchId);
+ const mixed=structuredClone(rows);mixed[0]!.coverage.cutoff='2026-10-02T00:00:00.000Z';assert.throws(()=>systemCompactEmptyFinanceBatchProof(mixed,systemActor));
+ const f=fixture();await assert.rejects(importSystemCompactEmptyFinanceObservationBatch(f.client,systemActor,rows,{} as any),/batch is unavailable/);
+ assert.equal(f.state.coverage.size,0);assert.equal(f.state.receipts.size,0);
+});
 const reviews=(rows:ObservationImportInput[],selected:ObservationImportReview['resource']=resource):ObservationImportReview[]=>rows.map(input=>({ref:'FIXTURE_EMPTY_REVIEW',attempt:'fixture_attempt',actor:{userId:actor.userId,sessionId:actor.sessionId},resource:{...selected},notBefore:'2026-10-16T05:00:00.000Z',expiresAt:'2026-10-16T06:00:00.000Z',inputSha256:input.coverage.inputSha256,cutoff:input.coverage.cutoff,bodyDigest:sha(input),userId:input.coverage.userId,sourceKind:input.coverage.sourceKind}));
 function fixture(selected:ObservationImportReview['resource']=resource){
- const state={now:'2026-10-16T05:30:00.000Z',badSource:false,badCutoff:false,failAudit:false,reverseRead:false,duplicateAudit:false,readOnly:false,transaction:true,extraObservation:false,queries:[] as {sql:string;args:any[]}[],coverage:new Map<string,any>(),audit:new Map<string,any>(),batchAudit:new Map<string,any[]>(),receipts:new Map<string,any>(),before:null as any};
+ const state={now:'2026-10-16T05:30:00.000Z',badSource:false,badCutoff:false,failAudit:false,reverseRead:false,duplicateAudit:false,readOnly:false,transaction:true,extraObservation:false,oldReceipt:false,queries:[] as {sql:string;args:any[]}[],coverage:new Map<string,any>(),audit:new Map<string,any>(),batchAudit:new Map<string,any[]>(),receipts:new Map<string,any>(),before:null as any};
  const client:any={connectionParameters:{host:selected.host,port:selected.port,database:selected.database,user:selected.role},getTransactionStatus:()=>state.transaction?'T':'I',release(){},query:async(sql:string,args:any[]=[])=>{
   state.queries.push({sql,args});
+  if(sql.includes('legacy_system_audit_insert'))return{rows:[{authorized:true,transactionId:'tx'}]};
+  if(sql.includes('history_coverage_guard'))return{rows:[{authorized:true}]};
+  if(sql.startsWith('SELECT pg_current_xact_id()'))return{rows:[{transactionId:'tx',nonce:'c'.repeat(24),direct:true,mode:true}]};
+  if(sql.includes('finance system old receipt baseline'))return{rows:[{conflicts:state.oldReceipt}]};
   if(sql==='BEGIN')state.before=structuredClone({coverage:state.coverage,audit:state.audit,batchAudit:state.batchAudit,receipts:state.receipts});
   if(sql==='ROLLBACK'&&state.before)Object.assign(state,state.before);
   if(sql.includes('finance-opening resource'))return{rows:[{...selected,tableOwner:selected.role,now:state.now}]};
@@ -42,6 +58,19 @@ function fixture(selected:ObservationImportReview['resource']=resource){
   return{rows:[],rowCount:1};
  }};return{state,client,pool:{connect:async()=>client} as any};
 }
+
+test('system finance baseline rejects old receipts and cannot be forged',async()=>{
+ const target={systemIdentifier:'12345',databaseOid:'42',marker:'zzsh:synthetic:v1',nonce:'c'.repeat(24),roleOid:'91'},sourceDatasetSha256='d'.repeat(64);
+ const actor={kind:'SYSTEM_FINANCE_MIGRATION' as const,id:systemFinanceMigrationId(sourceDatasetSha256,target),target,sourceDatasetSha256,
+  fenceEpochSha256:'e'.repeat(64),requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ const f=fixture(),rows=inputs();f.state.oldReceipt=true;
+ await assert.rejects(withSystemFinanceMigrationBatch(f.client,actor,()=>bindSystemEmptyReceiptBaseline(f.client,actor,rows)),/receipts require review/);
+ f.state.oldReceipt=false;await withSystemFinanceMigrationBatch(f.client,actor,async()=>{
+  const baseline=await bindSystemEmptyReceiptBaseline(f.client,actor,rows);
+  await assert.rejects(importSystemCompactEmptyFinanceObservationBatch(f.client,actor,rows,{...baseline}),/baseline is unavailable/);
+ });
+ assert.equal(f.state.coverage.size,0);assert.equal(f.state.receipts.size,0);
+});
 
 test('bounded empty batches retain individual original keys, immutable coverage and audits while sharing the exact resource admission',async()=>{
  const f=fixture(),rows=inputs(),scope=await bindReviewedEmptyFinanceObservationBatch(f.client,actor,rows,reviews(rows));

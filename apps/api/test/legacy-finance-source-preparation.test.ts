@@ -276,6 +276,15 @@ function foLiabilityClient(t:import('node:test').TestContext,p:FoParent,stage:nu
   return{rows:sql.includes('source_snapshot AS source')?[{source:p.sourceSnapshot,deposit:'5700'}]:[],rowCount:0};}} as unknown as FoPoolClient;
  return{calls,client};
 }
+test('system historical liability cannot import without its bound migration batch',async t=>{
+ const parent=foParent('7',foSnap.COMPLETED_UNREFUNDED),row=foLiability({batchId:'x',parents:[parent],current:null,rows:[foRow('7','COMPLETED_UNREFUNDED')]}).rows[0]!;assert(row.command);
+ const k=foLiabilityClient(t,parent,4),e:typeof import('../src/order/legacy-continuation-evidence')=require('../src/order/legacy-continuation-evidence');
+ t.mock.method(e,'readSystemLegacyOrderOrigin',async()=>parent.bindingDigest);
+ const target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},sourceDatasetSha256='b'.repeat(64);
+ const {systemOrderMigrationId}:typeof import('../src/legacy-load/system-user-migration')=require('../src/legacy-load/system-user-migration');
+ const actor={kind:'SYSTEM_ORDER_MIGRATION' as const,id:systemOrderMigrationId(sourceDatasetSha256,target),sourceDatasetSha256,target,requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ await assert.rejects(foImportLiability(k.client,actor,row.command.body),/batch is unavailable/);assert.equal(foDutyInsert(k.calls).length,0);
+});
 const foDutyInsert=(calls:Array<{sql:string;v:unknown[]}>)=>calls.filter(c=>c.sql.includes('INSERT INTO zzsh_order.legacy_order_duty('));
 
 test('FIN-ORDER-2 86 assembly: 18/1 net refund duty, 6 LEGACY_RECORDS terminal, 61 record-only; never admitted or writable without the current target read; amounts conserved',()=>{
@@ -353,6 +362,15 @@ test('FIN-ORDER-2 208 consumption: the assembled body passes the real completed-
  foMocks(t,[],false);k=client();await assert.rejects(()=>foImportCommission(k.client,foActor,row.command!.body));assert.equal(foDutyInsert(k.calls).length,0);t.mock.restoreAll();
  foMocks(t);k=client({fingerprint:row.command.fingerprint});const replay=await foImportCommission(k.client,foActor,row.command.body);assert.equal((replay as {replayed:boolean}).replayed,true);assert.equal(foDutyInsert(k.calls).length,0);t.mock.restoreAll();
  foMocks(t);k=client({fingerprint:'0'.repeat(64)});await assert.rejects(()=>foImportCommission(k.client,foActor,row.command!.body),(e:{status?:number})=>e.status===409);t.mock.restoreAll();
+});
+test('system completed commission cannot import without its bound migration batch',async()=>{
+ const p=foParent('7',foDone,foCompletedAt),row=foCommission({batchId:'x',cutoff:foCutoff,parents:[p],current:null,verifiedBeneficiaries:['44'],rows:[foCommissionRow('91','7','COMPLETED_PARENT')]}).rows[0]!;assert(row.command);
+ let inserts=0;const client={query:async(sql:string)=>{if(sql.includes('INSERT'))inserts++;return sql.includes('FROM zzsh_order.legacy_order_read_snapshot WHERE id=$1')
+  ?{rows:[{...foBinding,sourceDigest:p.sourceDigest,sourceOrderStatus:4,completedAt:foCompletedAt}]}:sql.includes('SELECT o.binding_digest AS')?{rows:[{bindingDigest:p.bindingDigest}]}:{rows:[]};}} as unknown as FoPoolClient;
+ const target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},sourceDatasetSha256='b'.repeat(64);
+ const {systemOrderMigrationId}:typeof import('../src/legacy-load/system-user-migration')=require('../src/legacy-load/system-user-migration');
+ const actor={kind:'SYSTEM_ORDER_MIGRATION' as const,id:systemOrderMigrationId(sourceDatasetSha256,target),sourceDatasetSha256,target,requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ await assert.rejects(foImportCommission(client,actor,row.command.body),/batch is unavailable/);assert.equal(inserts,0);
 });
 
 test('FIN-ORDER-2 root preflight binds economic tuple, admission digest and the exact actor original receipt',()=>{

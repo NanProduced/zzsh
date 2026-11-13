@@ -47,7 +47,7 @@ export function distributionDependencyRequirements(sourceManifest) {
 }
 export function optionalRoundSourceScripts(sourceManifest) {
   const files=Array.isArray(sourceManifest?.files)?sourceManifest.files:[],found=[];
-  for(const name of ['business-reference-readiness.mjs','local-growth-packages.mjs']){
+  for(const name of ['business-reference-readiness.mjs','local-growth-packages.mjs','system-opening-readback.mjs']){
     const entries=files.filter(row=>row?.path==='scripts/migration/'+name);
     assert(entries.length<=1,'ROUND_DEPENDENCY_SOURCE_MANIFEST_INVALID');
     if(entries.length){assert(/^[a-f0-9]{64}$/.test(entries[0].sha256??''),'ROUND_DEPENDENCY_SOURCE_MANIFEST_INVALID');found.push(name);}
@@ -110,7 +110,7 @@ export function inspectRoundDependencyLayout({ apiDist, bundlePath, bundleSha256
 
 /** The invoking process must be the sealed runner too, not merely its spawned children. */
 export function assertBoundRunnerScripts(runnerDir,scriptFiles) {
-  for (const file of [...new Set([...RUNNER_SCRIPTS, ...(Object.hasOwn(scriptFiles,"business-reference-readiness.mjs") ? ["business-reference-readiness.mjs"] : []),...(Object.hasOwn(scriptFiles,"local-growth-packages.mjs")?["local-growth-packages.mjs"]:[]),...NEXT_SOURCE_SCRIPTS.filter(name=>Object.hasOwn(scriptFiles,name))])]) {
+  for (const file of [...new Set([...RUNNER_SCRIPTS, ...(Object.hasOwn(scriptFiles,"business-reference-readiness.mjs") ? ["business-reference-readiness.mjs"] : []),...(Object.hasOwn(scriptFiles,"local-growth-packages.mjs")?["local-growth-packages.mjs"]:[]),...(Object.hasOwn(scriptFiles,"local-opening-proof.mjs")?["local-opening-proof.mjs"]:[]),...NEXT_SOURCE_SCRIPTS.filter(name=>Object.hasOwn(scriptFiles,name))])]) {
     const path=join(runnerDir,file),stat=lstatSync(path);
     assert(stat.isFile()&&!stat.isSymbolicLink()&&fileSha(path)===scriptFiles[file],"ROUND_DEPENDENCY_RUNNER_CHANGED:"+file);
   }

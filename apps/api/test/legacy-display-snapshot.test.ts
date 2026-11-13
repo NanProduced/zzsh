@@ -6,6 +6,8 @@ import { canonicalize } from "../src/supply/content-hash";
 import { sha256Hex } from "../src/supply/supply-util";
 import { recordLegacyDisplaySnapshot, readLegacyListing, buildLegacyListingCandidates, buildMixedListingCandidates, projectLegacyHistoricalRead, loadLegacyHistoricalRead, loadLegacyHistoricalReads, legacyHistoricalReadSql } from "../src/supply/legacy-listing-read";
 import { legacyAdmissionSql, parseLegacyPublicAdmission } from "../src/legacy-load/legacy-public-admission";
+import { legacyAccountId } from "../src/legacy-load/legacy-account-seam";
+import { systemAccountMigrationId } from "../src/legacy-load/system-user-migration";
 import type { ListingQueryV2 } from "../src/supply/listing-filter-contract";
 
 const source=()=>({ratio_type:"fast",haff:"30",awm_bullet_num:"2",level6_bullet_num:"2",level6_helmet_num:"0",level6_armor_num:"1",barrett_bullet_num:"0",coffee_num:"0",top_insure_card_num:"3",insure_lv:"9",grading_lv:"6",vit_lv:"7",bear_lv:"7",dive_lv:"0",character_lv:"60",login_way:"2",province:"浙江省",city:"杭州市",secret_kd:"1.25",processing_time_start:"23",processing_time_end:"8",high_risk_owner:0,ban_record:"1",face_is_self:"0"});
@@ -126,6 +128,13 @@ test("maintenance writer rejects malformed payload before any SQL and revoked ac
   const client={query:async(sql:string)=>{if(sql.includes("INSERT"))inserts++;return {rows:[],rowCount:0};}};
   await assert.rejects(()=>recordLegacyDisplaySnapshot(client as never,"a-1",input(),{id:"revoked-admin",sessionId:"s",requestId:"r"}));
   assert.equal(inserts,0);
+});
+test("system display cannot write without the bound migration batch",async()=>{
+  const target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},sourceDatasetSha256='b'.repeat(64);
+  const actor={kind:'SYSTEM_ACCOUNT_MIGRATION' as const,id:systemAccountMigrationId(sourceDatasetSha256,target),sourceDatasetSha256,target,requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+  let queries=0;const client={query:async()=>{queries++;return{rows:[]};}};
+  await assert.rejects(()=>recordLegacyDisplaySnapshot(client as never,legacyAccountId('legacy_mysql_restore','la_rental_accounts','1'),input(),actor),/batch is unavailable/);
+  assert.equal(queries,0);
 });
 
 test("shared public projection exposes safe display facts with exact historical amounts and rejects corrupt supplemental bytes",async()=>{

@@ -3,12 +3,24 @@ import assert from "node:assert/strict";
 import { canonicalize } from "../src/supply/content-hash";
 import { legacyOwnerUserId } from "../src/supply/legacy-user-migration";
 import { sha256Hex } from "../src/supply/supply-util";
-import { legacyMoneyCents, legacyEpochTimestamp, legacyAccountMetricSource, normalizeLegacyOrderReadInput, type LegacyOrderReadInput } from "../src/order/legacy-order-read";
+import * as util from "../src/supply/supply-util";
+import { systemOrderMigrationId } from "../src/legacy-load/system-user-migration";
+import { importLegacyOrderRead, legacyMoneyCents, legacyEpochTimestamp, legacyAccountMetricSource, normalizeLegacyOrderReadInput, type LegacyOrderReadInput } from "../src/order/legacy-order-read";
+import type { PoolClient } from "pg";
 const h="a".repeat(64);
 function input():LegacyOrderReadInput {
  const row={id:"1",order_sn:"legacy-1",accounts_id:"10",user_id:"20",sale_user_id:"30",order_status:"5",pay_is:"1",need_pay_money:"66.00",pay_money:"66.00",deposit_amount:"0.00",pay_time:"0",create_time:"1",cancel_time:"0",confirm_time:"0",level6_bullet_num:"2"};
  return {source:{legacyId:"1",digest:sha256Hex(canonicalize(row)),evidenceRef:"test:legacy-1",row},account:{accountId:"account-10",gameId:"game-1",legacyId:"10",businessNo:"A-10",sourceDigest:h},owner:{userId:legacyOwnerUserId("legacy_mysql_restore","la_user","30"),legacyId:"30",businessNo:"U-30",sourceDigest:h},renter:{userId:legacyOwnerUserId("legacy_mysql_restore","la_user","20"),legacyId:"20",businessNo:"U-20",sourceDigest:h}};
 }
+test("system order import cannot write without its protected source batch",async t=>{
+ t.mock.method(util,"withIdempotency",async(_client:unknown,scope:any,_key:unknown,_fingerprint:unknown,authorize:()=>Promise<unknown>)=>{
+  assert.equal(scope.realm,"system");await authorize();throw Error("unexpected write");
+ });
+ const target={systemIdentifier:"12345",databaseOid:"42",marker:"zzsh:synthetic:v1",nonce:"c".repeat(24),roleOid:"91"};
+ const actor={kind:"SYSTEM_ORDER_MIGRATION" as const,id:systemOrderMigrationId("d".repeat(64),target),requestId:"synthetic",
+  sourceDatasetSha256:"d".repeat(64),target,assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
+ await assert.rejects(importLegacyOrderRead({} as PoolClient,input(),actor),/batch is unavailable/);
+});
 test("legacy exact cents and unknown timestamps do not coerce invalid facts",()=>{
  assert.equal(legacyMoneyCents(null),null);assert.equal(legacyMoneyCents("0.00"),"0");assert.equal(legacyMoneyCents("9999999999999.99"),"999999999999999");
  for(const v of ["1.2","1.234","1e3",1,"01.00"])assert.throws(()=>legacyMoneyCents(v));

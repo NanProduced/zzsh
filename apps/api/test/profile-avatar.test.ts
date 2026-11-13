@@ -429,6 +429,7 @@ test("automatic defaults are system-attributed and existing custom avatars are n
     calls.push({ sql, values });
     if (sql.startsWith('SELECT')) return { rows: stored ? [stored] : [] };
     if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
+      if (stored) return { rows: [] };
       stored = profileRow({ defaultPresetId: values[2], currentPresetId: values[3] });
       return { rows: [stored] };
     }
@@ -440,7 +441,14 @@ test("automatic defaults are system-attributed and existing custom avatars are n
   stored = profileRow({ defaultPresetId: "avatar-night", currentKind: "CUSTOM", currentAssetId: "custom", currentPresetId: null });
   calls.length = 0;
   assert.deepEqual(await ensureInitialProfileAvatar(client, "user", "user_1", "replay", "avatar-frost"), { created: false, presetId: "avatar-night" });
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter(call=>call.sql.startsWith('UPDATE')).length,0);
+  assert.equal(calls.filter(call=>call.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')).length,0);
+});
+
+test("legacy migration cannot suppress an administrator avatar audit", async () => {
+  let queries=0;const client={async query(){queries++;return {rows:[]};}} as unknown as PoolClient;
+  await assert.rejects(ensureInitialProfileAvatar(client,"admin","admin_1","req",undefined,"LEGACY_USER_MIGRATION"),/Avatar audit context is invalid/);
+  assert.equal(queries,0);
 });
 
 test("managed profile paths reject traversal, arbitrary URLs and unbound query strings", () => {
