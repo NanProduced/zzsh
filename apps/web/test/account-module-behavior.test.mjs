@@ -519,6 +519,9 @@ test("R03: unknown pause/resume/withdraw survives remount and recovers only the 
     try {
       await first.render("accounts", "acc-recover");
       await first.clickDocButton(({pause:"暂停接单",resume:"恢复接单",withdraw:"撤回审核"})[action]);
+      if (action === "pause" || action === "withdraw") {
+        await first.clickDocButton(({pause:"确认暂停接单",withdraw:"确认撤回审核"})[action]);
+      }
       await first.waitFor(() => JSON.parse(first.window.sessionStorage.getItem(slot) ?? "null")?.uncertain === true);
       stored = first.window.sessionStorage.getItem(slot);
       assert.ok(stored, "a write responsibility must survive closing this component");
@@ -1054,7 +1057,7 @@ test("unified account filters survive details, URL navigation and the old rented
 
 test("account status keeps simultaneous restrictions and does not label withdrawn or historical facts as drafts", async () => {
   const p=await probe({rows:[accountRow('occupied',{rentalState:'RENTED',staff_restricted:true,owner_paused:true}),accountRow('withdrawn',{rentalState:'DRAFT',review_state:'WITHDRAWN'}),accountRow('historical',{rentalState:'DRAFT',review_state:'IMPORTED_UNVERIFIED'}),accountRow('draft',{rentalState:'DRAFT',review_state:'DRAFT'})]});
-  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/已暂停接单/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.equal(p.host.querySelectorAll('.mra-filter-rail .mra-chip').length,5);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
+  try{await p.render('accounts');const occupied=p.host.querySelector('[data-account-row="occupied"]').textContent;assert.match(occupied,/已有订单/);assert.match(occupied,/账号受限/);assert.match(occupied,/已暂停接单/);assert.match(p.host.querySelector('[data-account-row="withdrawn"]').textContent,/已撤回/);assert.match(p.host.querySelector('[data-account-row="historical"]').textContent,/历史资料待核/);assert.match(p.host.querySelector('[data-account-row="draft"]').textContent,/草稿/);assert.equal(p.host.querySelectorAll('.mra-filter-rail .mra-chip').length,7);assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,true);await p.clickDocButton('更多状态');assert.equal(p.host.querySelector('[aria-label="更多账号状态"]').hidden,false);}finally{await p.close();}
 });
 
 test("identity page shows only server-masked name and document, and explains missing source", async () => {
@@ -1074,4 +1077,39 @@ test("identity page shows only server-masked name and document, and explains mis
     assert.match(missing.host.textContent, /实名已验证；证件信息暂未记录/);
     assert.doesNotMatch(missing.host.textContent, /张\*|110101/);
   } finally { await missing.close(); }
+});
+
+test("account detail pause requires AlertDialog confirmation before sending POST", async () => {
+  const posts = [];
+  const supply = detailOf("acc-confirm");
+  supply.account.game_id = "game-confirm";
+  supply.version.id = "version-confirm";
+  supply.version.reviewState = "PUBLISHED";
+  const viaFetch = async (url, init = {}) => {
+    if (init.method === "POST") {
+      posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      supply.account.owner_paused = true;
+      supply.account.revision = "2";
+      return Response.json({ accountId: "acc-confirm", revision: "2", versionId: "version-confirm" });
+    }
+    if (url.includes("/me/accounts")) return Response.json({ items: [accountRow("acc-confirm")], nextCursor: null });
+    return Response.json(supply);
+  };
+  const p = await probe({ viaFetch });
+  try {
+    await p.render("accounts", "acc-confirm");
+    await p.waitFor(() => p.host.textContent.includes("暂停接单"));
+    await p.clickDocButton("暂停接单");
+    assert.ok(p.window.document.querySelector('[role="alertdialog"]'), "pause opens ConfirmAlertDialog");
+    assert.equal(posts.length, 0, "opening dialog does not POST");
+    await p.clickDocButton("暂不暂停");
+    assert.equal(posts.length, 0, "canceling dialog sends 0 POSTs");
+    await p.clickDocButton("暂停接单");
+    await p.clickDocButton("确认暂停接单");
+    await p.waitFor(() => posts.length === 1);
+    assert.equal(posts.length, 1, "confirming dialog sends 1 POST");
+    assert.match(posts[0].url, /\/pause$/);
+  } finally {
+    await p.close();
+  }
 });

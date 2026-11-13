@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
+import { Dialog } from "@base-ui/react/dialog";
 import { publishUserSessionChange, useUserSession, useUserSessionStore } from "./session/user-session-provider";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, ArrowLeft, Box, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, Crosshair, Dumbbell, FileText, Gem, HelpCircle, House, ImageOff, Images, Info, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, Waves, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, ChevronDown, ChevronRight, ClipboardList, Clock3, Copy, CreditCard, FileText, HelpCircle, House, ImageOff, Images, Info, LockKeyhole, LogIn, Package, Pause, Pencil, Play, ReceiptText, RefreshCw, Shield, ShieldCheck, Shirt, SlidersHorizontal, Sparkles, Undo2, UserRound, X } from "lucide-react";
 import { ServiceShell } from "./layout/service-shell";
 import { SessionLoading } from "./auth/session-loading";
 import { RecoveryAlert } from "./ui/information";
@@ -98,6 +99,14 @@ const ACCOUNT_STATE_FILTERS: ReadonlyArray<{ value: AccountStateFilter; label: s
   { value: "RESTRICTED", label: "已限制" },
   { value: "UNKNOWN", label: "待核实" },
 ];
+const PRIMARY_ACCOUNT_STATE_VALUES: ReadonlySet<AccountStateFilter> = new Set([
+  "ALL",
+  "LISTED",
+  "DRAFT",
+  "RENTED",
+  "PENDING_PAYMENT",
+  "PAUSED",
+]);
 const RENTAL_STATE_LABELS: Record<RentalState, string> = {
   RENTED: "已有订单",
   PENDING_PAYMENT: "待付款占用",
@@ -1036,10 +1045,10 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
       <div className="mra-toolbar">
         <span className="mra-count">已显示 {rows.length} 个</span>
         <div className="mra-filter-rail" role="group" aria-label="按账号状态筛选">
-          {ACCOUNT_STATE_FILTERS.filter(chip => ["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
-          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!["ALL", "LISTED", "RENTED", "REVIEWING"].includes(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
+          {ACCOUNT_STATE_FILTERS.filter(chip => PRIMARY_ACCOUNT_STATE_VALUES.has(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}
+          <button type="button" className="mra-chip mra-more-toggle" aria-expanded={moreFilters} aria-controls="account-more-filters" onClick={() => setMoreFilters(open => !open)}>更多状态{!PRIMARY_ACCOUNT_STATE_VALUES.has(stateFilter) ? ` · ${RENTAL_STATE_LABELS[stateFilter as RentalState]}` : ""}<ChevronDown size={14} aria-hidden="true" /></button>
         </div>
-        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !["ALL", "LISTED", "RENTED", "REVIEWING"].includes(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
+        <div id="account-more-filters" className="mra-more-filters" role="group" aria-label="更多账号状态" hidden={!moreFilters}>{ACCOUNT_STATE_FILTERS.filter(chip => !PRIMARY_ACCOUNT_STATE_VALUES.has(chip.value)).map(chip => <button key={chip.value} type="button" className="mra-chip" aria-pressed={stateFilter === chip.value} onClick={() => changeStateFilter(chip.value)}>{chip.label}</button>)}</div>
       </div>
       {loading && rows.length === 0 ? <div className="account-module-card account-empty-state" aria-busy="true" role="status"><House size={28} aria-hidden="true" /><h3>正在读取{pageTitle}</h3><p>请稍候。</p></div> : error && rows.length === 0 ? <div className="account-module-card account-empty-state" role="alert"><House size={28} aria-hidden="true" /><h3>{pageTitle}暂时无法读取</h3><p>{error.message || "请稍后重试。"}</p><button type="button" className="button secondary" onClick={() => void load(accountIdProp, false, undefined, stateFilter)}>重试读取</button></div> : rows.length === 0 ? (!loading && !error
         ? <div className="account-module-card account-empty-art-state" role="status">
@@ -1060,6 +1069,11 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
               const state = row.rentalState;
               const loginMethod = row.historicalRead?.display?.facts?.attributeDisplay?.loginMethod?.displayName;
               const serviceWindow = row.historicalRead?.display?.facts?.attributeDisplay?.serviceWindow?.displayName;
+              const ownerQuote = row.accountDisplay?.titleFacts?.ownerQuoteTotal;
+              const histQuoteYuan = row.historicalRead?.historicalQuote?.haffRentYuan;
+              const rowPrice = ownerQuote ? moneyText(ownerQuote) : histQuoteYuan ? `${histQuoteYuan} 元` : null;
+              const rowPriceLabel = ownerQuote ? "发布报价" : histQuoteYuan ? "历史租金" : null;
+              const canQuickEdit = !row.historicalReadOnly && (state === "DRAFT" || row.review_state === "DRAFT" || row.review_state === "REJECTED");
               return <div className="mra-row" role="listitem" key={row.id} data-account-row={row.id}>
                 <Link className="mra-row-main" id={`account-row-title-${row.id}`} href={accountListHref(mode, stateFilter, row.id)} scroll={false}>
                   <div className="mra-row-top">
@@ -1102,10 +1116,24 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
                   {row.accountDisplay?.titleFacts === null && row.accountDisplay?.unknownReason ? <span className="mra-badge" data-tone="unknown">资料待核实</span> : null}
                   {row.review_state === "REJECTED" ? <Link className="mra-row-anchor" href={`${accountListHref(mode, stateFilter, row.id)}#blockers`} scroll={false}>查看退回原因</Link> : null}
                 </div>
-                <Link className="mra-row-action" href={accountListHref(mode, stateFilter, row.id)} scroll={false} aria-label={`查看账号 ${title}`}>
-                  <span>查看账号</span>
-                  <ChevronRight size={14} aria-hidden="true" />
-                </Link>
+                {rowPrice ? (
+                  <div className="mra-row-price">
+                    <span className="mra-row-price-label">{rowPriceLabel}</span>
+                    <strong className="mra-row-price-val">{rowPrice}</strong>
+                  </div>
+                ) : <div className="mra-row-price mra-row-price--empty" aria-hidden="true" />}
+                <div className="mra-row-actions">
+                  {canQuickEdit ? (
+                    <Link className="mra-row-edit-link" href={`/publish?accountId=${encodeURIComponent(row.id)}&edit=1`}>
+                      <Pencil size={13} aria-hidden="true" />
+                      <span>{row.review_state === "REJECTED" ? "修改资料" : "继续填写"}</span>
+                    </Link>
+                  ) : null}
+                  <Link className="mra-row-action" href={accountListHref(mode, stateFilter, row.id)} scroll={false} aria-label={`查看账号 ${title}`}>
+                    <span>查看账号</span>
+                    <ChevronRight size={14} aria-hidden="true" />
+                  </Link>
+                </div>
               </div>;
             })}
           </div>
@@ -1121,12 +1149,6 @@ function MyAccountsPanel({ mode, accountId: accountIdProp, filterParam }: { mode
 
 
 const CONDITION_LEVELS = new Set(["vit_level", "bear_level", "dive_level", "character_level"]);
-
-const CONDITION_ICONS: Record<string, typeof Box> = {
-  safe_box_code: Box, vit_level: Dumbbell, bear_level: Package, dive_level: Waves,
-  character_level: UserRound, grading_code: Gem, secret_kd: Crosshair, login_method_code: LogIn,
-  service_window: Clock3,
-};
 
 const REVIEW_TONE: Record<string, string> = {
   PUBLISHED: "completed", APPROVED: "completed", SUBMITTED: "pending",
@@ -1185,7 +1207,7 @@ function availabilityView(detail: MySupply): { tone: "open" | "blocked" | "uncer
   return { tone: "uncertain", label: "资格待确认" };
 }
 
-type ResourceRow = { name: string; unit: string; quantity: string | null; ownerUnit: string | null; ownerAmount: string | null };
+type ResourceRow = { code: string | null; rawUnit: string; name: string; unit: string; quantity: string | null; ownerUnit: string | null; ownerAmount: string | null };
 
 function resourceRows(version: MySupply["version"]): ResourceRow[] {
   const lines = version?.quote?.lines ?? [];
@@ -1193,11 +1215,15 @@ function resourceRows(version: MySupply["version"]): ResourceRow[] {
   const items = version?.presentation?.items ?? [];
   return lines.map((line) => {
     const known = catalog.find((entry) => entry.id === line.itemId) ?? items.find((entry) => entry.id === line.itemId);
+    const rawUnit = line.unit ?? known?.unit ?? "";
+    const unit = unitLabel(rawUnit);
     return {
+      code: known?.code ?? null,
+      rawUnit,
       name: known?.name || "资源",
-      unit: unitLabel(line.unit ?? known?.unit ?? ""),
+      unit,
       quantity: line.quantity ?? line.unitQuantity ?? null,
-      ownerUnit: unitPriceText(line.ownerUnitAmount, line.unitQuantity, unitLabel(line.unit ?? known?.unit ?? "")),
+      ownerUnit: unitPriceText(line.ownerUnitAmount, line.unitQuantity, unit),
       ownerAmount: moneyText(line.ownerAmount),
     };
   });
@@ -1220,6 +1246,70 @@ function AccountMedia({ assetId, alt, className }: { assetId: string; alt: strin
 function historicalQuantityText(quantity: string | null, unit: string): string {
   if (quantity === null || !/^[0-9]{1,24}$/.test(quantity)) return "数量待核";
   return unit === "HAFF_BASE" ? haffMillionsLabel(quantity) + " M 哈夫币" : BigInt(quantity).toLocaleString("zh-CN") + " " + unitLabel(unit);
+}
+
+function renderUnifiedSpecsGrid(
+  items: Array<{ key: string; label: string; value: string }>,
+  attrs: Record<string, unknown> | null | undefined,
+  alwaysShowDeclarations: boolean,
+) {
+  const provinceCond = items.find((c) => c.key === "region_province");
+  const cityCond = items.find((c) => c.key === "region_city");
+  const regionVal = provinceCond && cityCond
+    ? (provinceCond.value === cityCond.value ? provinceCond.value : `${provinceCond.value} · ${cityCond.value}`)
+    : provinceCond?.value || cityCond?.value || null;
+  const nonRegion = items.filter((c) => c.key !== "region_province" && c.key !== "region_city");
+  const orderedKeys = [
+    "safe_box_code", "grading_code", "character_level", "secret_kd",
+    "vit_level", "bear_level", "dive_level", "login_method_code",
+  ];
+  const primaryList = orderedKeys
+    .map((k) => nonRegion.find((c) => c.key === k))
+    .filter((c): c is (typeof items)[number] => Boolean(c));
+  const serviceWindowCond = nonRegion.find((c) => c.key === "service_window");
+  const remainingList = nonRegion.filter((c) => !orderedKeys.includes(c.key) && c.key !== "service_window");
+  const showFace = alwaysShowDeclarations || typeof attrs?.face_is_self === "boolean";
+  const showBan = alwaysShowDeclarations || typeof attrs?.ban_record === "boolean";
+  return (
+    <div className="supply-unified-specs-grid">
+      {primaryList.map((item) => (
+        <div key={item.key} className={`supply-spec-pill${item.key === "safe_box_code" ? " highlight" : ""}`} data-key={item.key}>
+          <span className="supply-spec-pill-k">{item.label}</span>
+          <strong className="supply-spec-pill-v">{item.value}</strong>
+        </div>
+      ))}
+      {regionVal ? (
+        <div className="supply-spec-pill" data-key="region">
+          <span className="supply-spec-pill-k">游戏地区</span>
+          <strong className="supply-spec-pill-v">{regionVal}</strong>
+        </div>
+      ) : null}
+      {serviceWindowCond ? (
+        <div className="supply-spec-pill" data-key="service_window">
+          <span className="supply-spec-pill-k">{serviceWindowCond.label}</span>
+          <strong className="supply-spec-pill-v">{serviceWindowCond.value}</strong>
+        </div>
+      ) : null}
+      {showFace ? (
+        <div className="supply-spec-pill" data-key="face_declaration">
+          <span className="supply-spec-pill-k">人脸声明</span>
+          <strong className="supply-spec-pill-v">{attrs?.face_is_self === true ? "号主声明本人脸" : attrs?.face_is_self === false ? "号主声明非本人脸" : "未提供"}</strong>
+        </div>
+      ) : null}
+      {showBan ? (
+        <div className="supply-spec-pill" data-key="ban_declaration">
+          <span className="supply-spec-pill-k">封禁记录声明</span>
+          <strong className="supply-spec-pill-v">{attrs?.ban_record === true ? "号主声明有封禁记录" : attrs?.ban_record === false ? "号主声明无封禁记录" : "未提供"}</strong>
+        </div>
+      ) : null}
+      {remainingList.map((item) => (
+        <div key={item.key} className="supply-spec-pill" data-key={item.key}>
+          <span className="supply-spec-pill-k">{item.label}</span>
+          <strong className="supply-spec-pill-v">{item.value}</strong>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction, onRefresh, onAdopt }: { detail: MySupply; gameName?: string | null; latest: MySupply | null; busy: string; identityReady: boolean; onAction: (action: "withdraw" | "pause" | "resume") => Promise<void>; onRefresh: () => void; onAdopt: () => void }) {
@@ -1267,7 +1357,6 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const evidenceMedia = (declaration?.mediaBindings ?? []).filter((item) => item.purpose === "ACCOUNT_EVIDENCE");
   const penaltyMedia = displayMedia.filter((item) => item.category === "PENALTY");
   const galleryMedia = displayMedia.filter((item) => item.category !== "PENALTY");
-  const cover = galleryMedia.find((item) => item.publiclyReadable !== false) ?? null;
   const unconfirmedNativeDraft = version?.origin === "NATIVE" && version.reviewState === "DRAFT" && version.contentHash === null;
   const draftSkinSummary = unconfirmedNativeDraft && version.draftSkinSummary?.source === "CURRENT_DRAFT_SELECTION" ? version.draftSkinSummary : null;
   const legacyHolding = version?.legacySkinHolding;
@@ -1296,13 +1385,14 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   const publicImages = images.urls;
   const [activeImgIndex, setActiveImgIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const [copiedNo, setCopiedNo] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<"pause" | "withdraw" | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
     setImageState({ accountId: account.id, key: galleryKey, status: galleryMedia.length ? "ready" : "loading", urls: galleryMedia.map(item => mediaAccessUrl(item.assetId)) });
     setActiveImgIndex(0);
     setLightboxOpen(false);
+    setConfirmAction(null);
     void supplyApi.listing(account.id, controller.signal).then(listing => {
       if (listing.id !== account.id) throw new Error("Listing identity mismatch");
       const urls = toListingDetail(listing).media.map(item => item.url);
@@ -1317,7 +1407,6 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
   return <div className="supply-account-detail account-module-card">
     {/* 1. 顶部 Hero 控制条：单一行精简有质感 */}
     <div className="supply-detail-hero">
-      {cover ? <img className="supply-detail-cover" src={mediaAccessUrl(cover.assetId)} alt="" width={176} height={99} onError={(event) => { event.currentTarget.style.display = "none"; }} /> : null}
       <div className="supply-detail-hero-copy">
         <div className="supply-detail-hero-title-row">
           {gameName ? <span className="mra-game-tag">{gameName}</span> : null}
@@ -1335,9 +1424,9 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
         {historicalReadOnly ? detail.canPrepareLegacyCancelledDraft ? <div className="space-y-2"><p className="supply-detail-actions-hint">原订单已取消，请核实并更新账号资料后重新上架。</p><Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />核实资料并重新上架</Link></div> : <p className="supply-detail-actions-hint">历史只读记录，不参与当前接单或编辑；如需处理请联系客服。</p> : <>
           {account.owner_paused
             ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("resume")}><Play size={15} aria-hidden="true" />{busy === "resume" ? "恢复中…" : "恢复接单"}</button>
-            : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => void onAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}
+            : version ? <button type="button" className="button secondary button--sm" disabled={!identityReady || busy !== ""} onClick={() => setConfirmAction("pause")}><Pause size={15} aria-hidden="true" />{busy === "pause" ? "暂停中…" : "暂停接单"}</button> : null}
           {version?.reviewState === "SUBMITTED" ? (
-            <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => void onAction("withdraw")}><Undo2 size={16} aria-hidden="true" />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button>
+            <button type="button" className="button secondary" disabled={!identityReady || busy !== ""} onClick={() => setConfirmAction("withdraw")}><Undo2 size={16} aria-hidden="true" />{busy === "withdraw" ? "撤回中…" : "撤回审核"}</button>
           ) : (
             <Link href={editHref} className="button primary"><Pencil size={15} aria-hidden="true" />{editLabel}</Link>
           )}
@@ -1385,10 +1474,10 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           </div>
           {publicImages.length ? (
             <div className="supply-gallery-body">
-              <div className="supply-gallery-main" onClick={() => setLightboxOpen(true)} title="点击全屏查看大图">
+              <button type="button" className="supply-gallery-main" onClick={() => setLightboxOpen(true)} aria-label="全屏查看账号展示图" title="点击全屏查看大图">
                 <LegacyAccountImage src={publicImages[activeImgIndex] ?? publicImages[0] ?? null} alt="游戏公开截图" className="supply-gallery-hero-img" />
                 <span className="supply-gallery-zoom-pill"><Sparkles size={13} aria-hidden="true" />点击放大预览</span>
-              </div>
+              </button>
               {publicImages.length > 1 ? (
                 <div className="supply-gallery-thumbs-rail" role="tablist" aria-label="截图缩略图滑轨">
                   {publicImages.map((img, idx) => (
@@ -1434,63 +1523,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               </span>
             </div>
           </div>
-          {historicalDisplay ? (() => {
-            const provinceCond = historicalConditions.find(c => c.key === "region_province");
-            const cityCond = historicalConditions.find(c => c.key === "region_city");
-            const regionVal = provinceCond && cityCond
-              ? (provinceCond.value === cityCond.value ? provinceCond.value : `${provinceCond.value} · ${cityCond.value}`)
-              : provinceCond?.value || cityCond?.value || null;
-
-            const nonRegionConditions = historicalConditions.filter(c => c.key !== "region_province" && c.key !== "region_city");
-
-            const orderedKeys = [
-              "safe_box_code", "grading_code", "character_level", "secret_kd",
-              "vit_level", "bear_level", "dive_level", "login_method_code"
-            ];
-            const primaryList = orderedKeys
-              .map(k => nonRegionConditions.find(c => c.key === k))
-              .filter((c): c is (typeof historicalConditions)[number] => Boolean(c));
-
-            const remainingList = nonRegionConditions.filter(c => !orderedKeys.includes(c.key) && c.key !== "service_window");
-            const serviceWindowCond = nonRegionConditions.find(c => c.key === "service_window");
-
-            return (
-              <div className="supply-unified-specs-grid">
-                {primaryList.map(item => (
-                  <div key={item.key} className={`supply-spec-pill${item.key === "safe_box_code" ? " highlight" : ""}`} data-key={item.key}>
-                    <span className="supply-spec-pill-k">{item.label}</span>
-                    <strong className="supply-spec-pill-v">{item.value}</strong>
-                  </div>
-                ))}
-                {regionVal ? (
-                  <div className="supply-spec-pill" data-key="region">
-                    <span className="supply-spec-pill-k">游戏地区</span>
-                    <strong className="supply-spec-pill-v">{regionVal}</strong>
-                  </div>
-                ) : null}
-                {serviceWindowCond ? (
-                  <div className="supply-spec-pill" data-key="service_window">
-                    <span className="supply-spec-pill-k">{serviceWindowCond.label}</span>
-                    <strong className="supply-spec-pill-v">{serviceWindowCond.value}</strong>
-                  </div>
-                ) : null}
-                <div className="supply-spec-pill" data-key="face_declaration">
-                  <span className="supply-spec-pill-k">人脸声明</span>
-                  <strong className="supply-spec-pill-v">{historicalDisplay.attributes.face_is_self === true ? "号主声明本人脸" : historicalDisplay.attributes.face_is_self === false ? "号主声明非本人脸" : "未提供"}</strong>
-                </div>
-                <div className="supply-spec-pill" data-key="ban_declaration">
-                  <span className="supply-spec-pill-k">封禁记录声明</span>
-                  <strong className="supply-spec-pill-v">{historicalDisplay.attributes.ban_record === true ? "号主声明有封禁记录" : historicalDisplay.attributes.ban_record === false ? "号主声明无封禁记录" : "未提供"}</strong>
-                </div>
-                {remainingList.map(item => (
-                  <div key={item.key} className="supply-spec-pill" data-key={item.key}>
-                    <span className="supply-spec-pill-k">{item.label}</span>
-                    <strong className="supply-spec-pill-v">{item.value}</strong>
-                  </div>
-                ))}
-              </div>
-            );
-          })() : <p role="status">部分账号资料暂未确认。</p>}
+          {historicalDisplay ? renderUnifiedSpecsGrid(historicalConditions, historicalDisplay.attributes, true) : <p role="status">部分账号资料暂未确认。</p>}
         </section> : (!historical && conditions.length ? <section className="supply-block account-module-card supply-specs-card">
           <div className="account-module-card-header">
             <div className="supply-section-title-wrap">
@@ -1498,10 +1531,7 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <h2 className="supply-section-title">账号配置</h2>
             </div>
           </div>
-          <dl className="supply-spec-list">{conditions.map((row) => {
-            const Icon = CONDITION_ICONS[row.key] ?? null;
-            return <div key={row.key}><dt>{Icon ? <Icon size={16} aria-hidden="true" /> : null}{row.label}</dt><dd>{row.value}</dd></div>;
-          })}</dl>
+          {renderUnifiedSpecsGrid(conditions, declaration?.attributes as Record<string, unknown> | undefined, false)}
         </section> : null)}
 
         {/* 在架物资清单 */}
@@ -1540,7 +1570,20 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
               <h2 className="supply-section-title">账号资源</h2>
             </div>
           </div>
-          <ul className="supply-resource-list">{resources.map((row, index) => <li key={`${row.name}-${index}`}><span>{row.name}</span><strong>{row.quantity ?? "未返回"} {row.unit}</strong></li>)}</ul>
+          <div className="supply-resources-chips">
+            {resources.map((row, index) => {
+              const isHaff = row.code === "haff_base" || row.rawUnit === "HAFF_BASE" || row.name.includes("哈夫币");
+              const qtyText = (row.rawUnit === "HAFF_BASE" || row.code === "haff_base") && row.quantity && /^\d+$/.test(row.quantity)
+                ? `${haffMillionsLabel(row.quantity)} M 哈夫币`
+                : `${row.quantity ?? "未返回"}${row.unit ? ` ${row.unit}` : ""}`;
+              return (
+                <div key={`${row.name}-${index}`} className={`supply-resource-chip${isHaff ? " is-haff" : ""}`}>
+                  <span className="supply-resource-name">{row.name}：</span>
+                  <strong className="supply-resource-qty">{qtyText}</strong>
+                </div>
+              );
+            })}
+          </div>
           <details className="supply-inline-fold"><summary>查看报价明细</summary><table className="supply-stock-table"><thead><tr><th scope="col">物资</th><th scope="col">数量</th><th scope="col">号主侧单价</th><th scope="col">号主侧费用</th></tr></thead><tbody>{resources.map((row, index) => <tr key={`${row.name}-${index}`}><th scope="row">{row.name}{row.unit ? <small>{row.unit}</small> : null}</th><td>{row.quantity ?? "未返回"}</td><td>{row.ownerUnit ?? "未返回"}</td><td>{row.ownerAmount ?? "未返回"}</td></tr>)}</tbody>{quote?.ownerTotal ? <tfoot><tr><th scope="row" colSpan={3}>发布报价合计</th><td>{moneyText(quote.ownerTotal)}</td></tr></tfoot> : null}</table></details>
         </section> : null)}
 
@@ -1604,7 +1647,9 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
           </div>
 
           {quote || !historical ? <>
-            <div className="supply-revenue-stat"><span className="supply-revenue-label">上架报价</span><strong className="supply-revenue-num">{moneyText(quote?.ownerTotal)}</strong></div>
+            <div className="supply-revenue-hero supply-revenue-hero--single">
+              <div className="supply-revenue-stat"><span className="supply-revenue-label">上架报价</span><strong className="supply-revenue-num">{moneyText(quote?.ownerTotal)}</strong></div>
+            </div>
             <div className="supply-revenue-sub-grid">
               <div className="supply-revenue-sub-cell">
                 <span className="supply-rev-sub-k">约定租期</span>
@@ -1687,21 +1732,64 @@ function AccountDetail({ detail, gameName, latest, busy, identityReady, onAction
       </aside>
     </div>
 
+    <ConfirmAlertDialog
+      open={confirmAction !== null}
+      onOpenChange={(open) => { if (!open && busy === "") setConfirmAction(null); }}
+      title={confirmAction === "withdraw" ? "确认撤回当前审核？" : "确认暂停该账号接单？"}
+      description={
+        confirmAction === "withdraw"
+          ? "撤回后账号将退回草稿状态，等待你修改资料并重新提交审核。"
+          : "暂停后该账号将不再接收新的租赁订单，但不会影响已在进行中的订单。"
+      }
+      consequences={
+        confirmAction === "withdraw"
+          ? ["当前排队审核将被取消。", "你可以继续编辑资料后再次提交上架。"]
+          : ["租客侧列表将不再展示该账号。", "你随时可以在此页点击“恢复接单”重新上架。"]
+      }
+      cancelLabel={confirmAction === "withdraw" ? "继续等待审核" : "暂不暂停"}
+      confirmLabel={confirmAction === "withdraw" ? "确认撤回审核" : "确认暂停接单"}
+      busy={busy === "pause" || busy === "withdraw"}
+      onConfirm={async () => {
+        if (!confirmAction) return;
+        const action = confirmAction;
+        setConfirmAction(null);
+        await onAction(action);
+      }}
+    />
+
     {/* 全屏 Lightbox 大图预览 */}
-    {lightboxOpen && publicImages.length ? (
-      <div className="supply-lightbox-overlay" role="dialog" aria-modal="true" aria-label="全屏查看账号展示图" onClick={() => setLightboxOpen(false)}>
-        <div className="supply-lightbox-modal" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className="supply-lightbox-close" onClick={() => setLightboxOpen(false)} aria-label="关闭预览"><X size={20} /></button>
-          <LegacyAccountImage src={publicImages[activeImgIndex] ?? null} alt={`截图 ${activeImgIndex + 1}`} className="supply-lightbox-img" />
-          {publicImages.length > 1 ? (
-            <div className="supply-lightbox-nav">
-              <button type="button" className="supply-lightbox-arrow" disabled={activeImgIndex === 0} onClick={() => setActiveImgIndex(i => Math.max(0, i - 1))} aria-label="上一张">‹</button>
-              <span className="supply-lightbox-counter">{activeImgIndex + 1} / {publicImages.length}</span>
-              <button type="button" className="supply-lightbox-arrow" disabled={activeImgIndex === publicImages.length - 1} onClick={() => setActiveImgIndex(i => Math.min(publicImages.length - 1, i + 1))} aria-label="下一张">›</button>
-            </div>
-          ) : null}
-        </div>
-      </div>
-    ) : null}
+    <Dialog.Root open={lightboxOpen && publicImages.length > 0} onOpenChange={setLightboxOpen}>
+      <Dialog.Portal>
+        <Dialog.Backdrop className="supply-lightbox-backdrop" />
+        <Dialog.Popup
+          className="supply-lightbox-overlay"
+          aria-label="全屏查看账号展示图"
+          onKeyDown={(e) => {
+            if (publicImages.length <= 1) return;
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              setActiveImgIndex((i) => Math.max(0, i - 1));
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              setActiveImgIndex((i) => Math.min(publicImages.length - 1, i + 1));
+            }
+          }}
+        >
+          <div className="supply-lightbox-modal">
+            <Dialog.Close className="supply-lightbox-close" aria-label="关闭预览">
+              <X size={20} aria-hidden="true" />
+            </Dialog.Close>
+            <LegacyAccountImage src={publicImages[activeImgIndex] ?? publicImages[0] ?? null} alt={`截图 ${activeImgIndex + 1}`} className="supply-lightbox-img" />
+            {publicImages.length > 1 ? (
+              <div className="supply-lightbox-nav">
+                <button type="button" className="supply-lightbox-arrow" disabled={activeImgIndex === 0} onClick={() => setActiveImgIndex((i) => Math.max(0, i - 1))} aria-label="上一张">‹</button>
+                <span className="supply-lightbox-counter">{activeImgIndex + 1} / {publicImages.length}</span>
+                <button type="button" className="supply-lightbox-arrow" disabled={activeImgIndex === publicImages.length - 1} onClick={() => setActiveImgIndex((i) => Math.min(publicImages.length - 1, i + 1))} aria-label="下一张">›</button>
+              </div>
+            ) : null}
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
   </div>;
 }

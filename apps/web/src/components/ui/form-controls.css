@@ -4,8 +4,9 @@
 }
 .form-integer-stepper { display:flex; align-items:center; min-width:0; min-height:44px; overflow:hidden; border:1px solid var(--color-border-default); border-radius:8px; background:var(--color-bg-surface); color:var(--color-text-primary); }
 .form-integer-stepper:focus-within { outline:2px solid color-mix(in srgb,var(--color-focus-ring) 55%,var(--color-text-primary)); outline-offset:2px; }
-.form-integer-stepper > button { display:inline-flex; justify-content:center; align-items:center; flex:0 0 42px; width:42px; min-height:44px; border:0; background:none; color:inherit; cursor:pointer; }
+.form-integer-stepper > button { display:inline-flex; justify-content:center; align-items:center; flex:0 0 42px; width:42px; min-height:44px; border:0; background:none; color:inherit; cursor:pointer; user-select:none; touch-action:manipulation; transition:background-color 120ms ease, transform 90ms ease; }
 .form-integer-stepper > button:hover:not(:disabled) { background:var(--color-bg-elevated); }
+.form-integer-stepper > button:active:not(:disabled) { background:color-mix(in srgb,var(--color-accent-brand) 14%,var(--color-bg-elevated)); transform:scale(0.93); }
 .form-integer-stepper > button:disabled { opacity:.35; cursor:not-allowed; }
 .form-integer-stepper > .form-input { width:100%; min-width:0; flex:1; height:44px; border:0; box-shadow:none; padding:8px 6px; text-align:center; font-size:16px; font-variant-numeric:tabular-nums; background:none; }
 .form-integer-stepper > .form-input:focus-visible { box-shadow:none; }
