@@ -1,461 +1,41 @@
-import { ProfileImage } from "@zzsh/ui/profile-image";
 "use client";
-import { messageScopeLabel } from "./im-support-vocabulary";
-import { NIM_RECEIPT_PENDING, nimMessageView, oldestNimMessage } from "@zzsh/im-client/nim-web-client";
-import { SupportMessageBody, supportMessageSummary } from "./im-support-message-body";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { MessageActionMenu, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
+import { mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
+import "@zzsh/ui/message-media.css";
+import "@zzsh/ui/message-actions.css";
+import { ImLifecycleSupersededError } from "@zzsh/im-client/lifecycle";
+import { NimImageSendError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike } from "@zzsh/im-client/nim-web-client";
+import { isImSystemNoticeText, mergeImMessages } from "@zzsh/im-client/message-state";
+import { supportMessageSummary } from "./im-support-message-body";
 import { AftersaleInbox } from "./im-aftersale-inbox";
 import type { AftersaleRecord } from "@zzsh/im-client/aftersale";
-
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { ArrowDown, Bell, BellOff, CalendarClock, Check, ChevronLeft, CircleAlert, FileText, Headphones, Images, MessageSquareText, MoreHorizontal, Pin, Search, ShieldCheck, Smile, UserRound, Video, X } from "lucide-react";
-import { MessageScroller as MessageScrollerPrimitive } from "@shadcn/react/message-scroller";
-import { ImClientLifecycle, ImLifecycleSupersededError, isImDisposeFailure, markImDisposeFailure } from "@zzsh/im-client/lifecycle";
-import { createLocalFakeNimWebClientFactory, createNimWebClientFactory, NIM_IMAGE_MAX_BYTES, NimImageSendError, NimLoginTerminalError, NimMediaSendError, NimTextSendError, validateNimImageFile, validateNimMediaFile, type NimMessageLike, type NimMessageMedia, type NimWebClientLike, type NimWebConnectionState } from "@zzsh/im-client/nim-web-client";
-import { collapseImSystemNotices, decodeImSystemNotice, imSystemNoticeLabel, isImSystemNoticeText, mergeImMessages, type ImSystemNotice } from "@zzsh/im-client/message-state";
-import { CHAT_EMOJIS, MessageActionMenu, MessageReplyQuote, useMessageLongPress, type MessageActionId, type MessageActionItem } from "@zzsh/ui/message-actions";
-import { MediaDraftBar, mediaMessageOf, mediaSummaryOf, type MessageMediaDraft } from "@zzsh/ui/message-media";
-import "@zzsh/ui/message-media.css";
-import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { ActionTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
-import "@zzsh/ui/message-actions.css";
-import { API_ROOT, AdminApiError, adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
-import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, supportedImageUrl, type ImRequestKey } from "./im-support-guards";
+import { adminRequest, friendlyError, hasPermission, type SessionSnapshot } from "../api";
+import { confirmCurrentForbidden, isCurrentImRequest, messageAccessPath, type ImRequestKey } from "./im-support-guards";
 import { canOperateSupportType, createReadClientKey, createSendCapabilityKey } from "./im-support-capabilities";
-import { acquireSupportTabLease } from "./support-tab-lease";
 import { planSupportNotificationToggle, playSupportChime, readSupportNotificationPreference, requestSupportNotificationPermission, storeSupportNotificationPreference, supportNotificationPermission, unlockSupportAudio, useSupportUnreadNotifications, type SupportNotificationPermission } from "./im-support-notifications";
 import { groupPreferenceOf, readOrderGroupPreferences, storeOrderGroupPreferences, useOrderGroupCloudPins, withGroupPreference, ORDER_GROUP_PREF_EVENT, ORDER_GROUP_SETTINGS_EVENT, type OrderGroupPreference, type OrderGroupPreferenceMap } from "./im-support-group-settings";
 import { OrderWorkbenchPane } from "./im-support-orders";
-import { OrderGroupAvatar } from "./order-group-avatar";
-import { orderStageTone } from "@zzsh/ui/order-team-panel";
-import type { OrderTeamListItem } from "@zzsh/ui/order-team-panel";
-import { ConsultationUserCard } from "./im-support-user-card";
-import { EntityPreviewTrigger } from "../components/admin-preview";
-import { ConsultationEventsCard, ConsultationRoundsTimeline } from "./im-support-events";
+import { orderStageTone, type OrderTeamListItem } from "@zzsh/ui/order-team-panel";
 import "./im-support-details.css";
-import { formatDuration, parseSupportSender, type SupportSender } from "./im-support-management-model";
-import { dayKeyOf, dayLabelOf, formatBytes, formatListTime, formatMonthDay, formatTime, initialOf } from "./im-support-format";
-import { Dialog, DialogContent } from "../components/ui/dialog";
-import { Button } from "../components/ui/button";
-import { Marker, MarkerContent } from "../components/ui/marker";
-import { Message, MessageAvatar, MessageContent, MessageFooter, MessageHeader } from "../components/ui/message";
-import { Attachment, AttachmentAction, AttachmentContent, AttachmentDescription, AttachmentGroup, AttachmentMedia, AttachmentTitle } from "../components/ui/attachment";
-import { InputGroup, InputGroupAddon, InputGroupTextarea } from "../components/ui/input-group";
+import { formatListTime, formatMonthDay } from "./im-support-format";
+import {
+  MAX_STAGED_IMAGES, SESSION_REFRESH_ERROR, QUEUE_REFRESH_ERROR, REPLY_UNCERTAIN_NOTICE, ROUND_CLOSED_NOTICE,
+  readConsultationHistory, typeLabel, scopeStateLabel, stageLabelOf, stageToneOf, connectionForPresence,
+  messageFromNim, httpStatus, decodeImage, readConsultations, supportPageVisible,
+  type Consultation, type SupportMessage, type SupportSection, type QueueRow, type UnifiedRow, type DraftImage, type FailedText,
+} from "./im-support-view-model";
+import { useSupportPresence, SupportRuntimeBar, OffDutyDialog, ReceptionDialog } from "./im-support-presence";
+import { SupportConsultationQueue, SupportUnifiedDirectory } from "./im-support-queue";
+import { SupportChatPane, SupportDetailsPane } from "./im-support-chat";
+import { SupportTransferDialog, SupportCloseRoundDialog } from "./im-support-round-dialogs";
 
-import { Kbd } from "../components/ui/kbd";
-import { Textarea } from "../components/ui/textarea";
+export {
+  SUPPORT_QUICK_REPLIES, readSupportQuickReplies, storeSupportQuickReplies, supportHistoryMessage,
+  staleHeartbeatRetryState, presenceRuntimeState, presenceWriteSucceeded, messageFromNim, supportMessageAuthor,
+} from "./im-support-view-model";
+export type { QuickReplyItem } from "./im-support-view-model";
 
-type SupportType = "SERVICE" | "COMPLAINT";
-type ConsultationState = "WAITING" | "ACTIVE" | "CLOSED";
-type Consultation = {
-  id: string;
-  /** 持久线程与当前轮次：同一用户+类型的线程跨轮次保留，列表只返回当前未结束的一轮。 */
-  threadId?: string;
-  roundId?: string;
-  roundSeq?: number;
-  threadState?: "IDLE" | "WAITING" | "ACTIVE";
-  type: SupportType;
-  state: ConsultationState;
-  assignedAdmin: { id: string; name: string; avatar?: string | null } | null;
-  peerAccountId: string | null;
-  /** 平台“洲洲助手（Bot）”账号；欢迎语与自动卡片由它发出。 */
-  botAccountId?: string | null;
-  conversationType: "TEAM";
-  conversationId: string | null;
-  messageScopeState?: string;
-  /** 服务端视角的发送权：只有本轮负责客服为当前账号时才为 true。 */
-  canSend?: boolean;
-  version: number;
-  lastMessageAt: string | null;
-  /** 服务端最近一条消息摘要；未打开历史时队列行优先显示它。 */
-  lastMessagePreview?: string | null;
-  /** 本轮负责客服尚未读的用户消息数；服务端计数，仅 ACTIVE 轮次有意义。 */
-  adminUnreadCount?: number;
-  createdAt: string;
-  updatedAt: string;
-  user?: { id: string; name: string; username: string | null; avatar?: string | null };
-};
-type SupportMessage = {
-  id: string;
-  from: "customer" | "agent" | "system";
-  text: string;
-  time: string;
-  self?: boolean;
-  senderId?: string;
-  createTime?: number;
-  messageClientId?: string;
-  messageServerId?: string;
-  messageType?: number;
-  revoked?: boolean;
-  /** 服务端历史消息附带的发送者姓名；实时消息没有该字段时退回角色标签。 */
-  sender?: SupportSender;
-  /** Shared decode of a NIM team notification; display decides visibility. */
-  notice?: ImSystemNotice;
-  /** Raw channel message kept intact so reply/revoke/delete address the original. */
-  source?: NimMessageLike;
-  image?: { imageId: string; url?: string; thumbnailUrl?: string; name: string; mimeType: string; size: number };
-  media?: NimMessageMedia;
-};
-type ImToken = { appKey: string; accountId: string; token: string; transport: "nim" | "local-fake" };
-type PresenceToday = { seconds: number; sessions: number; users: number };
-type Presence = {
-  adminUserId: string;
-  availability: "OFF_DUTY" | "AVAILABLE" | "PAUSED";
-  connectionState: string;
-  lastConfirmedAt?: string | null;
-  disconnectedSince?: string | null;
-  dispatchPaused?: boolean;
-  dispatchable?: boolean;
-  reason?: string | null;
-  stateRevision?: number;
-  activeLoad: number;
-  version: number;
-  ownedByAnotherSession?: boolean;
-  unbound?: boolean;
-  today?: PresenceToday;
-};
-type PresenceHeartbeat = {
-  ok: boolean;
-  dispatchable: boolean;
-  reason: string | null;
-  disconnectedSince: string | null;
-  dispatchPaused: boolean;
-  stateRevision: number;
-  today?: PresenceToday;
-  serverTime: string;
-};
-type ConnectionClaim = {
-  ok: boolean;
-  reason: "CLAIMED" | "OTHER_WINDOW" | "LOCKED" | "FORBIDDEN" | "SESSION_INVALID";
-  version?: number;
-  stateRevision?: number;
-};
-type ConnectionLease = { ok: boolean; reason: string };
-type SupportSection = "consultation" | "orders";
-type QueueRow = { id: string; type: SupportType; title: string; snippet: string; time: string; sortAt: number; state: "待接入" | "接待中" | "已结束" | "通道异常"; unreadCount: number; consultation?: Consultation };
-type UnifiedRow = {
-  kind: "consultation" | "order";
-  avatar?: string | null;
-  id: string;
-  title: string;
-  tag: string;
-  tone: "warn" | "neutral";
-  snippet: string;
-  state: string;
-  stateTone: "good" | "warn" | "neutral" | "attention" | "live" | "done" | "danger";
-  /** 订单群的到期等次要事实，用 icon+短标签显示，不占时间列。 */
-  meta?: string;
-  /** UNKNOWN 自动卡只提示核对，不表示已发送或未发送。 */
-  stageCardUnknown?: boolean;
-  unreadCount: number;
-  sortAt: number;
-  time: string;
-  pinned?: boolean;
-  muted?: boolean;
-};
-type DraftImage = { key: string; file: File; previewUrl: string; name: string; size: number; width: number; height: number; state: "DECODING" | "READY" | "SENDING" | "FAILED" | "UNKNOWN"; progress: number; messageClientId?: string };
-type FailedText = { consultationId: string; conversationId: string; text: string; messageClientId?: string };
-
-const MAX_STAGED_IMAGES = 6;
-// 固定的业务常用语：只提供可复用句式，不代填任何订单、账号或处理结论。
-export const SUPPORT_QUICK_REPLIES = [
-  { label: "首次回复", text: "您好，很高兴为您服务，请问有什么可以帮您？" },
-  { label: "核对账号", text: "您好，请提供需要处理的账号和验证码，我们马上为您核对。" },
-  { label: "核验等待", text: "正在为您核实账号信息，请稍等片刻，处理好后第一时间回复您。" },
-  { label: "核验完成", text: "账号已核验完成，请确认账号和密码无误；如有问题随时联系我们。" },
-  { label: "结束说明", text: "如暂无其他问题，本次服务就先到这里，后续有问题随时发在这里。" },
-] as const;
-
-export type QuickReplyItem = { label: string; text: string };
-
-export function readSupportQuickReplies(adminUserId: string): QuickReplyItem[] {
-  if (typeof window === "undefined" || !adminUserId) return [...SUPPORT_QUICK_REPLIES];
-  try {
-    const raw = window.localStorage.getItem(`zzsh-support-quick-replies:${adminUserId}`);
-    if (!raw) return [...SUPPORT_QUICK_REPLIES];
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed.filter((item): item is QuickReplyItem => Boolean(item && typeof item.label === "string" && typeof item.text === "string"));
-    }
-  } catch {
-    // fallback
-  }
-  return [...SUPPORT_QUICK_REPLIES];
-}
-
-export function storeSupportQuickReplies(adminUserId: string, items: QuickReplyItem[]): void {
-  if (typeof window === "undefined" || !adminUserId) return;
-  window.localStorage.setItem(`zzsh-support-quick-replies:${adminUserId}`, JSON.stringify(items));
-}
-// 预设状态写入失败的两种可见结果：版本冲突不是错误，而是"别的窗口已经改过"，
-// 所以重新读取后只给中性说明；真正的保存失败不能留在旧显示上假装成功。
-const PRESENCE_CONFLICT_NOTICE = "另一窗口已更新接待状态，已刷新为最新状态。";
-const PRESENCE_SAVE_ERROR = "接待状态未保存，请重试";
-const SESSION_REFRESH_ERROR = "会话状态刷新失败";
-const QUEUE_REFRESH_ERROR = "队列刷新失败";
-const GROUP_WINDOW_MS = 300_000;
-// 回复没有“按原消息 ID 重放”的接口：结果未知时只能保留草稿与引用，等人工刷新确认，
-// 不能用一条新消息自动重发。
-const REPLY_UNCERTAIN_NOTICE = "回复结果未确认，请刷新确认后再发送；取消引用后可按普通消息发送。";
-// 本轮结束结果未知时的说明。不复述"仍进行中/已结束"这类推断：平台当前没有按咨询读取本轮
-// 结果的接口，目录缺席、分页、转交、失权都证明不了远端到底有没有执行这次结束本轮。
-const CLOSE_OUTCOME_UNKNOWN_NOTICE = "本轮结束结果未确认：这次结束本轮可能已生效也可能没有。平台目前没有按咨询读取本轮结果的接口，本页无法确认，也不会重复提交；请由平台侧核对后再处理。";
-const ROUND_CLOSED_NOTICE = "本轮已结束，聊天记录保留；用户再次咨询会在同一会话开启新一轮。";
-type SupportHistoryRow=NimMessageLike&{sender?:SupportSender};
-type SupportHistoryPage={messages:SupportHistoryRow[];hasMore:boolean;anchor?:NimMessageLike|string};
-export function supportHistoryMessage(row:SupportHistoryRow):SupportHistoryRow|null{
-  const message=nimMessageView(row);
-  if(!message)return null;
-  const sender=parseSupportSender(row.sender);
-  return sender?{...message,sender}:message;
-}
-async function readConsultationHistory(client:NimWebClientLike,conversationId:string,before?:NimMessageLike|string):Promise<SupportHistoryPage>{
-  if(client.transport==="local-fake"){
-    const messages=await client.getMessageHistory(conversationId,50,typeof before==="object"?before:undefined);
-    const mapped=messages.map(message=>supportHistoryMessage(message)).filter((message):message is SupportHistoryRow=>message!==null);
-    return {messages:mapped,hasMore:messages.length===50,anchor:oldestNimMessage(messages)};
-  }
-  const query=new URLSearchParams({mode:"member",conversationId,limit:"50"});if(typeof before==="string")query.set("cursor",before);
-  const page=await adminRequest<{messages:SupportHistoryRow[];hasMore:boolean;nextCursor:string|null}>(`/im/messages?${query}`);
-  return {messages:page.messages.map(supportHistoryMessage).filter((message):message is SupportHistoryRow=>message!==null),hasMore:page.hasMore,anchor:page.nextCursor??undefined};
-}
-
-// 「案件进度」stepper 与「下一步 / 轮到你回复」已移除：assignedAdmin + messageScopeState
-// 只能证明当前的接待关系与远端就绪状态，证明不了处理轮次，也证明不了历史阶段时间。
-// 处理记录时间线由 ConsultationEventsCard 按真实事件投影渲染，不再从当前状态推断。
-function typeLabel(type: SupportType): string { return type === "COMPLAINT" ? "投诉反馈" : "平台咨询"; }
-function roundSeqOf(consultation: { roundSeq?: number }): number | null {
-  return typeof consultation.roundSeq === "number" && Number.isInteger(consultation.roundSeq) && consultation.roundSeq > 0 ? consultation.roundSeq : null;
-}
-function roundTagOf(consultation: Consultation): string {
-  const seq = roundSeqOf(consultation);
-  return seq === null ? "" : `第 ${seq} 轮`;
-}
-function roundHeadlineOf(consultation: Consultation): string {
-  const seq = roundSeqOf(consultation);
-  const round = seq === null ? "" : `第 ${seq} 轮接待 · `;
-  if (consultation.state === "WAITING") return `${round}等待客服接入`;
-  if (consultation.assignedAdmin) return `${round}${consultation.assignedAdmin.name}`;
-  return `${round}尚未分配接待`;
-}
-function stateLabel(state: ConsultationState): QueueRow["state"] { return state === "ACTIVE" ? "接待中" : state === "WAITING" ? "待接入" : "已结束"; }
-function scopeStateLabel(consultation: Consultation): QueueRow["state"] { return consultation.messageScopeState === "FAILED" ? "通道异常" : stateLabel(consultation.state); }
-function stageLabelOf(row: OrderTeamListItem): string {
-  switch (row.stage) {
-    case "WAITING_STAFF": return "待分配";
-    case "TEAM_PENDING": return "建群中";
-    case "OPENING_CONFIRM": return "待开租确认";
-    case "RENTING": return "租用中";
-    case "ENDING": return "待结束";
-    case "SETTLED": return "已完成";
-    case "CANCELLED": return "已取消";
-    default: return row.status === "COMPLETED" ? "已完成" : row.status === "CANCELLED" ? "已取消" : "订单沟通";
-  }
-}
-function stageToneOf(state: string): "good" | "warn" | "neutral" {
-  return state === "接待中" || state === "租用中" ? "good" : state === "待接入" || state === "通道异常" || state === "已取消" ? "warn" : "neutral";
-}
-function connectionForPresence(state: NimWebConnectionState | "idle" | "error"): NimWebConnectionState {
-  return state === "idle" ? "DISCONNECTED" : state === "error" ? "AUTH_FAILED" : state;
-}
-function createConnectionId(): string {
-  const value = globalThis.crypto?.randomUUID?.();
-  if (value) return value;
-  return `conn_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-}
-/**
- * A stale heartbeat may only be retried with the connection that is live *now*.
- * A late CONNECTED from a kicked/reconnecting/older NIM client must be dropped;
- * a terminal state may be re-sent after refreshing the revision because that is
- * the current truth, not the old event.
- */
-export function staleHeartbeatRetryState(input: {
-  liveConnection: NimWebConnectionState | "idle" | "error";
-  terminal: "KICKED" | "AUTH_FAILED" | undefined;
-  sentGeneration: number;
-  liveGeneration: number;
-  sentClient: object | null | undefined;
-  liveClient: object | null | undefined;
-}): NimWebConnectionState | null {
-  if (input.sentGeneration !== input.liveGeneration) return null;
-  if ((input.sentClient ?? null) !== (input.liveClient ?? null)) return null;
-  const live = connectionForPresence(input.liveConnection);
-  if (input.terminal && live !== input.terminal) return null;
-  return live;
-}
-/** Keep the runtime label, tone and action consistent when the IM channel is not CONNECTED. */
-export function presenceRuntimeState(
-  availability: Presence["availability"],
-  connection: NimWebConnectionState | "idle" | "error",
-  busy: boolean,
-  ownedByAnotherSession = false,
-  unbound = false,
-  localLeader = true,
-  dispatchable = true,
-): { connected: boolean; tone: "good" | "warn" | "neutral"; label: string; toggleDisabled: boolean; toggleTitle: string | undefined; toggleLabel: string } {
-  const connected = connection === "CONNECTED";
-  const owned = ownedByAnotherSession === true;
-  const needsExplicitStart = unbound === true;
-  const kicked = connection === "KICKED";
-  const authFailed = connection === "AUTH_FAILED";
-  return {
-    connected,
-    tone: owned || !localLeader || needsExplicitStart || kicked || authFailed || (availability === "AVAILABLE" && (!connected || !dispatchable)) ? "warn"
-      : availability === "AVAILABLE" ? "good" : "neutral",
-    label: owned ? (connected ? "其他窗口接待中" : "其他窗口接待中 · 连接异常")
-      : !localLeader ? "其他窗口接待中"
-        : kicked ? availability === "AVAILABLE" ? "连接被踢下线 · 接待中" : "连接被踢下线 · 未接待"
-          : authFailed ? availability === "AVAILABLE" ? "连接认证失败 · 接待中" : "连接认证失败 · 未接待"
-            : needsExplicitStart
-              ? connected ? "需重新开始接待" : connection === "idle" || connection === "CONNECTING" ? "需重新开始接待 · 连接中" : "需重新开始接待 · 连接异常"
-              : connection === "idle" || connection === "CONNECTING"
-                ? "连接中"
-                : !connected
-                  ? availability === "AVAILABLE" ? "连接异常 · 接待中" : "连接异常"
-                  : availability === "AVAILABLE"
-                    ? dispatchable ? "可接待" : "接待中 · 暂停派单"
-                    : availability === "PAUSED" ? "已暂停" : "未上线",
-    toggleDisabled: owned ? busy
-      : !localLeader ? true
-        : needsExplicitStart ? busy || (!connected && !kicked && !authFailed)
-          : kicked || authFailed ? busy
-            : availability === "AVAILABLE" ? busy : busy || (!connected && !kicked && !authFailed),
-    toggleTitle: owned
-      ? "接管当前接待窗口"
-      : !localLeader ? "当前登录会话的云信连接由另一个标签页持有"
-        : kicked ? availability === "AVAILABLE" ? "重新连接并接管当前接待" : "重新连接消息服务"
-          : authFailed ? "重新获取登录凭据并连接"
-            : needsExplicitStart
-              ? connected ? "重新开始接待" : "消息服务异常，暂不可开始接待"
-              : availability === "AVAILABLE"
-                ? connected ? undefined : "消息服务异常，可先结束接待"
-                : connection === "idle" || connection === "CONNECTING" ? "消息通道连接中，请稍候" : !connected ? "消息服务异常，暂不可接待" : undefined,
-    toggleLabel: owned ? "接管接待" : !localLeader ? "其他窗口接待中" : kicked ? availability === "AVAILABLE" ? "在此接待" : "重新连接" : authFailed ? "重新连接" : needsExplicitStart ? "开始接待" : availability === "AVAILABLE" ? "暂停接待" : "开始接待",
-  };
-}
-/** Only this write's authoritative response may count as a successful presence change. */
-export function presenceWriteSucceeded(value: Presence | undefined, availability: Presence["availability"]): boolean {
-  return Boolean(value && value.availability === availability && value.ownedByAnotherSession !== true && value.unbound !== true);
-}
-/** Read/unread decisions require the workbench tab, the browser page and keyboard focus. */
-function supportPageVisible(): boolean {
-  return typeof document === "undefined" || (document.visibilityState === "visible" && document.hasFocus());
-}
-function imageOf(message: NimMessageLike): SupportMessage["image"] | undefined {
-  if (message.messageType !== 1 || !message.attachment || typeof message.attachment !== "object") return undefined;
-  const attachment = message.attachment;
-  const imageId = typeof attachment.imageId === "string" ? attachment.imageId : "";
-  const url = supportedImageUrl(attachment.url) ?? supportedImageUrl(attachment.thumbUrl);
-  const thumbnailUrl = supportedImageUrl(attachment.thumbUrl) ?? url;
-  return { imageId, ...(url ? { url } : {}), ...(thumbnailUrl ? { thumbnailUrl } : {}), name: typeof attachment.name === "string" ? attachment.name : "图片", mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : "image/jpeg", size: typeof attachment.size === "number" ? attachment.size : 0 };
-}
-const SERVER_SYSTEM_NOTICE_KINDS = new Set([
-  "TEAM_CREATED", "MEMBER_JOINED", "MEMBER_LEFT", "TEAM_UPDATED", "TEAM_DISMISSED", "UNKNOWN",
-]);
-
-/** Only a shape-valid server notice is trusted; anything else falls back to the shared decoder. */
-function serverSystemNotice(message: NimMessageLike): ImSystemNotice | null {
-  const notice: unknown = message.systemNotice;
-  if (message.messageType !== 5 || !notice || typeof notice !== "object" || Array.isArray(notice)) return null;
-  const { kind, text } = notice as { kind?: unknown; text?: unknown };
-  if (typeof kind !== "string" || !SERVER_SYSTEM_NOTICE_KINDS.has(kind)
-    || typeof text !== "string" || !isImSystemNoticeText(text)) return null;
-  return { kind: kind as ImSystemNotice["kind"], text: text.trim() };
-}
-
-export function messageFromNim(message: SupportHistoryRow, accountId: string, peerAccountId?: string | null): SupportMessage | null {
-  if (typeof message.senderId !== "string" || !message.senderId) return null;
-  const id = message.messageServerId || message.messageClientId || `${message.senderId}-${message.createTime}`;
-  const self = message.senderId === accountId;
-  const base = {
-    id,
-    self,
-    senderId: message.senderId,
-    createTime: message.createTime,
-    time: formatTime(message.createTime),
-    messageClientId: message.messageClientId,
-    ...(message.messageServerId ? { messageServerId: message.messageServerId } : {}),
-    ...(message.messageType === undefined ? {} : { messageType: message.messageType }),
-    ...(message.sender ? { sender: message.sender } : {}),
-    // 引用/撤回/删除都需要原消息对象；列表行只是它的展示投影，不能反向拼一个。
-    source: message,
-  };
-  // 已撤回是占位，不是发言：正文与附件都不再展示，也不再提供菜单。
-  if (message.revoked === true) return { ...base, from: self ? "agent" : "customer", text: "", revoked: true };
-  const notice = serverSystemNotice(message) ?? decodeImSystemNotice(message);
-  // A notification is never attributed to a human speaker, and unknown types
-  // are not rendered as if the customer had written them.
-  if (notice) return { ...base, from: "system", text: notice.text, notice };
-  const image = imageOf(message);
-  // Only the client-validated media envelope becomes a media bubble.
-  const media = mediaMessageOf(message);
-  const text = typeof message.text === "string" && message.text.trim() ? message.text : image || media ? "" : message.messageType === 0 ? "" : "暂不支持展示的消息类型";
-  // Only the mapped peer is a customer; a colleague staff message stays on the staff
-  // side instead of borrowing the current assignee's name or the user's label.
-  const from: SupportMessage["from"] = self || (peerAccountId ? message.senderId !== peerAccountId : false) ? "agent" : "customer";
-  return { ...base, from, text, ...(image === undefined ? {} : { image }), ...(media === undefined ? {} : { media }) };
-}
-export function supportMessageAuthor(
-  message: Pick<SupportMessage, "self" | "senderId" | "from" | "sender">,
-  selected: Pick<Consultation, "peerAccountId" | "botAccountId" | "user"> | null,
-  operatorName: string,
-  operatorAvatar?: string | null,
-): { name: string; role: string; avatar?: string | null } {
-  if (message.self) return { name: operatorName, role: "平台客服", avatar: operatorAvatar };
-  if (selected?.peerAccountId && message.senderId === selected.peerAccountId) {
-    return { name: selected.user?.name || selected.user?.username || "平台用户", role: "平台用户", avatar: selected.user?.avatar };
-  }
-  if (message.from === "agent" && selected?.botAccountId && message.senderId === selected.botAccountId) {
-    return { name: "洲洲助手（Bot）", role: "机器人", avatar: null };
-  }
-  // 服务端历史投影已给出每个发送者的平台身份；转交前的其他客服也显示完整姓名。
-  if (message.sender?.displayName) {
-    const role = message.sender.role === "ADMIN" ? "平台客服" : message.sender.role === "SYSTEM" ? "机器人" : "平台用户";
-    return { name: message.sender.displayName, role, avatar: message.sender.avatar };
-  }
-  // Historical senders the server did not project stay neutral instead of borrowing the current assignee's identity.
-  return message.from === "agent"
-    ? { name: "客服", role: "平台客服", avatar: null }
-    : { name: selected?.user?.name || selected?.user?.username || "平台用户", role: "平台用户", avatar: null };
-}
-
-function httpStatus(error: unknown): number | undefined {
-  if (error instanceof AdminApiError) return error.status;
-  return error && typeof error === "object" && "status" in error && typeof (error as { status?: unknown }).status === "number" ? (error as { status: number }).status : undefined;
-}
-function decodeImage(url: string): Promise<{ width: number; height: number }> {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => (image.naturalWidth > 0 && image.naturalHeight > 0 ? resolve({ width: image.naturalWidth, height: image.naturalHeight }) : reject(new Error("图片无法解码")));
-    image.onerror = () => reject(new Error("图片无法解码"));
-    image.src = url;
-  });
-}
-async function readImToken(connectionId: string): Promise<ImToken> {
-  const value = await adminRequest<Record<string, unknown>>("/im/token", undefined, "GET", { "x-zzsh-connection-id": connectionId });
-  if (typeof value.appKey !== "string" || typeof value.accountId !== "string" || typeof value.token !== "string" || !value.appKey || !value.accountId || !value.token || (value.transport !== "nim" && value.transport !== "local-fake")) throw new Error("云信登录凭据格式无效");
-  return { appKey: value.appKey, accountId: value.accountId, token: value.token, transport: value.transport };
-}
-async function readConsultations(): Promise<Consultation[]> {
-  const value = await adminRequest<{ consultations?: unknown }>("/im/consultations?limit=50");
-  if (!Array.isArray(value.consultations)) throw new Error("咨询队列格式无效");
-  return value.consultations as Consultation[];
-}
-
-/** Isolates the 1-second display re-render from the rest of the workbench. */
-function TodayDuration({ seconds, active }: { seconds: number | undefined; active: boolean }) {
-  const [tick, setTick] = useState(0);
-  useEffect(() => { setTick(0); }, [seconds]);
-  useEffect(() => {
-    if (!active || seconds === undefined) return;
-    const timer = window.setInterval(() => setTick((value) => value + 1), 1_000);
-    return () => window.clearInterval(timer);
-  }, [active, seconds]);
-  return (
-    <ActionTooltip content="今日接待开启时长（含短暂断线和锁屏存活；失联30分钟后按最后可信存活截断）">
-      <span className="im-wb-state im-wb-today" data-action="today-duty">今日接待 <b>{seconds === undefined ? "—" : formatDuration(seconds + tick)}</b></span>
-    </ActionTooltip>
-  );
-}
 
 export function ImSupportView({ snapshot, initialSection = "consultation", initialConsultationId, initialOrderId, initialUnifiedType = "ALL", workspaceQuery = {}, onQueryChange, onRefresh, onOpenPath, onDirtyChange, active = true }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
@@ -493,6 +73,29 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const canTransfer = hasPermission(snapshot, "im.support.transfer");
   const canPresence = canRead && hasPermission(snapshot, "im.support.presence");
   const readClientKey = createReadClientKey({ adminUserId: snapshot.adminUserId, sessionId: snapshot.session.id, locked: snapshot.session.locked, canRead });
+  const [notice, setNotice] = useState<string>();
+  const {
+    presence, connection, localLeader, busy, readyOperator,
+    clientRef, connectionIdRef, operatorRef, operatorGenerationRef,
+    beginBusy, endBusy, applyPresence, writePresence, reconnect, restartConnection,
+  } = useSupportPresence({
+    adminUserId: snapshot.adminUserId,
+    sessionLocked: snapshot.session.locked,
+    readClientKey, canRead, canPresence, setNotice,
+    onQueue: (rows) => { setQueue(rows); setQueueLoaded(true); },
+    onIncoming: (incoming, client) => {
+      for (const raw of incoming) {
+        const next = messageFromNim(raw, client.accountId, queueRef.current.find((c) => c.conversationId === raw.conversationId)?.peerAccountId);
+        const consultation = queueRef.current.find((candidate) => candidate.state === "ACTIVE" && candidate.assignedAdmin?.id === snapshot.adminUserId && candidate.conversationId === raw.conversationId);
+        if (!next || !consultation) continue;
+        setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [next]) }));
+        // 即时反馈：服务端计数仍是权威，下一次队列轮询会覆盖这个乐观增量。
+        if (next.self !== true && next.from !== "system") setQueue((current) => current.map((item) => item.id === consultation.id
+          ? { ...item, adminUnreadCount: Math.min((item.adminUnreadCount ?? 0) + 1, 999) }
+          : item));
+      }
+    },
+  });
   // Reads are an explicit "user is looking at this" claim: a hidden workspace tab or
   // background browser page must never advance unread state on its own.
   const [pageVisible, setPageVisible] = useState(supportPageVisible);
@@ -536,7 +139,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   orderScopeRef.current = readClientKey;
   const [groupPrefs, setGroupPrefs] = useState<OrderGroupPreferenceMap>(() => readOrderGroupPreferences(snapshot.adminUserId));
   const [groupPrefsScope, setGroupPrefsScope] = useState(snapshot.adminUserId);
-  const [unifiedOrderMenu, setUnifiedOrderMenu] = useState<{ x: number; y: number; orderId: string; preference: OrderGroupPreference; row: HTMLElement | null } | null>(null);
   const [unifiedQuery, setUnifiedQuery] = useState("");
   const [searchConsultations, setSearchConsultations] = useState<Consultation[]>([]);
   const [searchOrders, setSearchOrders] = useState<OrderTeamListItem[]>([]);
@@ -545,17 +147,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const [unifiedType, setUnifiedType] = useState<"ALL" | "SERVICE" | "COMPLAINT" | "ORDER">(initialUnifiedType);
   const [messages, setMessages] = useState<Record<string, SupportMessage[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [emojiOpen, setEmojiOpen] = useState(false);
-  const [quickReplyOpen, setQuickReplyOpen] = useState(false);
-  const [quickReplies, setQuickReplies] = useState<QuickReplyItem[]>(() => readSupportQuickReplies(snapshot.adminUserId));
-  const [editingQuickReplies, setEditingQuickReplies] = useState(false);
-  const [quickReplyDrafts, setQuickReplyDrafts] = useState<QuickReplyItem[]>([]);
-  const [quickReplyError, setQuickReplyError] = useState("");
-  useEffect(() => { setQuickReplies(readSupportQuickReplies(snapshot.adminUserId)); }, [snapshot.adminUserId]);
   useEffect(() => {
     setGroupPrefs(readOrderGroupPreferences(snapshot.adminUserId));
     setGroupPrefsScope(snapshot.adminUserId);
-    setUnifiedOrderMenu(null);
   }, [snapshot.adminUserId]);
   // Below this width a third column leaves the chat unusable, so the case column
 // starts collapsed and the operator opens it deliberately.
@@ -565,18 +159,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const viewing = active && pageVisible;
   const chatViewing = viewing && section === "consultation" && (!narrowScreen || mobilePane === "chat");
   const orderViewing = viewing && section === "orders" && (!narrowScreen || mobilePane === "chat");
-  const [notice, setNotice] = useState<string>();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"waiting" | "mine">("mine");
   const [blockedConsultations, setBlockedConsultations] = useState<Record<string, boolean>>({});
-  const [connection, setConnection] = useState<NimWebConnectionState | "idle" | "error">("idle");
 
-  const [localLeader, setLocalLeader] = useState(true);
-  const [reconnectEpoch, setReconnectEpoch] = useState(0);
-  const [connectionLeaseActive, setConnectionLeaseActive] = useState(false);
-  const connectionIdRef = useRef(createConnectionId());
-  const [presence, setPresence] = useState<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
-  const [busy, setBusy] = useState(false);
   const [notifyPermission, setNotifyPermission] = useState<SupportNotificationPermission>(() => supportNotificationPermission());
   const [notifyEnabled, setNotifyEnabled] = useState(() => readSupportNotificationPreference(snapshot.adminUserId));
   // 首个成功队列响应才算“已加载”：空队列也是合法状态，不能用 rows 非空猜测。
@@ -634,39 +220,11 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const readInFlightRef = useRef(new Map<string, string>());
   const markedOrderReadRef = useRef(new Set<string>());
 
-  const lifecycleRef = useRef<ImClientLifecycle<NimWebClientLike> | null>(null);
-  const clientRef = useRef<NimWebClientLike | null>(null);
   const cloudPins = useOrderGroupCloudPins(clientRef.current);
   const cloudPinnedTeamIds = cloudPins.status === "CLOUD" ? cloudPins.teamIds : undefined;
   useEffect(() => { if (cloudPins.error) setNotice(cloudPins.error); }, [cloudPins.error]);
-  const availabilityRef = useRef<Presence["availability"]>("OFF_DUTY");
-  const presenceVersionRef = useRef<number | null>(null);
-  const presenceStateRevisionRef = useRef<number | null>(null);
-  const heartbeatChainRef = useRef(Promise.resolve());
-  const handoffRef = useRef<Promise<void>>(Promise.resolve());
-  // 最近一次由服务端确认的 presence。写入失败时用它回退 availabilityRef，
-  // 让 30s 心跳与连接事件只重放"已知成立"的状态，而不是重试失败的用户意图。
-  const presenceRef = useRef<Presence>({ adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 });
-  const presenceWriteRef = useRef(Promise.resolve());
-  const connectionRef = useRef(connection);
-  const sessionLockedRef = useRef(snapshot.session.locked);
-  sessionLockedRef.current = snapshot.session.locked;
-  const nimGenerationRef = useRef(0);
-  const terminalConnectionRef = useRef<"KICKED" | "AUTH_FAILED" | undefined>(undefined);
-  const applyConnection = useCallback((next: NimWebConnectionState | "idle" | "error") => {
-    connectionRef.current = next;
-    setConnection(next);
-  }, []);
-  const localLeaderRef = useRef(localLeader);
-  localLeaderRef.current = localLeader;
-  const authRetryRef = useRef(0);
-  const logoutRetryRef = useRef(false);
-  const busyOwnerRef = useRef(0);
-  const composingRef = useRef(false);
   const chatHeadingRef = useRef<HTMLElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const consultationVideoInput = useRef<HTMLInputElement | null>(null);
-  const consultationFileInput = useRef<HTMLInputElement | null>(null);
   const detailsTriggerRef = useRef<HTMLButtonElement | null>(null);
   const transferTriggerRef = useRef<HTMLButtonElement | null>(null);
   const closeTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -678,15 +236,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   // 最新一次渲染算出的"现在能不能发起外发"。顺序发图时每张图都是一次新的发起，
   // 中途撤权必须停下来，而不是靠服务端 403 兜底。
   const canStartSendRef = useRef(false);
-  const canPresenceRef = useRef(canPresence);
-  const operatorRef = useRef("");
-  const operatorGenerationRef = useRef(0);
-  const readyOperatorRef = useRef<string | null>(null);
-  const [readyOperator, setReadyOperator] = useState<string | null>(null);
-  const markReadyOperator = useCallback((value: string | null) => {
-    readyOperatorRef.current = value;
-    setReadyOperator(value);
-  }, []);
   const selectedIdRef = useRef(selectedId);
   const sectionRef = useRef(section);
   const queueRef = useRef(queue);
@@ -701,11 +250,9 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
 // "who is handling this" and "who sent that message" from disagreeing on one screen.
   const operatorName = snapshot.user.name || snapshot.user.displayUsername || snapshot.user.username || "当前管理员";
   sendCapabilityRef.current = sendCapabilityKey;
-  canPresenceRef.current = canPresence;
   stagedRef.current = staged;
   pendingRef.current = pending;
   sectionRef.current = section;
-  if (operatorRef.current !== readClientKey) { operatorRef.current = readClientKey; operatorGenerationRef.current += 1; }
   selectedIdRef.current = selectedId;
   queueRef.current = queue;
 
@@ -714,180 +261,25 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const failedFor = (id: string) => (id ? failedText[id] ?? null : null);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDrafts((current) => ({ ...current, [draftKey]: value }));
-  const insertIntoDraft = (insertion: string, close: () => void) => {
+  // 常用语/表情只插入草稿，不自动发送；发送仍由客服确认。弹层关闭由聊天组件自理。
+  const insertIntoDraft = (insertion: string) => {
     const el = composerRef.current;
     const start = el?.selectionStart ?? draft.length;
     const end = el?.selectionEnd ?? start;
     const next = `${draft.slice(0, start)}${insertion}${draft.slice(end)}`;
     if (next.length > 4000) return;
     setDraft(next);
-    close();
     requestAnimationFrame(() => {
       el?.focus();
       const position = start + insertion.length;
       el?.setSelectionRange(position, position);
     });
   };
-  const insertEmoji = (emoji: string) => insertIntoDraft(emoji, () => setEmojiOpen(false));
-  // 常用语只插入草稿，不自动发送；发送仍由客服确认。
-  const insertQuickReply = (text: string) => insertIntoDraft(text, () => setQuickReplyOpen(false));
-  const beginBusy = () => { const owner = busyOwnerRef.current + 1; busyOwnerRef.current = owner; setBusy(true); return owner; };
-  const endBusy = (owner: number) => { if (busyOwnerRef.current === owner) setBusy(false); };
-  // 所有 presence 显示/版本只从服务端返回值更新；客户端没有任何"先行生效"的路径。
-  const rememberPresence = useCallback((value: Presence) => {
-    presenceVersionRef.current = value.version;
-    presenceStateRevisionRef.current = value.stateRevision ?? null;
-    presenceRef.current = value;
-    availabilityRef.current = value.availability;
-    setPresence(value);
-  }, []);
 
-  const writePresence = useCallback((availability: Presence["availability"], state: ReturnType<typeof connectionForPresence>, options?: { takeover?: boolean }) => {
-    const key = readClientKey;
-    const generation = operatorGenerationRef.current;
-    const current = () => canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation;
-    if (!canPresence || !current()) return Promise.resolve<Presence | undefined>(undefined);
-    availabilityRef.current = availability;
-    const operation = presenceWriteRef.current.then(async () => {
-      if (!current()) return undefined;
-      let version = presenceVersionRef.current;
-      if (version === null) {
-        // 本操作员本次会话的第一次写入：先向服务端要当前版本，再写。
-        // 上一会话可能已留下 presence 行；此时省略 version 会让 PUT 必然 409，
-        // 首屏就变成“未上线 + 一次失败”，而这不是并发冲突。
-        try {
-          const existing = await adminRequest<Presence>("/im/presence");
-          if (!current()) return undefined;
-          rememberPresence(existing);
-          version = presenceVersionRef.current;
-        } catch {
-          if (!current()) return undefined;
-          // 读不到就保持 null，让服务端按“无行则插入”的规则自行裁决。
-        }
-      }
-      if (!current()) return undefined;
-      try {
-        const value = await adminRequest<Presence>("/im/presence", {
-          availability,
-          connectionState: state,
-          ...(version === null ? {} : { version }),
-          ...(options?.takeover ? { takeover: true } : {}),
-          connectionId: connectionIdRef.current,
-        }, "PUT");
-        if (!current()) return undefined;
-        rememberPresence(value);
-        return value;
-      } catch (cause) {
-        if (!canPresenceRef.current || operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
-        // 失败不能成为本地状态：先把意图回退到最近一次服务端确认值，显示保持真实。
-        availabilityRef.current = presenceRef.current.availability;
-        if (httpStatus(cause) === 409) {
-          // 版本冲突：别的窗口已写过。读取最新版本与状态，不重发这次 PUT。
-          try {
-            const latest = await adminRequest<Presence>("/im/presence");
-            if (!canPresenceRef.current || operatorRef.current !== key || operatorGenerationRef.current !== generation) return undefined;
-            rememberPresence(latest);
-            setNotice(PRESENCE_CONFLICT_NOTICE);
-          } catch {
-            if (canPresenceRef.current && operatorRef.current === key && operatorGenerationRef.current === generation) setNotice(PRESENCE_SAVE_ERROR);
-          }
-          return undefined;
-        }
-        // 401/423 由 adminRequest 触发的既有会话刷新处理，这里不自行重登。
-        setNotice(httpStatus(cause) === 401 || httpStatus(cause) === 423 ? friendlyError(cause) : PRESENCE_SAVE_ERROR);
-        return undefined;
-      }
-    });
-    presenceWriteRef.current = operation.then(() => undefined, () => undefined);
-    return operation;
-  }, [canPresence, readClientKey, rememberPresence]);
 
-  const heartbeatPresence = useCallback((state: NimWebConnectionState, generation: number, client?: NimWebClientLike | null): Promise<void> => {
-    const key = readClientKey;
-    const operatorGeneration = operatorGenerationRef.current;
-    const current = () => canPresenceRef.current && operatorRef.current === key
-      && operatorGenerationRef.current === operatorGeneration && localLeaderRef.current
-      && !sessionLockedRef.current
-      && presenceRef.current.availability === "AVAILABLE"
-      && nimGenerationRef.current === generation
-      && (client == null || clientRef.current === client);
-    const run = async (sendState: NimWebConnectionState, retryStale: boolean): Promise<void> => {
-      if (!current()) return;
-      if (presenceStateRevisionRef.current === null) {
-        const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
-        if (!current() || !latest) return;
-        rememberPresence(latest);
-      }
-      try {
-        const value = await adminRequest<PresenceHeartbeat>("/im/presence/heartbeat", {
-          connectionState: sendState,
-          stateRevision: presenceStateRevisionRef.current,
-          connectionId: connectionIdRef.current,
-        }, "POST");
-        if (!current()) return;
-        // A newer NIM event already superseded this response; never let a late
-        // CONNECTED write over a disconnect/kick/reconnect state.
-        if (connectionForPresence(connectionRef.current) !== sendState) return;
-        presenceStateRevisionRef.current = value.stateRevision;
-        setPresence((currentPresence) => ({
-          ...currentPresence,
-          connectionState: sendState,
-          disconnectedSince: value.disconnectedSince,
-          dispatchPaused: value.dispatchPaused,
-          dispatchable: value.dispatchable,
-          reason: value.reason,
-          stateRevision: value.stateRevision,
-          ...(value.today ? { today: value.today } : {}),
-        }));
-        if (value.ok) return;
-        if (value.reason === "STALE_STATE" && retryStale) {
-          const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
-          if (!current() || !latest) return;
-          rememberPresence(latest);
-          // Retry with the *current* live connection state, not the stale closure's
-          // state. A terminal event must be recorded, and an old CONNECTED must not
-          // be replayed after the client was kicked or started reconnecting.
-          const liveState = staleHeartbeatRetryState({
-            liveConnection: connectionRef.current,
-            terminal: terminalConnectionRef.current,
-            sentGeneration: generation,
-            liveGeneration: nimGenerationRef.current,
-            sentClient: client,
-            liveClient: clientRef.current,
-          });
-          if (!liveState) return;
-          return run(liveState, false);
-        }
-        const latest = await adminRequest<Presence>("/im/presence").catch(() => null);
-        if (!current()) return;
-        if (latest) rememberPresence(latest);
-        const stopConnection = value.reason === "OTHER_WINDOW" || value.reason === "TAKEN_OVER"
-          || value.reason === "STALE_CONNECTION"
-          || value.reason === "FORBIDDEN" || value.reason === "SESSION_INVALID" || value.reason === "LOCKED"
-          || latest?.ownedByAnotherSession === true;
-        if (stopConnection) {
-          clientRef.current = null;
-          nimGenerationRef.current += 1;
-          applyConnection("idle");
-          void lifecycleRef.current?.close();
-        }
-        if (value.reason === "OTHER_WINDOW" || value.reason === "TAKEN_OVER" || latest?.ownedByAnotherSession) {
-          setNotice("其他窗口已持有云信连接或接管接待，本页不再登录云信。");
-        } else if (value.reason === "FORBIDDEN") setNotice("接待权限已失效，请联系管理岗。");
-        else if (value.reason === "ENDED") setNotice("当前接待已结束，如需继续请重新开始接待。");
-      } catch {
-        // The next interval or visibility event retries; heartbeat failure does not
-        // end reception or rewrite the last server-confirmed state.
-      }
-    };
-    heartbeatChainRef.current = heartbeatChainRef.current.then(() => run(state, true), () => run(state, true));
-    return heartbeatChainRef.current;
-  }, [readClientKey, rememberPresence, applyConnection]);
 
   // Identity/permission change: drop every private projection and every owned preview URL.
   useEffect(() => {
-    clientRef.current = null;
-    markReadyOperator(null);
     setQueue([]);
     setQueueLoaded(false);
     setOrderQueue([]);
@@ -923,18 +315,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     sendingRef.current = false;
     setSending(false);
     historyAnchorRef.current = {};
-    const clearedPresence: Presence = { adminUserId: snapshot.adminUserId, availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 0 };
-    presenceRef.current = clearedPresence;
-    setPresence(clearedPresence);
-    presenceVersionRef.current = null;
-    presenceStateRevisionRef.current = null;
-    heartbeatChainRef.current = Promise.resolve();
-    availabilityRef.current = "OFF_DUTY";
-    applyConnection("idle");
-    setLocalLeader(true);
-    setReconnectEpoch(0);
-    authRetryRef.current = 0;
-    logoutRetryRef.current = false;
     setNotice(undefined);
     setBlockedConsultations({});
     setCloseOutcomeUnknown({});
@@ -945,9 +325,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     setTransferOpen(false);
     setTransferNote("");
     closeFlightRef.current = null;
-    busyOwnerRef.current += 1;
-    setBusy(false);
-    presenceWriteRef.current = Promise.resolve();
   }, [readClientKey, snapshot.adminUserId]);
 
   useEffect(() => () => {
@@ -971,381 +348,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [onRefresh, snapshot.session.locked]);
 
-  useEffect(() => {
-    if (!canRead) return;
-    // A locked page holds no live NIM connection. Reset the local state so an
-    // unlock cannot send a stale CONNECTED heartbeat before NIM actually recovers.
-    if (snapshot.session.locked) { applyConnection("idle"); return; }
-    // A kick is terminal until the operator explicitly reconnects; an automatic
-    // epoch/retry or an unrelated re-render must not log in over the new client.
-    if (terminalConnectionRef.current === "KICKED") { applyConnection("KICKED"); return; }
-    let cancelled = false;
-    let retryTimer: number | undefined;
-    let retryWake: (() => void) | undefined;
-    let tabLease: ReturnType<typeof acquireSupportTabLease> | undefined;
-    const waitForRetry = (ms: number) => new Promise<void>((resolve) => {
-      let settled = false;
-      let timer: number | undefined;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (timer !== undefined) window.clearTimeout(timer);
-        window.removeEventListener("online", finish);
-        retryWake = undefined;
-        resolve();
-      };
-      retryWake = finish;
-      timer = window.setTimeout(finish, ms);
-      window.addEventListener("online", finish, { once: true });
-    });
-    const leaseAbort = new AbortController();
-    const generation = operatorGenerationRef.current;
-    const operator = readClientKey;
-    const lifecycle = new ImClientLifecycle<NimWebClientLike>(async (context) => {
-      const token = await readImToken(connectionIdRef.current);
-      if (token.transport === "local-fake") return createLocalFakeNimWebClientFactory({ endpoint: "/api/bff/admin/im/messages", accountId: token.accountId, pollMs: 1_500 })(context);
-      const factory = createNimWebClientFactory({
-        appKey: token.appKey,
-        accountId: token.accountId,
-        enableCloudConversation: true,
-        messageReceiptEndpoint:"/api/bff/admin/im/messages",
-        onReceiptStatus:({pending,failed,persistent})=>{if(pending&&(failed||!persistent))setNotice(NIM_RECEIPT_PENDING+(!persistent?"本地恢复记录未保存，请在离开前恢复登记。":""));else if(!pending)setNotice(current=>current?.startsWith(NIM_RECEIPT_PENDING)?undefined:current);},
-        messageAuthorization: async ({ conversationId, operation,...intent }) => {
-          const value = await adminRequest<{ authorized?: unknown }>(messageAccessPath(conversationId, operation,intent));
-          if (value.authorized !== true) throw new Error("当前咨询未获授权");
-        },
-        tokenProvider: async (accountId) => {
-          const refreshed = await readImToken(connectionIdRef.current);
-          if (refreshed.accountId !== accountId || refreshed.accountId !== token.accountId) throw new Error("云信账号不匹配");
-          return refreshed.token;
-        },
-      });
-      const handle = await factory(context);
-      // The token was bound before login, but a takeover can happen while the SDK
-      // is logging in. Re-check this exact instance before exposing the client; if
-      // it lost the slot, dispose what just logged in instead of keeping two
-      // clients on one account.
-      try {
-        const lease = await adminRequest<ConnectionLease>("/im/presence/connection", { connectionId: connectionIdRef.current }, "POST");
-        if (!lease.ok) throw new AdminApiError(
-          lease.reason === "LOCKED" ? 423 : lease.reason === "SESSION_INVALID" ? 401 : 409,
-          lease.reason,
-          undefined,
-          "/im/presence/connection",
-        );
-      } catch (error) {
-        try { await handle.dispose(); }
-        catch (disposeError) {
-          throw markImDisposeFailure(
-            error instanceof Error ? error : new Error("IM connection was taken over after login", { cause: error }),
-            disposeError,
-          );
-        }
-        throw error;
-      }
-      return handle;
-    });
-    lifecycleRef.current = lifecycle;
-    const connectionGeneration = ++nimGenerationRef.current;
-    terminalConnectionRef.current = undefined;
-    // Wait for every prior effect's real NIM close, not only the immediately
-    // preceding one. Rapid reconnects must not chain two overlapping clients.
-    const previousHandoff = handoffRef.current;
-    const current = () => !cancelled && generation === operatorGenerationRef.current && operatorRef.current === operator;
-    const readQueueForReadOnly = async () => {
-      const queueResult = await readConsultations().catch((cause) => {
-        if (current()) setNotice(friendlyError(cause));
-        return null;
-      });
-      if (!current()) return;
-      if (queueResult) { setQueue(queueResult); setQueueLoaded(true); }
-    };
-    const run = async () => {
-      try {
-        await previousHandoff;
-      } catch {
-        if (current()) {
-          applyConnection("AUTH_FAILED");
-          setConnectionLeaseActive(false);
-          setNotice("旧连接未安全关闭，请刷新页面后重试。");
-        }
-        return;
-      }
-      try {
-        // Ownership is decided before any NIM login: a second browser (or a reader
-        // without presence permission) must never kick the reception holder.
-        let initialPresence: Presence | null = null;
-        let initialPresenceError: unknown;
-        if (canPresence) {
-          try { initialPresence = await adminRequest<Presence>("/im/presence"); }
-          catch (cause) { initialPresenceError = cause; }
-        }
-        if (!current()) return;
-        if (initialPresence) rememberPresence(initialPresence);
-        if (initialPresence?.ownedByAnotherSession && initialPresence.availability === "AVAILABLE") {
-          markReadyOperator(operator);
-          setLocalLeader(true);
-          setConnectionLeaseActive(false);
-          applyConnection("idle");
-          await readQueueForReadOnly();
-          return;
-        }
-        if (canPresence && !initialPresence) {
-          applyConnection("error");
-          const status = httpStatus(initialPresenceError);
-          if (status !== undefined && status < 500 && status !== 408 && status !== 429) {
-            setNotice("登录状态或接待权限已失效，请重新登录或联系管理员。");
-            return;
-          }
-          setNotice("接待状态读取失败，稍后自动重试。");
-          await waitForRetry(5_000);
-          if (current()) setReconnectEpoch((value) => value + 1);
-          return;
-        }
-        // One tab per administrator/NIM account owns the single IM login, even
-        // when two browser profiles have different auth sessions. The server claim
-        // below is the cross-browser authority; this lock only serializes tabs.
-        const lease = tabLease = acquireSupportTabLease(`zzsh-im-support:${snapshot.adminUserId}`, leaseAbort.signal);
-        setLocalLeader(!lease.supported);
-        // Directory reads do not need NIM. Let a waiting tab render the queue and
-        // order workbench while the current holder keeps the only IM login.
-        markReadyOperator(operator);
-        void readQueueForReadOnly();
-        const acquired = await lease.acquired;
-        if (!acquired) {
-          if (current()) { applyConnection("idle"); setNotice("云信连接锁不可用，本页保持只读。"); }
-          return;
-        }
-        if (!current()) return;
-        setLocalLeader(true);
-        markReadyOperator(operator);
-        applyConnection("CONNECTING");
-        // Server-side connection claim must run before any NIM login. Two browser
-        // sessions that both see an empty presence race on the same row.
-        if (current()) {
-          let claimed: ConnectionClaim | null = null;
-          let claimError: unknown;
-          try { claimed = await adminRequest<ConnectionClaim>("/im/presence/connect", { connectionId: connectionIdRef.current }, "POST"); }
-          catch (cause) { claimError = cause; }
-          if (!current()) return;
-          if (!claimed?.ok) {
-            const latest = canPresence ? await adminRequest<Presence>("/im/presence").catch(() => null) : null;
-            if (!current()) return;
-            if (latest) rememberPresence(latest);
-            // No NIM client exists yet on this path, so releasing the local lock
-            // immediately is safe; a waiting tab may try the server claim next.
-            lease.release();
-            // A server-side OTHER_WINDOW means this tab is the read-only fallback,
-            // including the no-Web-Locks case; it must not present as the holder.
-            const waitingForOwnLease = claimed?.reason === "OTHER_WINDOW"
-              && (latest?.ownedByAnotherSession === false || latest?.availability !== "AVAILABLE");
-            const status = httpStatus(claimError);
-            const retryNetwork = !claimed && (status === undefined || status >= 500 || status === 408 || status === 429);
-            setLocalLeader(claimed?.reason === "OTHER_WINDOW" ? false : true);
-            applyConnection(retryNetwork ? "error" : "idle");
-            setConnectionLeaseActive(false);
-            setNotice(waitingForOwnLease
-              ? "上一个接待连接尚未释放，系统会自动尝试恢复。"
-              : claimed?.reason === "OTHER_WINDOW" ? "其他窗口已持有云信连接，本页保持只读。"
-              : claimed?.reason === "LOCKED" ? "当前会话已锁屏，解锁后再连接。"
-                : retryNetwork ? "消息服务暂不可用，正在自动重试。"
-                : "接待权限或登录状态已失效，暂不能连接云信。");
-            await readQueueForReadOnly();
-            if (waitingForOwnLease || retryNetwork) {
-              await waitForRetry(waitingForOwnLease ? 15_000 : 5_000);
-              if (current()) setReconnectEpoch((value) => value + 1);
-            }
-            return;
-          }
-          presenceVersionRef.current = claimed.version ?? presenceVersionRef.current;
-          presenceStateRevisionRef.current = claimed.stateRevision ?? presenceStateRevisionRef.current;
-          setConnectionLeaseActive(true);
-          setPresence((currentPresence) => ({
-            ...currentPresence,
-            version: claimed.version ?? currentPresence.version,
-            stateRevision: claimed.stateRevision ?? currentPresence.stateRevision,
-          }));
-        }
-        let client: NimWebClientLike | null = null;
-        const delays = [3_000, 5_000, 10_000, 30_000, 60_000];
-        for (let attempt = 0; !client; attempt += 1) {
-          if (!current()) return;
-          try {
-            client = await lifecycle.open(snapshot.adminUserId);
-          } catch (cause) {
-            if (!current()) return;
-            if (cause instanceof NimLoginTerminalError) {
-              if (cause.state === "AUTH_FAILED" && authRetryRef.current < 2) {
-                // The first token/login attempt can fail on a stale credential.
-                // Re-request the token a bounded number of times; KICKED is never
-                // retried, and both terminal states still stop after the limit.
-                authRetryRef.current += 1;
-                applyConnection("AUTH_FAILED");
-                setNotice("云信登录认证失败，正在重新获取登录凭据。");
-                void heartbeatPresence("AUTH_FAILED", connectionGeneration, null);
-                await waitForRetry(authRetryRef.current === 1 ? 5_000 : 15_000);
-                continue;
-              }
-              terminalConnectionRef.current = cause.state;
-              applyConnection(cause.state);
-              setNotice(cause.state === "KICKED" ? "云信连接已被其他客户端下线。点击“在此接待”可重新连接。" : "云信登录认证失败，请点击“重新连接”。");
-              void heartbeatPresence(cause.state, connectionGeneration, null);
-              return;
-            }
-            if (terminalConnectionRef.current) {
-              applyConnection(terminalConnectionRef.current);
-              return;
-            }
-            if (isImDisposeFailure(cause)) {
-              terminalConnectionRef.current = "AUTH_FAILED";
-              applyConnection("AUTH_FAILED");
-              setNotice("旧连接未安全关闭，请刷新页面后重试。");
-              return;
-            }
-            const status = httpStatus(cause);
-            if (status === 409) {
-              applyConnection("idle");
-              setLocalLeader(false);
-              setConnectionLeaseActive(false);
-              setNotice("其他窗口已接管云信连接，本页保持只读。");
-              return;
-            }
-            if (status === 401 || status === 403 || status === 423) {
-              applyConnection("AUTH_FAILED");
-              setNotice("登录状态已失效，请重新登录后再连接云信。");
-              return;
-            }
-            // Transport/API failure: keep a controlled retry alive (and wake on
-            // `online`) while the session still permits reading. Explicit auth
-            // failure or kick is a terminal branch above and is never looped.
-            applyConnection(attempt === 0 ? "error" : "RECONNECTING");
-            setNotice("消息服务暂不可用，正在自动重连；接待计时与派单暂停由服务端规则保持。");
-            await waitForRetry(delays[Math.min(attempt, delays.length - 1)] ?? 60_000);
-          }
-        }
-        if (!current()) return;
-        if (!client) return;
-        clientRef.current = client;
-        markReadyOperator(operator);
-        // Register before the first presence/queue read: a disconnect during those
-        // requests must not be lost behind a stale CONNECTED state.
-        client.onConnectionStateChange((state, details) => {
-          if (!current() || clientRef.current !== client) return;
-          applyConnection(state);
-          let beatGeneration = connectionGeneration;
-          if (state === "KICKED" || state === "AUTH_FAILED") {
-            terminalConnectionRef.current = state;
-            if (retryTimer !== undefined) { window.clearTimeout(retryTimer); retryTimer = undefined; }
-            retryWake?.();
-            // Invalidate any in-flight CONNECTED response from the previous state.
-            beatGeneration = ++nimGenerationRef.current;
-          } else if (state === "CONNECTED") {
-            terminalConnectionRef.current = undefined;
-            authRetryRef.current = 0;
-            logoutRetryRef.current = false;
-          }
-          if (state === "KICKED") {
-            const reason = details?.kickedReasonDesc ? `：${details.kickedReasonDesc}` : "";
-            setNotice(`云信连接已被其他客户端下线${reason}。点击“在此接待”可重新连接。`);
-          } else if (state === "AUTH_FAILED") {
-            setNotice("云信登录认证失败，正在重新获取登录凭据。");
-          }
-          if (canPresenceRef.current && localLeaderRef.current && !presenceRef.current.ownedByAnotherSession) {
-            void heartbeatPresence(connectionForPresence(state), beatGeneration, client);
-          }
-          if (state === "DISCONNECTED" && details?.kind === "LOGOUT" && !logoutRetryRef.current && presenceRef.current.availability === "AVAILABLE") {
-            logoutRetryRef.current = true;
-            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, 0);
-          } else if (state === "AUTH_FAILED" && authRetryRef.current < 2) {
-            authRetryRef.current += 1;
-            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, authRetryRef.current === 1 ? 5_000 : 15_000);
-          }
-        });
-        const initialConnection = client.getConnectionState();
-        if (initialConnection === "CONNECTED") {
-          authRetryRef.current = 0;
-          logoutRetryRef.current = false;
-          terminalConnectionRef.current = undefined;
-        } else if (initialConnection === "KICKED") {
-          terminalConnectionRef.current = "KICKED";
-          setNotice("云信连接已被其他客户端下线。点击“在此接待”可重新连接。");
-        } else if (initialConnection === "AUTH_FAILED") {
-          terminalConnectionRef.current = "AUTH_FAILED";
-          setNotice("云信登录认证失败，正在重新获取登录凭据。");
-          if (authRetryRef.current < 2 && retryTimer === undefined) {
-            authRetryRef.current += 1;
-            retryTimer = window.setTimeout(() => { retryTimer = undefined; if (current()) setReconnectEpoch((value) => value + 1); }, authRetryRef.current === 1 ? 5_000 : 15_000);
-          }
-        }
-        applyConnection(initialConnection);
-        const [presenceResult, queueResult] = await Promise.allSettled([
-          canPresence ? adminRequest<Presence>("/im/presence") : Promise.resolve(undefined),
-          readConsultations(),
-        ]);
-        if (!current() || clientRef.current !== client) return;
-        if (presenceResult.status === "fulfilled" && presenceResult.value) rememberPresence(presenceResult.value);
-        if (queueResult.status === "fulfilled") { setQueue(queueResult.value); setQueueLoaded(true); }
-        else setNotice(friendlyError(queueResult.reason));
-        if (canPresence && !presenceRef.current.ownedByAnotherSession) {
-          void heartbeatPresence(connectionForPresence(client.getConnectionState()), connectionGeneration, client);
-        }
-        client.onMessages((incoming) => {
-          if (!current() || clientRef.current !== client) return;
-          for (const raw of incoming) {
-            const next = messageFromNim(raw, client.accountId, queueRef.current.find((c) => c.conversationId === raw.conversationId)?.peerAccountId);
-            const consultation = queueRef.current.find((candidate) => candidate.state === "ACTIVE" && candidate.assignedAdmin?.id === snapshot.adminUserId && candidate.conversationId === raw.conversationId);
-            if (!next || !consultation) continue;
-            setMessages((current) => ({ ...current, [consultation.id]: mergeImMessages(current[consultation.id] ?? [], [next]) }));
-            // 即时反馈：服务端计数仍是权威，下一次队列轮询会覆盖这个乐观增量。
-            if (next.self !== true && next.from !== "system") setQueue((current) => current.map((item) => item.id === consultation.id
-              ? { ...item, adminUnreadCount: Math.min((item.adminUnreadCount ?? 0) + 1, 999) }
-              : item));
-          }
-        });
-      } catch (cause) {
-        if (current()) { applyConnection("error"); setNotice(friendlyError(cause)); }
-      }
-    };
-    void run();
-    return () => {
-      cancelled = true;
-      leaseAbort.abort();
-      retryWake?.();
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      clientRef.current = null;
-      setConnectionLeaseActive(false);
-      if (generation === operatorGenerationRef.current && operatorRef.current === operator) markReadyOperator(null);
-      if (lifecycleRef.current === lifecycle) lifecycleRef.current = null;
-      // Dispose the old NIM connection (including a login that is still opening)
-      // before the next effect may claim again. A failed cleanup keeps the lock:
-      // an unproven handoff is not a safe handoff.
-      const handoff = previousHandoff.then(async () => {
-        try {
-          await lifecycle.close();
-        } catch (error) {
-          setNotice("旧连接未安全关闭，请刷新页面后重试。");
-          throw error;
-        }
-        tabLease?.release();
-      });
-      handoffRef.current = handoff;
-      void handoff.catch(() => undefined);
-    };
-  }, [canPresence, canRead, readClientKey, snapshot.adminUserId, snapshot.session.locked, reconnectEpoch, heartbeatPresence, rememberPresence]);
 
-  // Browser connectivity recovery for a client that was already open. The NIM SDK
-  // usually reconnects itself; this is the user-visible fallback when it does not.
-  useEffect(() => {
-    if (!canRead || !localLeader || snapshot.session.locked) return;
-    const onOnline = () => {
-      if (terminalConnectionRef.current) return;
-      if (["DISCONNECTED", "RECONNECTING", "error"].includes(connectionRef.current)) {
-        setReconnectEpoch((value) => value + 1);
-      }
-    };
-    window.addEventListener("online", onOnline);
-    return () => window.removeEventListener("online", onOnline);
-  }, [canRead, localLeader, snapshot.session.locked]);
 
   useEffect(() => {
     if (!canRead || readyOperator !== readClientKey) return;
@@ -1615,102 +618,15 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     else if (section === "consultation" && !selectedId && initialConsultationId) restoreConsultation();
   }, [section, orderSelection, selectedId, initialOrderId, initialConsultationId, visibleOrderQueue, queue]);
 
-  // One heartbeat for every connection state. It runs without CONNECTED so a
-  // disconnect is reported once, a short reconnect keeps the same interval, and
-  // the server can return TAKEN_OVER/ENDED before the next UI action.
-  useEffect(() => {
-    if (!canPresence || !localLeader || presence.ownedByAnotherSession || presence.unbound
-      || presence.availability !== "AVAILABLE" || snapshot.session.locked
-      || connection === "idle" || connection === "error") return;
-    const beat = () => { void heartbeatPresence(connectionForPresence(connectionRef.current), nimGenerationRef.current, clientRef.current); };
-    const timer = window.setInterval(beat, 30_000);
-    const onVisible = () => { if (document.visibilityState === "visible") beat(); };
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("focus", onVisible);
-    window.addEventListener("online", beat);
-    window.addEventListener("pageshow", beat);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("focus", onVisible);
-      window.removeEventListener("online", beat);
-      window.removeEventListener("pageshow", beat);
-    };
-  }, [canPresence, localLeader, connection, presence.availability, presence.ownedByAnotherSession, presence.unbound, snapshot.session.locked, heartbeatPresence]);
 
-  // Off-duty pages still own the exclusive connection slot. Renew the bounded
-  // connection lease so a crashed/closed window can recover after it expires.
-  useEffect(() => {
-    if (!connectionLeaseActive || !localLeader) return;
-    let cancelled = false;
-    const renew = () => {
-      void adminRequest<ConnectionLease>("/im/presence/connection", { connectionId: connectionIdRef.current }, "POST")
-        .then((value) => {
-          if (cancelled || value?.ok) return;
-          if (value.reason !== "OTHER_WINDOW" && value.reason !== "STALE_CONNECTION") return;
-          setConnectionLeaseActive(false);
-          clientRef.current = null;
-          nimGenerationRef.current += 1;
-          applyConnection("idle");
-          setLocalLeader(false);
-          void lifecycleRef.current?.close();
-          setNotice("其他窗口已接管云信连接，本页保持只读。");
-        })
-        .catch(() => undefined);
-    };
-    const timer = window.setInterval(renew, 30_000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [applyConnection, connectionLeaseActive, localLeader]);
 
-  // Best-effort page-close notice: it only advances the first disconnect time, so
-  // a lost beacon (crash, sleep) simply falls back to the last confirmed liveness.
-  useEffect(() => {
-    if (!localLeader || presence.ownedByAnotherSession) return;
-    const onPageHide = (event: PageTransitionEvent) => {
-      // bfcache keeps the page (and its SDK) alive; do not hand off on a freeze.
-      if (event.persisted) return;
-      if (presence.availability === "AVAILABLE") {
-        const stateRevision = presenceStateRevisionRef.current;
-        if (stateRevision !== null) {
-          void fetch(`${API_ROOT}/im/presence/heartbeat`, {
-            method: "POST",
-            credentials: "include",
-            keepalive: true,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ connectionState: "DISCONNECTED", stateRevision, connectionId: connectionIdRef.current }),
-          }).catch(() => undefined);
-        }
-      }
-      // Dispose every prior effect's SDK, then this effect's client, before
-      // clearing the server claim. lifecycleRef may already point at a new effect
-      // whose open is still waiting on the old handoff chain; releasing early would
-      // let a standby tab log in while the old client is still alive. If any close
-      // is unproven or the page unloads first, the bounded lease is the recovery path.
-      void (async () => {
-        try { await handoffRef.current; } catch { return; }
-        const lifecycle = lifecycleRef.current;
-        if (lifecycle) {
-          try { await lifecycle.close(); } catch { return; }
-        }
-        await fetch(`${API_ROOT}/im/presence/release`, {
-          method: "POST",
-          credentials: "include",
-          keepalive: true,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ connectionId: connectionIdRef.current }),
-        }).catch(() => undefined);
-      })();
-    };
-    window.addEventListener("pagehide", onPageHide);
-    return () => window.removeEventListener("pagehide", onPageHide);
-  }, [localLeader, presence.availability, presence.ownedByAnotherSession]);
 
   // 日常流不代选：首次加载或队列刷新不替客服打开会话，否则未读会在没被看到时就上报。
-  // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中的一轮消失时才清空。
+  // 只有显式选择（点行、铃铛通知、交接清单）会设置 selectedId；选中项从目录（队列＋搜索结果）消失时才清空。
   useEffect(() => {
-    if (!selectedId || queue.some((item) => item.id === selectedId)) return;
+    if (!selectedId || consultationDirectory.some((item) => item.id === selectedId)) return;
     setSelectedId(null);
-  }, [queue, selectedId]);
+  }, [consultationDirectory, selectedId]);
 
   useEffect(() => {
     const items = queue.filter((item) => item.state === "ACTIVE" && item.assignedAdmin?.id === snapshot.adminUserId);
@@ -2002,21 +918,18 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       if (preference.hidden) window.dispatchEvent(new CustomEvent(ORDER_GROUP_PREF_EVENT, { detail: { orderId, patch: { hidden: false }, adminUserId: snapshot.adminUserId } }));
     }
   };
-  const handleUnifiedOrderMenuAction = (action: MessageActionId) => {
-    const menu = unifiedOrderMenu;
-    setUnifiedOrderMenu(null);
-    if (!menu) return;
-    if (action === "pin") { toggleOrderPin(menu.orderId, orderDirectory.find((row) => row.id === menu.orderId)?.teamId, !menu.preference.pinned); return; }
-    if (action === "mute") { applyGroupPreference(menu.orderId, { muted: !menu.preference.muted }); return; }
+  const handleUnifiedOrderAction = (action: MessageActionId, orderId: string, preference: OrderGroupPreference) => {
+    if (action === "pin") { toggleOrderPin(orderId, orderDirectory.find((row) => row.id === orderId)?.teamId, !preference.pinned); return; }
+    if (action === "mute") { applyGroupPreference(orderId, { muted: !preference.muted }); return; }
     if (action === "hide") {
-      applyGroupPreference(menu.orderId, { hidden: true });
-      if (orderSelection === menu.orderId) setOrderSelection(null);
+      applyGroupPreference(orderId, { hidden: true });
+      if (orderSelection === orderId) setOrderSelection(null);
       return;
     }
     if (action === "settings") {
       setSection("orders");
-      setOrderSelection(menu.orderId);
-      window.setTimeout(() => window.dispatchEvent(new CustomEvent(ORDER_GROUP_SETTINGS_EVENT, { detail: { orderId: menu.orderId } })), 160);
+      setOrderSelection(orderId);
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent(ORDER_GROUP_SETTINGS_EVENT, { detail: { orderId } })), 160);
     }
   };
   const toggleNotifications = async () => {
@@ -2076,12 +989,10 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
   const selectedMedia = mediaDrafts[draftKey] ?? null;
   const selectedFailedText = failedFor(draftKey);
   const imageInFlight = Boolean(selectedPending && (selectedPending.state === "SENDING" || imageFlights.current.has(draftKey)));
-  const imageBlocked = selectedStaged.some((item) => item.state === "DECODING" || item.width <= 0 || item.height <= 0);
   const mediaInFlight = Boolean(selectedMedia?.state === "SENDING" || mediaFlights.current.has(draftKey));
   const sendBlocked = sending || imageInFlight || mediaInFlight || selectedPending?.state === "UNKNOWN" || selectedPending?.state === "SENDING" || selectedMedia?.state === "UNKNOWN";
 
   /* ---------- platform message menu: copy / reply / revoke / delete ---------- */
-  const replySummaryOf = (message: SupportMessage): string => message.image ? "[图片]" : mediaSummaryOf(message) ?? (message.text.trim() ? supportMessageSummary(message.text).trim().slice(0, 120) : "消息");
   const copyableTextOf = (message: SupportMessage): string | null => !message.revoked && message.from !== "system" && !message.image && !message.media
     && (message.messageType === undefined || message.messageType === 0) && message.text.trim() ? supportMessageSummary(message.text) : null;
   const clearReplyFor = (key: string) => {
@@ -2417,20 +1328,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       if (current && isCurrentImRequest(requestKey, current)) setTransferError(friendlyError(cause));
     } finally { setTransferBusy(false); }
   };
-  const applyPresence = async (availability: Presence["availability"], options?: { takeover?: boolean }): Promise<boolean> => {
-    if (!canPresence) return false;
-    const busyOwner = beginBusy();
-    setNotice(undefined);
-    const generation = operatorGenerationRef.current;
-    const operator = readClientKey;
-    try {
-      const value = await writePresence(availability, connectionForPresence(connection), options);
-      return canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator
-        && presenceWriteSucceeded(value, availability);
-    }
-    catch (cause) { if (canPresenceRef.current && generation === operatorGenerationRef.current && operatorRef.current === operator) setNotice(friendlyError(cause)); return false; }
-    finally { endBusy(busyOwner); }
-  };
   const endReception = async () => {
     if (!canPresence) return;
     // 暂停/下线前把未完成会话摆出来；用户可以继续暂停，也可以逐条去交接，不强制阻断。
@@ -2442,8 +1339,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     // A terminal connection still keeps the reception entry; the secondary
     // "结束接待" action below is the only way out without reconnecting.
     if (connection === "KICKED" || connection === "AUTH_FAILED") {
-      terminalConnectionRef.current = undefined;
-      setReconnectEpoch((value) => value + 1);
+      restartConnection();
       return;
     }
     // Another browser session owns reception/connection. Transfer ownership first
@@ -2453,7 +1349,7 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       setNotice(undefined);
       try {
         const value = await writePresence("AVAILABLE", "CONNECTING", { takeover: true });
-        if (value && value.ownedByAnotherSession !== true) setReconnectEpoch((current) => current + 1);
+        if (value && value.ownedByAnotherSession !== true) reconnect();
       } finally { endBusy(busyOwner); }
       return;
     }
@@ -2521,15 +1417,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         setNotice(`${item.name}：图片无法解码，请选择有效的 JPG 或 PNG`);
       });
     }
-  };
-  const onComposerPaste = (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type === "image/jpeg" || file.type === "image/png");
-    if (files.length) { event.preventDefault(); stageFiles(files); }
-  };
-  const onComposerDrop = (event: DragEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer?.files ?? []);
-    if (files.length) stageFiles(files);
   };
 
   const beginFlight = (key: string, image: DraftImage): DraftImage | null => {
@@ -2859,370 +1746,48 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
     }
   };
 
-  const onComposerKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || composingRef.current) return;
-    event.preventDefault();
-    const form = event.currentTarget.form;
-    if (!form) return;
-    if (typeof form.requestSubmit === "function") form.requestSubmit();
-    else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-  };
 
 
 
   if (snapshot.session.locked) return <section className="im-wb-root" aria-hidden="true" />;
 
   // Loading, empty, failed, forbidden and "not selected" are five different answers.
-  const emptyStreamState = (state: "loading" | "ready" | "error" | "forbidden" | undefined, hasSelection: boolean) => (
-    hasSelection && state === "loading"
-      ? <div className="im-wb-empty" role="status"><strong>正在读取消息…</strong></div>
-      : hasSelection && state === "error"
-        ? <div className="im-wb-empty"><CircleAlert size={22} /><strong>消息读取失败</strong><span>已加载的消息仍保留。</span><button type="button" data-action="retry-history" onClick={() => void setHistoryRetryToken((token) => token + 1)}>重新读取</button></div>
-        : hasSelection && state === "forbidden"
-          ? <div className="im-wb-empty"><ShieldCheck size={22} /><strong>无法查看该会话历史</strong></div>
-          : <div className="im-wb-empty"><Headphones size={22} /><strong>{hasSelection ? "等待第一条消息" : "尚未选择会话"}</strong><span>{hasSelection ? "该会话暂时没有可读消息。" : "从左侧队列选择会话。"}</span></div>);
-
-  const authorFor = (message: SupportMessage) => supportMessageAuthor(message, selected, operatorName, snapshot.user.image);
-  const userHoverCard = selected ? <div className="im-wb-author-hover">
-    <ConsultationUserCard consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-      request={adminRequest} scope={profileScope}
-      onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
-  </div> : null;
-  const jumpToMessage = (messageId: string) => {
-    const target = selectedMessages.find((message) => message.id === messageId || message.source?.messageServerId === messageId || message.source?.messageClientId === messageId);
-    if (!target) return;
-    const node = [...document.querySelectorAll<HTMLElement>("[data-message-id]")].find((item) => item.dataset.messageId === target.id);
-    if (!node) return;
-    node.scrollIntoView?.({ block: "center", behavior: "smooth" });
-    const targetNode = node.querySelector<HTMLElement>(".im-wb-bub") ?? node;
-    targetNode.classList.add("message-quote-target");
-    window.setTimeout(() => targetNode.classList.remove("message-quote-target"), 1600);
-  };
-  let timelineDay = "";
-  // Bot 欢迎/阶段卡已经说明建群或成员变化时，不再重复技术通知；没有 Bot 覆盖时保留一条兜底。
-  const botAccountId = selected?.botAccountId ?? null;
-  const noticeScope = selected?.type ?? "SERVICE";
-  const timelineMessages = collapseImSystemNotices(selectedMessages, {
-    hasBotMessage: Boolean(botAccountId && selectedMessages.some((message) => message.from !== "system" && !message.revoked && message.senderId === botAccountId)),
-    noticeOf: (message) => message.notice ?? null,
-  });
-  const timelineItems = timelineMessages.map((message, index) => {
-    const nodes = [];
-    const dayKey = dayKeyOf(message.createTime);
-    if (dayKey && dayKey !== timelineDay) {
-      timelineDay = dayKey;
-      nodes.push(<MessageScrollerPrimitive.Item key={`day-${dayKey}`} messageId={`day-${dayKey}`}><Marker className="im-wb-day" role="separator"><MarkerContent>{dayLabelOf(dayKey)}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
-    }
-    if (message.from === "system") {
-      const label = message.notice ? imSystemNoticeLabel(message.notice.kind, noticeScope) : message.text;
-      if (label === null) return nodes;
-      nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}><Marker className="im-wb-sys" variant="separator"><MarkerContent>{label}</MarkerContent></Marker></MessageScrollerPrimitive.Item>);
-      return nodes;
-    }
-    const previous = timelineMessages[index - 1];
-    const author = authorFor(message);
-    const grouped = Boolean(author.role !== "机器人" && previous && previous.from !== "system" && previous.senderId === message.senderId && (message.createTime ?? 0) - (previous.createTime ?? 0) < GROUP_WINDOW_MS);
-    const imageUrl = message.image ? supportedImageUrl(message.image.url) : null;
-    const imageThumbnailUrl = message.image ? supportedImageUrl(message.image.thumbnailUrl) : null;
-    const mine = message.self === true;
-    nodes.push(<MessageScrollerPrimitive.Item key={message.id} messageId={message.id} scrollAnchor={message.from === "customer"} tabIndex={-1} onContextMenu={onMessageContextMenu} {...messageLongPress}>
-      <Message align={mine ? "end" : "start"} className="im-wb-msg" data-message-id={message.id} data-from={message.from} data-self={mine} data-grouped={grouped}>
-        {author.role === "平台用户" && userHoverCard ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
-          trigger={<button type="button" className="im-wb-av-button" aria-label={`查看用户 ${author.name}`}><MessageAvatar className="im-wb-av" aria-hidden="true"><ProfileImage src={author.avatar} fallback={initialOf(author.name)} /></MessageAvatar></button>}
-          content={userHoverCard} /> : <MessageAvatar className="im-wb-av" aria-hidden="true">{author.role === "机器人" ? <img src="/art/zhouzhou/avatar.webp" alt="" /> : <ProfileImage src={author.avatar} fallback={initialOf(author.name)} />}</MessageAvatar>}
-        <MessageContent className="im-wb-msg-body">
-          {grouped ? null : <MessageHeader className="im-wb-msg-meta">{author.role === "平台用户" && userHoverCard
-            ? <EntityPreviewTrigger enableTouchButton={false} side="right" align="start" touchLabel={`预览用户 ${author.name}`} className="im-wb-author-preview"
-                trigger={<button type="button" className="im-wb-author-name-trigger"><b>{author.name}</b></button>} content={userHoverCard} />
-            : <b>{author.name}</b>}<span className="im-wb-role-tag" data-role={author.role}>{author.role}</span>{mine ? null : <time>{message.time}</time>}</MessageHeader>}
-          <SupportMessageBody message={{ ...message.source, text: message.text, media: message.media, revoked: message.revoked }}
-            image={message.image ? { url: imageUrl, thumbnailUrl: imageThumbnailUrl, name: message.image.name } : null}
-            replySenderName={(() => { const target = selectedMessages.find((item) => item.id === message.source?.reply?.messageId || item.source?.messageServerId === message.source?.reply?.messageId || item.source?.messageClientId === message.source?.reply?.messageId); return target ? authorFor(target).name : null; })()}
-            onJump={jumpToMessage} onOpenOrder={onOpenPath ? id => onOpenPath(`/orders/${encodeURIComponent(id)}`, "订单详情") : undefined}
-            legacyScopeKey={`${snapshot.adminUserId}:${snapshot.session.id}:${snapshot.permissions.join(",")}:${selected?.id ?? ""}:${selected?.version ?? ""}:${selected?.state ?? ""}:${selected?.assignedAdmin?.id ?? ""}`}
-            allowLegacyOrderOpen={profileScope.orders} resolveLegacyOrder={selected ? (id, signal) => adminRequest(`/im/consultations/${encodeURIComponent(selected.id)}/legacy-orders/${encodeURIComponent(id)}`, undefined, "GET", {}, signal) : undefined}
-            align={mine ? "end" : "start"} />
-          {mine && !message.revoked ? <MessageFooter className="im-wb-msg-status"><time>{message.time}</time><Check size={11} />已发送</MessageFooter> : null}
-        </MessageContent>
-      </Message>
-    </MessageScrollerPrimitive.Item>);
-    return nodes;
-  }).flat();
-
   const consultationPane = <div className="im-wb" data-pane={mobilePane} data-details={detailsOpen}>
-    <aside className="im-wb-queue" aria-label="会话队列">
-      <label className="im-wb-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话" aria-label="搜索会话" /></label>
-      <div className="im-wb-filters" role="group" aria-label="队列筛选">
-        <button type="button" aria-pressed={filter === "waiting"} onClick={() => setFilter("waiting")}>待接待<b>{counts.waiting}</b></button>
-        <button type="button" aria-pressed={filter === "mine"} onClick={() => setFilter("mine")}>我接待中<b>{counts.mine}</b></button>
-      </div>
-      <div className="im-wb-rows">
-        {filteredQueue.length ? filteredQueue.map((row) => <button type="button" key={row.id} className="im-wb-row" data-active={selectedId === row.id} aria-current={selectedId === row.id ? "page" : undefined}
-          onClick={() => {
-            restoredSelectionRef.current = true;
-            setSelectedId(row.id);
-            setMobilePane("chat");
-            setNotice(undefined);
-            persistQuery({ section: "consultation", consultation: row.consultation?.threadId ?? row.id });
-          }}>
-          <span className="im-wb-row-av" aria-hidden="true"><ProfileImage src={row.consultation?.user?.avatar} fallback={initialOf(row.title)} /></span>
-          <span className="im-wb-row-copy"><span className="im-wb-row-top"><b>{row.title}</b><i className="im-wb-tag" data-tone={row.type === "COMPLAINT" ? "warn" : "neutral"}>{row.type === "COMPLAINT" ? "投诉" : "咨询"}</i><time>{row.time}</time></span>
-            <span className="im-wb-row-snip">{row.snippet}</span>
-            <span className="im-wb-row-foot"><em data-tone={stageToneOf(row.state)}>{row.state}</em>{row.unreadCount > 0 ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`}>{row.unreadCount > 99 ? "99+" : row.unreadCount}</i> : null}</span></span>
-        </button>) : <div className="im-wb-list-empty">{query ? <><strong>当前列表没有匹配会话</strong><span>试试其他关键词。</span></>
-          : filter === "waiting" ? <><strong>系统正在分配…</strong><span>新咨询会按在线状态自动分配；异常时由管理岗接管。</span></>
-          : <><strong>暂无你接待中的会话</strong><span>从「待接待」接入一条即可开始。</span></>}</div>}
-      </div>
-    </aside>
+    <SupportConsultationQueue query={query} onQueryChange={setQuery} filter={filter} onFilterChange={setFilter} counts={counts} rows={filteredQueue} selectedId={selectedId}
+      onSelect={(row) => {
+        restoredSelectionRef.current = true;
+        setSelectedId(row.id);
+        setMobilePane("chat");
+        setNotice(undefined);
+        persistQuery({ section: "consultation", consultation: row.consultation?.threadId ?? row.id });
+      }} />
 
-    <main className="im-wb-chat">
-      <header className="im-wb-chat-head" ref={chatHeadingRef} tabIndex={-1} data-focus-target="chat">
-        <button type="button" className="im-wb-back" data-action="back-to-queue" onClick={() => setMobilePane("queue")}><ChevronLeft size={14} />队列</button>
-        <span className="im-wb-chat-av" aria-hidden="true"><ProfileImage src={selected?.user?.avatar} fallback={initialOf(selected?.user?.name || selected?.user?.username || "客")} /></span>
-        <div className="im-wb-chat-title">
-          <h2>{selected ? `${selected.user?.name || selected.user?.username || "平台用户"} · ${typeLabel(selected.type)}` : "选择一条会话"}</h2>
-          <span className="im-wb-chat-sub">{!selected ? "等待用户咨询" : roundHeadlineOf(selected)}</span>
-        </div>
-        <div className="im-wb-chat-actions">
-          {claimReady && canManageSupport ? <ActionTooltip content="自动分配异常时由管理岗接管"><button type="button" className="im-wb-btn im-wb-btn-outline" data-action="claim-consultation" onClick={() => void claim()} disabled={busy || connection !== "CONNECTED"}>接管会话</button></ActionTooltip> : null}
-          {claimReady && !canManageSupport ? <span className="im-wb-state">系统分配中…</span> : null}
-          {selected && isMine && selected.messageScopeState !== "FAILED" ? <ActionTooltip content={!serverCanSend && canOperateSelected ? "本轮尚未就绪，暂不可结束" : undefined}><button ref={closeTriggerRef} type="button" data-action="close-consultation" className="im-wb-btn im-wb-btn-outline" onClick={() => { if (!canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }} disabled={busy || !canOperateSelected || !serverCanSend || Boolean(closeOutcomeUnknown[selected.id]) || Boolean(blockedConsultations[selected.id])}>{!canOperateSelected ? "无本类型接待权限" : closeOutcomeUnknown[selected.id] ? "结束结果未确认" : "结束本轮"}</button></ActionTooltip> : null}
-          <button ref={transferTriggerRef} type="button" data-action="open-transfer" className="im-wb-btn im-wb-btn-outline" onClick={() => void openTransfer()} disabled={!canTransfer || !selected || selected.state !== "ACTIVE" || !isMine || selected.messageScopeState !== "READY" || busy}>{canTransfer ? "转交" : "无转交权限"}</button>
-          <ActionTooltip content={detailsOpen ? "收起会话详情" : "展开会话详情"}><button ref={detailsTriggerRef} type="button" className="im-wb-btn im-wb-btn-outline im-wb-btn-icon" aria-label={detailsOpen ? "收起会话详情" : "展开会话详情"} aria-expanded={detailsOpen} aria-controls="im-wb-details" data-action="toggle-details" onClick={() => { const narrow=typeof window!=="undefined"&&window.matchMedia("(max-width: 760px)").matches; if(narrow&&mobilePane!=="details"){openDetails();return;} if (detailsOpen) closeDetails(); else openDetails(); }}><MoreHorizontal size={15} /></button></ActionTooltip>
-        </div>
-      </header>
-      {readOnlyReason ? <p className="im-wb-scope-note" data-tone="readonly" data-action="support-readonly" role="status"><ShieldCheck size={13} />{readOnlyReason}</p> : null}
-      {activeAftersale&&selected?.threadId===activeAftersale.threadId?<p className="im-wb-notice" role="status">当前跟进售后：订单 {activeAftersale.orderDisplayNo??"—"} · {activeAftersale.id}<button type="button" className="im-wb-link" onClick={()=>setAftersaleOpen(true)}>查看售后记录</button>{onOpenPath?<button type="button" className="im-wb-link" onClick={()=>onOpenPath(`/orders/${activeAftersale.orderId}`)}>订单详情</button>:null}</p>:null}
-      {notice && (notice !== ROUND_CLOSED_NOTICE || selected?.state === "CLOSED") ? <p className="im-wb-notice" role="status"><CircleAlert size={14} />{notice}</p> : null}
-      {selected && closeOutcomeUnknown[selected.id] ? <p className="im-wb-notice" data-tone="warn" role="status"><CircleAlert size={14} />{CLOSE_OUTCOME_UNKNOWN_NOTICE}</p> : null}
-      <div className="im-wb-stream-wrap">
-        {selected?.messageScopeState === "FAILED" ? <div className="im-wb-empty"><CircleAlert size={22} /><strong>会话待人工核验</strong><span>请先完成核验再回复。</span>{selected.assignedAdmin?.id === snapshot.adminUserId && canTransfer ? <button type="button" className="im-wb-btn" data-action="reconcile-consultation" onClick={() => void reconcile()} disabled={busy}>核验并恢复</button> : null}</div>
-          : <MessageScrollerPrimitive.Provider autoScroll defaultScrollPosition="last-anchor">
-            <MessageScrollerPrimitive.Root className="im-wb-scroller">
-              <MessageScrollerPrimitive.Viewport preserveScrollOnPrepend className="im-wb-viewport" aria-label="会话消息" onContextMenu={onMessageContextMenu}><MessageScrollerPrimitive.Content className="im-wb-content">
-                {selectedMessages.length ? <>
-                  {selected && historyMore[selected.id] ? <MessageScrollerPrimitive.Item messageId="load-earlier"><div className="im-wb-history-more"><button type="button" onClick={() => void loadEarlier()} disabled={historyLoading}>{historyLoading ? "正在读取更早消息…" : "更早的消息"}</button></div></MessageScrollerPrimitive.Item> : null}
-                  {timelineItems}
-                </> : <MessageScrollerPrimitive.Item messageId="empty">{emptyStreamState(selected ? historyState[selected.id] : undefined, Boolean(selected))}</MessageScrollerPrimitive.Item>}
-              </MessageScrollerPrimitive.Content></MessageScrollerPrimitive.Viewport>
-              <ActionTooltip content="跳到最新消息"><MessageScrollerPrimitive.Button direction="end" className="im-wb-jump" render={<button type="button" aria-label="跳到最新消息" />}><ArrowDown size={13} aria-hidden="true" /></MessageScrollerPrimitive.Button></ActionTooltip>
-            </MessageScrollerPrimitive.Root>
-          </MessageScrollerPrimitive.Provider>}
-      </div>
-      {selectedFailedText ? <p className="im-wb-pending" role="status"><CircleAlert size={13} />发送结果未确认，草稿已保留。<button type="button" data-action="retry-text" onClick={() => void retryFailedText(selected!.id)} disabled={busy || !canSend}>{selectedFailedText.messageClientId ? "原消息重试" : "刷新历史核对"}</button></p> : null}
-      {selectedPending ? <div className="im-wb-draft" data-state={selectedPending.state}>
-        <img src={selectedPending.previewUrl} alt={selectedPending.name} />
-        <span>{selectedPending.name} · {formatBytes(selectedPending.size)} · {selectedPending.state === "SENDING" ? `上传中 ${selectedPending.progress}%` : selectedPending.state === "UNKNOWN" ? "结果未确认" : "发送失败"}</span>
-        <button type="button" onClick={() => void retryPendingImage()} disabled={sending || imageInFlight || !canSend}>{selectedPending.messageClientId ? "原消息重试" : "重试"}</button>
-        <ActionTooltip content={selectedPending.state === "UNKNOWN" ? "结果未确认时不可移除原图片" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" onClick={removePending} disabled={sendBlocked || !canSend || selectedPending.state === "UNKNOWN"}>移除</button></span></ActionTooltip>
-      </div> : null}
-      {selectedMedia ? <MediaDraftBar draft={selectedMedia} onRetry={() => void retryMediaDraft()} onRemove={removeSelectedMedia} disabled={busy || sending} /> : null}
-      {selectedReply ? <MessageReplyQuote label={replySummaryOf(selectedReply)} onCancel={() => clearReplyFor(draftKey)} /> : null}
-      <form className="im-wb-composer" onSubmit={(event) => void send(event)} onDragOver={(event) => event.preventDefault()} onDrop={onComposerDrop}>
-        {selectedStaged.length ? <AttachmentGroup className="im-wb-tray">{selectedStaged.map((item, idx) => <Attachment key={item.key} className="im-wb-tray-item" data-state={item.state} state={item.state === "DECODING" ? "processing" : "idle"} size="xs">
-          <AttachmentMedia variant="image"><img src={item.previewUrl} alt="" /></AttachmentMedia>
-          <AttachmentContent>
-            <AttachmentTitle>{selectedStaged.length > 1 ? `${idx + 1}. ` : ""}{item.name}</AttachmentTitle>
-            <AttachmentDescription>{item.state === "DECODING" ? "检查中" : "待发送"}</AttachmentDescription>
-          </AttachmentContent>
-          <AttachmentAction data-action="remove-staged" onClick={() => removeStaged(item)} disabled={sendBlocked} aria-label={`移除 ${item.name}`}>×</AttachmentAction>
-        </Attachment>)}
-          <span className="im-wb-tray-count">{selectedStaged.length + (selectedPending ? 1 : 0)}/{MAX_STAGED_IMAGES}</span></AttachmentGroup> : null}
-        <InputGroup className="im-wb-composer-box">
-          <InputGroupTextarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onComposerKeyDown} onPaste={onComposerPaste}
-            onCompositionStart={() => { composingRef.current = true; }} onCompositionEnd={() => { composingRef.current = false; }}
-            aria-label="输入客服消息" rows={3}
-            placeholder={!selected ? "从左侧选择会话" : selected.state === "WAITING" ? "接入会话后可回复" : selected.state === "ACTIVE" && !isMine ? readOnlyPlaceholder ?? "仅负责客服可发送消息" : selected.messageScopeState === "FAILED" ? messageScopeLabel("FAILED") : connection !== "CONNECTED" ? "消息通道未连接，草稿会保留" : "输入回复…"}
-            disabled={!canEdit} />
-          <InputGroupAddon align="block-end" className="im-wb-composer-tools">
-            <TooltipProvider delay={200}>
-              <Popover open={quickReplyOpen} onOpenChange={setQuickReplyOpen}>
-                <Tooltip>
-                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" data-action="quick-replies" aria-label="常用语" disabled={!canEdit || sendBlocked}><MessageSquareText size={15} /></button>} />} />
-                  <TooltipContent>常用语</TooltipContent>
-                </Tooltip>
-                <PopoverContent side="top" align="start" className="w-80 p-0">
-                  {editingQuickReplies ? (
-                    <div className="p-3 space-y-2 text-xs" data-panel="quick-replies-editor">
-                      <div className="flex items-center justify-between border-b pb-1.5 font-medium">
-                        <span>编辑个人常用语</span>
-                        <span className="text-[11px] text-muted-foreground">{quickReplyDrafts.length}/15</span>
-                      </div>
-                      <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
-                        {quickReplyDrafts.map((item, index) => (
-                          <div key={index} className="flex flex-col gap-1 rounded border p-1.5 bg-muted/30">
-                            <div className="flex items-center justify-between gap-1">
-                              <input
-                                className="h-6 flex-1 rounded border px-1.5 text-xs bg-background"
-                                placeholder="标签（≤10字）"
-                                maxLength={10}
-                                value={item.label}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setQuickReplyDrafts((prev) => prev.map((q, i) => i === index ? { ...q, label: val } : q));
-                                }}
-                              />
-                              <button
-                                type="button"
-                                className="text-destructive hover:underline px-1"
-                                onClick={() => setQuickReplyDrafts((prev) => prev.filter((_, i) => i !== index))}
-                              >
-                                删除
-                              </button>
-                            </div>
-                            <textarea
-                              className="w-full rounded border p-1 text-xs resize-none bg-background"
-                              rows={2}
-                              placeholder="回复内容（≤200字）"
-                              maxLength={200}
-                              value={item.text}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setQuickReplyDrafts((prev) => prev.map((q, i) => i === index ? { ...q, text: val } : q));
-                              }}
-                            />
-                          </div>
-                        ))}
-                        {quickReplyDrafts.length < 15 ? (
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="xs"
-                            className="w-full"
-                            onClick={() => setQuickReplyDrafts((prev) => [...prev, { label: "", text: "" }])}
-                          >
-                            + 添加常用语
-                          </Button>
-                        ) : null}
-                      </div>
-                      {quickReplyError ? <p className="text-destructive text-[11px]">{quickReplyError}</p> : null}
-                      <div className="flex items-center justify-between pt-1 border-t">
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="xs"
-                          onClick={() => {
-                            setQuickReplyDrafts([...SUPPORT_QUICK_REPLIES]);
-                            setQuickReplyError("");
-                          }}
-                        >
-                          恢复默认
-                        </Button>
-                        <div className="flex gap-1.5">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="xs"
-                            onClick={() => {
-                              setEditingQuickReplies(false);
-                              setQuickReplyError("");
-                            }}
-                          >
-                            取消
-                          </Button>
-                          <Button
-                            type="button"
-                            size="xs"
-                            onClick={() => {
-                              const cleaned = quickReplyDrafts
-                                .map((q) => ({ label: q.label.trim(), text: q.text.trim() }))
-                                .filter((q) => q.label && q.text);
-                              if (!cleaned.length) {
-                                setQuickReplyError("至少保留一条有效常用语");
-                                return;
-                              }
-                              try {
-                                storeSupportQuickReplies(snapshot.adminUserId, cleaned);
-                                setQuickReplies(cleaned);
-                                setEditingQuickReplies(false);
-                                setQuickReplyError("");
-                              } catch {
-                                setQuickReplyError("保存到本地失败，请检查浏览器存储空间");
-                              }
-                            }}
-                          >
-                            保存
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="im-wb-quick-replies" role="group" aria-label="常用语">
-                        {quickReplies.map((item) => (
-                          <button key={item.label} type="button" data-action="insert-quick-reply" onClick={() => insertQuickReply(item.text)}>
-                            <strong>{item.label}</strong><span>{item.text}</span>
-                          </button>
-                        ))}
-                      </div>
-                      <div className="border-t px-3 py-1.5 text-[11px] text-muted-foreground flex items-center justify-between">
-                        <span>仅本机保存</span>
-                        <button
-                          type="button"
-                          className="text-xs text-primary hover:underline"
-                          data-action="manage-quick-replies"
-                          onClick={() => {
-                            setQuickReplyDrafts(quickReplies);
-                            setQuickReplyError("");
-                            setEditingQuickReplies(true);
-                          }}
-                        >
-                          管理常用语
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </PopoverContent>
-              </Popover>
-              <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
-                <Tooltip>
-                  <TooltipTrigger render={<PopoverTrigger render={<button type="button" className="im-wb-tool" aria-label="表情" disabled={!canEdit || sendBlocked}><Smile size={15} /></button>} />} />
-                  <TooltipContent>表情</TooltipContent>
-                </Tooltip>
-                <PopoverContent side="top" align="start" className="w-auto p-0"><div className="chat-emoji-grid">
-                  {CHAT_EMOJIS.map((item) => <button key={item.emoji} type="button" className="chat-emoji-button" aria-label={item.label} onClick={() => insertEmoji(item.emoji)}>{item.emoji}</button>)}
-                </div></PopoverContent>
-              </Popover>
-              <Tooltip>
-                <TooltipTrigger render={<label className="im-wb-tool" aria-label="发送图片" />}>
-                  <Images size={15} /><input type="file" accept="image/jpeg,image/png" multiple onChange={(event: ChangeEvent<HTMLInputElement>) => { const files = event.target.files ? Array.from(event.target.files) : []; event.target.value = ""; stageFiles(files); }} disabled={!canEdit || sendBlocked} />
-                </TooltipTrigger>
-                <TooltipContent>发送图片</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送视频" onClick={() => consultationVideoInput.current?.click()} disabled={!canEdit || sendBlocked} />}><Video size={15} /></TooltipTrigger>
-                <TooltipContent>发送视频</TooltipContent>
-              </Tooltip>
-              <input ref={consultationVideoInput} type="file" accept="video/mp4,video/quicktime,video/webm" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "video"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
-              <Tooltip>
-                <TooltipTrigger render={<button type="button" className="im-wb-tool" aria-label="发送文件" onClick={() => consultationFileInput.current?.click()} disabled={!canEdit || sendBlocked} />}><FileText size={15} /></TooltipTrigger>
-                <TooltipContent>发送文件</TooltipContent>
-              </Tooltip>
-              <input ref={consultationFileInput} type="file" accept="application/pdf,application/zip,text/plain,text/csv,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.presentationml.presentation" hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) stageMediaFile(file, "file"); }} disabled={!canEdit || sendBlocked || selectedMedia?.state === "UNKNOWN"} />
-            </TooltipProvider>
-            <span className="im-wb-hint im-wb-hint-right"><Kbd>Enter</Kbd> 发送 · <Kbd>Shift</Kbd>+<Kbd>Enter</Kbd> 换行</span>
-            <button type="submit" className="im-wb-send" disabled={!canSend || busy || sendBlocked || (!draft.trim() && !selectedStaged.length && !(selectedPending?.state === "FAILED") && selectedMedia?.state !== "READY")}>{busy ? "处理中…" : "发送"}</button>
-          </InputGroupAddon>
-        </InputGroup>
-      </form>
-    </main>
+    <SupportChatPane
+      selected={selected} selectedMessages={selectedMessages} operatorName={operatorName} operatorAvatar={snapshot.user.image}
+      profileScope={profileScope} adminUserId={snapshot.adminUserId} sessionId={snapshot.session.id} permissions={snapshot.permissions}
+      onOpenPath={onOpenPath} isMine={isMine} claimReady={claimReady} canManageSupport={canManageSupport} canTransfer={canTransfer}
+      canOperateSelected={canOperateSelected} serverCanSend={serverCanSend} busy={busy} connection={connection} sending={sending}
+      canEdit={canEdit} canSend={canSend} sendBlocked={sendBlocked} imageInFlight={imageInFlight}
+      closeOutcomeUnknown={Boolean(selected && closeOutcomeUnknown[selected.id])} blocked={Boolean(selected && blockedConsultations[selected.id])}
+      detailsOpen={detailsOpen} mobilePane={mobilePane} notice={notice} activeAftersale={activeAftersale}
+      readOnlyReason={readOnlyReason} readOnlyPlaceholder={readOnlyPlaceholder}
+      historyMore={Boolean(selected && historyMore[selected.id])} historyState={selected ? historyState[selected.id] : undefined} historyLoading={historyLoading}
+      selectedFailedText={selectedFailedText} selectedPending={selectedPending} selectedMedia={selectedMedia} selectedReply={selectedReply}
+      selectedStaged={selectedStaged} draft={draft}
+      chatHeadingRef={chatHeadingRef} closeTriggerRef={closeTriggerRef} transferTriggerRef={transferTriggerRef} detailsTriggerRef={detailsTriggerRef} composerRef={composerRef}
+      onBackToQueue={() => setMobilePane("queue")} onClaim={() => void claim()}
+      onOpenClose={() => { if (!selected || !canOperateSelected || !serverCanSend || closeOutcomeUnknown[selected.id]) return; setCloseTarget(selected); setCloseOpen(true); }}
+      onOpenTransfer={() => void openTransfer()}
+      onToggleDetails={() => { const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches; if (narrow && mobilePane !== "details") { openDetails(); return; } if (detailsOpen) closeDetails(); else openDetails(); }}
+      onReconcile={() => void reconcile()} onRetryHistory={() => setHistoryRetryToken((token) => token + 1)} onLoadEarlier={() => void loadEarlier()}
+      onRetryFailedText={() => void retryFailedText(selected!.id)} onRetryPendingImage={() => void retryPendingImage()} onRemovePending={removePending}
+      onRetryMedia={() => void retryMediaDraft()} onRemoveMedia={removeSelectedMedia} onClearReply={() => clearReplyFor(draftKey)}
+      onSend={(event) => void send(event)} onStageFiles={stageFiles} onStageMedia={stageMediaFile} onRemoveStaged={removeStaged}
+      onDraftChange={setDraft} onInsertText={insertIntoDraft} onMessageContextMenu={onMessageContextMenu} messageLongPress={messageLongPress}
+      onOpenAftersale={() => setAftersaleOpen(true)} />
 
-    <aside id="im-wb-details" className="im-wb-details" aria-label="会话详情" hidden={!detailsOpen}>
-      <div className="im-wb-details-head"><strong>会话详情</strong><button type="button" className="im-wb-btn im-wb-btn-icon im-wb-details-back" data-action="back-to-chat" onClick={closeDetails}>返回会话</button></div>
-      {!selected ? <p className="im-wb-details-empty">未选择会话</p> : <>
-        {/* 会话类型、状态与当前接待已在聊天头部；右栏不再重复「本次服务」，第一屏从用户与
-            风险摘要开始。处理记录只陈列真实事件投影，不按当前状态推断历史；投诉的额外摘要
-            只使用现有投影并逐项标注缺口。 */}
-        <ConsultationUserCard key={selected.id} consultationId={selected.id} rowUserId={selected.user?.id ?? ""} fallbackName={selected.user?.name || selected.user?.username || "平台用户"}
-          request={adminRequest} scope={profileScope}
-          onOpenProfile={(id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料")} />
-        <ConsultationEventsCard key={`${selected.id}:events`} consultationId={selected.id} request={adminRequest} />
-        <ConsultationRoundsTimeline key={`${selected.id}:rounds`} consultationId={selected.id} currentRoundId={selected.id} request={adminRequest} />
-
-        {blockedConsultations[selected.id] ? <section className="im-wb-sec"><span>授权状态</span><small>发送权限已失效</small>
-          <button type="button" className="im-wb-btn" data-action="refresh-consultation-access" onClick={() => void refreshConsultationAccess()} disabled={busy || !selected.conversationId}>重新确认当前授权</button></section> : null}
-      </>}
-    </aside>
+    <SupportDetailsPane selected={selected} profileScope={profileScope} onOpenPath={onOpenPath} blocked={Boolean(selected && blockedConsultations[selected.id])}
+      busy={busy} detailsOpen={detailsOpen} onClose={closeDetails} onRefreshAccess={() => void refreshConsultationAccess()} />
   </div>;
 
   const contactedAftersale=(record:AftersaleRecord,id:string,threadId:string)=>{
@@ -3233,19 +1798,6 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
       persistQuery({section:"consultation",consultation:threadId});
     }).catch(cause=>{if(aftersaleScopeRef.current===expected)setNotice(friendlyError(cause));});
   };
-  // Availability is the server's reception intent; the label must still show a broken
-  // message channel instead of claiming "可接待". Ending presence stays available so
-  // the operator can clear a stale AVAILABLE row even while the IM channel reconnects.
-  const runtime = presenceRuntimeState(
-    presence.availability,
-    connection,
-    busy,
-    presence.ownedByAnotherSession === true,
-    presence.unbound === true,
-    localLeader,
-    presence.dispatchable !== false,
-  );
-
   return <div className="im-wb-root" data-unified="true">
     <AftersaleInbox key={aftersaleScope} open={aftersaleOpen&&canRead} onOpenChange={setAftersaleOpen} scope={aftersaleScope} adminId={snapshot.adminUserId} canHandle={canRead&&canAccept} canTakeover={Boolean(snapshot.security.isBoss||snapshot.permissions.includes("im.support.audit.takeover"))} onContact={contactedAftersale} onDirtyChange={setAftersaleDirty} getConnectionId={() => connectionIdRef.current}/>
     <nav className="im-wb-bar" aria-label="沟通类型">
@@ -3256,106 +1808,32 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
         <button type="button" aria-pressed={section === "orders"} onClick={() => { setSection("orders"); persistQuery({ section: "orders" }); }}>订单沟通</button>
       </div>
       <span className="im-wb-spacer" />
-      <div className="im-wb-runtime">
-        <ActionTooltip content={notifyPermission === "denied" ? "浏览器已屏蔽通知，请在站点设置中允许" : notifyEnabled && notifyPermission === "granted" ? "消息提醒已开启（需保持标签页打开）" : "开启浏览器通知与提示音"}>
-          <button type="button" className="im-wb-btn im-wb-btn-icon im-wb-notify" data-action="toggle-notifications"
-            data-state={notifyPermission === "denied" ? "denied" : notifyEnabled && notifyPermission === "granted" ? "on" : "prompt"}
-            aria-label={notifyEnabled && notifyPermission === "granted" ? "关闭消息提醒" : "开启消息提醒"}
-            onClick={() => void toggleNotifications()}>
-            {notifyPermission === "denied" || notifyPermission === "unsupported" ? <BellOff size={15} /> : <Bell size={15} />}
-            {notifyUnreadCount > 0 ? <b className="im-wb-notify-count" aria-label={`${notifyUnreadCount} 条未读`}>{notifyUnreadCount > 99 ? "99+" : notifyUnreadCount}</b> : null}
-          </button>
-        </ActionTooltip>
-        <span className="im-wb-runtime-divider" aria-hidden="true" />
-        {canPresence ? <>
-          <span className="im-wb-state im-wb-runtime-state" data-tone={runtime.tone}><i className={presence.availability === "AVAILABLE" && runtime.connected ? "on" : ""} />{runtime.label}</span>
-          <span className="im-wb-runtime-divider" aria-hidden="true" />
-          <TodayDuration seconds={presence.today?.seconds} active={canPresence && localLeader && presence.availability === "AVAILABLE" && !snapshot.session.locked} />
-          <ActionTooltip content={runtime.toggleTitle}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn im-wb-btn-outline im-wb-presence-toggle im-wb-runtime-action" data-action="toggle-presence" onClick={() => void togglePresence()} disabled={runtime.toggleDisabled}>{runtime.toggleLabel}</button></span></ActionTooltip>
-          {presence.availability === "AVAILABLE" && localLeader && (connection === "KICKED" || connection === "AUTH_FAILED")
-            ? <button type="button" className="im-wb-btn im-wb-btn-outline im-wb-runtime-action" data-action="end-reception" onClick={() => void endReception()} disabled={busy}>结束接待</button>
-            : null}
-        </> : <span className="im-wb-state">无在线状态权限</span>}
-        {connection !== "CONNECTED" ? <>
-          <span className="im-wb-runtime-divider" aria-hidden="true" />
-          <span className="im-wb-state im-wb-runtime-warning" data-tone="warn"><i />消息服务异常</span>
-        </> : null}
-      </div>
-      {clientRef.current?.transport === "local-fake" ? <span className="im-wb-state im-wb-local">本地测试</span> : null}
+      <SupportRuntimeBar canPresence={canPresence} presence={presence} connection={connection} busy={busy} localLeader={localLeader}
+        sessionLocked={snapshot.session.locked} notifyPermission={notifyPermission} notifyEnabled={notifyEnabled} notifyUnreadCount={notifyUnreadCount}
+        isLocalFake={clientRef.current?.transport === "local-fake"} onToggleNotifications={() => void toggleNotifications()}
+        onTogglePresence={() => void togglePresence()} onEndReception={() => void endReception()} />
     </nav>
     <div className="im-wb-unified">
-      <aside className="im-wb-unified-queue" aria-label="全部会话" onContextMenu={(event) => { const rowEl = (event.target as Element).closest(".im-wb-row") as HTMLElement | null; event.preventDefault(); if (!rowEl || rowEl.dataset.unifiedKind !== "order") { setUnifiedOrderMenu(null); return; } event.stopPropagation(); const orderId = rowEl.dataset.orderId; if (!orderId) return; setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId, preference: orderPreferenceOf(orderId, orderDirectory.find((row) => row.id === orderId)?.teamId), row: rowEl }); }}>
-        <div className="im-wb-unified-head"><strong>全部会话</strong><span>{searchState.loading && searchState.q === unifiedQuery.trim() ? "搜索中…" : unifiedTotal}</span></div>
-        <label className="im-wb-search"><Search size={13} /><input value={unifiedQuery} maxLength={64} onChange={(event) => setUnifiedQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape" && unifiedQuery) { event.preventDefault(); setUnifiedQuery(""); } }} placeholder="搜索用户、订单号、账号或游戏" aria-label="搜索全部会话" />{unifiedQuery ? <button type="button" className="im-wb-search-clear" aria-label="清空搜索" onClick={() => setUnifiedQuery("")}><X size={12} /></button> : null}</label>
-        {searchState.error ? <p className="im-wb-order-notice" data-tone="warn" role="status">{searchState.error}</p> : null}
-        {searchLimitReached ? <p className="im-wb-order-notice" role="status">匹配结果较多，当前每类最多显示 50 条；请补充关键词继续缩小范围。</p> : null}
-        <div className="im-wb-unified-types" role="group" aria-label="会话类型">
-          {([["ALL", "全部"], ["SERVICE", "咨询"], ["COMPLAINT", "投诉"], ["ORDER", "订单群"]] as const).map(([value, label]) =>
-            <button key={value} type="button" aria-pressed={unifiedType === value} onClick={() => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}>{label}</button>)}
-        </div>
-        {orderQueueNotice && (unifiedType === "ALL" || unifiedType === "ORDER")
-          ? <p className="im-wb-order-notice" data-tone="warn" role="status" data-action="order-queue-notice">{orderQueueNotice}</p>
-          : null}
-        <div className="im-wb-rows">
-          {unifiedRows.length ? unifiedRows.map((row) => {
-            const active = row.kind === "consultation" ? section === "consultation" && selectedId === row.id : section === "orders" && orderSelection === row.id;
-            return <button type="button" key={`${row.kind}:${row.id}`} className="im-wb-row" data-unified-kind={row.kind} data-order-id={row.kind === "order" ? row.id : undefined} data-active={active} aria-current={active ? "page" : undefined}
-              onContextMenu={row.kind === "order" ? (event) => { event.preventDefault(); event.stopPropagation(); setUnifiedOrderMenu({ x: event.clientX, y: event.clientY, orderId: row.id, preference: orderPreferenceOf(row.id, orderDirectory.find((item) => item.id === row.id)?.teamId), row: event.currentTarget }); } : undefined}
-              onClick={() => {
-                restoredSelectionRef.current = true;
-                if (row.kind === "consultation") {
-                  setSection("consultation");
-                  setSelectedId(row.id);
-                  const target = consultationDirectory.find((item) => item.id === row.id);
-                  persistQuery({ section: "consultation", consultation: target?.threadId ?? row.id });
-                } else {
-                  setSection("orders");
-                  setOrderSelection(row.id);
-                  persistQuery({ section: "orders", order: row.id });
-                }
-                setMobilePane("chat");
-              }}>
-              {row.kind === "order"
-                ? <OrderGroupAvatar displayNo={row.title} className="im-wb-row-av" />
-                : <span className="im-wb-row-av" data-kind={row.kind} aria-hidden="true"><ProfileImage src={row.avatar} fallback={initialOf(row.title)} /></span>}
-              <span className="im-wb-row-copy">
-                <span className="im-wb-row-top">
-                  <b>{row.title}</b>
-                  {row.tag ? <i className="im-wb-tag" data-tone={row.tone}>{row.tag}</i> : null}
-                  {row.stageCardUnknown ? <i className="im-wb-tag" data-tone="warn">自动卡待核对</i> : null}
-                  {row.pinned ? <Pin size={11} className="im-wb-row-flag" aria-label="已置顶" /> : null}
-                </span>
-                <span className="im-wb-row-snip">
-                  <i className="im-wb-row-state" data-tone={row.stateTone}>{row.state}</i>
-                  <span className="im-wb-row-preview">{row.snippet}</span>
-                  {row.meta ? <span className="im-wb-row-meta"><CalendarClock size={10} aria-hidden="true" />{row.meta}</span> : null}
-                </span>
-              </span>
-              <span className="im-wb-row-tail">
-                <time dateTime={row.sortAt ? new Date(row.sortAt).toISOString() : undefined}>{row.time}</time>
-                {row.muted
-                  ? <BellOff size={12} className="im-wb-row-flag" aria-label={row.unreadCount > 0 ? "有未读消息，已免打扰" : "已免打扰"} />
-                  : row.unreadCount > 0
-                    ? <i className="im-wb-unread" aria-label={`${row.unreadCount} 条未读`} title={`${row.unreadCount} 条未读`}>{row.unreadCount > 99 ? "99+" : row.unreadCount}</i>
-                    : null}
-              </span>
-            </button>;
-          }) : <div className="im-wb-list-empty"><strong>{searchState.loading ? "正在搜索…" : serverSearchActive ? "没有匹配的会话" : "暂无会话"}</strong><span>{serverSearchActive ? "换一个关键词，或清空搜索查看全部已加载会话。" : "新的咨询、投诉和订单群会出现在这里。"}</span></div>}
-          {orderNextCursor && !serverSearchActive && (unifiedType === "ALL" || unifiedType === "ORDER")
-            ? <button type="button" className="im-wb-more" data-action="load-more-orders" disabled={orderLoadingMore || orderRefreshing}
-                onClick={() => void loadMoreOrders()}>{orderRefreshing ? "刷新中…" : orderLoadingMore ? "正在读取…" : "加载更多订单群"}</button>
-            : null}
-          {hiddenOrderCount ? <button type="button" className="im-wb-more im-og-restore" onClick={restoreHiddenOrders}>已隐藏 {hiddenOrderCount} 个订单群 · 恢复显示</button> : null}
-        </div>
-      </aside>
-      {unifiedOrderMenu ? <MessageActionMenu x={unifiedOrderMenu.x} y={unifiedOrderMenu.y} label="订单群操作" returnFocus={unifiedOrderMenu.row}
-        items={[
-          { id: "pin" as const, label: unifiedOrderMenu.preference.pinned ? "取消置顶" : "置顶会话" },
-          { id: "mute" as const, label: unifiedOrderMenu.preference.muted ? "取消消息免打扰" : "消息免打扰" },
-          { id: "settings" as const, label: "群设置" },
-          { id: "hide" as const, label: "不显示会话", danger: true },
-        ]}
-        onSelect={handleUnifiedOrderMenuAction} onClose={() => setUnifiedOrderMenu(null)} /> : null}
+      <SupportUnifiedDirectory adminUserId={snapshot.adminUserId} rows={unifiedRows} total={unifiedTotal} searchState={searchState} query={unifiedQuery} onQueryChange={setUnifiedQuery}
+        unifiedType={unifiedType} onTypeChange={(value) => { setUnifiedType(value); persistQuery({ type: value === "ALL" ? null : value }); }}
+        orderQueueNotice={orderQueueNotice} serverSearchActive={serverSearchActive} searchLimitReached={searchLimitReached} orderNextCursor={orderNextCursor}
+        orderLoadingMore={orderLoadingMore} orderRefreshing={orderRefreshing} onLoadMore={() => void loadMoreOrders()} hiddenOrderCount={hiddenOrderCount} onRestoreHidden={restoreHiddenOrders}
+        section={section} selectedId={selectedId} orderSelection={orderSelection} preferenceOf={orderPreferenceOf} teamIdOf={(orderId) => orderDirectory.find((row) => row.id === orderId)?.teamId}
+        onOrderAction={handleUnifiedOrderAction}
+        onSelect={(row) => {
+          restoredSelectionRef.current = true;
+          if (row.kind === "consultation") {
+            setSection("consultation");
+            setSelectedId(row.id);
+            const target = consultationDirectory.find((item) => item.id === row.id);
+            persistQuery({ section: "consultation", consultation: target?.threadId ?? row.id });
+          } else {
+            setSection("orders");
+            setOrderSelection(row.id);
+            persistQuery({ section: "orders", order: row.id });
+          }
+          setMobilePane("chat");
+        }} />
       <div className="im-wb-unified-detail">
         <div className="im-wb-pane" hidden={section !== "consultation"}>{consultationPane}</div>
         {canRead ? <div className="im-wb-pane im-wb-pane--orders" hidden={section !== "orders"}><OrderWorkbenchPane identity={readClientKey} adminUserId={snapshot.adminUserId} operatorName={operatorName}
@@ -3365,66 +1843,13 @@ export function ImSupportView({ snapshot, initialSection = "consultation", initi
           onOpenProfile={profileScope.profile ? (id) => onOpenPath?.(`/users/${encodeURIComponent(id)}`, "用户资料") : undefined} onOpenPath={onOpenPath} /></div> : null}
       </div>
     </div>
-    <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="转交会话" showCloseButton={false} finalFocus={transferTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>转交会话</strong><span>{selected?.user?.name || "当前咨询"}</span></div><ActionTooltip content="关闭转交"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setTransferOpen(false)} aria-label="关闭转交"><X size={14} /></button></ActionTooltip></div>
-        <label className="im-wb-dialog-note"><span>交接备注（可选，≤200 字）<em>{transferNote.length}/200</em></span>
-          <Textarea value={transferNote} maxLength={200} rows={2} aria-label="交接备注（可选）" placeholder="说明交接原因或注意事项" disabled={transferBusy} onChange={(event) => setTransferNote(event.target.value)} /></label>
-        {transferError ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />{transferError}</p>
-          : transferState === null ? <p className="im-wb-dialog-empty">正在读取可转交客服…</p>
-          : !transferState.transferReady ? <p className="im-wb-dialog-empty">会话尚未就绪，暂不可转交</p>
-          : !transferState.targets.length ? <p className="im-wb-dialog-empty">暂无可转交的客服。这里只显示当前在线且可接待的其他客服；投诉会话还会排除无权处理或已被排除的客服。</p>
-          : <div className="im-wb-dialog-list">{transferState.targets.map((target) => <button key={target.adminUserId} type="button" disabled={transferBusy} onClick={() => void confirmTransfer(target.adminUserId)}><span>{target.displayName}</span><small>{target.inGrace ? "连接异常，可能无法及时查看" : "可接待客服"}</small></button>)}</div>}
-        <p className="im-wb-dialog-hint">转交后原会话与历史保留；填写的备注会写入交接记录</p>
-      </DialogContent>
-    </Dialog>
-    {/* 暂停/下线前的未完成会话清单：只提示与提供交接入口，不阻断暂停。 */}
-    <Dialog open={offDutyOpen} onOpenChange={setOffDutyOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="暂停接待确认" showCloseButton={false}>
-        <div className="im-wb-dialog-head"><div><strong>暂停接待</strong><span>还有 {myOpenConsultations.length} 条未完成咨询</span></div>
-          <ActionTooltip content="关闭暂停确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setOffDutyOpen(false)} aria-label="关闭暂停确认"><X size={14} /></button></ActionTooltip></div>
-        <p className="im-wb-dialog-hint">暂停后不再接新会话，已有会话不会自动结束；你可以先逐条交接，也可以直接暂停。</p>
-        <ul className="im-wb-offduty-list" aria-label="未完成咨询">
-          {myOpenConsultations.map((item) => <li key={item.id} data-consultation-id={item.id}>
-            <div><strong>{item.user?.name || item.user?.username || "平台用户"}</strong><span>{typeLabel(item.type)} · {scopeStateLabel(item)}</span></div>
-            <ActionTooltip content={!canTransfer ? "无转交权限" : item.messageScopeState !== "READY" ? "会话尚未就绪，暂不可转交" : undefined}><span className="im-wb-tooltip-anchor"><button type="button" className="im-wb-btn" data-action="offduty-transfer" disabled={!canTransfer || item.messageScopeState !== "READY" || busy}
-              onClick={() => goTransferFromChecklist(item.id)}>去交接</button></span></ActionTooltip>
-          </li>)}
-        </ul>
-        <div className="im-wb-dialog-actions">
-          <button type="button" className="im-wb-btn" onClick={() => setOffDutyOpen(false)}>继续接待</button>
-          <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-pause-presence" disabled={busy}
-            onClick={() => { setOffDutyOpen(false); void applyPresence("OFF_DUTY"); }}>仍然暂停</button>
-        </div>
-      </DialogContent>
-    </Dialog>
-    <Dialog open={receptionOpen} onOpenChange={setReceptionOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="需要先开始接待" showCloseButton={false}>
-        <div className="im-wb-dialog-head"><div><strong>还不能接入会话</strong><span>当前未开始接待</span></div>
-          <ActionTooltip content="关闭接待提醒"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setReceptionOpen(false)} aria-label="关闭接待提醒"><X size={14} /></button></ActionTooltip></div>
-        <p className="im-wb-dialog-hint">你当前还没有开始接待，直接接入会被服务端拒绝。先开始接待，平台会把你的状态更新为“可接待”，然后自动接入当前会话。</p>
-        {connection !== "CONNECTED" ? <p className="im-wb-dialog-error" role="alert"><CircleAlert size={14} />消息服务未连接，暂不能开始接待。</p> : null}
-        <div className="im-wb-dialog-actions">
-          <Button type="button" variant="outline" onClick={() => setReceptionOpen(false)}>取消</Button>
-          <Button type="button" data-action="start-reception-and-claim" disabled={busy || connection !== "CONNECTED"} onClick={() => void startReceptionAndClaim()}>开始接待并接入</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-    {/* 结束本轮：只结束当前轮次，不断开整条线程；确认对象与后果再提交。没有后台恢复/撤销合同，
-        所以这里不给「撤销」，也不把结束本轮包装成可逆操作。 */}
-    <Dialog open={closeOpen} onOpenChange={setCloseOpen}>
-      <DialogContent className="im-wb-dialog" aria-label="结束本轮" showCloseButton={false} finalFocus={closeTriggerRef}>
-        <div className="im-wb-dialog-head"><div><strong>结束本轮</strong><span>{closeTarget ? `${typeLabel(closeTarget.type)} · ${roundTagOf(closeTarget)}${roundTagOf(closeTarget) ? " · " : ""}${closeTarget.user?.name || closeTarget.user?.username || "平台用户"}` : "当前轮次"}</span></div><ActionTooltip content="关闭结束本轮确认"><button type="button" className="im-wb-btn im-wb-btn-icon" onClick={() => setCloseOpen(false)} aria-label="关闭结束本轮确认"><X size={14} /></button></ActionTooltip></div>
-        {closeTarget ? <dl className="im-wb-confirm">
-          <div><dt>{closeTarget.type === "COMPLAINT" ? "本轮处理" : "本轮接待"}</dt><dd>{closeTarget.assignedAdmin?.name || "尚未分配"}</dd></div>
-        </dl> : null}
-        <p className="im-wb-dialog-hint">结束后只结束当前这一轮接待：客服状态恢复为空闲，聊天记录保留在同一会话，用户再次咨询会开启新一轮并重新匹配客服。本轮结束不可撤销，平台当前没有恢复本轮接待的入口。</p>
-        <div className="im-wb-dialog-actions">
-          <button type="button" className="im-wb-btn" onClick={() => setCloseOpen(false)}>取消</button>
-          <button type="button" className="im-wb-btn im-wb-btn-danger" data-action="confirm-close-consultation" onClick={() => { if (closeTarget) void close(closeTarget.id); }} disabled={busy || !closeTarget || !canOperateSelected || !closeTarget.canSend}>确认结束本轮</button>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <SupportTransferDialog open={transferOpen} onOpenChange={setTransferOpen} userName={selected?.user?.name || "当前咨询"} note={transferNote} onNoteChange={setTransferNote}
+      busy={transferBusy} error={transferError} state={transferState} onConfirm={(targetAdminId) => void confirmTransfer(targetAdminId)} finalFocusRef={transferTriggerRef} />
+    <OffDutyDialog open={offDutyOpen} onOpenChange={setOffDutyOpen} consultations={myOpenConsultations} canTransfer={canTransfer} busy={busy}
+      onGoTransfer={goTransferFromChecklist} onConfirmPause={() => { setOffDutyOpen(false); void applyPresence("OFF_DUTY"); }} />
+    <ReceptionDialog open={receptionOpen} onOpenChange={setReceptionOpen} connection={connection} busy={busy} onStart={() => void startReceptionAndClaim()} />
+    <SupportCloseRoundDialog open={closeOpen} onOpenChange={setCloseOpen} target={closeTarget} busy={busy} canOperateSelected={canOperateSelected}
+      onConfirm={() => { if (closeTarget) void close(closeTarget.id); }} finalFocusRef={closeTriggerRef} />
 
     {messageMenu && menuMessage ? <MessageActionMenu key={`${messageMenu.key}:${messageMenu.id}`} x={messageMenu.x} y={messageMenu.y} items={messageMenuItems}
       onSelect={selectMessageAction} onClose={() => setMessageMenu(null)} returnFocus={messageMenu.row} /> : null}
