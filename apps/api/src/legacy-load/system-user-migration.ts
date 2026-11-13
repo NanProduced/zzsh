@@ -4,7 +4,7 @@ import { forbidden } from "../supply/supply-util";
 
 type MigrationTarget = Readonly<{ systemIdentifier: string; databaseOid: string; marker: string; nonce: string; roleOid: string }>;
 type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; evidenceDigest: string }>;
-export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT"; accountId: string;
+export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT" | "DISPLAY"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
 export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
 export type FinanceMigrationSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
@@ -141,16 +141,22 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, read
   if (row?.authorized !== true || typeof row.transactionId !== "string" || !row.transactionId) throw forbidden("Legacy system migration requires the protected migration role");
   if (actor.kind === "SYSTEM_ACCOUNT_MIGRATION" || actor.kind === "SYSTEM_ORDER_MIGRATION") {
     const accountGuard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(
-      (SELECT count(*)=4 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.rental_account'),
+      (SELECT count(*)=5 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_supply.rental_account'),
         to_regclass('zzsh_supply.listing_version'),to_regclass('zzsh_supply.legacy_supply_map'),
-        to_regclass('zzsh_supply.legacy_listing_read_snapshot')) AND c.relowner=r.oid)
+        to_regclass('zzsh_supply.legacy_listing_read_snapshot'),to_regclass('zzsh_supply.legacy_listing_display_snapshot')) AND c.relowner=r.oid)
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=s.oid AND c.conname='legacy_snapshot_migration_source' AND c.convalidated
+        AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_supply.legacy_listing_display_snapshot') AND c.conname='legacy_display_migration_source' AND c.convalidated
         AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
       AND NOT EXISTS (SELECT 1 FROM (VALUES
         (s.oid,'legacy_system_snapshot_insert',7,'zzsh_supply.guard_legacy_system_snapshot()','(new.created_by_migration_id IS NOT NULL)'),
         (s.oid,'legacy_system_snapshot_audit',5,'zzsh_supply.guard_legacy_system_snapshot_audit()','(new.created_by_migration_id IS NOT NULL)'),
         (s.oid,'legacy_read_snapshot_insert',7,'zzsh_supply.guard_legacy_read_snapshot()',NULL),
         (s.oid,'legacy_read_snapshot_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
+        (to_regclass('zzsh_supply.legacy_listing_display_snapshot'),'legacy_system_display_insert',7,'zzsh_supply.guard_legacy_system_snapshot()','(new.created_by_migration_id IS NOT NULL)'),
+        (to_regclass('zzsh_supply.legacy_listing_display_snapshot'),'legacy_system_display_audit',5,'zzsh_supply.guard_legacy_system_display_audit()','(new.created_by_migration_id IS NOT NULL)'),
+        (to_regclass('zzsh_supply.legacy_listing_display_snapshot'),'legacy_display_insert',7,'zzsh_supply.guard_legacy_display_snapshot()',NULL),
+        (to_regclass('zzsh_supply.legacy_listing_display_snapshot'),'legacy_display_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
         (to_regclass('zzsh_supply.legacy_supply_map'),'legacy_map_immutable',27,'zzsh_supply.guard_release_immutable()',NULL)
       ) required(relation,name,kind,fn,qualification) WHERE NOT EXISTS (
         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation
@@ -159,7 +165,8 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, read
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
           AND (required.fn<>'zzsh_supply.guard_legacy_system_snapshot()' OR position('current_user<>session_user' IN p.prosrc)>0)
           AND (required.fn<>'zzsh_supply.guard_legacy_system_snapshot_audit()' OR position('legacy_migration_manifest_sha256' IN p.prosrc)>0)
-          AND (required.name<>'legacy_system_snapshot_audit' OR (t.tgdeferrable AND t.tginitdeferred))))
+          AND (required.fn<>'zzsh_supply.guard_legacy_system_display_audit()' OR position('legacy_migration_manifest_sha256' IN p.prosrc)>0)
+          AND (required.name NOT IN ('legacy_system_snapshot_audit','legacy_system_display_audit') OR (t.tgdeferrable AND t.tginitdeferred))))
       ,false) AS authorized FROM pg_roles r JOIN pg_class s ON s.oid=to_regclass('zzsh_supply.legacy_listing_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
     if (accountGuard?.authorized !== true) throw forbidden("Legacy system account migration requires protected source guards");
   }
@@ -305,7 +312,7 @@ export function authorizeSystemUserMigration(client: PoolClient, actor: SystemUs
 export function authorizeSystemAccountMigration(client: PoolClient, actor: SystemAccountMigrationActor, source: AccountSource): Promise<void> {
   if (actor.kind !== "SYSTEM_ACCOUNT_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   const expectedAccountId = `account_${createHash("sha256").update(JSON.stringify(["legacy-account", source.sourceSystem, source.sourceEntity, source.legacyId])).digest("hex").slice(0,40)}`;
-  if (!['CREATE','OBSERVATION','SNAPSHOT'].includes(source.operation) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
+  if (!['CREATE','OBSERVATION','SNAPSHOT','DISPLAY'].includes(source.operation) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
       || !/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.accountId !== expectedAccountId
       || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.payloadDigest))
     throw forbidden("Legacy system account source is invalid");

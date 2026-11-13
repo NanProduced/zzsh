@@ -51,10 +51,16 @@ BEGIN
          AND u.image='/api/v1/profile/avatars/user/'||NEW.object_id||'/1') THEN
       RAISE EXCEPTION 'legacy user source or avatar is invalid' USING ERRCODE='42501';
     END IF;
-  ELSIF NEW.action IN ('supply.legacy.account_created','supply.publication.legacy_observed','supply.legacy.read_snapshot_recorded') THEN
+  ELSIF NEW.action IN ('supply.legacy.account_created','supply.publication.legacy_observed','supply.legacy.read_snapshot_recorded','supply.legacy.display_snapshot_recorded') THEN
     actor_prefix:='legacy-account-migration:'; source_entity:='la_rental_accounts';
     IF NEW.object_type IS DISTINCT FROM 'rental_account' OR COALESCE(NEW.details->>'payloadDigest','') !~ '^[a-f0-9]{64}$' THEN
       RAISE EXCEPTION 'legacy account source is invalid' USING ERRCODE='42501';
+    END IF;
+    IF NEW.action='supply.legacy.display_snapshot_recorded' AND
+      (NEW.details->>'displayDigest' IS DISTINCT FROM NEW.details->>'payloadDigest'
+       OR COALESCE(NEW.details->>'extractSha256','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details#>>'{after,observationVersionId}','')='') THEN
+      RAISE EXCEPTION 'legacy display source is invalid' USING ERRCODE='42501';
     END IF;
   ELSIF NEW.action='order.legacy.read_imported' THEN
     actor_prefix:='legacy-order-migration:'; source_entity:='la_order';

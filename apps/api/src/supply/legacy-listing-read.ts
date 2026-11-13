@@ -247,34 +247,62 @@ export async function recordLegacyReadSnapshot(client: PoolClient, accountId: st
 }
 
 /** Additive maintenance writer; caller owns the transaction. No public route. */
-export async function recordLegacyDisplaySnapshot(client: PoolClient, accountId: string, input: LegacyDisplayInput, actor: {id:string;sessionId:string;requestId:string}) {
+export async function recordLegacyDisplaySnapshot(client: PoolClient, accountId: string, input: LegacyDisplayInput, actor: {id:string;sessionId:string;requestId:string} | SystemAccountMigrationActor) {
   if (!input || Object.keys(input).sort().join(",")!=="baseSourceDigest,evidenceRef,extractSha256,observationVersionId,snapshot,sourceUpdatedAt"
     || !/^[A-Za-z0-9._:-]{1,128}$/.test(accountId) || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.observationVersionId)
     || !/^[a-f0-9]{64}$/.test(input.baseSourceDigest) || !/^[a-f0-9]{64}$/.test(input.extractSha256)
     || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(input.sourceUpdatedAt) || !Number.isFinite(Date.parse(input.sourceUpdatedAt))
     || typeof input.evidenceRef!=="string" || !input.evidenceRef.startsWith(`legacy-display-v1:${input.extractSha256}:`)) throw invalid("Invalid legacy display binding");
   const normalized={...input,snapshot:parseLegacyDisplaySnapshot(input.snapshot)}, digest=legacyDisplayDigest(accountId,normalized);
+  const systemActor="kind" in actor && actor.kind==="SYSTEM_ACCOUNT_MIGRATION" ? actor : null;
+  const legacyId=input.evidenceRef.slice(`legacy-display-v1:${input.extractSha256}:`.length);
+  const systemSource={operation:"DISPLAY" as const,accountId,sourceSystem:"legacy_mysql_restore",sourceEntity:"la_rental_accounts",legacyId,sourceDigest:input.baseSourceDigest,payloadDigest:digest};
+  if(systemActor)await authorizeSystemAccountMigration(client,systemActor,systemSource);
   const operation="supply.legacy.display_snapshot_recorded", key=`legacy-display-v1:${accountId}`;
-  const result=await withIdempotency(client,{realm:"admin",principalId:actor.id,operation,resourceId:accountId},key,fingerprintRequest(operation,accountId,normalized),async()=>{
-    const access=await loadEffectiveAdminAccess(client,actor.id); requirePermission(access,"supply.catalog.manage");
+  const result=await withIdempotency(client,{realm:systemActor?"system":"admin",principalId:actor.id,operation,resourceId:accountId},key,fingerprintRequest(operation,accountId,normalized),async replay=>{
+    if(systemActor&&replay?.publishRequired)throw conflict("Original system display receipt differs");
+    if(systemActor)await authorizeSystemAccountMigration(client,systemActor,systemSource);
+    const access=systemActor?null:await loadEffectiveAdminAccess(client,actor.id);if(!systemActor)requirePermission(access,"supply.catalog.manage");
     const account=(await client.query("SELECT game_id FROM zzsh_supply.rental_account WHERE id=$1 FOR UPDATE",[accountId])).rows[0];
-    if(!account) throw notFound(); await assertGameScope(client,actor.id,access!.isBoss,account.game_id);
+    if(!account) throw notFound(); if(!systemActor)await assertGameScope(client,actor.id,access!.isBoss,account.game_id);
     const old=(await client.query(legacySnapshotReplaySql(),[accountId])).rows[0];
     if(!old || old.observation_version_id!==input.observationVersionId || old.source_digest!==input.baseSourceDigest || old.source_updated_at.toISOString()!==input.sourceUpdatedAt
       || input.evidenceRef!==`legacy-display-v1:${input.extractSha256}:${old.legacy_id}`) throw conflict("Display source binding changed");
-    // Reuse the original writer's permission, scope and immutable-source replay checks.
-    await recordLegacyReadSnapshot(client,accountId,{observationVersionId:old.observation_version_id,sourceSystem:old.source_system,sourceEntity:old.source_entity,legacyId:old.legacy_id,sourceDigest:old.source_digest,sourceStatus:Number(old.source_status),sourceDeleted:false,sourceUpdatedAt:old.source_updated_at.toISOString(),evidenceRef:old.evidence_ref,snapshot:old.snapshot},actor);
+    if(systemActor){
+      const original=(await client.query(`/* legacy system display base */ SELECT h.created_by_migration_id,h.migration_manifest_sha256,
+       (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.actor_type='system' AND a.actor_id=$2 AND a.session_id IS NULL
+        AND a.action='supply.legacy.read_snapshot_recorded' AND a.object_type='rental_account' AND a.object_id=h.account_id AND a.outcome='SUCCESS'
+        AND a.legacy_migration_manifest_sha256=$3 AND a.details->>'sourceDigest'=h.source_digest
+        AND a.details->>'legacyId'=h.legacy_id AND a.details#>>'{after,observationVersionId}'=h.observation_version_id) AS audits,
+       (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action='supply.legacy.read_snapshot_recorded'
+        AND a.object_type='rental_account' AND a.object_id=h.account_id AND a.outcome='SUCCESS') AS all_audits
+       FROM zzsh_supply.legacy_listing_read_snapshot h WHERE h.account_id=$1`,[accountId,systemActor.id,systemActor.sourceDatasetSha256])).rows[0];
+      if(!original||original.created_by_migration_id!==systemActor.id||original.migration_manifest_sha256!==systemActor.sourceDatasetSha256||original.audits!==1||original.all_audits!==1)throw conflict("Original system listing source is not proved");
+      const prior=(await client.query(`/* legacy system display evidence */ SELECT d.display_digest,d.created_by_migration_id,d.migration_manifest_sha256,
+       (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.actor_type='system' AND a.actor_id=$2 AND a.session_id IS NULL
+        AND a.action=$4 AND a.object_type='rental_account' AND a.object_id=d.account_id AND a.outcome='SUCCESS'
+        AND a.legacy_migration_manifest_sha256=$3 AND a.details->>'displayDigest'=d.display_digest
+        AND a.details->>'extractSha256'=d.extract_sha256) AS audits,
+       (SELECT count(*)::int FROM zzsh_iam.audit_event a WHERE a.action=$4 AND a.object_type='rental_account' AND a.object_id=$1 AND a.outcome='SUCCESS') AS all_audits
+       FROM (SELECT 1) x LEFT JOIN zzsh_supply.legacy_listing_display_snapshot d ON d.account_id=$1 AND d.schema_version=1`,[accountId,systemActor.id,systemActor.sourceDatasetSha256,operation])).rows[0];
+      if(!prior||(replay ? prior.display_digest!==digest||prior.created_by_migration_id!==systemActor.id||prior.migration_manifest_sha256!==systemActor.sourceDatasetSha256||prior.audits!==1||prior.all_audits!==1 : prior.display_digest!==null||prior.all_audits!==0))
+        throw conflict("Original system display evidence differs");
+    }else{
+      // Reuse the original writer's permission, scope and immutable-source replay checks.
+      await recordLegacyReadSnapshot(client,accountId,{observationVersionId:old.observation_version_id,sourceSystem:old.source_system,sourceEntity:old.source_entity,legacyId:old.legacy_id,sourceDigest:old.source_digest,sourceStatus:Number(old.source_status),sourceDeleted:false,sourceUpdatedAt:old.source_updated_at.toISOString(),evidenceRef:old.evidence_ref,snapshot:old.snapshot},actor);
+    }
     return false;
   },async()=>{
     const prior=(await client.query("SELECT display_digest FROM zzsh_supply.legacy_listing_display_snapshot WHERE account_id=$1 AND schema_version=1",[accountId])).rows[0];
     if(prior && prior.display_digest!==digest) throw conflict("Display snapshot is immutable; review a new schema version");
     if(!prior){
-      await client.query(`INSERT INTO zzsh_supply.legacy_listing_display_snapshot(account_id,schema_version,observation_version_id,base_source_digest,extract_sha256,source_updated_at,evidence_ref,snapshot,display_digest,created_by_admin_id)
-        VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9)`,[accountId,input.observationVersionId,input.baseSourceDigest,input.extractSha256,input.sourceUpdatedAt,input.evidenceRef,normalized.snapshot,digest,actor.id]);
-      await recordAudit(client,{actorType:"admin",actorId:actor.id,sessionId:actor.sessionId,requestId:actor.requestId,action:operation,objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"补充不可变历史展示事实；不改变原快照、资金、库存或交易资格",details:{extractSha256:input.extractSha256,baseSourceDigest:input.baseSourceDigest,displayDigest:digest,before:{displaySnapshot:null},after:{displaySnapshot:"RECORDED",schemaVersion:1},result:"DISPLAY_SNAPSHOT_RECORDED"}});
+      await client.query(`INSERT INTO zzsh_supply.legacy_listing_display_snapshot(account_id,schema_version,observation_version_id,base_source_digest,extract_sha256,source_updated_at,evidence_ref,snapshot,display_digest,created_by_admin_id${systemActor?",created_by_migration_id,migration_manifest_sha256":""})
+        VALUES($1,1,$2,$3,$4,$5,$6,$7,$8,$9${systemActor?",$10,$11":""})`,[accountId,input.observationVersionId,input.baseSourceDigest,input.extractSha256,input.sourceUpdatedAt,input.evidenceRef,normalized.snapshot,digest,systemActor?null:actor.id,...(systemActor?[systemActor.id,systemActor.sourceDatasetSha256]:[])]);
+      await recordAudit(client,{actorType:systemActor?"system":"admin",actorId:actor.id,...(systemActor?{legacyMigrationManifestSha256:systemActor.sourceDatasetSha256}:{sessionId:(actor as {sessionId:string}).sessionId}),requestId:actor.requestId,action:operation,objectType:"rental_account",objectId:accountId,outcome:"SUCCESS",reason:"补充不可变历史展示事实；不改变原快照、资金、库存或交易资格",details:{...(systemActor?{sourceSystem:systemSource.sourceSystem,sourceEntity:systemSource.sourceEntity,legacyId,sourceDigest:input.baseSourceDigest,sourceDatasetSha256:systemActor.sourceDatasetSha256,migrationRunDigest:systemActor.id.slice("legacy-account-migration:".length),payloadDigest:digest}:{}),extractSha256:input.extractSha256,baseSourceDigest:input.baseSourceDigest,displayDigest:digest,before:{displaySnapshot:null},after:{displaySnapshot:"RECORDED",schemaVersion:1,...(systemActor?{observationVersionId:input.observationVersionId}:{})},result:"DISPLAY_SNAPSHOT_RECORDED"}});
     }
     return {status:200,body:{accountId,displayDigest:digest,schemaVersion:1}};
   });
+  if(systemActor&&(result.status!==200||canonicalize(result.body)!==canonicalize({accountId,displayDigest:digest,schemaVersion:1})))throw conflict("Original system display receipt differs");
   return {...result.body as {accountId:string;displayDigest:string;schemaVersion:number},replayed:result.replayed};
 }
 
