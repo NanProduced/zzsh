@@ -114,7 +114,8 @@ export async function fixedFeeTradeSchemaReady(client: Pick<PoolClient, "query">
       SELECT 1 FROM (VALUES
         ('zzsh_supply.listing_publication','SELECT'), ('zzsh_supply.listing_publication','INSERT'),
         ('zzsh_supply.rule_acceptance','SELECT'), ('zzsh_supply.rule_acceptance','INSERT'),
-        ('zzsh_order.rental_order','SELECT'), ('zzsh_order.rental_order','INSERT')
+        ('zzsh_order.rental_order','SELECT'), ('zzsh_order.rental_order','INSERT'),
+        ('zzsh_order.support_poststart_cancellation','SELECT')
       ) required(relation,privilege)
       WHERE NOT COALESCE(has_table_privilege(current_user,to_regclass(required.relation),required.privilege),false)
     ) AS ready`)).rows[0];
