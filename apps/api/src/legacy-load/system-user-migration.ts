@@ -335,15 +335,20 @@ export function authorizeSystemUserMigration(client: PoolClient, actor: SystemUs
   if (actor.kind !== "SYSTEM_USER_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
 }
-export async function authorizeSystemAccountMigration(client: PoolClient, actor: SystemAccountMigrationActor, source: AccountSource): Promise<void> {
+export async function authorizeSystemAccountMigration(client: PoolClient, actor: SystemAccountMigrationActor, source: AccountSource | readonly AccountSource[]): Promise<void> {
   if (actor.kind !== "SYSTEM_ACCOUNT_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
-  const expectedAccountId = `account_${createHash("sha256").update(JSON.stringify(["legacy-account", source.sourceSystem, source.sourceEntity, source.legacyId])).digest("hex").slice(0,40)}`;
-  if (!['CREATE','OBSERVATION','SNAPSHOT','DISPLAY','HOLDINGS','MEDIA'].includes(source.operation) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
-      || !/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.accountId !== expectedAccountId
-      || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.payloadDigest))
-    throw forbidden("Legacy system account source is invalid");
-  await authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
-  if (source.operation === "HOLDINGS") {
+  const sources: readonly AccountSource[] = Array.isArray(source) ? source : [source as AccountSource];
+  if (!sources.length || sources.length>100 || (sources.length>1 && (sources.some(item=>item.operation!=="MEDIA")
+    || new Set(sources.map(item=>item.accountId)).size!==sources.length))) throw forbidden("Legacy system account batch is invalid");
+  for (const item of sources) {
+    const expectedAccountId = `account_${createHash("sha256").update(JSON.stringify(["legacy-account", item.sourceSystem, item.sourceEntity, item.legacyId])).digest("hex").slice(0,40)}`;
+    if (!['CREATE','OBSERVATION','SNAPSHOT','DISPLAY','HOLDINGS','MEDIA'].includes(item.operation) || item.sourceSystem !== "legacy_mysql_restore" || item.sourceEntity !== "la_rental_accounts"
+        || !/^[1-9][0-9]{0,23}$/.test(item.legacyId) || item.accountId !== expectedAccountId
+        || !/^[a-f0-9]{64}$/.test(item.sourceDigest) || !/^[a-f0-9]{64}$/.test(item.payloadDigest))
+      throw forbidden("Legacy system account source is invalid");
+  }
+  await authorizeSystemMigration(client, actor, async()=>{for(const item of sources)await actor.assertSourceEvidence(item);});
+  if (sources[0]!.operation === "HOLDINGS") {
     const guard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(h.relowner=r.oid
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=h.oid AND c.conname='legacy_skin_holding_migration_source'
         AND c.convalidated AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
@@ -364,7 +369,7 @@ export async function authorizeSystemAccountMigration(client: PoolClient, actor:
       WHERE r.rolname=current_user`)).rows[0];
     if (guard?.authorized !== true) throw forbidden("Legacy system skin holding requires protected source guards");
   }
-  if (source.operation === "MEDIA") {
+  if (sources[0]!.operation === "MEDIA") {
     const guard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(h.relowner=r.oid
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=h.oid AND c.conname='legacy_media_paths_migration_source'
         AND c.convalidated AND position('migration_batch_id' IN pg_get_constraintdef(c.oid))>0)

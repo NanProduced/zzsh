@@ -28,13 +28,13 @@ export async function recordLegacyPathRecords(client: PoolClient, inputs: Array<
     const next = inputs.map(input => ({ accountId: input.accountId, ...prepareLegacyPathRecord(input.sourceRow) })).sort((a,b)=>a.accountId<b.accountId?-1:a.accountId>b.accountId?1:0);
     const digest = sha256Hex(canonicalize(next)), batchId = `legacy-media-batch:${digest}`, operation = "supply.legacy.image_paths";
     const fingerprint = fingerprintRequest(operation, batchId, next);
+    const sources = next.map(row=>({ operation: "MEDIA" as const, accountId: row.accountId, sourceSystem: "legacy_mysql_restore",
+      sourceEntity: "la_rental_accounts", legacyId: row.legacyId, sourceDigest: row.sourceDigest, payloadDigest: sha256Hex(canonicalize(row)) }));
     let mapped: Array<{ accountId: string; ownerUserId: string; legacyId: string; observationVersionId: string; sourceDigest: string }> = [];
     const result = await withIdempotency(client, { realm: "system", principalId: actor.id, operation, resourceId: batchId }, batchId, fingerprint,
       async replay => {
         if (replay?.publishRequired) throw conflict("Original system image paths receipt differs");
-        for (const row of next) await authorizeSystemAccountMigration(client, actor, { operation: "MEDIA", accountId: row.accountId,
-          sourceSystem: "legacy_mysql_restore", sourceEntity: "la_rental_accounts", legacyId: row.legacyId, sourceDigest: row.sourceDigest,
-          payloadDigest: sha256Hex(canonicalize(row)) });
+        await authorizeSystemAccountMigration(client, actor, sources);
         mapped = (await client.query<typeof mapped[number]>(`SELECT a.id AS "accountId",a.owner_user_id AS "ownerUserId",m.legacy_id AS "legacyId",
           m.version_id AS "observationVersionId",m.source_digest AS "sourceDigest" FROM zzsh_supply.rental_account a
           JOIN zzsh_supply.legacy_supply_map m ON m.account_id=a.id WHERE a.id=ANY($1::text[])
@@ -89,6 +89,7 @@ export async function recordLegacyPathRecords(client: PoolClient, inputs: Array<
         return {status:200,body:{inserted:rows.length,replayed:0}};
       });
     if(result.status!==200||canonicalize(result.body)!==canonicalize({inserted:next.length,replayed:0}))throw conflict("Original system image paths receipt differs");
+    await authorizeSystemAccountMigration(client, actor, sources);
     return result.replayed ? {inserted:0,replayed:next.length} : result.body as {inserted:number;replayed:number};
   }
   const access = await lockActor(client, actor.id);
