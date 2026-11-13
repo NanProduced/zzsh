@@ -9,6 +9,7 @@ import {
   assertRolePermissionSet,
   computeProposedPermissions,
   evaluateAdminDirectoryActions,
+  fieldAccessFrom,
   hasPermission,
   isAdminPermissionCode,
   loadEffectiveAdminAccess,
@@ -31,7 +32,8 @@ import {
   writeAdminGameScope,
   type AdminGameScope,
 } from "./admin-scope";
-import type { AuthSecurityOptions } from "./auth-security";
+import type { AuthSecurityNodeRequest, AuthSecurityNodeResponse, AuthSecurityOptions } from "./auth-security";
+import { bodyOf, queryValue, readAdminContext, sendSuccess } from "./auth-security";
 import {
   buildYunxinIdentityMarker,
   deriveYunxinAccountId,
@@ -976,3 +978,67 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 export { hasPermission, ADMIN_PERMISSION };
+
+/* ------------------------------ 目录路由 ------------------------------ */
+
+export async function listAdminDirectory(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  sendSuccess(response, await listAdministrators(options.pool, fieldAccessFrom(access), { ...access, id: context.userId }), requestId);
+}
+
+export async function readAdminDirectoryDetail(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  const username = queryValue(request, "username");
+  if (!username) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Administrator login is required");
+  sendSuccess(response, await readAdministratorDetail(options.pool, username, fieldAccessFrom(access), { ...access, id: context.userId }), requestId);
+}
+
+export async function readAdminGameScopeRoute(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  await requireDirectoryPermission(options.pool, context.userId, ADMIN_PERMISSION.accountRead);
+  const username = queryValue(request, "username");
+  if (!username) throw new SecurityApiError(400, API_V1_ERROR_CODES.INVALID_ARGUMENT, "Administrator login is required");
+  sendSuccess(response, await readAdministratorGameScope(options.pool, username), requestId);
+}
+
+export async function handleAssignAdministratorGameScope(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await assignAdministratorGameScope(context, bodyOf(request), requestId, options), requestId);
+}
+
+export async function listAdminRoles(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  const access = await loadEffectiveAdminAccess(options.pool, context.userId);
+  const fields = fieldAccessFrom(access);
+  if (!fields.roleRead && !fields.permissionRead) {
+    throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Permission required");
+  }
+  sendSuccess(response, await listRolesAndCatalog(options.pool, fields), requestId);
+}
+
+export async function handleCreateAdministrator(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await createAdministrator(context, bodyOf(request), requestId, options), requestId);
+}
+
+export async function handleUpdateAdministrator(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await updateAdministrator(context, bodyOf(request), requestId, options), requestId);
+}
+
+export async function handleAssignAdministrator(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await assignAdministratorAccess(context, bodyOf(request), requestId, options), requestId);
+}
+
+export async function handleCreateRole(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await createRole(context, bodyOf(request), requestId, options), requestId);
+}
+
+export async function handleUpdateRole(request: AuthSecurityNodeRequest, response: AuthSecurityNodeResponse, requestId: string, options: AuthSecurityOptions): Promise<void> {
+  const context = await readAdminContext(request, options);
+  sendSuccess(response, await updateRole(context, bodyOf(request), requestId, options), requestId);
+}
