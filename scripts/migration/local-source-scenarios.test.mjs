@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -35,6 +35,15 @@ test('system display readback requires its exact original receipt',()=>{
  assert.equal(matchesSystemDisplayReceipt([row],expected),true);
  for(const rows of [[],[row,row],[{...row,request_fingerprint:'d'.repeat(64)}],[{...row,publish_required:true}],[{...row,response_body:{...row.response_body,displayDigest:'e'.repeat(64)}}]])
   assert.equal(matchesSystemDisplayReceipt(rows,expected),false);
+});
+test('system continuation readback rejects missing, duplicated or changed receipts',()=>{
+ const expected={actorId:'legacy-order-migration:'+'a'.repeat(64),orderId:'legacy_order_1',key:'b'.repeat(64),fingerprint:'c'.repeat(64),
+  evidenceId:'evidence-1',admission:'PARAMETER_COMPLETE',canonicalize:JSON.stringify};
+ const row={scope_key:JSON.stringify(['system',expected.actorId,'order.legacy.continuation.import',expected.orderId]),key:expected.key,
+  request_fingerprint:expected.fingerprint,response_status:200,publish_required:false,response_body:{evidenceId:expected.evidenceId,admission:expected.admission,isolated:[]}};
+ assert.equal(matchesSystemContinuationReceipt([row],expected),true);
+ for(const rows of [[],[row,row],[{...row,request_fingerprint:'d'.repeat(64)}],[{...row,publish_required:true}],[{...row,response_body:{...row.response_body,isolated:[{}]}}]])
+  assert.equal(matchesSystemContinuationReceipt(rows,expected),false);
 });
 
 test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {

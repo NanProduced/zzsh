@@ -424,6 +424,15 @@ export function systemDisplayAttributionMatches(checkpoint,readback){
   &&phase.nextIndex===input.rows&&display?.expected===input.rows&&display.matched===input.rows
   &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
 }
+export function systemContinuationAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemOrderId;if(id===undefined)return true;
+ const input=checkpoint?.generatedPhases?.continuationEvidence,phase=checkpoint?.phases?.continuationEvidence;
+ const result=readback?.continuationEvidence,proof=result?.systemAttribution;
+ return /^legacy-order-migration:[a-f0-9]{64}$/.test(id)&&input?.receiptMode==='SYSTEM_ORDER_V1'&&Number.isSafeInteger(input.rows)&&input.rows>=0
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.rows
+  &&result?.expected===input.rows&&result.matched===input.rows&&result.total===input.rows
+  &&proof?.status==='VERIFIED'&&proof.sourceReconstructed===true&&proof.expected===input.rows&&proof.matched===input.rows;
+}
 
 /** Offline assessment: historical artifacts prove their recorded run, not current target state. */
 export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, checkpoint, readback, expected, growth, checkpointInput = input, checkpointActorProof = actorProof, requireStageAcks = true, requireReadback = true, requireGrowth = true, requireCurrentLegacyListed = true }) {
@@ -574,6 +583,7 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(!systemCoreAttributionMatches(checkpoint,readback))issues.push("ROUND_SYSTEM_SOURCE_ATTRIBUTION_UNCONFIRMED");
     if(!systemInvitationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_INVITATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemDisplayAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_DISPLAY_ATTRIBUTION_UNCONFIRMED');
+    if(!systemContinuationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_CONTINUATION_ATTRIBUTION_UNCONFIRMED');
     if (target.migrationProfile === NEXT_MIGRATION_PROFILE && (requireCurrentLegacyListed
       || Object.hasOwn(readback, "legacyListedSource") || Object.hasOwn(readback, "legacyListedSourceOrigin")
       || readback.legacyListedTarget?.sourceProofSha256 !== undefined)) {

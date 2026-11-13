@@ -337,6 +337,7 @@ const SYSTEM_AUDIT_DOMAINS = Object.freeze({
     accounts: {objectType:"rental_account", actions:["supply.legacy.account_created","supply.publication.legacy_observed","supply.legacy.read_snapshot_recorded"]},
     display: {objectType:"rental_account", actions:["supply.legacy.display_snapshot_recorded"]},
     orders: {objectType:"rental_order", actions:["order.legacy.read_imported"]},
+    continuation: {objectType:"rental_order", actions:["order.legacy.continuation.import"]},
 });
 
 /** Read exact source audits for one bounded page; SQL identifiers come only from this allowlist. */
@@ -362,7 +363,8 @@ export function matchesSystemMigrationAudit(rows, expected) {
       ||row.source_manifest!==expected.manifestSha256||!details||details.sourceDatasetSha256!==expected.manifestSha256
       ||details.migrationRunDigest!==parts[1]||details.sourceSystem!==expected.sourceSystem||details.sourceEntity!==expected.sourceEntity
       ||details.legacyId!==expected.legacyId||details.sourceDigest!==expected.sourceDigest)return false;
-    for(const field of ["evidenceDigest","payloadDigest","bindingDigest"])if(expected[field]!==undefined&&details[field]!==expected[field])return false;
+    for(const field of ["evidenceDigest","payloadDigest","bindingDigest","factsDigest","evidenceId","admission"])if(expected[field]!==undefined&&details[field]!==expected[field])return false;
+    if(expected.noIsolation===true&&(!Array.isArray(details.isolated)||details.isolated.length!==0))return false;
     if(expected.initialAvatarPresetId!==undefined&&(details.initialAvatar?.presetId!==expected.initialAvatarPresetId
       ||details.initialAvatar?.version!=="1"||details.initialAvatar?.created!==true))return false;
     return expected.observationVersionId===undefined||details.after?.observationVersionId===expected.observationVersionId;
@@ -372,6 +374,12 @@ export function matchesSystemDisplayReceipt(rows,{actorId,accountId,displayDiges
     const row=rows[0],scope=JSON.stringify(["system",actorId,"supply.legacy.display_snapshot_recorded",accountId]);
     return row.scope_key===scope&&row.key==="legacy-display-v1:"+accountId&&row.request_fingerprint===fingerprint
       &&row.response_status===200&&row.publish_required===false&&canonicalize(row.response_body)===canonicalize({accountId,displayDigest,schemaVersion:1});
+}
+export function matchesSystemContinuationReceipt(rows,{actorId,orderId,key,fingerprint,evidenceId,admission,canonicalize}){
+    if(!Array.isArray(rows)||rows.length!==1||typeof canonicalize!=="function")return false;
+    const row=rows[0],scope=JSON.stringify(["system",actorId,"order.legacy.continuation.import",orderId]);
+    return row.scope_key===scope&&row.key===key&&row.request_fingerprint===fingerprint&&row.response_status===200&&row.publish_required===false
+      &&canonicalize(row.response_body)===canonicalize({evidenceId,admission,isolated:[]});
 }
 function assertRegularSourceFile(file) {
     const stat = lstatSync(file);

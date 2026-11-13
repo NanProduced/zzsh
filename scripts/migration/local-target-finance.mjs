@@ -142,14 +142,15 @@ export async function applyFinancialDomains(ctx) {
     // recorded on the plan so the report can prove it was deliberate.
     const continuations = await arrayOf(ctx, "continuations");
     const next = ctx.isNextMigration === true;
-    let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", []) : null;
+    const continuationReceiptMode=next?'SYSTEM_ORDER_V1':undefined;
+    let continuationRows = !next && state.generatedPhases?.continuationEvidence ? freezePhase(ctx, "continuationEvidence", [],continuationReceiptMode) : null;
     if (!continuationRows) {
         const target = await facts(ctx, continuations.map(row => row.sourceId));
         const byLegacy = new Map(target.parents.map(p => [p.legacyId, p]));
         continuationRows = [];
         if (next) {
             continuationRows = buildNextContinuationRows({manifest, rows: continuations, parents: target.parents, sourceAsOf: micros(sourceCutoff), admit: mod("order/legacy-continuation-calc").admitLegacyEvidence});
-            const prior = state.generatedPhases?.continuationEvidence && freezePhase(ctx, "continuationEvidence", []);
+            const prior = state.generatedPhases?.continuationEvidence && freezePhase(ctx, "continuationEvidence", [],continuationReceiptMode);
             if (prior && JSON.stringify(prior) !== JSON.stringify(continuationRows)) throw new Error("CONTINUATION_FROZEN_PHASE_CHANGED");
         } else {
         for (const row of continuations) {
@@ -165,9 +166,12 @@ export async function applyFinancialDomains(ctx) {
             continuationRows.push({ sourceId: row.sourceId, body: { orderId: parent.parentOrderId, sourceDigest: parent.sourceDigest, sourceAsOf: micros(sourceCutoff), evidenceRef: manifest.sourceRef + ":continuation:" + row.sourceId, source: row.source, commissionEvidence: row.commissionEvidence } });
         }
         }
-        continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows);
+        continuationRows = freezePhase(ctx, "continuationEvidence", continuationRows,continuationReceiptMode);
     }
-    await ctx.runItems("continuationEvidence", continuationRows, row => mod("order/legacy-continuation-evidence").importLegacyContinuationEvidence(client, actor, row.body), 20);
+    if(next){
+        if(typeof ctx.systemContinuation!=='function')throw new Error('NEXT_SYSTEM_CONTINUATION_ADAPTER_REQUIRED');
+        await ctx.runBatches("continuationEvidence",continuationRows,rows=>ctx.systemContinuation(rows),20);
+    }else await ctx.runItems("continuationEvidence", continuationRows, row => mod("order/legacy-continuation-evidence").importLegacyContinuationEvidence(client, actor, row.body), 20);
     const liabilities = await arrayOf(ctx, "liabilities");
     let liabilityRows = state.generatedPhases?.liabilityDuties ? freezePhase(ctx, "liabilityDuties", []) : null;
     if (!liabilityRows) {

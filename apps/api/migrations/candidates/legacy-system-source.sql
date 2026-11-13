@@ -67,6 +67,14 @@ BEGIN
     IF NEW.object_type IS DISTINCT FROM 'rental_order' OR COALESCE(NEW.details->>'bindingDigest','') !~ '^[a-f0-9]{64}$' THEN
       RAISE EXCEPTION 'legacy order source is invalid' USING ERRCODE='42501';
     END IF;
+  ELSIF NEW.action='order.legacy.continuation.import' THEN
+    actor_prefix:='legacy-order-migration:'; source_entity:='la_order';
+    IF NEW.object_type IS DISTINCT FROM 'rental_order' OR COALESCE(NEW.details->>'bindingDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'payloadDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'factsDigest','') !~ '^[a-f0-9]{64}$'
+       OR COALESCE(NEW.details->>'evidenceId','')='' THEN
+      RAISE EXCEPTION 'legacy continuation source is invalid' USING ERRCODE='42501';
+    END IF;
   ELSIF NEW.action='finance.history.empty_batch.imported' THEN
     actor_prefix:='legacy-finance-migration:'; source_entity:='EMPTY_FINANCE_COVERAGE';
     IF NEW.object_type IS DISTINCT FROM 'personal_finance_observation_coverage_batch'

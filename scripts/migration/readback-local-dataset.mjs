@@ -3,7 +3,7 @@ import { acquireMigrationTransactionFence, advisoryLockSql, assertCoreSystemMigr
 import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
 import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
-import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
@@ -750,16 +750,56 @@ try {
     const phase = state.generatedPhases.continuationEvidence, bytes = readFileSync(join(phaseDirectory, "phases/continuationEvidence.json"));
     if (hash(bytes) !== phase.sha256) throw new Error("FINANCIAL_PHASE_INPUT_CHANGED");
     const expected = JSON.parse(bytes), model = mod("order/legacy-continuation-model");
+    const systemContinuation=phase.receiptMode==='SYSTEM_ORDER_V1';
+    if(phase.receiptMode!==undefined&&!systemContinuation||state.binding.systemOrderId&&!systemContinuation||systemContinuation&&!systemCore)
+      throw new Error('SYSTEM_CONTINUATION_RECEIPT_MODE_UNCONFIRMED');
+    let sourceReconstructed=false;
+    const audits=new Map(),receipts=new Map();
+    if(systemContinuation){
+      const sourceRows=[],entry=manifest.files.continuations;
+      if(entry)for await(const row of readBoundSourceRows(join(dataset,entry.file),entry))sourceRows.push(row);
+      const parents=[];
+      for(let index=0;index<sourceRows.length;index+=500)parents.push(...(await query(`SELECT legacy_id AS "legacyId",id AS "parentOrderId",source_digest AS "sourceDigest"
+        FROM zzsh_order.legacy_order_read_snapshot WHERE source_system='legacy_mysql_restore' AND source_entity='la_order' AND legacy_id=ANY($1::text[])`,[sourceRows.slice(index,index+500).map(row=>row.sourceId)])).rows);
+      const rebuilt=buildNextContinuationRows({manifest,rows:sourceRows,parents,sourceAsOf:new Date(manifest.sourceCutoff).toISOString().replace(/\.([0-9]{3})Z$/,(_,digits)=>'.'+digits+'000Z'),
+        admit:mod('order/legacy-continuation-calc').admitLegacyEvidence});
+      sourceReconstructed=canonical(rebuilt)===canonical(expected);
+      if(!sourceReconstructed)difference('continuationEvidence','SOURCE','CONTINUATION_SOURCE_RECONSTRUCTION_DRIFT');
+      for(let index=0;index<expected.length;index+=500){
+        const ids=expected.slice(index,index+500).map(row=>row.body.orderId),grouped=await readSystemMigrationAudits(query,'continuation',ids);
+        for(const [id,values] of grouped)audits.set(id,values);
+        const scopes=ids.map(id=>JSON.stringify(['system',state.binding.systemOrderId,'order.legacy.continuation.import',id]));
+        for(const row of (await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required
+          FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows){const group=receipts.get(row.scope_key)??[];group.push(row);receipts.set(row.scope_key,group);}
+      }
+    }
     reviewedEffects.push(...continuationCommissionEffects(expected, mod));
-    const actual = new Map((await query(`SELECT order_id,source_digest,parameter_digest,evidence_ref,admission,facts,facts_digest,facts_canonical,to_char(source_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') source_as_of FROM zzsh_order.legacy_continuation_evidence WHERE source_kind='SOURCE_IMPORT'`)).rows.map(row => [row.order_id, row]));
-    let matched = 0;
+    const actual = new Map((await query(`SELECT e.id,e.order_id,e.source_digest,e.parameter_digest,e.evidence_ref,e.admission,e.facts,e.facts_digest,e.facts_canonical,
+      to_jsonb(e)->>'created_by_migration_id' AS migration_id,to_jsonb(e)->>'migration_manifest_sha256' AS migration_manifest,o.binding_digest,
+      to_char(e.source_as_of AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') source_as_of FROM zzsh_order.legacy_continuation_evidence e
+      JOIN zzsh_order.legacy_order_read_snapshot o ON o.id=e.order_id WHERE e.source_kind='SOURCE_IMPORT'`)).rows.map(row => [row.order_id, row]));
+    let matched = 0,attributionMatched=0;
     for (const row of expected) {
       const a = actual.get(row.body.orderId), b = row.body, facts = model.initialLegacyFacts(b.source, b.commissionEvidence), sealed = model.sealLegacyFacts(facts);
       if (!a || a.source_digest !== b.sourceDigest || a.source_as_of !== b.sourceAsOf || a.evidence_ref !== b.evidenceRef || a.parameter_digest !== facts.evidence.parameterDigest || a.admission !== facts.evidence.admission || a.facts_digest !== sealed.digest || a.facts_canonical !== sealed.canonical || canonical(a.facts) !== sealed.canonical) difference("continuationEvidence", row.sourceId, "CONTINUATION_SOURCE_FACT_DRIFT");
-      else matched++;
+      else {
+        matched++;
+        if(systemContinuation){
+          const actorId=state.binding.systemOrderId,scope=JSON.stringify(['system',actorId,'order.legacy.continuation.import',b.orderId]);
+          const good=a.migration_id===actorId&&a.migration_manifest===state.binding.datasetSha256
+            &&matchesSystemMigrationAudit(audits.get(b.orderId),{objectId:b.orderId,action:'order.legacy.continuation.import',actorId,manifestSha256:state.binding.datasetSha256,
+              sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId:row.sourceId,sourceDigest:b.sourceDigest,bindingDigest:a.binding_digest,
+              payloadDigest:hash(canonical(b)),factsDigest:sealed.digest,evidenceId:a.id,admission:a.admission,noIsolation:true})
+            &&matchesSystemContinuationReceipt(receipts.get(scope),{actorId,orderId:b.orderId,key:hash(JSON.stringify([b.orderId,sealed.digest])),
+              fingerprint:mod('supply/supply-util').fingerprintRequest('order.legacy.continuation.import',b.orderId,b),evidenceId:a.id,admission:a.admission,canonicalize:canonical});
+          if(good)attributionMatched++;else difference('continuationEvidence',row.sourceId,'CONTINUATION_SYSTEM_ATTRIBUTION_DRIFT');
+        }
+      }
     }
     if (actual.size !== expected.length) difference("continuationEvidence", "COHORT", "CONTINUATION_TARGET_COUNT_DRIFT");
     report.continuationEvidence = { expected: expected.length, matched, total: actual.size };
+    if(systemContinuation)report.continuationEvidence.systemAttribution={expected:expected.length,matched:attributionMatched,sourceReconstructed,
+      status:sourceReconstructed&&attributionMatched===expected.length?'VERIFIED':'MISMATCH'};
   }
   if (reviewedEffects.length) {
     const actual = new Map((await query("SELECT id,kind,amount_cents::text amount,status,counterparty_user_id beneficiary,settled_by,source_record_id,level::text AS level,ratio::text,source_digest FROM zzsh_order.legacy_order_duty WHERE id=ANY($1::text[])", [reviewedEffects.map(row => row.dutyId)])).rows.map(row => [row.id, row]));

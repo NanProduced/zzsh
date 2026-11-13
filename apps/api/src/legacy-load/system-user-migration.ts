@@ -6,7 +6,8 @@ type MigrationTarget = Readonly<{ systemIdentifier: string; databaseOid: string;
 type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; evidenceDigest: string }>;
 export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT" | "DISPLAY"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
-export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string }>;
+export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string;
+  operation?: "CONTINUATION"; payloadDigest?: string }>;
 export type FinanceMigrationSource = Readonly<{ inputsDigest: string; inputSha256: string; cutoff: string }>;
 export type InvitationMigrationSource = Readonly<{ phase: 'IMPORT' | 'COUNTS'; key: string; sourceDigest: string; bodyDigest: string }>;
 
@@ -172,19 +173,33 @@ async function verifyBatch(client: PoolClient, actor: SystemMigrationActor, read
   }
   if (actor.kind === "SYSTEM_ORDER_MIGRATION") {
     const orderGuard = (await client.query<{authorized:boolean}>(`SELECT COALESCE(o.relowner=r.oid
+      AND (SELECT count(*)=3 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.legacy_continuation_evidence'),
+        to_regclass('zzsh_order.legacy_order_duty'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
+      AND EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()')
+        AND position('order.legacy.continuation.import' IN p.prosrc)>0)
       AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=o.oid AND c.conname='legacy_order_migration_source' AND c.convalidated
         AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=to_regclass('zzsh_order.legacy_continuation_evidence')
+        AND c.conname='legacy_continuation_migration_source' AND c.convalidated AND position('created_by_migration_id' IN pg_get_constraintdef(c.oid))>0)
       AND NOT EXISTS (SELECT 1 FROM (VALUES
         (o.oid,'legacy_system_order_insert',7,'zzsh_order.guard_legacy_system_order()','(new.created_by_migration_id IS NOT NULL)'),
         (o.oid,'legacy_order_read_binding',7,'zzsh_order.guard_legacy_order_read_binding()',NULL),
         (o.oid,'legacy_order_read_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
-        (o.oid,'legacy_order_read_audit',5,'zzsh_order.check_legacy_order_read_audit()',NULL)
+        (o.oid,'legacy_order_read_audit',5,'zzsh_order.check_legacy_order_read_audit()',NULL),
+        (to_regclass('zzsh_order.legacy_continuation_evidence'),'legacy_system_continuation_insert',7,'zzsh_order.guard_legacy_system_order()','(new.created_by_migration_id IS NOT NULL)'),
+        (to_regclass('zzsh_order.legacy_continuation_evidence'),'legacy_system_continuation_audit',5,'zzsh_order.check_legacy_system_continuation_audit()','(new.created_by_migration_id IS NOT NULL)'),
+        (to_regclass('zzsh_order.legacy_continuation_evidence'),'a_legacy_evidence_source_owner',7,'zzsh_order.guard_legacy_source_owner()',NULL),
+        (to_regclass('zzsh_order.legacy_continuation_evidence'),'legacy_evidence_immutable',27,'zzsh_order.guard_legacy_continuation_immutable()',NULL),
+        (to_regclass('zzsh_order.legacy_order_duty'),'a_legacy_duty_source_owner',7,'zzsh_order.guard_legacy_source_owner()',NULL),
+        (to_regclass('zzsh_order.legacy_order_duty'),'legacy_duty_guard',31,'zzsh_order.guard_legacy_duty()',NULL)
       ) required(relation,name,kind,fn,qualification) WHERE NOT EXISTS (
         SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=required.relation
           AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
           AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
           AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
           AND (required.fn<>'zzsh_order.guard_legacy_system_order()' OR position('current_user<>session_user' IN p.prosrc)>0)
+          AND (required.fn<>'zzsh_order.check_legacy_system_continuation_audit()' OR
+            (t.tgdeferrable AND t.tginitdeferred AND position('legacy_migration_manifest_sha256' IN p.prosrc)>0))
           AND (required.fn<>'zzsh_order.check_legacy_order_read_audit()' OR
             (t.tgdeferrable AND t.tginitdeferred AND position('legacy_migration_manifest_sha256' IN p.prosrc)>0))))
       ,false) AS authorized FROM pg_roles r JOIN pg_class o ON o.oid=to_regclass('zzsh_order.legacy_order_read_snapshot') WHERE r.rolname=current_user`)).rows[0];
@@ -322,7 +337,8 @@ export function authorizeSystemOrderMigration(client: PoolClient, actor: SystemO
   if (actor.kind !== "SYSTEM_ORDER_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   const expectedOrderId = `legacy_order_${createHash("sha256").update(JSON.stringify(["legacy_mysql_restore", "la_order", source.legacyId])).digest("hex").slice(0,40)}`;
   if (!/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.orderId !== expectedOrderId
-      || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.bindingDigest))
+      || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.bindingDigest)
+      || (source.operation === undefined ? source.payloadDigest !== undefined : source.operation !== "CONTINUATION" || !/^[a-f0-9]{64}$/.test(source.payloadDigest ?? "")))
     throw forbidden("Legacy system order source is invalid");
   return authorizeSystemMigration(client, actor, () => actor.assertSourceEvidence(source));
 }
