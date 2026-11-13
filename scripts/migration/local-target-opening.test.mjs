@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { applyOpeningDomain, openingReviewResource } from "./local-target-opening.mjs";
-import { capturedOpeningUser, assertOpeningUserSource, verifyPreparedOpeningUsers, verifyOpeningUserCapture } from "./local-opening-proof.mjs";
+import { capturedOpeningUser, assertOpeningUserSource, verifyPreparedOpeningUsers, verifyOpeningCapture } from "./local-opening-proof.mjs";
 
 const source = readFileSync(new URL("./local-target-opening.mjs", import.meta.url), "utf8")
   .replace(/^import .*;$/gm, "").replace(/^export /gm, "");
@@ -46,7 +46,8 @@ test("opening preparation checks stored balance against captured source before e
   const line=(dir,name,rows)=>{const meta=put(dir,name,rows.map(row=>JSON.stringify(row)+'\n').join(''));meta.rows=rows.length;return meta;};
   const sourceFiles={users:line(sourceDir,'users.jsonl',[raw]),orders:line(sourceDir,'orders.jsonl',[]),distributionOrders:line(sourceDir,'distribution.jsonl',[])};
   const base={status:'CAPTURED_READ_ONLY',rollbackConfirmed:true,clientClosed:true,containerId:'synthetic',database:'synthetic',files:sourceFiles};
-  const baseReceipt=put(sourceDir,'receipt.json',base),fundsFiles={earnings:line(fundsDir,'earnings.jsonl',[]),withdraws:line(fundsDir,'withdraws.jsonl',[])};
+  const log={id:'501',user_id:'101',sn:'SYNTHETIC-LOG',action:'1',change_amount:'1.00',source_id:'0',create_time:'1779469800',change_type:'1006',left_amount:'2.50',source_sn:'',remark:'Synthetic adjustment',extra:null};
+  const baseReceipt=put(sourceDir,'receipt.json',base),fundsFiles={earnings:line(fundsDir,'earnings.jsonl',[log]),withdraws:line(fundsDir,'withdraws.jsonl',[])};
   const funds={status:'CAPTURED_READ_ONLY',rollbackConfirmed:true,clientClosed:true,containerId:'synthetic',database:'synthetic',sourceSupplement:{baseReceiptSha256:baseReceipt.sha256,fullSourcePopulation:true},files:fundsFiles},fundsReceipt=put(fundsDir,'receipt.json',funds);
   const planned={sourceId:'101',userId,sourceDigest:digest},balance={...planned,source:{id:'101',earnings:'7.50',money:'-1.25'},amounts:{earnings:'750',money:'-125'}};
   const users=line(datasetDir,'users.jsonl',[planned]);let balances=line(datasetDir,'balances.jsonl',[balance]);
@@ -56,12 +57,13 @@ test("opening preparation checks stored balance against captured source before e
     '--funds-source',fundsDir,'--funds-source-sha',fundsReceipt.sha256,'--api-dist',api,'--out',out],{encoding:'utf8',windowsHide:true});
   const good=run(goodDir);assert.equal(good.status,0,good.stderr);const report=JSON.parse(readFileSync(path.join(goodDir,'manifest.json'),'utf8'));
   assert.equal(report.sourceUsers.status,'SOURCE_VALUE_AND_SUBJECT_VERIFIED');assert.equal(report.sourceUsers.matched,1);assert.equal(report.stats.candidateAvailableCents,'750');
-  const modules={canonical,legacyOwnerUserId:require(path.join(api,'supply/legacy-user-migration.js')).legacyOwnerUserId,financeRead:require(path.join(api,'finance/personal-finance-read.js'))};
+  const modules={canonical,legacyOwnerUserId:require(path.join(api,'supply/legacy-user-migration.js')).legacyOwnerUserId,financeRead:require(path.join(api,'finance/personal-finance-read.js')),
+    preparation:require(path.join(api,'finance/legacy-finance-source-preparation.js')),proof:require(path.join(api,'finance/legacy-finance-source-evidence.js'))};
   const privatePath=file=>{assert(path.resolve(file).toLowerCase().startsWith(path.resolve(root).toLowerCase()+'\\'));assert(!lstatSync(file).isSymbolicLink());return file;};
-  const verify=opening=>verifyOpeningUserCapture({datasetDir,sourceDir,openingDir:goodDir,dataset:dataset(),source:base,opening,datasetSha256:sha(readFileSync(manifestFile)),sourceReceiptSha256:baseReceipt.sha256,fundsReceiptSha256:fundsReceipt.sha256,modules,privatePath});
-  assert.equal((await verify(report)).candidateAvailableCents,'750');
-  const planFile=path.join(goodDir,'openings.jsonl'),tampered=JSON.parse(readFileSync(planFile,'utf8'));tampered.input.proof.availableCents='751';writeFileSync(planFile,JSON.stringify(tampered)+'\n');
-  await assert.rejects(verify({...report,sha256:sha(readFileSync(planFile))}),/OPENING_PREPARED_SOURCE_MISMATCH/);
+  const verify=opening=>verifyOpeningCapture({datasetDir,sourceDir,fundsDir,openingDir:goodDir,dataset:dataset(),source:base,funds,opening,datasetSha256:sha(readFileSync(manifestFile)),sourceReceiptSha256:baseReceipt.sha256,fundsReceiptSha256:fundsReceipt.sha256,modules,privatePath});
+  const verified=await verify(report);assert.equal(verified.status,'SOURCE_FINANCIAL_FACTS_VERIFIED');assert.equal(verified.candidateAvailableCents,'750');
+  const planFile=path.join(goodDir,'openings.jsonl'),tampered=JSON.parse(readFileSync(planFile,'utf8'));tampered.input.observations[0].amount='9.00';writeFileSync(planFile,JSON.stringify(tampered)+'\n');
+  await assert.rejects(verify({...report,sha256:sha(readFileSync(planFile))}),/OPENING_FINANCIAL_SOURCE_MISMATCH/);
   writeFileSync(path.join(datasetDir,'balances.jsonl'),JSON.stringify({...balance,source:{...balance.source,money:'0.00'},amounts:{...balance.amounts,money:'0'}})+'\n');
   balances={...balances,sha256:sha(readFileSync(path.join(datasetDir,'balances.jsonl')))};writeFileSync(manifestFile,JSON.stringify(dataset()));
   const bad=run(badDir);assert.notEqual(bad.status,0);assert.match(bad.stderr,/OPENING_CAPTURED_BALANCE_MISMATCH/);
@@ -113,6 +115,39 @@ test("unsafe or absent cause codes never enter the migration receipt", async () 
   }
 });
 
+test("NEXT opening maps each system batch result to its own subject, including mixed replay",async()=>{
+  const inputs=['user-b','user-a'].map((userId,index)=>({sourceId:String(index+1),state:'CANDIDATE',input:{inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z',
+    proof:{userId,source:{sourceId:String(index+1),identityDigest:'b'.repeat(64)},sourceDigest:'c'.repeat(64),availableCents:'0',coveredDigest:'d'.repeat(64),coveredCount:0},observations:[],admissions:[]}}));
+  const plan={status:'REVIEWED_CANDIDATES_TARGET_NOT_RUN',datasetSha256:'dataset',file:'openings.jsonl',sha256:'f'.repeat(64),stats:{subjects:2,candidate:2,reviewRequired:0}},manifest=Buffer.from(JSON.stringify(plan));
+  let applied;
+  const ctx={isNextMigration:true,targetPort:55435,actor:{userId:'unused',sessionId:'unused'},manifest:{sourceCutoff:'2026-01-01T00:00:00.000Z'},
+    systemOpening:{receiptMode:'SYSTEM_OPENING_V1',fenceEpochSha256:'a'.repeat(64),async importBatch(batch,window){assert.equal(batch.length,2);assert.match(window.ref,/CORE_FULL_STORED_OPENING/);return{outcomes:[{subjectId:'user-a',replayed:false},{subjectId:'user-b',replayed:true}]};}},
+    state:{binding:{oid:'42',datasetSha256:'dataset'},resource:{owner:'owner',marker:'marker',role:'role',role_oid:'43'},openingSourcePreflight:{status:'SOURCE_FINANCIAL_FACTS_VERIFIED'},phases:{storedOpening:{quarantined:0}}},
+    mod:name=>name==='finance/personal-finance-maintenance'?{assertOpeningConservation:async()=>({basisCents:'0',entryRows:0})}:{canonicalize:JSON.stringify},
+    client:{query:async()=>({rows:[{subjects:2,positive:0,zero:2,amount:'0'}]})},save(){},
+    async runBatches(_phase,rows,writer){const batch=[];for await(const row of rows)batch.push(row);applied=await writer(batch);}};
+  const make=new AsyncFunction('createHash','createReadStream','readFileSync','join','resolve','basename','preflightBoundSourceBatches','readBoundSourceBatches',source+'\nreturn {applyOpeningDomain};');
+  const fakeRows=async function*(){yield* inputs;};
+  const {applyOpeningDomain}=await make(createHash,()=>Readable.from([]),()=>manifest,path.join,path.resolve,path.basename,async()=>({verified:true}),fakeRows);
+  await applyOpeningDomain(ctx,'E:/zzsh-local-state/restricted/fixture-openings',sha(manifest));
+  assert.deepEqual(applied,[{replayed:true},{replayed:false}]);assert.equal(ctx.state.additiveInputs.opening.receiptMode,'SYSTEM_OPENING_V1');
+});
+
+test("NEXT opening recovery reads the exact original batch and preserves UNKNOWN",async()=>{
+  const inputs=[{sourceId:'1',state:'CANDIDATE',input:{proof:{userId:'first'}}},{sourceId:'skip',state:'REVIEW_REQUIRED',reason:'SOURCE_UNKNOWN'},
+    {sourceId:'2',state:'CANDIDATE',input:{proof:{userId:'second'}}}],plan={status:'REVIEWED_CANDIDATES_TARGET_NOT_RUN',datasetSha256:'dataset',file:'openings.jsonl',sha256:'f'.repeat(64),stats:{subjects:3}},manifest=Buffer.from(JSON.stringify(plan));
+  const pending={domain:'storedOpening',receiptMode:'SYSTEM_OPENING_V1',start:1,end:2,sourceIds:['2'],phaseBodyDigest:sha(JSON.stringify([inputs[2]])),fenceEpochSha256:'a'.repeat(64),stage:'COMMIT_UNKNOWN'};
+  const state={binding:{oid:'42',datasetSha256:'dataset'},pending,additiveInputs:{opening:{directory:'E:/zzsh-local-state/restricted/fixture-openings',manifestSha256:sha(manifest),sourceFileSha256:plan.sha256,receiptMode:'SYSTEM_OPENING_V1',fenceEpochs:['a'.repeat(64)],notBefore:'2026-01-01T00:00:00.000Z',expiresAt:'2026-01-02T00:00:00.000Z'}}};
+  let calls=0;const ctx={state,mod:name=>name==='finance/personal-finance-maintenance'?{openingPlanCore:input=>({key:'key-'+input.proof.userId})}:{canonicalize:JSON.stringify},systemOpening:{receiptMode:'SYSTEM_OPENING_V1',async recoverBatch(batch){calls++;assert.deepEqual(batch,[inputs[2].input]);return{knowledge:'UNKNOWN',results:[{knowledge:'UNKNOWN',subjectId:'second',key:'key-second',receipt:null}]};}}};
+  const make=new AsyncFunction('createHash','createReadStream','readFileSync','join','resolve','basename','preflightBoundSourceBatches','readBoundSourceBatches',source+'\nreturn {recoverSystemOpeningDomain};');
+  const {recoverSystemOpeningDomain}=await make(createHash,()=>Readable.from([]),()=>manifest,path.join,path.resolve,path.basename,async()=>({verified:true}),async function*(){yield* inputs;});
+  const before=JSON.stringify(state),result=await recoverSystemOpeningDomain(ctx);assert.deepEqual(result,{knowledge:'UNKNOWN',subjects:1,known:0,unknown:1,originalKeysPreserved:true});assert.equal(JSON.stringify(state),before);
+  const original=ctx.systemOpening.recoverBatch;ctx.systemOpening.recoverBatch=async()=>({knowledge:'KNOWN',results:[{knowledge:'KNOWN',subjectId:'second',key:'different',originalOpeningVerified:true}]});
+  await assert.rejects(recoverSystemOpeningDomain(ctx),/ORIGINAL_OPENING_RECOVERY_INVALID/);ctx.systemOpening.recoverBatch=original;
+  state.additiveInputs.opening.fenceEpochs=[];await assert.rejects(recoverSystemOpeningDomain(ctx),/ORIGINAL_OPENING_PENDING_REQUIRED/);state.additiveInputs.opening.fenceEpochs=['a'.repeat(64)];
+  state.pending.phaseBodyDigest='0'.repeat(64);await assert.rejects(recoverSystemOpeningDomain(ctx),/ORIGINAL_OPENING_PENDING_CHANGED/);assert.equal(calls,1);
+});
+
 test("next-round opening stops if the source changes after preflight", {skip:process.platform!=="win32"||!existsSync("E:/zzsh-local-state/restricted")}, async t=>{
   const dir=mkdtempSync("E:/zzsh-local-state/restricted/opening-source-synthetic-"),file=path.join(dir,"openings.jsonl"),manifestFile=path.join(dir,"manifest.json");
   t.after(()=>{for(const f of [file,manifestFile])if(existsSync(f)){assert(lstatSync(f).isFile()&&!lstatSync(f).isSymbolicLink());unlinkSync(f)}rmdirSync(dir)});
@@ -121,7 +156,8 @@ test("next-round opening stops if the source changes after preflight", {skip:pro
     sha256:sha(bytes),stats:{subjects:1,candidate:1,reviewRequired:0}}));writeFileSync(manifestFile,manifest);
   let writes=0;
   const ctx={isNextMigration:true,targetPort:55433,actor:{userId:"actor",sessionId:"session"},
-    state:{binding:{oid:"42",datasetSha256:"dataset"},resource:{owner:"owner",marker:"marker",role:"role",role_oid:"43"}},
+    systemOpening:{receiptMode:'SYSTEM_OPENING_V1',fenceEpochSha256:'a'.repeat(64),async importBatch(){throw Error('MUST_NOT_WRITE');}},
+    state:{binding:{oid:"42",datasetSha256:"dataset"},resource:{owner:"owner",marker:"marker",role:"role",role_oid:"43"},openingSourcePreflight:{status:'SOURCE_FINANCIAL_FACTS_VERIFIED'},phases:{}},
     mod:()=>({canonicalize:JSON.stringify}),save(){},async runBatches(_phase,candidates){
       writeFileSync(file,JSON.stringify({...row,input:{proof:{availableCents:"100"}}})+"\n");
       for await(const _ of candidates)writes++;

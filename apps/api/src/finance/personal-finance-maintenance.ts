@@ -303,9 +303,16 @@ async function verifyOpeningRecoveryFacts(client:PoolClient,input:OpeningMainten
  FROM zzsh_order.finance_opening_basis b JOIN zzsh_order.finance_economic_root r ON r.basis_id=b.id AND r.id=$2 WHERE b.id=$1`,[plan.basisId,plan.rootId])).rows;
  const expectedBasis={userId:p.userId,sourceSystem:p.source.sourceSystem,sourceEntity:'la_user',sourceId:p.source.sourceId,identityDigest:p.source.identityDigest,sourceDigest:p.sourceDigest,cutoff:new Date(input.cutoff).toISOString(),coveredCount:p.coveredCount,coveredDigest:p.coveredDigest,rootKind:'LEGACY_OPENING',rootType:'LEGACY_MYSQL',rootSystem:p.source.sourceSystem,rootEntity:'la_user',rootSourceId:p.source.sourceId,rootSubject:p.userId,rootRole:'WALLET_HOLDER'};
  const covered=(await client.query(`/* finance-opening recovery covered */ SELECT jsonb_build_array(user_id,source_kind,source_type,source_entity,source_id,beneficiary_role,extract(epoch FROM source_event_at)::bigint::text,source_digest) AS row FROM zzsh_order.finance_covered_event WHERE basis_id=$1 ORDER BY source_kind COLLATE "C",source_type COLLATE "C",source_entity COLLATE "C",source_id COLLATE "C",beneficiary_role COLLATE "C"`,[plan.basisId])).rows.map(x=>x.row);
- const observed=(await client.query(`/* finance-opening recovery observations */ SELECT a.user_id AS "userId",a.source_system AS "sourceSystem",a.legacy_user_id AS "legacyUserId",a.source_entity AS "sourceEntity",a.source_id AS "sourceId",a.source_digest AS "sourceDigest",to_char(a.source_event_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "sourceEventAt",a.included_in_opening AS included,o.source_canonical AS canonical,o.user_id AS "observationUserId",o.basis_id AS "observationBasis",o.source_digest AS "observationDigest",o.source_canonical AS "observationCanonical",o.included_in_opening AS "observationIncluded"
- FROM zzsh_order.finance_observation_admission a FULL JOIN zzsh_order.personal_finance_observation o ON ${stored?'o.user_id=a.user_id AND o.source_system=a.source_system':'o.basis_id=a.basis_id'} AND o.source_entity=a.source_entity AND o.source_id=a.source_id WHERE a.basis_id=$1 OR o.basis_id=$1 ORDER BY a.source_entity COLLATE "C",a.source_id COLLATE "C"`,[plan.basisId])).rows;
- const expectedObservations=plan.observations.map(o=>({userId:p.userId,sourceSystem:o.sourceSystem,legacyUserId:o.legacyUserId,sourceEntity:o.sourceEntity,sourceId:o.sourceId,sourceDigest:o.sourceDigest,sourceEventAt:o.sourceEventAt,included:o.includedInOpening,canonical:o.sourceCanonical,observationUserId:p.userId,observationBasis:plan.basisId,observationDigest:o.sourceDigest,observationCanonical:o.sourceCanonical,observationIncluded:o.includedInOpening}));
+ const observed=(await client.query(`/* finance-opening recovery observations */ WITH admissions AS MATERIALIZED (
+  SELECT * FROM zzsh_order.finance_observation_admission WHERE basis_id=$1
+ ), observations AS MATERIALIZED (
+  SELECT o.* FROM zzsh_order.personal_finance_observation o WHERE o.basis_id=$1
+  ${stored?`UNION ALL SELECT o.* FROM admissions a JOIN zzsh_order.personal_finance_observation o
+    ON o.user_id=a.user_id AND o.source_system=a.source_system AND o.source_entity=a.source_entity AND o.source_id=a.source_id
+    WHERE o.basis_id IS DISTINCT FROM $1`:''}
+ ) SELECT a.user_id AS "userId",a.source_system AS "sourceSystem",a.legacy_user_id AS "legacyUserId",a.source_entity AS "sourceEntity",a.source_id AS "sourceId",a.source_digest AS "sourceDigest",to_char(a.source_event_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "sourceEventAt",a.included_in_opening AS included,o.source_canonical AS canonical,o.user_id AS "observationUserId",o.basis_id AS "observationBasis",o.source_digest AS "observationDigest",o.source_canonical AS "observationCanonical",o.included_in_opening AS "observationIncluded",o.snapshot AS "observationSnapshot"
+ FROM admissions a FULL JOIN observations o ON ${stored?'o.user_id=a.user_id AND o.source_system=a.source_system':'o.basis_id=a.basis_id'} AND o.source_entity=a.source_entity AND o.source_id=a.source_id ORDER BY a.source_entity COLLATE "C",a.source_id COLLATE "C"`,[plan.basisId])).rows;
+ const expectedObservations=plan.observations.map(o=>({userId:p.userId,sourceSystem:o.sourceSystem,legacyUserId:o.legacyUserId,sourceEntity:o.sourceEntity,sourceId:o.sourceId,sourceDigest:o.sourceDigest,sourceEventAt:o.sourceEventAt,included:o.includedInOpening,canonical:o.sourceCanonical,observationUserId:p.userId,observationBasis:plan.basisId,observationDigest:o.sourceDigest,observationCanonical:o.sourceCanonical,observationIncluded:o.includedInOpening,observationSnapshot:JSON.parse(o.sourceCanonical)}));
  if(stored)expectedObservations.sort((a,b)=>a.sourceEntity<b.sourceEntity?-1:a.sourceEntity>b.sourceEntity?1:a.sourceId<b.sourceId?-1:a.sourceId>b.sourceId?1:0);
  const ledger=(await client.query(`/* finance-opening recovery ledger */ SELECT line_no AS line,account_code AS account,debit_cents::text AS debit,credit_cents::text AS credit,counterparty_user_id AS subject,details FROM zzsh_order.settlement_ledger_entry WHERE finance_event_id=$1 ORDER BY line_no`,[plan.eventId])).rows;
  const details={basisId:plan.basisId,economicRootId:plan.rootId,sourceDigest:p.sourceDigest};
@@ -439,7 +446,7 @@ export function systemStoredOpeningBatchProof(inputs:StoredOpeningInput[],actor:
  return{inputs:copy,source:{inputsDigest:sha(canonicalize({inputs:copy,window})),inputSha256:first.inputSha256,cutoff:first.cutoff}};
 }
 
-function systemOpeningReview(input:StoredOpeningInput,actor:SystemFinanceMigrationActor,window:SystemStoredOpeningWindow){
+export function systemOpeningReview(input:StoredOpeningInput,actor:SystemFinanceMigrationActor,window:SystemStoredOpeningWindow){
  const p=input.proof;
  return canonicalize({...window,actor:{kind:actor.kind,id:actor.id,sourceDatasetSha256:actor.sourceDatasetSha256,fenceEpochSha256:actor.fenceEpochSha256},target:actor.target,
   inputSha256:input.inputSha256,cutoff:input.cutoff,bodyDigest:sha(canonicalize(input)),
@@ -451,12 +458,18 @@ function systemOpeningReview(input:StoredOpeningInput,actor:SystemFinanceMigrati
 async function assertSystemOpeningGuards(client:PoolClient,actor:SystemFinanceMigrationActor){
  const entryQual=`((new.finance_event_id IS NOT NULL)${['intentId','earningId','guaranteeId','legacyDutyId','nativeRefundIntentId','joinpayWithdrawalIntentId','prestartTerminationId','localRefundIntentId','legacyRefundCaseId','legacyRefundIntentId','compensationCaseId','supportCancellationId'].map(k=>` AND (NOT (new.details ? '${k}'::text))`).join('')})`;
  const row=(await client.query(`/* system opening schema and guard preflight */ SELECT COALESCE(
-  (SELECT count(*)=10 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.finance_opening_basis'),to_regclass('zzsh_order.finance_stored_opening_review'),
+  (SELECT count(*)=11 FROM pg_class c WHERE c.oid IN (to_regclass('zzsh_order.finance_opening_basis'),to_regclass('zzsh_order.finance_stored_opening_review'),
    to_regclass('zzsh_order.finance_covered_event'),to_regclass('zzsh_order.finance_economic_root'),to_regclass('zzsh_order.finance_event'),
    to_regclass('zzsh_order.settlement_ledger_entry'),to_regclass('zzsh_order.finance_observation_admission'),to_regclass('zzsh_order.personal_finance_observation'),
-   to_regclass('zzsh_order.wallet_revision'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
+   to_regclass('zzsh_order.wallet_revision'),to_regclass('zzsh_order.wallet_coverage'),to_regclass('zzsh_supply.idempotency_record')) AND c.relowner=r.oid)
   AND EXISTS(SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()') AND p.proowner=r.oid
    AND position('finance.opening.imported' IN p.prosrc)>0 AND position('legacy-finance-migration:' IN p.prosrc)>0)
+  AND NOT EXISTS(SELECT 1 FROM (VALUES
+   ('zzsh_order.finance_covered_event','zzsh_order.finance_covered_event_basis_idx',NULL::text),
+   ('zzsh_order.personal_finance_observation','zzsh_order.personal_finance_observation_basis_idx','(basis_id IS NOT NULL)')
+  ) required(table_name,index_name,predicate) WHERE NOT EXISTS(SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname='basis_id'
+   WHERE i.indrelid=to_regclass(required.table_name) AND i.indexrelid=to_regclass(required.index_name) AND i.indisvalid AND i.indisready
+    AND i.indnkeyatts=1 AND i.indkey[0]=a.attnum AND pg_get_expr(i.indpred,i.indrelid) IS NOT DISTINCT FROM required.predicate))
   AND NOT EXISTS(SELECT 1 FROM (VALUES
    (to_regclass('zzsh_order.finance_opening_basis'),'opening_basis_guard',7,'zzsh_order.guard_opening_basis()','(new.source_kind = ''LEGACY_OPENING''::text)',false),
    (to_regclass('zzsh_order.finance_opening_basis'),'opening_basis_immutable',27,'zzsh_order.finance_immutable()',NULL,false),
@@ -481,6 +494,8 @@ async function assertSystemOpeningGuards(client:PoolClient,actor:SystemFinanceMi
    (to_regclass('zzsh_order.settlement_ledger_entry'),'ledger_immutable',27,'zzsh_order.finance_immutable()',NULL,false),
    (to_regclass('zzsh_order.finance_observation_admission'),'observation_admission_guard',7,'zzsh_order.guard_observation_admission()',NULL,false),
    (to_regclass('zzsh_order.finance_observation_admission'),'observation_admission_immutable',27,'zzsh_order.finance_immutable()',NULL,false),
+   (to_regclass('zzsh_order.wallet_coverage'),'wallet_coverage_immutable',27,'zzsh_order.finance_immutable()',NULL,false),
+   (to_regclass('zzsh_order.personal_finance_observation'),'finance_observation_guard',7,'zzsh_order.guard_finance_observation()',NULL,false),
    (to_regclass('zzsh_order.personal_finance_observation'),'finance_observation_immutable',27,'zzsh_order.finance_immutable()',NULL,false)
   ) required(relation,name,kind,fn,qualification,deferred) WHERE NOT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
    WHERE t.tgrelid=required.relation AND t.tgname=required.name AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
@@ -635,5 +650,7 @@ async function writeStoredOpeningBatchOn(client:PoolClient,actor:OpeningBatchWri
   await client.query(`/* opening batch receipts */ INSERT INTO zzsh_supply.idempotency_record(scope_key,key,request_fingerprint,response_status,response_body,publish_required)
    SELECT $2,x.key,x.fingerprint,200,x.body,false FROM jsonb_to_recordset($1::jsonb) x(key text,fingerprint text,body jsonb) ORDER BY x.key COLLATE "C"`,[JSON.stringify(receiptRows),scopeKey]);
  }
- return Object.freeze({subjects:plans.length,created:fresh.length,replayed:plans.length-fresh.length,authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt});
+ return Object.freeze({subjects:plans.length,created:fresh.length,replayed:plans.length-fresh.length,
+  outcomes:plans.map(({input,plan})=>({subjectId:input.proof.userId,replayed:receiptByKey.has(plan.key)})),
+  authorizedAt:window.authorizedAt,windowExpiresAt:window.windowExpiresAt});
 }

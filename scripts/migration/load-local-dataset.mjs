@@ -8,7 +8,8 @@ import { isStrictRoundReservation, matchesLoadReservation, strictRoundReservatio
 import { assertFullExecutionAdmitted } from "./full-source-scope.mjs";
 import { assertSelectedScopeForWrite, legacyListedProofVersion } from "./selected-business-scope.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readSourceRows as readRows, preflightBoundSourceBatches, readBoundSourceBatches } from "./local-source-adapter.mjs";
-import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { privatePath, readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { verifyOpeningCapture } from "./local-opening-proof.mjs";
 import { preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 const require = createRequire(import.meta.url), { Client, Pool } = require("pg");
@@ -147,6 +148,8 @@ if (registered.migrationProfile === NEXT_MIGRATION_PROFILE) {
     if(execute && importsCore && !args.includes("--core-only") && ["bindSystemInvitationReceiptBaseline","importSystemLegacyInvitationFacts",
       "closeSystemLegacyInvitationCounts","recoverSystemLegacyInvitationFacts"].some(name=>typeof mod('finance/legacy-invitation-facts-maintenance')[name]!=="function"))
         throw new Error("NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED");
+    if(execute && args.includes("--import-openings") && ["systemStoredOpeningBatchProof","importSystemStoredOpeningBatchOn","recoverSystemStoredOpeningBatch","systemOpeningReview"]
+      .some(name=>typeof mod('finance/personal-finance-maintenance')[name]!=="function"))throw new Error("NEXT_SYSTEM_OPENING_ADAPTER_REQUIRED");
 }
 if (execute) assertNextMigrationWriteReady(registered);
 if (execute && registered.migrationProfile === NEXT_MIGRATION_PROFILE && !strictBatch) throw new Error("NEXT_USER_STRICT_BATCH_REQUIRED");
@@ -173,6 +176,8 @@ if (usesSystemOrder
 if (usesSystemFinance
     && (typeof systemUserMigration?.systemFinanceMigrationId !== "function" || typeof systemUserMigration?.withSystemFinanceMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_FINANCE_MIGRATION_BUILD_REQUIRED");
+if(recover&&state?.pending?.domain==='storedOpening'&&state.pending.receiptMode==='SYSTEM_OPENING_V1'
+    &&typeof systemUserMigration?.withSystemFinanceRecoveryBatch!=='function')throw new Error('NEXT_SYSTEM_OPENING_RECOVERY_BUILD_REQUIRED');
 if (usesSystemInvitation
     && (typeof systemUserMigration?.systemInvitationMigrationId !== "function" || typeof systemUserMigration?.withSystemInvitationMigrationBatch !== "function"))
     throw new Error("NEXT_SYSTEM_INVITATION_MIGRATION_BUILD_REQUIRED");
@@ -214,7 +219,13 @@ const displayOnly = args.includes("--enrich-display");
 const openingOnly = args.includes("--import-openings");
 const holdingsOnly = args.includes("--enrich-holdings");
 const coreOnly = args.includes("--core-only");
-if (!displayOnly && !openingOnly && !holdingsOnly && !contactAppend && !numberOnly && (!option("--funds-source") || !/^[a-f0-9]{64}$/.test(option("--funds-source-sha") ?? ""))) throw new Error("BOUND_FINANCIAL_SOURCE_SUPPLEMENT_REQUIRED");
+const systemOpeningRecovery=recover&&registered.migrationProfile===NEXT_MIGRATION_PROFILE&&state.pending?.domain==='storedOpening'&&state.pending.receiptMode==='SYSTEM_OPENING_V1';
+if(recover&&registered.migrationProfile===NEXT_MIGRATION_PROFILE&&state.pending?.domain==='storedOpening'
+ &&(!systemOpeningRecovery||state.additiveInputs?.opening?.receiptMode!=='SYSTEM_OPENING_V1'
+  ||state.openingSourcePreflight?.status!=='SOURCE_FINANCIAL_FACTS_VERIFIED'||!/^[a-f0-9]{64}$/.test(state.pending.fenceEpochSha256??'')
+  ||!Array.isArray(state.additiveInputs.opening.fenceEpochs)||!state.additiveInputs.opening.fenceEpochs.includes(state.pending.fenceEpochSha256)))
+ throw new Error('ORIGINAL_SYSTEM_OPENING_PROOF_REQUIRED');
+if (!displayOnly && !openingOnly && !holdingsOnly && !contactAppend && !numberOnly && !systemOpeningRecovery && (!option("--funds-source") || !/^[a-f0-9]{64}$/.test(option("--funds-source-sha") ?? ""))) throw new Error("BOUND_FINANCIAL_SOURCE_SUPPLEMENT_REQUIRED");
 if(!coreOnly&&!displayOnly&&!openingOnly&&!holdingsOnly&&!contactAppend&&!numberOnly&&!args.includes("--recover")&&(!option("--refund-attempts")||!/^[a-f0-9]{64}$/.test(option("--refund-attempts-sha")??"")))throw new Error("BOUND_REFUND_ATTEMPT_SOURCE_REQUIRED");
 if ([displayOnly, openingOnly, holdingsOnly, contactAppend, numberOnly, coreOnly].filter(Boolean).length > 1) throw new Error("ONE_ADDITIVE_PHASE_PER_EXECUTION");
 if (displayOnly && !args.includes("--recover") && !["LOCAL_DATASET_CORE_ONLY_COMMITTED_FINANCE_NOT_RUN", "LOCAL_DATASET_CORE_AND_FINANCIAL_DOMAINS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_DISPLAY_ENRICHMENT_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED", "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED", "FAILED_STOPPED"].includes(state.status))
@@ -229,6 +240,23 @@ const fundsSourceBinding=option("--funds-source")?{path:resolve(option("--funds-
 if(fundsSourceBinding){
  if(!fundsSourceBinding.path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||sha(readFileSync(join(fundsSourceBinding.path,"receipt.json")))!==fundsSourceBinding.sha256)throw new Error("FUNDS_SOURCE_BINDING_CHANGED");
  if(state.fundsSourceBinding&&JSON.stringify(state.fundsSourceBinding)!==JSON.stringify(fundsSourceBinding))throw new Error("CHECKPOINT_FUNDS_SOURCE_CHANGED");
+}
+let openingSourcePreflight;
+if((execute&&openingOnly&&registered.migrationProfile===NEXT_MIGRATION_PROFILE)||systemOpeningRecovery){
+ const boundFunds=state.fundsSourceBinding;
+ if(!boundFunds||typeof boundFunds.path!=='string'||!/^[a-f0-9]{64}$/.test(boundFunds.sha256??''))throw new Error('NEXT_OPENING_FUNDS_SOURCE_REQUIRED');
+ const source=readBoundSelectedSourceReceipt(manifest.source,manifest.sourceReceiptSha256),fundsBytes=readFileSync(privatePath(join(boundFunds.path,'receipt.json')));
+ if(sha(fundsBytes)!==boundFunds.sha256)throw new Error('FUNDS_SOURCE_BINDING_CHANGED');
+ const openingDir=privatePath(systemOpeningRecovery?state.additiveInputs?.opening?.directory:option('--opening-proof')),
+  openingSha=systemOpeningRecovery?state.additiveInputs?.opening?.manifestSha256:option('--opening-proof-sha'),openingBytes=readFileSync(privatePath(join(openingDir,'manifest.json')));
+ if(!/^[a-f0-9]{64}$/.test(openingSha??'')||sha(openingBytes)!==openingSha)throw new Error('OPENING_PROOF_MANIFEST_SHA_MISMATCH');
+ const opening=JSON.parse(openingBytes),modules={canonical,legacyOwnerUserId:mod('supply/legacy-user-migration').legacyOwnerUserId,
+  financeRead:mod('finance/personal-finance-read'),preparation:mod('finance/legacy-finance-source-preparation'),proof:mod('finance/legacy-finance-source-evidence')};
+ openingSourcePreflight={...await verifyOpeningCapture({datasetDir:privatePath(dataset),sourceDir:privatePath(manifest.source),fundsDir:privatePath(boundFunds.path),
+  openingDir,dataset:manifest,source,funds:JSON.parse(fundsBytes),opening,datasetSha256:sha(manifestBytes),sourceReceiptSha256:manifest.sourceReceiptSha256,
+  fundsReceiptSha256:boundFunds.sha256,modules,privatePath}),datasetManifestSha256:sha(manifestBytes),sourceReceiptSha256:manifest.sourceReceiptSha256,
+  openingManifestSha256:openingSha,fundsReceiptSha256:boundFunds.sha256,sourceConnections:0,targetConnections:0,targetWrites:0};
+ if(state.openingSourcePreflight&&canonical(state.openingSourcePreflight)!==canonical(openingSourcePreflight))throw new Error('OPENING_SOURCE_PREFLIGHT_CHANGED');
 }
 const refundAttemptsBinding=option("--refund-attempts")?{path:resolve(option("--refund-attempts")),sha256:option("--refund-attempts-sha")}:null;
 if(refundAttemptsBinding){if(!refundAttemptsBinding.path.toLowerCase().startsWith("e:\\zzsh-local-state\\restricted\\")||sha(readFileSync(join(refundAttemptsBinding.path,"receipt.json")))!==refundAttemptsBinding.sha256||state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");}
@@ -290,9 +318,12 @@ const gameIds = new Map();
 const domainFile = name => manifest.files[name] ? join(dataset, manifest.files[name].file) : null;
 async function checkpointBatch(domain, batch, start, body, beforeBatch, batchBody) {
     assertRoundWindow();
+    if(domain==='storedOpening'&&registered.migrationProfile===NEXT_MIGRATION_PROFILE&&(!fenceHeld||!fenceEpoch))throw new Error('TARGET_FENCE_EPOCH_LOST');
     const sourceIds = batch.map(row => row.sourceId ?? row.parentLegacyOrderId ?? row.key);
     if (strictBatch && sourceIds.some(id => id === undefined || id === "")) throw new Error("STRICT_BATCH_ORIGINAL_KEYS_REQUIRED");
-    const batchIntent = { domain, start, end: start + batch.length, sourceIds, phaseBodyDigest: sha(canonical(batch)), stage: "BEFORE_BEGIN" };
+    const batchIntent = { domain, start, end: start + batch.length, sourceIds, phaseBodyDigest: sha(canonical(batch)), stage: "BEFORE_BEGIN",
+      ...(domain==='storedOpening'&&registered.migrationProfile===NEXT_MIGRATION_PROFILE&&fenceEpoch
+        ? {receiptMode:'SYSTEM_OPENING_V1',fenceEpochSha256:sha(JSON.stringify(fenceEpoch))} : {}) };
     state.pending = batchIntent;
     save();
     event({ domain, start, end: start + batch.length, event: "INTENT" });
@@ -602,6 +633,27 @@ function systemFinanceAdapter() {
     }
     return {receiptMode:"SYSTEM_BATCH_V1",importEmpty:inputs=>importBatch(inputs,false),importHistory:inputs=>importBatch(inputs,true)};
 }
+function systemOpeningAdapter(originalFenceEpochSha256=null){
+    const module=mod('finance/personal-finance-maintenance'),epoch=fenceEpoch,admitted=new Set();
+    if(!epoch||!fenceHeld||['systemStoredOpeningBatchProof','importSystemStoredOpeningBatchOn','recoverSystemStoredOpeningBatch']
+      .some(name=>typeof module[name]!=='function'))throw new Error('NEXT_SYSTEM_OPENING_ADAPTER_REQUIRED');
+    const recovery=originalFenceEpochSha256!==null;
+    if(recovery&&!/^[a-f0-9]{64}$/.test(originalFenceEpochSha256))throw new Error('ORIGINAL_OPENING_FENCE_REQUIRED');
+    const financeActor={kind:'SYSTEM_FINANCE_MIGRATION',id:systemFinanceId,sourceDatasetSha256:sha(manifestBytes),target:systemUserTarget,
+      fenceEpochSha256:originalFenceEpochSha256??sha(JSON.stringify(epoch)),requestId:'core-legacy-dataset-'+expectedOid,
+      assertMigrationFence:async targetClient=>{if(!recovery)assertRoundWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');
+        await assertMigrationFenceHeld(targetClient,registered,epoch);if(!recovery)assertRoundWindow();},
+      assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_OPENING_SOURCE_NOT_ADMITTED');}};
+    async function apply(inputs,window,readOnly){
+      if(readOnly!==recovery)throw new Error('SYSTEM_OPENING_MODE_CHANGED');
+      const proof=module.systemStoredOpeningBatchProof(inputs,financeActor,window);
+      admitted.clear();admitted.add(JSON.stringify(proof.source));
+      try{return await (readOnly?systemUserMigration.withSystemFinanceRecoveryBatch:systemUserMigration.withSystemFinanceMigrationBatch)(client,financeActor,
+        ()=>readOnly?module.recoverSystemStoredOpeningBatch(client,financeActor,inputs,window):module.importSystemStoredOpeningBatchOn(client,financeActor,inputs,window));}
+      finally{admitted.clear();}
+    }
+    return {receiptMode:'SYSTEM_OPENING_V1',fenceEpochSha256:financeActor.fenceEpochSha256,importBatch:(inputs,window)=>apply(inputs,window,false),recoverBatch:(inputs,window)=>apply(inputs,window,true)};
+}
 function systemInvitationAdapter(){
     const module=mod('finance/legacy-invitation-facts-maintenance'),facts=mod('finance/legacy-invitation-facts'),epoch=fenceEpoch,admitted=new Set();
     if(!epoch||!fenceHeld||['bindSystemInvitationReceiptBaseline','importSystemLegacyInvitationFacts','closeSystemLegacyInvitationCounts',
@@ -690,7 +742,7 @@ try {
     held = (await maintenance.query(advisoryLockSql(registered, "try"))).rows[0].ok;
     if (!held)
         throw new Error("REGRESSION_RESOURCE_BUSY");
-    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE && !recover)
+    if (registered.migrationProfile === NEXT_MIGRATION_PROFILE && (!recover||systemOpeningRecovery))
         fenceEpoch = await captureMaintenanceLockEpoch(maintenance, registered);
     let startingResource;
     if (!fenceEpoch) startingResource = readStartingResource();
@@ -712,7 +764,24 @@ try {
     }
     resetRunCleanup();
     if(refundAttemptsBinding&&state.refundAttemptsBinding&&JSON.stringify(state.refundAttemptsBinding)!==JSON.stringify(refundAttemptsBinding))throw new Error("REFUND_ATTEMPT_CHECKPOINT_BINDING_CHANGED");
-    if (recover) {
+    if (systemOpeningRecovery) {
+        let result, failure;
+        await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        try {
+            const { recoverSystemOpeningDomain } = await import('./local-target-opening.mjs');
+            result=await recoverSystemOpeningDomain({client,mod,state,systemOpening:systemOpeningAdapter(state.pending.fenceEpochSha256)});
+            await assertMigrationFenceHeld(client,registered,fenceEpoch);
+        } catch(error) { failure=error; }
+        try { if((await client.query('ROLLBACK')).command!=='ROLLBACK')throw new Error('ROUND_ROLLBACK_ACK_NOT_CONFIRMED'); }
+        catch(error){unsafeConnection=error;failure??=error;}
+        if(failure)throw failure;
+        const pending=state.pending,report={mode:'READ_ONLY',binding,phase:'storedOpening',stage:pending.stage,
+          originalBatch:{start:pending.start,end:pending.end,phaseBodyDigest:pending.phaseBodyDigest,fenceEpochSha256:pending.fenceEpochSha256},
+          ...result,sourceVerification:openingSourcePreflight.status};
+        writeFileSync(join(output,'recovery-'+Date.now()+'.json'),JSON.stringify(report,null,2),{flag:'wx'});
+        console.log(JSON.stringify({status:'READ_ONLY_OPENING_RECOVERY_RECORDED',knowledge:result.knowledge,subjects:result.subjects}));
+    }
+    else if (recover) {
         const { pending, status } = state;
         writeFileSync(join(output, "recovery-" + Date.now() + ".json"), JSON.stringify({ mode: "READ_ONLY", binding, pending, checkpointStatus: status, knowledge: "EXACT_PENDING_KEYS_REQUIRE_INSPECTION" }, null, 2), { flag: "wx" });
         console.log(JSON.stringify({ status: "READ_ONLY_RECOVERY_RECORDED", phase: pending.domain }));
@@ -753,6 +822,7 @@ try {
         checkpointOwned = true;
         state.resource = actual;
         if(fundsSourceBinding)state.fundsSourceBinding=fundsSourceBinding;
+        if(openingSourcePreflight)state.openingSourcePreflight=openingSourcePreflight;
         if(refundAttemptsBinding)state.refundAttemptsBinding=refundAttemptsBinding;
         state.gameBindings = Object.fromEntries(gameIds);
         state.status = "RUNNING";
@@ -776,7 +846,9 @@ try {
         }
         else if (openingOnly) {
             const { applyOpeningDomain } = await import("./local-target-opening.mjs");
-            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event, isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, targetPort: registered.port ?? registered.instance?.port ?? null }, option("--opening-proof"), option("--opening-proof-sha"));
+            await applyOpeningDomain({ client, actor, mod, manifest, state, output, domainFile, readRows, runItems, runBatches, save, event,
+              isNextMigration: registered.migrationProfile === NEXT_MIGRATION_PROFILE, systemOpening:registered.migrationProfile===NEXT_MIGRATION_PROFILE?systemOpeningAdapter():null,
+              targetPort: registered.port ?? registered.instance?.port ?? null }, option("--opening-proof"), option("--opening-proof-sha"));
             state.status = "LOCAL_DATASET_STORED_OPENINGS_COMMITTED_REVIEW_REQUIRED";
         }
         else if (displayOnly) {

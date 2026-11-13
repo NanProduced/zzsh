@@ -2,7 +2,9 @@ import {assertEmptyCoverageReceiptMode,assertRebuiltEmptyCoverageChunk,assertReb
 import { acquireMigrationTransactionFence, advisoryLockSql, assertCoreSystemMigrationBinding, assertLiveTarget, assertMigrationFenceHeld, assertReadbackTarget, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { compareKeySets } from "./local-key-set.mjs";
 import { legacyListedIdsDigest, legacyListedSourceForReadback, legacyListedTargetMatches } from "./selected-business-scope.mjs";
-import { readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { privatePath, readBoundSelectedSourceReceipt, verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
+import { verifyOpeningCapture } from "./local-opening-proof.mjs";
+import { readSystemOpeningBatch } from "./system-opening-readback.mjs";
 import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
@@ -80,6 +82,22 @@ const mod = name => require(join(api, name + ".js"));
 const canonical = mod("supply/content-hash").canonicalize, accountId = mod("legacy-load/legacy-account-seam").legacyAccountId, orderRead = mod("order/legacy-order-read");
 const hasSystemIds = ["systemUserId","systemAccountId","systemOrderId","systemFinanceId","systemInvitationId"].some(key => state.binding?.[key] !== undefined);
 const systemCore = assertCoreSystemMigrationBinding(registration,state.binding,hasSystemIds ? mod("legacy-load/system-user-migration") : null);
+let openingSourceReadback,openingSourceError;
+if(registration.migrationProfile===NEXT_MIGRATION_PROFILE&&state.phases.storedOpening?.complete)try{
+  const binding=state.fundsSourceBinding,opening=state.additiveInputs?.opening;
+  if(!binding||!opening||typeof binding.path!=='string'||!/^[a-f0-9]{64}$/.test(binding.sha256??'')
+    ||typeof opening.directory!=='string'||!/^[a-f0-9]{64}$/.test(opening.manifestSha256??''))throw new Error('OPENING_SOURCE_READBACK_BINDING_REQUIRED');
+  const fundsBytes=readFileSync(privatePath(join(binding.path,'receipt.json'))),openingBytes=readFileSync(privatePath(join(opening.directory,'manifest.json')));
+  if(hash(fundsBytes)!==binding.sha256||hash(openingBytes)!==opening.manifestSha256)throw new Error('OPENING_SOURCE_READBACK_BINDING_CHANGED');
+  const modules={canonical,legacyOwnerUserId:mod('supply/legacy-user-migration').legacyOwnerUserId,financeRead:mod('finance/personal-finance-read'),
+    preparation:mod('finance/legacy-finance-source-preparation'),proof:mod('finance/legacy-finance-source-evidence')};
+  openingSourceReadback={...await verifyOpeningCapture({datasetDir:privatePath(dataset),sourceDir:privatePath(manifest.source),fundsDir:privatePath(binding.path),
+    openingDir:privatePath(opening.directory),dataset:manifest,source:listedSourceReceipt,funds:JSON.parse(fundsBytes),opening:JSON.parse(openingBytes),
+    datasetSha256:hash(bytes),sourceReceiptSha256:manifest.sourceReceiptSha256,fundsReceiptSha256:binding.sha256,modules,privatePath}),
+    datasetManifestSha256:hash(bytes),sourceReceiptSha256:manifest.sourceReceiptSha256,openingManifestSha256:opening.manifestSha256,
+    fundsReceiptSha256:binding.sha256,sourceConnections:0,targetConnections:0,targetWrites:0};
+  if(canonical(openingSourceReadback)!==canonical(state.openingSourcePreflight))throw new Error('OPENING_SOURCE_READBACK_CHANGED');
+}catch(error){openingSourceError=error;}
 const hasIdentityProfiles = manifest.identityProfiles?.schema === "zzsh.legacy-identity-profile-source.v1";
 if (manifest.identityProfiles && (!hasIdentityProfiles || manifest.identityProfiles.invalid !== 0
   || manifest.identityProfiles.verified !== manifest.identityProfiles.ready)) throw new Error("LEGACY_IDENTITY_PROFILE_SOURCE_INCOMPLETE");
@@ -181,6 +199,7 @@ if (listedSource && !listedAccountSources) {
 const report = { schema: "zzsh.local-dataset-readback.v1", startedAt: new Date().toISOString(), resource: { oid: state.binding.oid, nonce: state.binding.nonce, database: registration.database, ...(registration.instance ? {instance:registration.instance} : {}), ...(registration.migrationProfile ? {migrationProfile:registration.migrationProfile} : {}) }, sourceDatasetSha256: option("--dataset-sha"), status: "STARTED", queries: 0, domains: {}, differences: [], differenceCount: 0, targetWrites: 0, rollbackConfirmed: false, lockReleased: false, connectionsClosed: false };
 const systemAttribution = systemCore ? Object.fromEntries(["users","accounts","orders"].map(name=>[name,{expected:0,matched:0}])) : null;
 if (listedSource) { report.legacyListedSource = listedSource; report.legacyListedSourceOrigin = listedSourceOrigin; }
+if(openingSourceReadback)report.openingSourceReadback=openingSourceReadback;
 const difference = (domain, id, reason) => { report.differenceCount++; if (report.differences.length < 100) report.differences.push({ domain, id, reason }); };
 const query = async (...args) => { report.queries++; return db.query(...args); };
 async function batched(domain, apply, collect = null, batchSize = 1000, source = null) { let batch = [], count = 0;
@@ -190,6 +209,7 @@ async function batched(domain, apply, collect = null, batchSize = 1000, source =
   for await (const row of input) { batch.push(row); if (collect) collect.push(row.sourceId); if (batch.length === batchSize) { await apply(batch); count += batch.length; batch = []; } } if (batch.length) { await apply(batch); count += batch.length; } return count; }
 const started = performance.now(); let held = false, connected = false, fenceEpoch;
 try {
+  if(openingSourceError)throw openingSourceError;
   await maintenance.connect(); held = (await maintenance.query(advisoryLockSql(registration, "try"))).rows[0].ok;
   if (!held) throw new Error("REGRESSION_RESOURCE_BUSY");
   fenceEpoch = registration.migrationProfile === NEXT_MIGRATION_PROFILE ? await captureMaintenanceLockEpoch(maintenance, registration) : null;
@@ -506,11 +526,31 @@ try {
       if (!audit || audit.sourceUpdatedAtUtc !== row.sealedRow.sourceUpdatedAtUtc || audit.sourceExtractSha256 !== hp.sourceContext.sourceExtractSha256 || audit.mappingOverlay?.sha256 !== hp.sourceContext.mappingOverlay?.sha256) difference("holdings", row.sourceId, "HOLDING_SOURCE_TIME_OR_REVIEWED_OVERLAY_AUDIT_DRIFT");
     }
     const opening = state.additiveInputs.opening, om = JSON.parse(readFileSync(await checked(opening.directory, "manifest.json", opening.manifestSha256)));
+    const systemOpening=registration.migrationProfile===NEXT_MIGRATION_PROFILE;
+    if(systemOpening&&(opening.receiptMode!=='SYSTEM_OPENING_V1'||!systemCore||!state.binding.systemFinanceId))throw new Error('SYSTEM_OPENING_RECEIPT_MODE_UNCONFIRMED');
+    const openingEvidence=systemOpening?{expected:om.stats.candidate,matched:0,sourceReconstructed:!!openingSourceReadback}:null;
+    const openingModule=systemOpening?mod('finance/personal-finance-maintenance'):null;
+    const openingActor=systemOpening?{kind:'SYSTEM_FINANCE_MIGRATION',id:state.binding.systemFinanceId,sourceDatasetSha256:state.binding.datasetSha256,
+      requestId:'core-legacy-dataset-'+state.binding.oid,target:{systemIdentifier:registration.instance?.systemIdentifier,databaseOid:registration.oid,marker:registration.marker,nonce:registration.nonce,roleOid:registration.migrationRoleOid}}:null;
+    const openingWindow=systemOpening?{ref:'CORE_FULL_STORED_OPENING_'+state.binding.oid,attempt:'opening-'+opening.manifestSha256.slice(0,16),notBefore:opening.notBefore,expiresAt:opening.expiresAt}:null;
     async function* candidates() { for await (const row of rows(await checked(opening.directory, om.file, om.sha256))) if (row.state === "CANDIDATE") yield row; }
-    await compare("openings", candidates(), async batch => (await query("SELECT source_id key,user_id,source_digest,identity_source_digest,available_cents::text available_cents,covered_count,covered_set_digest,source_cutoff FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore' AND source_id=ANY($1::text[])", [batch.map(r => r.sourceId)])).rows, (r, a) => {
+    await compare("openings", candidates(), async batch => {
+      const values=(await query("SELECT source_id key,user_id,source_digest,identity_source_digest,available_cents::text available_cents,covered_count,covered_set_digest,source_cutoff FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore' AND source_id=ANY($1::text[])", [batch.map(r => r.sourceId)])).rows;
+      if(systemOpening){
+        const evidence=[];for(let i=0;i<batch.length;i+=200)evidence.push(...await readSystemOpeningBatch(query,batch.slice(i,i+200).map(row=>row.input),
+          {actor:openingActor,window:openingWindow,fenceEpochs:opening.fenceEpochs,canonical,openingPlanCore:openingModule.openingPlanCore,
+            systemOpeningReview:openingModule.systemOpeningReview,fingerprintRequest:mod('supply/supply-util').fingerprintRequest}));
+        const bySubject=new Map(evidence.map(row=>[row.subjectId,row.matched]));for(const row of values)row.systemOpeningMatched=bySubject.get(row.user_id)===true;
+      }
+      return values;
+    }, (r, a) => {
       const p = r.input.proof;
-      return a && a.user_id === p.userId && a.source_digest === p.sourceDigest && a.identity_source_digest === p.source.identityDigest && a.available_cents === p.availableCents && a.covered_count === p.coveredCount && a.covered_set_digest === p.coveredDigest && a.source_cutoff.toISOString() === r.input.cutoff;
+      const match=a && a.user_id === p.userId && a.source_digest === p.sourceDigest && a.identity_source_digest === p.source.identityDigest && a.available_cents === p.availableCents && a.covered_count === p.coveredCount && a.covered_set_digest === p.coveredDigest && a.source_cutoff.toISOString() === r.input.cutoff
+        &&(!systemOpening||a.systemOpeningMatched===true);
+      if(match&&systemOpening)openingEvidence.matched++;
+      return match;
     }, om.stats.candidate);
+    if(openingEvidence)report.openings.systemAttribution={...openingEvidence,status:openingEvidence.sourceReconstructed&&openingEvidence.matched===openingEvidence.expected?'VERIFIED':'MISMATCH'};
     const pathDir = option("--paths-plan"), pm = JSON.parse(readFileSync(await checked(pathDir, "receipt.json", option("--paths-plan-sha"))));
     if (pm.datasetSha256 !== state.binding.datasetSha256) throw new Error("ADDITIVE_PATH_DATASET_DRIFT");
     await compare("paths", rows(await checked(pathDir, pm.file, pm.fileSha256)), async batch => (await query("SELECT m.legacy_id key,m.version_id,p.observation_version_id,p.source_digest,p.display_paths,p.penalty_paths FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_account_media_paths p USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])", [batch.map(r => r.legacyId)])).rows, (r, a) => a && a.version_id === a.observation_version_id && a.source_digest === r.sourceDigest && canonical(a.display_paths) === canonical(r.displayPaths) && canonical(a.penalty_paths) === canonical(r.penaltyPaths), pm.accounts);

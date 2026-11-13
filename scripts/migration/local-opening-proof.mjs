@@ -24,7 +24,7 @@ export function assertOpeningUserSource(balance, captured, planned, { canonical,
 }
 
 /** Match every prepared candidate to its captured stored balance without summing transaction flows. */
-export async function verifyPreparedOpeningUsers({ balances, openings, capturedUsers, plannedUsers, modules, inputSha256, cutoff }) {
+export async function verifyPreparedOpeningUsers({ balances, openings, capturedUsers, plannedUsers, modules, inputSha256, cutoff, rebuild }) {
   const iterator = openings[Symbol.asyncIterator](), seen = new Set(); let subjects = 0, candidate = 0, reviewRequired = 0, amount = 0n;
   for await (const balance of balances) {
     if (seen.has(balance.sourceId)) throw new Error("OPENING_SOURCE_BALANCE_DUPLICATE");
@@ -33,6 +33,7 @@ export async function verifyPreparedOpeningUsers({ balances, openings, capturedU
     assertOpeningUserSource(balance, captured, planned, modules);
     const next = await iterator.next(), row = next.value;
     if (next.done || row?.sourceId !== balance.sourceId || row.userId !== balance.userId) throw new Error("OPENING_PREPARED_SUBJECT_MISMATCH");
+    if (rebuild && modules.canonical(row) !== modules.canonical(rebuild(balance))) throw new Error("OPENING_FINANCIAL_SOURCE_MISMATCH");
     if (row.state === "CANDIDATE") {
       const input = row.input, proof = input?.proof;
       const sourceDigest = sha(JSON.stringify({ id: captured.source.id, earnings: captured.source.earnings, money: captured.source.money }));
@@ -46,14 +47,18 @@ export async function verifyPreparedOpeningUsers({ balances, openings, capturedU
     subjects++;
   }
   if (!(await iterator.next()).done) throw new Error("OPENING_PREPARED_SUBJECT_MISMATCH");
-  return { status: "SOURCE_VALUE_AND_SUBJECT_VERIFIED", subjects, candidate, reviewRequired, candidateAvailableCents: amount.toString() };
+  return { status: rebuild ? "SOURCE_FINANCIAL_FACTS_VERIFIED" : "SOURCE_VALUE_AND_SUBJECT_VERIFIED", subjects, candidate, reviewRequired, candidateAvailableCents: amount.toString() };
 }
 
-/** Re-read source, planned users, balances and the opening package before target writes. */
-export async function verifyOpeningUserCapture({ datasetDir, sourceDir, openingDir, dataset, source, opening, datasetSha256, sourceReceiptSha256, fundsReceiptSha256, modules, privatePath }) {
+/** Rebuild each opening from captured users, transaction sources and the same cutoff before writes. */
+export async function verifyOpeningCapture({ datasetDir, sourceDir, fundsDir, openingDir, dataset, source, funds, opening, datasetSha256, sourceReceiptSha256, fundsReceiptSha256, modules, privatePath }) {
   const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
   if (![datasetSha256,sourceReceiptSha256,fundsReceiptSha256].every(hex)||typeof privatePath!=='function'
     ||dataset?.sourceReceiptSha256!==sourceReceiptSha256||source?.status!=='CAPTURED_READ_ONLY'||source.rollbackConfirmed!==true||source.clientClosed!==true
+    ||funds?.status!=='CAPTURED_READ_ONLY'||funds.rollbackConfirmed!==true||funds.clientClosed!==true
+    ||funds.sourceSupplement?.baseReceiptSha256!==sourceReceiptSha256||funds.sourceSupplement?.fullSourcePopulation!==true
+    ||typeof source.containerId!=='string'||!source.containerId||typeof source.database!=='string'||!source.database
+    ||funds.containerId!==source.containerId||funds.database!==source.database
     ||opening?.status!=='REVIEWED_CANDIDATES_TARGET_NOT_RUN'||opening.datasetSha256!==datasetSha256
     ||opening.sourceUsers?.status!=='SOURCE_VALUE_AND_SUBJECT_VERIFIED'||opening.sourceUsers.sha256!==source.files?.users?.sha256
     ||opening.sourceUsers.matched!==opening.stats?.subjects||opening.sourceCutoff!==new Date(dataset.sourceCutoff).toISOString())
@@ -72,12 +77,27 @@ export async function verifyOpeningUserCapture({ datasetDir, sourceDir, openingD
     if(typeof user.sourceId!=='string'||plannedUsers.has(user.sourceId))throw new Error('OPENING_PLANNED_USER_DUPLICATE');
     plannedUsers.set(user.sourceId,{sourceId:user.sourceId,userId:user.userId,sourceDigest:user.sourceDigest});
   }
+  const maps={logs:new Map(),orders:new Map(),withdraws:new Map(),distributions:new Map()},logIds=new Set();
+  for(const [dir,meta,map] of [[fundsDir,funds.files?.earnings,maps.logs],[sourceDir,source.files?.orders,maps.orders],
+    [fundsDir,funds.files?.withdraws,maps.withdraws],[sourceDir,source.files?.distributionOrders,maps.distributions]]){
+    for await(const row of read(dir,meta)){
+      if(typeof row?.id!=='string'||!row.id)throw new Error('OPENING_FINANCIAL_SOURCE_INVALID');
+      if(map===maps.logs){
+        if(typeof row.user_id!=='string'||!row.user_id||logIds.has(row.id))throw new Error('OPENING_FINANCIAL_SOURCE_INVALID');
+        logIds.add(row.id);if(!map.has(row.user_id))map.set(row.user_id,[]);map.get(row.user_id).push(row);
+      }else{if(map.has(row.id))throw new Error('DUPLICATE_OPENING_SOURCE_ID');map.set(row.id,row);}
+    }
+  }
+  const context={modules,...maps,cutoff:opening.sourceCutoff,inputSha256:expectedInputSha,sourceExtractSha256:funds.files.earnings.sha256};
   const proof=await verifyPreparedOpeningUsers({balances:read(datasetDir,dataset.files['stored-balances']),
-    openings:read(openingDir,{file:opening.file,sha256:opening.sha256,rows:opening.stats?.subjects}),capturedUsers,plannedUsers,modules,inputSha256:expectedInputSha,cutoff:opening.sourceCutoff});
+    openings:read(openingDir,{file:opening.file,sha256:opening.sha256,rows:opening.stats?.subjects}),capturedUsers,plannedUsers,modules,inputSha256:expectedInputSha,cutoff:opening.sourceCutoff,
+    rebuild:balance=>prepareLocalStoredOpening(balance,context)});
   if(proof.subjects!==opening.stats.subjects||proof.candidate!==opening.stats.candidate||proof.reviewRequired!==opening.stats.reviewRequired
     ||proof.candidateAvailableCents!==opening.stats.candidateAvailableCents||proof.subjects!==dataset.domains?.users?.ready)
     throw new Error('OPENING_SOURCE_RECONCILIATION_CHANGED');
-  return {...proof,sourceUsersSha256:source.files.users.sha256,openingSha256:opening.sha256};
+  return {...proof,sourceUsersSha256:source.files.users.sha256,sourceOrdersSha256:source.files.orders.sha256,
+    sourceDistributionsSha256:source.files.distributionOrders.sha256,fundsEarningsSha256:funds.files.earnings.sha256,
+    fundsWithdrawalsSha256:funds.files.withdraws.sha256,openingSha256:opening.sha256};
 }
 
 /** Same frozen physical-source extraction used for the accepted local stored-opening package.

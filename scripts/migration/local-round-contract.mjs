@@ -452,14 +452,29 @@ export function systemCompletedCommissionAttributionMatches(checkpoint,readback)
   &&proof?.status==='VERIFIED'&&proof.expected===input.rows&&proof.matched===input.rows;
 }
 
+export function systemOpeningAttributionMatches(checkpoint,readback){
+ const id=checkpoint?.binding?.systemFinanceId,input=checkpoint?.additiveInputs?.opening,phase=checkpoint?.phases?.storedOpening;
+ if(id===undefined)return true;
+ const result=readback?.openings,proof=result?.systemAttribution,source=checkpoint?.openingSourcePreflight;
+ return /^legacy-finance-migration:[a-f0-9]{64}$/.test(id??'')&&input?.receiptMode==='SYSTEM_OPENING_V1'&&Number.isSafeInteger(input.candidateCount)&&input.candidateCount>=0
+  &&Array.isArray(input.fenceEpochs)&&input.fenceEpochs.length>0&&input.fenceEpochs.every(value=>/^[a-f0-9]{64}$/.test(value))
+  &&phase?.complete===true&&phase.quarantined===0&&phase.nextIndex===input.candidateCount
+  &&source?.status==='SOURCE_FINANCIAL_FACTS_VERIFIED'&&JSON.stringify(source)===JSON.stringify(readback?.openingSourceReadback)
+  &&result?.expected===input.candidateCount&&result.matched===input.candidateCount
+  &&proof?.status==='VERIFIED'&&proof.sourceReconstructed===true&&proof.expected===input.candidateCount&&proof.matched===input.candidateCount;
+}
+
 export function openingSourcePreflightMatches(input,expected,p){
  const opening=expected?.openings,stats=opening?.stats;
  const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),count=value=>Number.isSafeInteger(value)&&value>=0;
- return [input?.dataset?.sha256,input?.source?.sha256,input?.funds?.sha256,input?.openings?.sha256,opening?.sha256,expected?.source?.files?.users?.sha256].every(hex)
-  &&p?.status==='SOURCE_VALUE_AND_SUBJECT_VERIFIED'&&p.datasetManifestSha256===input.dataset?.sha256
+ return [input?.dataset?.sha256,input?.source?.sha256,input?.funds?.sha256,input?.openings?.sha256,opening?.sha256,expected?.source?.files?.users?.sha256,
+  expected?.source?.files?.orders?.sha256,expected?.source?.files?.distributionOrders?.sha256,expected?.funds?.files?.earnings?.sha256,expected?.funds?.files?.withdraws?.sha256].every(hex)
+  &&p?.status==='SOURCE_FINANCIAL_FACTS_VERIFIED'&&p.datasetManifestSha256===input.dataset?.sha256
   &&p.sourceReceiptSha256===input.source?.sha256&&p.fundsReceiptSha256===input.funds?.sha256
   &&p.openingManifestSha256===input.openings?.sha256&&p.openingSha256===opening?.sha256
   &&p.sourceUsersSha256===expected?.source?.files?.users?.sha256&&[stats?.subjects,stats?.candidate,stats?.reviewRequired].every(count)
+  &&p.sourceOrdersSha256===expected?.source?.files?.orders?.sha256&&p.sourceDistributionsSha256===expected?.source?.files?.distributionOrders?.sha256
+  &&p.fundsEarningsSha256===expected?.funds?.files?.earnings?.sha256&&p.fundsWithdrawalsSha256===expected?.funds?.files?.withdraws?.sha256
   &&stats.candidate+stats.reviewRequired===stats.subjects&&typeof stats.candidateAvailableCents==='string'&&/^(0|[1-9]\d*)$/.test(stats.candidateAvailableCents)
   &&p.subjects===stats.subjects&&p.candidate===stats.candidate&&p.reviewRequired===stats.reviewRequired
   &&p.candidateAvailableCents===stats.candidateAvailableCents&&p.sourceConnections===0&&p.targetConnections===0&&p.targetWrites===0;
@@ -621,6 +636,10 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(!systemContinuationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_CONTINUATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemLiabilityAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_LIABILITY_ATTRIBUTION_UNCONFIRMED');
     if(!systemCompletedCommissionAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_COMPLETED_COMMISSION_ATTRIBUTION_UNCONFIRMED');
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&((expected?.dataset?.identityProfiles&&checkpoint?.binding?.systemFinanceId===undefined)
+      ||!systemOpeningAttributionMatches(checkpoint,readback)))issues.push('ROUND_SYSTEM_OPENING_ATTRIBUTION_UNCONFIRMED');
+    if(target.migrationProfile===NEXT_MIGRATION_PROFILE&&!input.resume&&expected?.dataset?.identityProfiles
+      &&JSON.stringify(receipt?.openingSourcePreflight)!==JSON.stringify(checkpoint?.openingSourcePreflight))issues.push('ROUND_SYSTEM_OPENING_SOURCE_BINDING_CHANGED');
     if (target.migrationProfile === NEXT_MIGRATION_PROFILE && (requireCurrentLegacyListed
       || Object.hasOwn(readback, "legacyListedSource") || Object.hasOwn(readback, "legacyListedSourceOrigin")
       || readback.legacyListedTarget?.sourceProofSha256 !== undefined)) {

@@ -14,15 +14,30 @@ import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assert
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, openingSourcePreflightMatches, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, openingSourcePreflightMatches, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, systemOpeningAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+
+test('system opening completion requires the original source and every financial receipt',()=>{
+ const source={status:'SOURCE_FINANCIAL_FACTS_VERIFIED',openingSha256:'a'.repeat(64)},checkpoint={binding:{systemFinanceId:'legacy-finance-migration:'+'b'.repeat(64)},
+  openingSourcePreflight:source,additiveInputs:{opening:{receiptMode:'SYSTEM_OPENING_V1',candidateCount:2,fenceEpochs:['c'.repeat(64)]}},
+  phases:{storedOpening:{complete:true,quarantined:0,nextIndex:2}}};
+ const readback={openingSourceReadback:source,openings:{expected:2,matched:2,systemAttribution:{status:'VERIFIED',sourceReconstructed:true,expected:2,matched:2}}};
+ assert.equal(systemOpeningAttributionMatches(checkpoint,readback),true);
+ for(const change of [r=>{r.openingSourceReadback.openingSha256='0'.repeat(64);},r=>{r.openings.systemAttribution.matched=1;},r=>{r.openings.systemAttribution.sourceReconstructed=false;}]){
+  const r=structuredClone(readback);change(r);assert.equal(systemOpeningAttributionMatches(checkpoint,r),false);
+ }
+ for(const change of [c=>{c.additiveInputs.opening.fenceEpochs=[];},c=>{c.phases.storedOpening.quarantined=1;},c=>{c.binding.systemFinanceId='wrong';}]){
+  const c=structuredClone(checkpoint);change(c);assert.equal(systemOpeningAttributionMatches(c,readback),false);
+ }
+});
 
 test('NEXT completion requires the exact independently checked stored-balance sources',()=>{
  const input={dataset:{sha256:'a'.repeat(64)},source:{sha256:'b'.repeat(64)},funds:{sha256:'c'.repeat(64)},openings:{sha256:'d'.repeat(64)}};
- const expected={source:{files:{users:{sha256:'e'.repeat(64)}}},openings:{sha256:'f'.repeat(64),stats:{subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750'}}};
- const proof={status:'SOURCE_VALUE_AND_SUBJECT_VERIFIED',datasetManifestSha256:input.dataset.sha256,sourceReceiptSha256:input.source.sha256,fundsReceiptSha256:input.funds.sha256,openingManifestSha256:input.openings.sha256,
-  openingSha256:expected.openings.sha256,sourceUsersSha256:expected.source.files.users.sha256,subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750',sourceConnections:0,targetConnections:0,targetWrites:0};
+ const expected={source:{files:{users:{sha256:'e'.repeat(64)},orders:{sha256:'1'.repeat(64)},distributionOrders:{sha256:'2'.repeat(64)}}},funds:{files:{earnings:{sha256:'3'.repeat(64)},withdraws:{sha256:'4'.repeat(64)}}},openings:{sha256:'f'.repeat(64),stats:{subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750'}}};
+ const proof={status:'SOURCE_FINANCIAL_FACTS_VERIFIED',datasetManifestSha256:input.dataset.sha256,sourceReceiptSha256:input.source.sha256,fundsReceiptSha256:input.funds.sha256,openingManifestSha256:input.openings.sha256,
+  openingSha256:expected.openings.sha256,sourceUsersSha256:expected.source.files.users.sha256,sourceOrdersSha256:expected.source.files.orders.sha256,sourceDistributionsSha256:expected.source.files.distributionOrders.sha256,
+  fundsEarningsSha256:expected.funds.files.earnings.sha256,fundsWithdrawalsSha256:expected.funds.files.withdraws.sha256,subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750',sourceConnections:0,targetConnections:0,targetWrites:0};
  assert.equal(openingSourcePreflightMatches(input,expected,proof),true);
- for(const change of [{sourceUsersSha256:'0'.repeat(64)},{candidateAvailableCents:'0'},{targetWrites:1},{subjects:1},{openingSha256:undefined}])
+ for(const change of [{sourceUsersSha256:'0'.repeat(64)},{fundsEarningsSha256:'0'.repeat(64)},{candidateAvailableCents:'0'},{targetWrites:1},{subjects:1},{openingSha256:undefined}])
   assert.equal(openingSourcePreflightMatches(input,expected,{...proof,...change}),false);
  assert.equal(openingSourcePreflightMatches({...input,funds:{}},expected,{...proof,fundsReceiptSha256:undefined}),false);
 });
