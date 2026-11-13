@@ -71,31 +71,29 @@ export async function assertFixedFeeTestListingAdmission(client: PoolClient, adm
 /** Exact native creations within the current demo enrollment; user migration does not affect eligibility. */
 export async function readFixedFeeDemoAccounts(client: PoolClient, demo: DemoFinanceResource, accountIds: readonly string[], purpose: "READ" | "WRITE"): Promise<Set<string>> {
   if (!accountIds.length) return new Set();
-  try {
-    const registration = await assertEcsTestDemoResource(client, demo, purpose === "READ" ? "READ_ORIGINAL" : "WRITE");
-    if (!registration.active || !await fixedFeeTradeSchemaReady(client)) return new Set();
-    if ((await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN") return new Set();
-    const result = await client.query<{ id: string }>(`SELECT a.id
-      FROM zzsh_supply.rental_account a
-      JOIN zzsh_order.ecs_test_demo_finance_registration r ON r.reference=$2 AND r.active AND a.created_at>=r.registered_at
-      JOIN zzsh_iam.audit_event e ON e.object_id=a.id AND e.object_type='rental_account'
-        AND e.actor_type='user' AND e.actor_id=a.owner_user_id AND e.action='supply.account.created'
-        AND e.outcome='SUCCESS' AND e.occurred_at>=r.registered_at AND e.details->>'gameId'=a.game_id
-      WHERE a.id=ANY($1::text[]) AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE'
-        AND NOT EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id)
-        AND NOT EXISTS(
-          SELECT 1 FROM zzsh_order.owner_guarantee_requirement q
-          JOIN zzsh_order.owner_guarantee_payment p ON p.requirement_id=q.id AND p.owner_user_id=q.owner_user_id
-          WHERE q.account_id=a.id AND p.status='CONFIRMED'
-            AND (p.created_at<r.registered_at OR p.original_receipt->>'source' IS DISTINCT FROM 'ECS_DEMO_GUARANTEE'
-              OR p.original_receipt->>'registrationDigest' IS DISTINCT FROM $3)
-        )
-        AND NOT EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id
-          AND (p.source<>'OWNER_DIRECT' OR p.published_at<r.registered_at))
-      GROUP BY a.id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest]);
-    return new Set(result.rows.map(row => row.id));
-  } catch (error) {
-    if (purpose === "READ" && error instanceof SecurityApiError) return new Set();
-    throw error;
-  }
+  const registration = await assertEcsTestDemoResource(client, demo, purpose === "READ" ? "READ_ORIGINAL" : "WRITE");
+  if (!registration.active) return new Set();
+  if (!await fixedFeeTradeSchemaReady(client))
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo trade guards unavailable");
+  if ((await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN")
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo distribution policy unavailable");
+  const result = await client.query<{ id: string }>(`SELECT a.id
+    FROM zzsh_supply.rental_account a
+    JOIN zzsh_order.ecs_test_demo_finance_registration r ON r.reference=$2 AND r.active AND a.created_at>=r.registered_at
+    JOIN zzsh_iam.audit_event e ON e.object_id=a.id AND e.object_type='rental_account'
+      AND e.actor_type='user' AND e.actor_id=a.owner_user_id AND e.action='supply.account.created'
+      AND e.outcome='SUCCESS' AND e.occurred_at>=r.registered_at AND e.details->>'gameId'=a.game_id
+    WHERE a.id=ANY($1::text[]) AND a.lifecycle='ACTIVE' AND a.legacy_hold='NONE'
+      AND NOT EXISTS(SELECT 1 FROM zzsh_supply.legacy_supply_map m WHERE m.account_id=a.id)
+      AND NOT EXISTS(
+        SELECT 1 FROM zzsh_order.owner_guarantee_requirement q
+        JOIN zzsh_order.owner_guarantee_payment p ON p.requirement_id=q.id AND p.owner_user_id=q.owner_user_id
+        WHERE q.account_id=a.id AND p.status='CONFIRMED'
+          AND (p.created_at<r.registered_at OR p.original_receipt->>'source' IS DISTINCT FROM 'ECS_DEMO_GUARANTEE'
+            OR p.original_receipt->>'registrationDigest' IS DISTINCT FROM $3)
+      )
+      AND NOT EXISTS(SELECT 1 FROM zzsh_supply.listing_publication p WHERE p.account_id=a.id
+        AND (p.source<>'OWNER_DIRECT' OR p.published_at<r.registered_at))
+    GROUP BY a.id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest]);
+  return new Set(result.rows.map(row => row.id));
 }
