@@ -6,7 +6,7 @@ import { privatePath, readBoundSelectedSourceReceipt, verifySelectedPopulationFi
 import { verifyOpeningCapture } from "./local-opening-proof.mjs";
 import { assertLegacySkinOverlaySources, deriveLegacySkinTokenRules, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { readSystemOpeningBatch } from "./system-opening-readback.mjs";
-import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readVerifiedSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
+import { assertLegacyIdentityColumns, assertDisplayCaptureCoverage, assertNextBusinessPopulation, inspectUnresolvedRefundSource, matchesLegacyIdentitySource, classifyLegacyRegistrationTime, compareLegacyRegistrationFact, matchesLegacyAccountMetricAudit, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemMediaBatch, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, buildNextContinuationRows, legacyAccountCaptureProof, matchesLegacyAccountCapture, matchesCapturedAccountBaseRatio, matchesCapturedAccountFullPayout, legacyOrderCaptureProof, matchesLegacyOrderCapture, readBoundSourceRows, readVerifiedSourceRows, readSourceRows as rows } from "./local-source-adapter.mjs";
 import { assessInvitationChildSet, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 import { prepareLegalPair, readPinnedRegularFile, verifyLegalPair } from "./local-legal-pair.mjs";
 import { assertRentalReferenceReceipt, readTargetRentalReference, verifyRuntimeRentalReference } from "./business-reference-readiness.mjs";
@@ -688,15 +688,9 @@ try {
         const receipts=Map.groupBy((await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required
           FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows,row=>row.scope_key);
         for(const batchId of group){
-          const items=pathBatches.get(batchId).sort((a,b)=>a.accountId<b.accountId?-1:a.accountId>b.accountId?1:0),digest=hash(canonical(items));
-          const scope=JSON.stringify(['system',actorId,operation,batchId]),a=audits.get(batchId),r=receipts.get(scope),details=a?.[0]?.details;
-          const fingerprint=mod('supply/supply-util').fingerprintRequest(operation,batchId,items);
-          if(batchId!=='legacy-media-batch:'+digest||a?.length!==1||a[0].actor_type!=='system'||a[0].actor_id!==actorId||a[0].session_id!==null
-            ||a[0].source_manifest!==state.binding.datasetSha256||details?.sourceSystem!=='legacy_mysql_restore'||details.sourceEntity!=='la_rental_accounts'
-            ||details.sourceDatasetSha256!==state.binding.datasetSha256||details.migrationRunDigest!==actorId.slice('legacy-account-migration:'.length)
-            ||details.sourceBindingDigest!==digest||details.count!==items.length||r?.length!==1||r[0].key!==batchId
-            ||r[0].request_fingerprint!==fingerprint||r[0].response_status!==200||r[0].publish_required!==false
-            ||canonical(r[0].response_body)!==canonical({inserted:items.length,replayed:0}))difference('paths',batchId,'SYSTEM_MEDIA_BATCH_EVIDENCE_DRIFT');
+          const items=pathBatches.get(batchId),scope=JSON.stringify(['system',actorId,operation,batchId]);
+          if(!matchesSystemMediaBatch(audits.get(batchId),receipts.get(scope),{actorId,manifestSha256:state.binding.datasetSha256,batchId,items,
+            canonicalize:canonical,fingerprintRequest:mod('supply/supply-util').fingerprintRequest}))difference('paths',batchId,'SYSTEM_MEDIA_BATCH_EVIDENCE_DRIFT');
           else matched+=items.length;
         }
       }

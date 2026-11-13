@@ -378,6 +378,20 @@ export function matchesSystemDisplayReceipt(rows,{actorId,accountId,displayDiges
     return row.scope_key===scope&&row.key==="legacy-display-v1:"+accountId&&row.request_fingerprint===fingerprint
       &&row.response_status===200&&row.publish_required===false&&canonicalize(row.response_body)===canonicalize({accountId,displayDigest,schemaVersion:1});
 }
+export function matchesSystemMediaBatch(audits,receipts,{actorId,manifestSha256,batchId,items,canonicalize,fingerprintRequest}){
+    if(!Array.isArray(audits)||audits.length!==1||!Array.isArray(receipts)||receipts.length!==1||!Array.isArray(items)||!items.length
+      ||new Set(items.map(item=>item.accountId)).size!==items.length||typeof canonicalize!=="function"||typeof fingerprintRequest!=="function"
+      ||!/^legacy-account-migration:[a-f0-9]{64}$/.test(actorId??"")||!/^[a-f0-9]{64}$/.test(manifestSha256??""))return false;
+    const sorted=[...items].sort((a,b)=>a.accountId<b.accountId?-1:a.accountId>b.accountId?1:0),sourceDigest=digest(canonicalize(sorted));
+    const operation="supply.legacy.image_paths",scope=JSON.stringify(["system",actorId,operation,batchId]),audit=audits[0],receipt=receipts[0],details=audit.details;
+    return batchId==="legacy-media-batch:"+sourceDigest&&audit.object_id===batchId&&audit.actor_type==="system"&&audit.actor_id===actorId
+      &&audit.session_id===null&&audit.source_manifest===manifestSha256&&details?.sourceSystem==="legacy_mysql_restore"
+      &&details.sourceEntity==="la_rental_accounts"&&details.sourceDatasetSha256===manifestSha256
+      &&details.migrationRunDigest===actorId.slice("legacy-account-migration:".length)&&details.sourceBindingDigest===sourceDigest
+      &&details.count===sorted.length&&receipt.scope_key===scope&&receipt.key===batchId
+      &&receipt.request_fingerprint===fingerprintRequest(operation,batchId,sorted)&&receipt.response_status===200&&receipt.publish_required===false
+      &&canonicalize(receipt.response_body)===canonicalize({inserted:sorted.length,replayed:0});
+}
 export function matchesSystemContinuationReceipt(rows,{actorId,orderId,key,fingerprint,evidenceId,admission,canonicalize}){
     if(!Array.isArray(rows)||rows.length!==1||typeof canonicalize!=="function")return false;
     const row=rows[0],scope=JSON.stringify(["system",actorId,"order.legacy.continuation.import",orderId]);
