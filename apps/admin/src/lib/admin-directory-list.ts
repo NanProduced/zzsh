@@ -14,9 +14,9 @@ export type SortDirection = "asc" | "desc";
 export const ADMIN_SORT_LABELS: Record<AdminSortKey, string> = {
   name: "管理员",
   status: "账号状态",
-  access: "访问配置",
+  access: "角色与权限",
   scope: "业务范围",
-  security: "登录与安全",
+  security: "安全与会话",
 };
 
 /** 业务顺序按"需要处理 → 已阻断 → 正常"，不是字典序；未登记的枚举排最后。 */

@@ -566,7 +566,7 @@ html body .workspace-root button[data-variant="link"]:focus-visible {
 }
 
 .data-table th {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--admin-muted-fg);
   background: var(--admin-surface-soft);
@@ -738,8 +738,8 @@ html body .workspace-root button[data-variant="link"]:focus-visible {
   .role-boss::after { display: none; }
 }
 
-/* 保留七列事实与可读表头，中小屏由 table-wrap 承接横向滚动。 */
-.admin-directory-table{min-width:1080px}
+/* 六列定位信息；1280px 以下改用卡片列表，避免整表横向滚动。 */
+.admin-directory-table{min-width:920px}
 
 /* ADM-ACCOUNT-ORDER-FLOW-02: denser order list and compact progress; scoped to the order page only. */
 .oc-table-compact th{padding:9px 12px}

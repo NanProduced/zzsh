@@ -10,9 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Icons } from "../components/icons";
 import { Timeline, TimelineContent, TimelineDate, TimelineHeader, TimelineIndicator, TimelineItem, TimelineSeparator } from "@/components/reui/timeline";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, CircleHelp, Copy, Eye, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, TriangleAlert, UserCog } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, Copy, KeyRound, Lock, LogOut, MoreHorizontal, ShieldAlert, SquarePen, TriangleAlert, UserCog } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ActionTooltip, InfoTip } from "@/components/ui/tooltip";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { PasswordInput, StatusMessage } from "../components/ui-elements";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/ui/alert";
@@ -121,28 +121,9 @@ function adminStatusLabel(status: string): string {
   return ADMIN_STATUS_LABELS[status] ?? "状态待确认";
 }
 
-/** 必要的说明性文案统一收进问号 + Tooltip，正文只留事实。 */
-function InfoHint({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={<button type="button" aria-label={label} className="rounded-full p-0.5 text-muted-foreground hover:bg-foreground/[0.08] hover:text-foreground focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring" />}
-      >
-        <CircleHelp size={13} aria-hidden />
-      </TooltipTrigger>
-      <TooltipContent className="max-w-72">{children}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-/** 全页统一的"未提供"长相：虚线中性徽标 + Tooltip 说明来源，不冒充空值或 0。 */
+/** 全页统一的"未提供"长相：虚线中性徽标 + 共享 Tooltip，不冒充空值或 0。 */
 function UnknownFact({ hint }: { hint: string }) {
-  return (
-    <Tooltip>
-      <TooltipTrigger render={<Badge variant="unknown">未提供</Badge>} />
-      <TooltipContent className="max-w-64">{hint}</TooltipContent>
-    </Tooltip>
-  );
+  return <ActionTooltip content={hint}><Badge variant="unknown" tabIndex={0}>未提供</Badge></ActionTooltip>;
 }
 
 function AdminStatusBadge({ status }: { status: string }) {
@@ -455,7 +436,7 @@ function SecurityActionDialog({
                   disabled={Boolean(pending || blockedReason)}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm focus-visible:outline-none!"
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
                 />
               </label>
               <label className="block">
@@ -466,7 +447,6 @@ function SecurityActionDialog({
                   disabled={Boolean(pending || blockedReason)}
                   value={totpCode}
                   onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
-                  className="focus-visible:outline-none!"
                 />
               </label>
             </>
@@ -502,9 +482,9 @@ const BOSS_ONLY_PERSONAL_REASON = "仅 Boss 账号持有，不能作为个人权
 
 function BossOnlyTag() {
   return (
-    <span title={BOSS_ONLY_PERSONAL_REASON} className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1 py-px align-middle text-[10px] font-medium leading-4">
-      仅 Boss
-    </span>
+    <ActionTooltip content={BOSS_ONLY_PERSONAL_REASON}>
+      <span className="boss-only-tag ml-1.5 inline-flex shrink-0 items-center rounded px-1.5 py-px align-middle text-xs font-medium leading-4">仅 Boss</span>
+    </ActionTooltip>
   );
 }
 
@@ -543,7 +523,7 @@ function PermissionPicker({
               const locked = lockBossOnly && Boolean(permission.bossOnly) && !checked;
               const off = disabled || locked;
               return (
-                <label key={code} title={permission.bossOnly ? BOSS_ONLY_PERSONAL_REASON : undefined} className={`flex items-start gap-2.5 rounded-md px-2 py-2 select-none ${off ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-foreground/[0.05]"}`}>
+                <label key={code} className={`flex items-start gap-2.5 rounded-md px-2 py-2 select-none ${off ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-foreground/[0.05]"}`}>
                   <Checkbox
                     name={code}
                     className="mt-0.5"
@@ -1112,7 +1092,7 @@ export function AdminDirectoryView({
     };
     return planDirectoryActions(item).map((plan) => (
       // F1：本仓菜单项的动作走 onClick（Base UI Item）；onSelect 不会被执行。
-      <DropdownMenuItem key={plan.action} disabled={Boolean(actionReason(plan.action, item))} onClick={() => startRowAction(item, plan.action, runFor[plan.action])}>
+      <DropdownMenuItem key={plan.action} variant={plan.action === "freeze" || plan.action === "force-logout" ? "destructive" : "default"} disabled={Boolean(actionReason(plan.action, item))} onClick={() => startRowAction(item, plan.action, runFor[plan.action])}>
         {ACTION_ICONS[plan.action]}
         {plan.label}
       </DropdownMenuItem>
@@ -1133,6 +1113,14 @@ export function AdminDirectoryView({
 /** 菜单标签下一行汇总禁用原因，避免把同一条原因重复写进每个条目。 */
   const menuReasons = (item: AdminDirectoryEntry) => {
     const reasons = [...new Set(planDirectoryActions(item).map((plan) => actionReason(plan.action, item)).filter(Boolean))] as string[];
+    if (reasons.length === 0) return null;
+    return `不可用：${reasons.join("；")}`;
+  };
+  /** 详情页动作更全（含重置密码/2FA）；统一用可见的一行说明，不依赖原生 title。 */
+  const detailReasons = (item: AdminDirectoryEntry) => {
+    const actions = planDirectoryActions(item).map((plan) => plan.action);
+    if (isBossActor) actions.push("reset-password", "reset-2fa");
+    const reasons = [...new Set(actions.map((action) => actionReason(action, item)).filter(Boolean))] as string[];
     if (reasons.length === 0) return null;
     return `不可用：${reasons.join("；")}`;
   };
@@ -1176,10 +1164,39 @@ export function AdminDirectoryView({
   const activePage = clampPage(page, pageCount);
   const pageItems = filteredAdmins.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE);
   const visibleUnknownCount = pageItems.filter((item) => !item.scopeSummary || !item.securitySummary || item.personalGrantSummary === undefined).length;
+  const mobileSortOptions = (Object.keys(ADMIN_SORT_LABELS) as AdminSortKey[])
+    .filter((key) => key !== "access" || canReadRoles || canReadPermissions)
+    .map((key) => ({ value: key, label: ADMIN_SORT_LABELS[key] }));
+  const mobileSortKey = mobileSortOptions.some((option) => option.value === sort.key) ? sort.key : "name";
   const openDetail = (username: string, title: string) => {
     setMessage(undefined);
     setSelectedUsername(username);
   };
+
+  const sessionFact = (item: AdminDirectoryEntry): ReactNode => item.sessionSummary
+    ? item.sessionSummary.activeCount === 0
+      ? "无未过期会话"
+      : `${item.sessionSummary.activeCount} 个未过期会话${item.sessionSummary.lockedCount > 0 ? `（含 ${item.sessionSummary.lockedCount} 锁定）` : ""}`
+    : <UnknownFact hint="暂未读取到会话摘要。" />;
+
+  const rowActions = (item: AdminDirectoryEntry) => (
+    <div className="flex items-center justify-end gap-1" onClick={(event) => event.stopPropagation()}>
+      <Button type="button" variant="ghost" size="sm" className="max-xl:min-h-11" onClick={() => openDetail(item.username, item.name)}>查看</Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="sm" className="max-xl:min-h-11" aria-label={`${item.name} 的更多操作`} />}>
+          <span>更多</span><MoreHorizontal size={14} aria-hidden />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="min-w-52">
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>{item.name} · {item.username}</DropdownMenuLabel>
+            {menuReasons(item) ? <p className="max-w-72 px-1.5 pb-1 text-xs leading-relaxed text-muted-foreground">{menuReasons(item)}</p> : null}
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          {directoryMenu(item)}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
 
   /**
    * R4：关闭只废弃「读取」——代次自增后在途 GET 的响应不再写回，也不会重开弹窗。
@@ -1208,7 +1225,7 @@ export function AdminDirectoryView({
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="block">
                   <FieldLabel>显示名称</FieldLabel>
-                  <Input value={name} onChange={(event) => setName(event.target.value)} disabled={Boolean(profileActionReason) || detail.isBoss || loading} className="focus-visible:outline-none!" required />
+                  <Input value={name} onChange={(event) => setName(event.target.value)} disabled={Boolean(profileActionReason) || detail.isBoss || loading} required />
                 </label>
                 <div className="block">
                   <FieldLabel>登录账号</FieldLabel>
@@ -1444,7 +1461,7 @@ export function AdminDirectoryView({
   // 信息以弹窗呈现：不新增工作区对象标签，列表保持挂载，筛选/排序/页码不丢。
   const detailWindow = selectedUsername ? (
     <Dialog open onOpenChange={(open) => { if (!open) (objectOnly ? returnToList() : closeDetail()); }}>
-      <DialogContent className="flex h-[min(84vh,46rem)] w-full flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl" data-admin-detail showCloseButton={!loading}>
+      <DialogContent className="flex h-[min(84vh,46rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl" data-admin-detail showCloseButton={!loading}>
         {!detail ? <DialogTitle className="sr-only">管理员信息</DialogTitle> : null}
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           <div className="mx-auto w-full max-w-5xl space-y-6">
@@ -1466,7 +1483,7 @@ export function AdminDirectoryView({
           </header>
           <StatusMessage error={error} success={message} />
           {detailError ? <StatusMessage error={detailError} /> : null}
-          {menuReasons(detail) ? <p className="text-xs text-muted-foreground">{menuReasons(detail)}</p> : null}
+          {detailReasons(detail) ? <p className="text-xs text-muted-foreground">{detailReasons(detail)}</p> : null}
           {targetPending.map((record) => (
             <Alert key={record.subject} variant="warning" role="status">
               <TriangleAlert aria-hidden="true" />
@@ -1484,8 +1501,8 @@ export function AdminDirectoryView({
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <h2 id="admin-access-title" className="text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">角色与有效能力</h2>
                 </div>
-                <div className="flex justify-end">
-                  {canGrant && !detail.isBoss ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={accessActionReason ?? undefined} disabled={Boolean(accessActionReason) || loading || !grantsComplete || writeLocked("access")} onClick={() => setEditSection("access")}>调整角色与权限</Button> : null}
+                <div className="flex flex-wrap justify-end gap-2">
+                  {canGrant && !detail.isBoss ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(accessActionReason) || loading || !grantsComplete || writeLocked("access")} onClick={() => setEditSection("access")}>调整角色与权限</Button> : null}
                 </div>
                 {detail.isBoss ? <NotApplicable reason="Boss 拥有全部权限，角色与个人例外对 Boss 不生效。" /> : (
                   <>
@@ -1517,14 +1534,14 @@ export function AdminDirectoryView({
                         </dd>
                       </div>
                     </dl>
-                    {canGrant && !grantsComplete ? <p className="flex items-center gap-1.5 text-xs text-muted-foreground">授权基线不完整<InfoHint label="为什么不能调整授权">角色或个人权限没有完整读取，而保存是全量替换；为避免清空看不见的授权，当前禁止调整。</InfoHint></p> : null}
+                    {canGrant && !grantsComplete ? <p className="flex items-center gap-1.5 text-xs text-muted-foreground">授权基线不完整<InfoTip label="为什么不能调整授权" body="角色或个人权限没有完整读取，而保存是全量替换；为避免清空看不见的授权，当前禁止调整。" /></p> : null}
                   </>
                 )}
               </section>
               <section className="space-y-3 border-t border-border/60 pt-5" aria-labelledby="admin-scope-title">
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <h2 id="admin-scope-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">业务范围<InfoHint label="业务范围的含义">{detail.isBoss ? "Boss 的业务范围始终为全部游戏，不在此调整。" : !scopeKnown ? "范围确认后才可调整。" : detail.scope?.mode === "ALL_GAMES" ? "可读取全部游戏的业务，新增游戏也自动包含。" : detail.scope?.gameIds.length === 0 ? "当前没有任何游戏的业务读取范围。" : "业务读取仅限上述游戏，实际操作仍由角色与权限决定。"}</InfoHint></h2>
-                  {canGrant && !detail.isBoss ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={scopeActionReason ?? undefined} disabled={Boolean(scopeActionReason) || loading || !scopeKnown || writeLocked("scope")} onClick={() => setEditSection("scope")}>调整业务范围</Button> : null}
+                  <h2 id="admin-scope-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">业务范围<InfoTip label="业务范围的含义" body={detail.isBoss ? "Boss 的业务范围始终为全部游戏，不在此调整。" : !scopeKnown ? "范围确认后才可调整。" : detail.scope?.mode === "ALL_GAMES" ? "可读取全部游戏的业务，新增游戏也自动包含。" : detail.scope?.gameIds.length === 0 ? "当前没有任何游戏的业务读取范围。" : "业务读取仅限上述游戏，实际操作仍由角色与权限决定。"} /></h2>
+                  {canGrant && !detail.isBoss ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(scopeActionReason) || loading || !scopeKnown || writeLocked("scope")} onClick={() => setEditSection("scope")}>调整业务范围</Button> : null}
                 </div>
                 <dl className="grid gap-y-4">
                   <dt className="text-xs font-medium text-foreground/70">当前范围</dt>
@@ -1533,20 +1550,20 @@ export function AdminDirectoryView({
               </section>
 
               <section className="space-y-3" aria-labelledby="admin-security-title">
-                <h2 id="admin-security-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">账号安全{detail.security === undefined || detail.security.twoFactorEnabled === null ? <InfoHint label="为什么安全详情不完整">安全详情尚未提供，当前不能确认双因素验证及会话情况。治理操作以接口资格预检为准，执行前请核对账号状态。</InfoHint> : null}</h2>
-                <div className="flex justify-end">
-                  {canFreeze && !detail.isBoss && detail.id !== snapshot.adminUserId && detail.status !== "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="text-destructive hover:bg-destructive/10 hover:text-destructive" title={actionReason("freeze") ?? undefined} disabled={Boolean(actionReason("freeze")) || loading} onClick={() => setSecurityAction("freeze")}>冻结账号</Button> : null}
-                  {canUnfreeze && !detail.isBoss && detail.status === "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("unfreeze") ?? undefined} disabled={Boolean(actionReason("unfreeze")) || loading} onClick={() => setSecurityAction("unfreeze")}>解除冻结</Button> : null}
-                  {isBossActor && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("force-logout") ?? undefined} disabled={Boolean(actionReason("force-logout")) || loading} onClick={() => setSecurityAction("force-logout")}>撤销全部会话</Button> : null}
-                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("reset-password") ?? undefined} disabled={Boolean(actionReason("reset-password")) || loading} onClick={() => setSecurityAction("reset-password")}>重置密码</Button> : null}
-                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="hover:bg-foreground/[0.06] hover:text-foreground" title={actionReason("reset-2fa") ?? undefined} disabled={Boolean(actionReason("reset-2fa")) || loading} onClick={() => setSecurityAction("reset-2fa")}>重置 2FA</Button> : null}
+                <h2 id="admin-security-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">账号安全{detail.security === undefined || detail.security.twoFactorEnabled === null ? <InfoTip label="为什么安全详情不完整" body="安全详情尚未提供，当前不能确认双因素验证及会话情况。治理操作以接口资格预检为准，执行前请核对账号状态。" /> : null}</h2>
+                <div className="flex flex-wrap justify-end gap-2">
+                  {canFreeze && !detail.isBoss && detail.id !== snapshot.adminUserId && detail.status !== "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={Boolean(actionReason("freeze")) || loading} onClick={() => setSecurityAction("freeze")}>冻结账号</Button> : null}
+                  {canUnfreeze && !detail.isBoss && detail.status === "FROZEN" ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(actionReason("unfreeze")) || loading} onClick={() => setSecurityAction("unfreeze")}>解除冻结</Button> : null}
+                  {isBossActor && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(actionReason("force-logout")) || loading} onClick={() => setSecurityAction("force-logout")}>撤销全部会话</Button> : null}
+                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(actionReason("reset-password")) || loading} onClick={() => setSecurityAction("reset-password")}>重置密码</Button> : null}
+                  {isBossActor && !detail.isBoss && detail.id !== snapshot.adminUserId ? <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11 hover:bg-foreground/[0.06] hover:text-foreground" disabled={Boolean(actionReason("reset-2fa")) || loading} onClick={() => setSecurityAction("reset-2fa")}>重置 2FA</Button> : null}
                 </div>
                 <div className="space-y-4 text-sm"><div className="space-y-1"><p className="text-xs text-muted-foreground">最近一次完整认证</p><p>{detail.lastFullAuthenticatedAt ? formatDate(detail.lastFullAuthenticatedAt) : "未记录"}</p></div></div>
                 <SecurityFacts detail={detail} />
                 {detail.id === snapshot.adminUserId ? <p className="text-xs text-muted-foreground">不能冻结或撤销当前账号自己的会话。</p> : null}
               </section>
               <section className="space-y-3 border-t border-border/60 pt-5" aria-labelledby="admin-audit-title">
-                <h2 id="admin-audit-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">账号变更记录<InfoHint label="账号变更记录的覆盖范围">只汇总直接作用于该账号的记录（资料、授权、安全状态）；角色定义本身的变更、认证与恢复流程属于其他来源，不在这里。</InfoHint></h2>
+                <h2 id="admin-audit-title" className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-[0.06em] text-muted-foreground">账号变更记录<InfoTip label="账号变更记录的覆盖范围" body="只汇总直接作用于该账号的记录（资料、授权、安全状态）；角色定义本身的变更、认证与恢复流程属于其他来源，不在这里。" /></h2>
                 {!canReadAudit ? <p className="text-sm text-muted-foreground">无权查看操作记录</p> : audit.status === "error" ? <div className="space-y-2 text-sm"><p>操作记录读取失败，无法判断该账号是否有相关记录。</p><Button type="button" size="sm" variant="secondary" onClick={() => selectedUsername && void loadDetail(selectedUsername, currentDrafts())}>重试读取</Button></div> : audit.status === "loading" || audit.status === "idle" ? <p className="text-sm text-muted-foreground">正在读取操作记录…</p> : !auditApplicable ? <p className="text-sm text-muted-foreground">当前可见范围不包含该账号的操作记录。</p> : <>
                   {audit.status === "partial" ? <div className="space-y-2 rounded-md bg-amber-500/10 p-3 text-xs text-amber-900 dark:text-amber-300"><p>记录不完整：{(audit.missing ?? []).join("、")}没有读到，下面只包含已读到的来源，不代表该账号只有这些记录。</p><Button type="button" size="sm" variant="secondary" disabled={detailLoading} onClick={() => selectedUsername && void loadDetail(selectedUsername, currentDrafts())}>重试读取</Button></div> : null}
                   {audit.events.length === 0 ? <p className="text-sm text-muted-foreground">{audit.status === "partial" ? "已读到的来源里没有该账号的记录。" : "暂无该账号相关的审计事件。"}</p> : <Timeline>
@@ -1574,16 +1591,16 @@ export function AdminDirectoryView({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-border/60 px-6 py-3">
           <div className="flex flex-wrap items-center gap-2">
-            {canUpdate && detail && !detail.isBoss ? <Button type="button" size="sm" variant="secondary" className="hover:border-foreground/40 hover:bg-foreground/[0.06]" title={profileActionReason ?? undefined} disabled={Boolean(profileActionReason) || loading || writeLocked("profile")} onClick={() => setEditSection("profile")}>编辑资料</Button> : null}
+            {canUpdate && detail && !detail.isBoss ? <Button type="button" size="sm" variant="secondary" className="max-xl:min-h-11 hover:border-foreground/40 hover:bg-foreground/[0.06]" disabled={Boolean(profileActionReason) || loading || writeLocked("profile")} onClick={() => setEditSection("profile")}>编辑资料</Button> : null}
           </div>
-          <Button type="button" size="sm" variant="ghost" onClick={() => (objectOnly ? returnToList() : closeDetail())}>关闭</Button>
+          <Button type="button" size="sm" variant="ghost" className="max-xl:min-h-11" onClick={() => (objectOnly ? returnToList() : closeDetail())}>关闭</Button>
         </div>
       </DialogContent>
     </Dialog>
   ) : null;
   const detailEditor = editSection && detail ? (
     <Dialog open onOpenChange={open => { if (!open) closeEditor(); }}>
-      <DialogContent className="flex h-[min(88vh,40rem)] w-full flex-col gap-0 p-0 sm:max-w-2xl" showCloseButton={!loading}>
+      <DialogContent className="flex h-[min(88vh,40rem)] flex-col gap-0 p-0 sm:max-w-2xl" showCloseButton={!loading}>
         <DialogHeader className="shrink-0 px-6 pb-4 pt-6">
           <DialogTitle>{editorTitle}</DialogTitle>
           <DialogDescription>{detail.name}（{detail.username}）。只修改当前分区。</DialogDescription>
@@ -1611,13 +1628,10 @@ export function AdminDirectoryView({
   ) : null;
 
   return (
-    <TooltipProvider>
     <div className="space-y-5">
-      {(<TooltipProvider>
-      <>
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-foreground">管理员账号{visibleUnknownCount > 0 ? <InfoHint label="为什么有的资料未提供">标「未提供」的资料暂时无法确认，不代表没有此项。</InfoHint> : null}</h1>
+          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-foreground">管理员账号{visibleUnknownCount > 0 ? <InfoTip label="为什么有的资料未提供" body="标「未提供」的资料暂时无法确认，不代表没有此项。" /> : null}</h1>
           <p className="mt-1 text-sm tabular-nums text-muted-foreground">
             {ready
               ? `共 ${admins.length} 个账号${filteredAdmins.length !== admins.length ? ` · 匹配 ${filteredAdmins.length}` : ""} · 生效 ${admins.filter((item) => item.status === "ACTIVE").length} · 冻结 ${admins.filter((item) => item.status === "FROZEN").length} · 待激活 ${admins.filter((item) => item.status === "PENDING_ENROLLMENT").length}`
@@ -1625,7 +1639,7 @@ export function AdminDirectoryView({
           </p>
         </div>
         {canCreate ? (
-          <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
+          <Button type="button" size="sm" className="max-xl:min-h-11" onClick={() => setCreateOpen(true)}>
             新增管理员
           </Button>
         ) : null}
@@ -1649,12 +1663,12 @@ export function AdminDirectoryView({
           >
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">账号或名称</span>
-              <Input value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索账号(ZZ...)或显示名称" className="h-9 w-56 focus-visible:outline-none!" />
+              <Input value={filters.q} onChange={(event) => applyFilters({ q: event.target.value })} placeholder="搜索账号(ZZ...)或显示名称" className="h-9 w-56 max-xl:h-10" />
             </label>
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">状态</span>
               <Select value={filters.status || "all"} onValueChange={(value) => applyFilters({ status: value === "all" ? "" : String(value) })} items={STATUS_FILTER_ITEMS}>
-                <SelectTrigger className="h-9 w-32 text-xs focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-9 w-32 text-xs max-xl:min-h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="PENDING_ENROLLMENT">待激活</SelectItem>
@@ -1666,7 +1680,7 @@ export function AdminDirectoryView({
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">角色</span>
               <Select value={filters.role || "all"} onValueChange={(value) => applyFilters({ role: value === "all" ? "" : String(value) })} disabled={!canReadRoles} items={roleFilterItems}>
-                <SelectTrigger className="h-9 w-32 text-xs focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-9 w-32 text-xs max-xl:min-h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">{canReadRoles ? "全部" : "无权查看"}</SelectItem>
                   {canReadRoles ? roles.map((role) => <SelectItem key={role.id} value={role.id}>{role.name}{role.status === "DISABLED" ? "（已停用）" : ""}</SelectItem>) : null}
@@ -1676,7 +1690,7 @@ export function AdminDirectoryView({
             <label className="space-y-1 text-xs">
               <span className="text-muted-foreground block">业务范围</span>
               <Select value={filters.scope || "all"} onValueChange={(value) => applyFilters({ scope: value === "all" ? "" : String(value) })} items={SCOPE_FILTER_ITEMS}>
-                <SelectTrigger className="h-9 w-32 text-xs focus-visible:outline-none!"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-9 w-32 text-xs max-xl:min-h-10"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">全部</SelectItem>
                   <SelectItem value="ALL_GAMES">全部游戏</SelectItem>
@@ -1693,47 +1707,58 @@ export function AdminDirectoryView({
             ) : null}
           </form>
 
+          {filteredAdmins.length > 0 ? <div className="mb-2 flex flex-wrap items-center justify-end gap-2 xl:hidden">
+            <span className="text-xs text-muted-foreground">排序</span>
+            <Select value={mobileSortKey} onValueChange={(value) => { if (value) applySort(value as AdminSortKey); }} items={mobileSortOptions}>
+              <SelectTrigger aria-label="排序字段" className="h-9 w-40 text-xs max-xl:min-h-10"><SelectValue /></SelectTrigger>
+              <SelectContent>{mobileSortOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
+            </Select>
+            <Button type="button" size="sm" variant="outline" className="max-xl:min-h-10" aria-label={`切换为${sort.direction === "asc" ? "降序" : "升序"}排序`} onClick={() => applySort(mobileSortKey)}>
+              {sort.direction === "asc" ? <ArrowUp size={14} aria-hidden /> : <ArrowDown size={14} aria-hidden />}
+              {sort.direction === "asc" ? "升序" : "降序"}
+            </Button>
+          </div> : null}
+
           {filteredAdmins.length === 0 ? (
             <p className="rounded-md border border-dashed border-border/70 px-4 py-12 text-center text-sm text-muted-foreground">
               {admins.length === 0 ? "还没有管理员账号。用右上角「新增管理员」创建第一个。" : `没有匹配当前筛选条件的账号${filters.q.trim() ? `（“${filters.q.trim()}”）` : ""}。`}
             </p>
           ) : (
             <>
-            <div className="table-wrap">
+            <div className="table-wrap hidden xl:block">
               <table className="data-table admin-directory-table" style={{ tableLayout: "fixed" }}>
                 <colgroup>
-                  <col style={{ width: "22%" }} />
+                  <col style={{ width: "24%" }} />
                   <col style={{ width: "10%" }} />
-                  <col style={{ width: "17%" }} />
-                  <col style={{ width: "11%" }} />
-                  <col style={{ width: "15%" }} />
-                  <col style={{ width: "14%" }} />
-                  <col style={{ width: "11%" }} />
+                  <col style={{ width: "18%" }} />
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "20%" }} />
+                  <col style={{ width: "16%" }} />
                 </colgroup>
                 <thead>
                   <tr>
-                    {([
-                      ["name", "管理员"],
-                      ["status", "账号状态"],
-                      ["access", "访问配置"],
-                      ["scope", "业务范围"],
-                      ["security", "登录与安全"],
-                    ] as const).map(([key, label]) => (
-                      <th key={key} scope="col" aria-sort={sort.key === key ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
-                        <button
-                          type="button"
-                          className="-mx-2 flex w-full items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-medium hover:bg-foreground/[0.05] focus-visible:bg-foreground/[0.05] focus-visible:outline-none! disabled:cursor-not-allowed disabled:opacity-50"
-                          onClick={() => applySort(key)}
-                          disabled={key === "access" && !canReadRoles && !canReadPermissions}
-                          title={key === "access" && !canReadRoles && !canReadPermissions ? "没有角色/权限读取能力，不能按该列排序" : `按${label}排序`}
-                        >
-                          {label}
-                          {sort.key === key ? (sort.direction === "asc" ? <ArrowUp size={12} aria-hidden /> : <ArrowDown size={12} aria-hidden />) : <ArrowUpDown size={12} aria-hidden className="opacity-40" />}
-                        </button>
-                      </th>
-                    ))}
-                    <th scope="col">会话</th>
-                    <th scope="col">操作</th>
+                    {(["name", "status", "access", "scope", "security"] as const).map((key) => {
+                      const label = ADMIN_SORT_LABELS[key];
+                      const accessSortBlocked = key === "access" && !canReadRoles && !canReadPermissions;
+                      return (
+                        <th key={key} scope="col" aria-sort={sort.key === key ? (sort.direction === "asc" ? "ascending" : "descending") : "none"}>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              className="-mx-2 flex min-w-0 flex-1 cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1 text-left font-medium hover:bg-foreground/[0.05] focus-visible:bg-foreground/[0.05] disabled:cursor-not-allowed disabled:opacity-50"
+                              onClick={() => applySort(key)}
+                              disabled={accessSortBlocked}
+                              aria-label={accessSortBlocked ? "角色与权限不可排序：没有角色或权限读取能力" : `按${label}排序`}
+                            >
+                              {label}
+                              {sort.key === key ? (sort.direction === "asc" ? <ArrowUp size={12} aria-hidden /> : <ArrowDown size={12} aria-hidden />) : <ArrowUpDown size={12} aria-hidden className="opacity-40" />}
+                            </button>
+                            {accessSortBlocked ? <InfoTip label="角色与权限排序不可用" body="没有角色或权限读取能力，不能按该列排序。" /> : null}
+                          </div>
+                        </th>
+                      );
+                    })}
+                    <th scope="col" className="text-right">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1751,7 +1776,7 @@ export function AdminDirectoryView({
                             </Avatar>
                             <span className="flex min-w-0 flex-col gap-0.5">
                             <span className="inline-flex min-w-0 items-center gap-1.5">
-                              <button type="button" className="min-w-0 truncate text-left font-medium text-foreground underline-offset-4 hover:underline focus-visible:underline" onClick={() => openDetail(item.username, item.name)}>{item.name}</button>
+                              <button type="button" className="min-w-0 cursor-pointer truncate text-left font-medium text-foreground underline-offset-4 hover:underline focus-visible:underline" onClick={() => openDetail(item.username, item.name)}>{item.name}</button>
                             </span>
                               <span className="flex min-w-0 items-center gap-1.5">
                                 <span className="truncate font-mono text-xs text-muted-foreground">{item.username}</span>
@@ -1779,73 +1804,66 @@ export function AdminDirectoryView({
                           <span className="block text-sm">
                             {security.headline === "未提供" ? <UnknownFact hint="暂未读取到安全摘要，不代表未启用双因素。" /> : security.headline}
                           </span>
-                          <span className="block text-xs text-muted-foreground">
-                            {security.detail ? `${security.detail} ` : ""}
-                            {security.timeLabel ? `${security.timeLabel} ${formatDate(security.time)}` : ""}
-                          </span>
+                          <span className="mt-0.5 block text-xs text-muted-foreground">{sessionFact(item)}</span>
                         </td>
-                        <td className="whitespace-normal">
-                          {item.sessionSummary ? (
-                            <>
-                              <span className="block text-sm">
-                                {item.sessionSummary.activeCount === 0
-                                  ? "无未过期会话"
-                                  : `${item.sessionSummary.activeCount} 个未过期会话${item.sessionSummary.lockedCount > 0 ? `（含 ${item.sessionSummary.lockedCount} 锁定）` : ""}`}
-                              </span>
-                              <span className="block text-xs text-muted-foreground">
-                                {item.sessionSummary.lastSessionCreatedAt ? `最近建立 ${formatDate(item.sessionSummary.lastSessionCreatedAt)}` : "尚无未过期会话的建立记录"}
-                              </span>
-                            </>
-                          ) : (
-                            <UnknownFact hint="暂未读取到会话摘要。" />
-                          )}
-                        </td>
-                        <td className="whitespace-nowrap">
-                          <div className="flex items-center justify-start gap-0.5" onClick={(event) => event.stopPropagation()}>
-                            <Tooltip>
-                              <TooltipTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`查看 ${item.name} 的信息`} onClick={() => openDetail(item.username, item.name)} />}>
-                                <Eye size={16} aria-hidden />
-                              </TooltipTrigger>
-                              <TooltipContent>查看信息</TooltipContent>
-                            </Tooltip>
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    aria-label={`编辑 ${item.name} 的显示名称`}
-                                    disabled={Boolean(actionReason("update", item)) || writeLocked("profile", item.username)}
-                                    onClick={() => startRowAction(item, "update", () => setEditSection("profile"))}
-                                  />
-                                }
-                              >
-                                <SquarePen size={16} aria-hidden />
-                              </TooltipTrigger>
-                              <TooltipContent>{writeLocked("profile", item.username) ? "上一次提交结果未确认" : actionReason("update", item) ?? "修改显示名称"}</TooltipContent>
-                            </Tooltip>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-sm" aria-label={`${item.name} 的更多操作`} />}>
-                                <MoreHorizontal size={16} aria-hidden />
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuGroup>
-                                  <DropdownMenuLabel>{item.name} · {item.username}</DropdownMenuLabel>
-                                  {menuReasons(item) ? <p className="max-w-72 px-1.5 pb-1 text-xs leading-relaxed text-muted-foreground">{menuReasons(item)}</p> : null}
-                                </DropdownMenuGroup>
-                                <DropdownMenuSeparator />
-                                {directoryMenu(item)}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
-                        </td>
+                        <td className="whitespace-nowrap">{rowActions(item)}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
+            <ul className="admin-mobile-list divide-y divide-border/60 xl:hidden" aria-label="管理员列表">
+              {pageItems.map((item) => {
+                const access = accessSummaryOf(item);
+                const security = securitySummaryOf(item);
+                const scope = scopeSummaryOf(item);
+                return (
+                  <li key={item.id} data-admin-mobile-row className="py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <Avatar className="size-9 shrink-0">
+                          <AvatarImage src={item.image ?? undefined} alt="" />
+                          <AvatarFallback className="text-xs">{item.name.trim().slice(0, 1) || "?"}</AvatarFallback>
+                        </Avatar>
+                        <div className="min-w-0">
+                          <button type="button" className="block max-w-full cursor-pointer truncate text-left font-medium text-foreground underline-offset-4 hover:underline focus-visible:underline" onClick={() => openDetail(item.username, item.name)}>{item.name}</button>
+                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                            <span className="truncate font-mono text-xs text-muted-foreground">{item.username}</span>
+                            {item.isBoss ? <Badge variant="outline" className="shrink-0 border-transparent bg-foreground/[0.08] text-muted-foreground">Boss</Badge> : null}
+                          </div>
+                        </div>
+                      </div>
+                      <Badge variant={item.status === "ACTIVE" ? "success" : item.status === "FROZEN" ? "destructive" : item.status === "PENDING_ENROLLMENT" ? "warning" : "unknown"}>
+                        {adminStatusLabel(item.status)}
+                      </Badge>
+                    </div>
+                    <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 text-[13px]">
+                      <div className="min-w-0">
+                        <dt className="text-xs text-muted-foreground">角色与权限</dt>
+                        <dd className="mt-0.5 min-w-0">
+                          <span className="block truncate">{item.isBoss ? "拥有全部权限" : access.roles}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{item.isBoss ? "无需分配角色" : access.exception}{access.disabledCount > 0 ? ` · 含 ${access.disabledCount} 个已停用角色` : ""}</span>
+                        </dd>
+                      </div>
+                      <div className="min-w-0">
+                        <dt className="text-xs text-muted-foreground">业务范围</dt>
+                        <dd className="mt-0.5 truncate">{item.isBoss ? "全部游戏" : scope.known ? scope.label : <UnknownFact hint="暂未读取到该账号的业务范围，不代表未设置业务范围。" />}</dd>
+                      </div>
+                      <div className="col-span-2 min-w-0">
+                        <dt className="text-xs text-muted-foreground">安全与会话</dt>
+                        <dd className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          {security.headline === "未提供" ? <UnknownFact hint="暂未读取到安全摘要，不代表未启用双因素。" /> : <span>{security.headline}</span>}
+                          <span aria-hidden="true" className="text-muted-foreground">·</span>
+                          <span className="text-muted-foreground">{sessionFact(item)}</span>
+                        </dd>
+                      </div>
+                    </dl>
+                    <div className="mt-3">{rowActions(item)}</div>
+                  </li>
+                );
+              })}
+            </ul>
             </>
           )}
 
@@ -1854,19 +1872,16 @@ export function AdminDirectoryView({
               共 {filteredAdmins.length} 人，第 {activePage}/{pageCount} 页
             </span>
             <div className="flex gap-2">
-              <Button type="button" size="sm" variant="secondary" disabled={activePage <= 1} onClick={() => { const next = activePage - 1; setPage(next); persistQuery(filters, next); }}>
+              <Button type="button" size="sm" variant="secondary" className="max-xl:min-h-11" disabled={activePage <= 1} onClick={() => { const next = activePage - 1; setPage(next); persistQuery(filters, next); }}>
                 上一页
               </Button>
-              <Button type="button" size="sm" variant="secondary" disabled={activePage >= pageCount} onClick={() => { const next = activePage + 1; setPage(next); persistQuery(filters, next); }}>
+              <Button type="button" size="sm" variant="secondary" className="max-xl:min-h-11" disabled={activePage >= pageCount} onClick={() => { const next = activePage + 1; setPage(next); persistQuery(filters, next); }}>
                 下一页
               </Button>
             </div>
           </div>
         </section>
       )}
-
-      </>
-      </TooltipProvider>)}
 
       {detailWindow}
 
@@ -1898,7 +1913,7 @@ export function AdminDirectoryView({
           if (!open) setError(undefined);
         }}
       >
-        <DialogContent className="flex max-h-[88vh] w-full flex-col gap-0 p-0 sm:max-w-2xl" showCloseButton={!delivery && !loading}>
+        <DialogContent className="flex max-h-[88vh] flex-col gap-0 p-0 sm:max-w-2xl" showCloseButton={!delivery && !loading}>
           <DialogHeader className="shrink-0 px-6 pb-4 pt-6">
             <DialogTitle>{delivery ? "交付临时凭据" : "新增管理员"}</DialogTitle>
             <DialogDescription>
@@ -2008,7 +2023,7 @@ export function AdminDirectoryView({
                 <p className="text-xs text-muted-foreground">本人首次登录需改密并绑定 2FA（双因素身份验证 / TOTP 动态口令）。</p>
                 <label className="block">
                   <FieldLabel>显示名称</FieldLabel>
-                  <Input value={createName} onChange={(event) => setCreateName(event.target.value)} className="focus-visible:outline-none!" required />
+                  <Input value={createName} onChange={(event) => setCreateName(event.target.value)} required />
                 </label>
                 <fieldset className="space-y-2" disabled={loading || !createScopeSupported}>
                   <FieldLabel>业务范围（必须明确选择）</FieldLabel>
@@ -2061,6 +2076,5 @@ export function AdminDirectoryView({
         </DialogContent>
       </Dialog>
     </div>
-    </TooltipProvider>
   );
 }

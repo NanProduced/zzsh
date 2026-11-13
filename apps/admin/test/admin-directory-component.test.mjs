@@ -829,7 +829,9 @@ test("P0 会话列只说事实：零会话、有会话、未接入三种呈现�
   t.after(view.cleanup);
   await view.render({ initialUsername: undefined });
   await waitFor(() => browser.document.querySelectorAll("tbody tr").length === 3);
-  const cells = [...browser.document.querySelectorAll("tbody tr")].map((row) => row.querySelectorAll("td")[5]?.textContent ?? "");
+  const sessionIndex = [...browser.document.querySelectorAll("thead th")].findIndex((th) => th.textContent.includes("安全与会话"));
+  assert.notEqual(sessionIndex, -1, "合并后的安全与会话列必须存在");
+  const cells = [...browser.document.querySelectorAll("tbody tr")].map((row) => row.querySelectorAll("td")[sessionIndex]?.textContent ?? "");
   assert.ok(cells[0]?.includes("无未过期会话"), "零会话是事实，不是未接入");
   assert.ok(cells[1]?.includes("2 个未过期会话") && cells[1]?.includes("含 1 锁定"), "有会话时给出计数与锁定数");
   assert.ok(cells[2]?.includes("未提供"), "缺少会话摘要时标未提供，不冒充 0");
@@ -850,8 +852,9 @@ test("P1 缺预检、空预检、缺单项：快捷入口与信息窗口统一�
     try {
       await view.render({ initialUsername: undefined });
       await waitFor(() => browser.document.querySelector("tbody tr"));
-      const shortcut = browser.document.querySelector(`button[aria-label="编辑 ${TARGET.name} 的显示名称"]`);
-      assert.equal(shortcut.disabled, true);
+      await click(browser.document.querySelector(`tbody button[aria-label="${TARGET.name} 的更多操作"]`));
+      const shortcut = [...browser.document.querySelectorAll("[role=menuitem]")].find((node) => node.textContent.includes("修改显示名称"));
+      assert.equal(shortcut?.getAttribute("aria-disabled"), "true");
       await click(browser.document.querySelector("tbody tr button"));
       await waitFor(() => detailPage()?.querySelector("h1"));
       for (const label of ["编辑资料", "调整业务范围", "冻结账号"]) assert.equal(btn(label, detailPage()).disabled, true, label);
@@ -867,7 +870,9 @@ test("P1 列表允许但详情缺资格时，不得自动打开可写编辑器",
   const view = mount(); t.after(view.cleanup);
   await view.render({ initialUsername: undefined });
   await waitFor(() => browser.document.querySelector("tbody tr"));
-  await click(browser.document.querySelector(`button[aria-label="编辑 ${TARGET.name} 的显示名称"]`));
+  await click(browser.document.querySelector(`tbody button[aria-label="${TARGET.name} 的更多操作"]`));
+  const update = [...browser.document.querySelectorAll("[role=menuitem]")].find((node) => node.textContent.includes("修改显示名称"));
+  await click(update);
   await waitFor(() => detailPage()?.textContent.includes("操作资格未提供"));
   assert.equal(editDialog(), undefined);
   assert.equal(calls.filter((call) => call.route.startsWith("POST ")).length, 0);
@@ -916,16 +921,19 @@ test("P2 信息窗读取中与详情均有可访问名称", async (t) => {
   assert.equal(title(), TARGET.name);
 });
 
-test("P2 七列表头、正文、colgroup一致，不在窄屏隐藏单独一列", async (t) => {
+test("P2 六列表头、正文、colgroup一致，并提供移动卡片", async (t) => {
   useServer(baseRoutes(detailFixture()));
   const view = mount(); t.after(view.cleanup);
   await view.render({ initialUsername: undefined });
   await waitFor(() => browser.document.querySelector("tbody tr"));
   const table = browser.document.querySelector(".admin-directory-table");
-  assert.equal(table.querySelectorAll("col").length, 7);
-  assert.equal(table.querySelectorAll("th").length, 7);
-  assert.equal(table.querySelectorAll("tbody tr:first-child td").length, 7);
+  assert.equal(table.querySelectorAll("col").length, 6);
+  assert.equal(table.querySelectorAll("th").length, 6);
+  assert.equal(table.querySelectorAll("tbody tr:first-child td").length, 6);
   for (const cell of table.querySelectorAll("th,td")) assert.equal(cell.classList.contains("hidden"), false);
+  const mobile = browser.document.querySelector(".admin-mobile-list");
+  assert.ok(mobile, "窄屏卡片列表必须存在");
+  assert.equal(mobile.querySelectorAll("[data-admin-mobile-row]").length, 1);
 });
 
 test("D3 创建必须显式选范围，旧接口未声明支持时拒绝发送", async () => {
