@@ -38,13 +38,20 @@ async function requirePricingScheduleSchema(client:PoolClient):Promise<void> {
 }
 
 /** The caller authorizes the game before reading its current and scheduled policies. */
-export async function readPricingSchedules(client:PoolClient,gameId:string) {
+export async function readPricingSchedules(client: PoolClient, gameId: string, confirmation?: { id: string; kind: "price" | "mode" }) {
   if(typeof gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId))throw invalid("Pricing policy reference is invalid");
   const state=(await client.query<{prices:boolean;modes:boolean;rates:boolean;asOf:string}>(`SELECT to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
     to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.price_version')
       AND attname='fixed_fee_rates' AND attnum>0 AND NOT attisdropped) AS rates,${instantSql("transaction_timestamp()")} AS "asOf"`)).rows[0];
   if(!state||typeof state.prices!=="boolean"||typeof state.modes!=="boolean"||typeof state.rates!=="boolean"||!state.asOf)throw conflict("抽成政策状态无法核实");
   if(!state.prices||!state.modes||!state.rates)return {available:false as const,reason:state.prices||state.modes?"INCOMPLETE":"NOT_INSTALLED",asOf:state.asOf};
+  if (confirmation) {
+    const row = (await client.query(`SELECT id, pricing_model AS "pricingModel", generation::text AS generation,
+      ${instantSql("effective_at")} AS "effectiveAt"${confirmation.kind === "price" ? ', price_version_id AS "priceVersionId"' : ""}
+      FROM zzsh_supply.${confirmation.kind === "price" ? "pricing_policy_schedule" : "pricing_mode_schedule"} WHERE game_id=$1 AND id=$2`,
+      [gameId, confirmation.id])).rows[0];
+    return { available: true as const, asOf: state.asOf, confirmed: row ?? null };
+  }
   const prices=(await client.query(`SELECT id,pricing_model AS "pricingModel",price_version_id AS "priceVersionId",generation::text AS generation,
     ${instantSql("effective_at")} AS "effectiveAt",source FROM zzsh_supply.pricing_policy_schedule WHERE game_id=$1
     ORDER BY effective_at DESC,generation DESC LIMIT 101`,[gameId])).rows;
@@ -55,7 +62,21 @@ export async function readPricingSchedules(client:PoolClient,gameId:string) {
   const modeGeneration=(await client.query<{generation:string}>(`SELECT COALESCE(MAX(generation),0)::text AS generation
     FROM zzsh_supply.pricing_mode_schedule WHERE game_id=$1`,[gameId])).rows[0]?.generation;
   if(!modeGeneration||!/^(0|[1-9]\d{0,18})$/.test(modeGeneration)||generations.some(row=>!["SPREAD","FIXED_FEE"].includes(row.model)||!/^[1-9]\d{0,18}$/.test(row.generation)))throw conflict("抽成政策版本无法核实");
-  return {available:true as const,asOf:state.asOf,current:await readEffectivePricingMode(client,gameId,state.asOf),
+  const current = await readEffectivePricingMode(client, gameId, state.asOf);
+  const currentPrices = (await client.query(`SELECT DISTINCT ON (pricing_model)
+    id, pricing_model AS "pricingModel", price_version_id AS "priceVersionId", generation::text AS generation,
+    ${instantSql("effective_at")} AS "effectiveAt" FROM zzsh_supply.pricing_policy_schedule
+    WHERE game_id=$1 AND effective_at<=$2::timestamptz ORDER BY pricing_model, effective_at DESC, generation DESC`,
+    [gameId, state.asOf])).rows;
+  const visibility = updateVisibilitySql("$2");
+  const announcements = (await client.query(`SELECT v.id, v.title,
+    ${instantSql("v.published_at")} AS "publishedAt", i.game_id AS "gameId"
+    FROM zzsh_content.content_version v JOIN zzsh_content.content_item i ON i.id=v.item_id
+    WHERE i.type='ANNOUNCEMENT' AND (i.game_id=$1 OR i.game_id IS NULL)
+      AND v.state='PUBLISHED' AND v.published_at<=$2::timestamptz AND ${visibility.visible} AND ${visibility.alive}
+    ORDER BY v.published_at DESC, v.id DESC LIMIT 51`, [gameId, state.asOf])).rows;
+  return {available:true as const,asOf:state.asOf,current,currentPrices,spreadSchedulingEnabled:SCHEDULED_SPREAD_ORDER_ENABLED,
+    announcements:announcements.slice(0,50),announcementsTruncated:announcements.length>50,
     priceGenerations:{SPREAD:generations.find(row=>row.model==="SPREAD")?.generation??"0",FIXED_FEE:generations.find(row=>row.model==="FIXED_FEE")?.generation??"0"},
     modeGeneration,prices:prices.slice(0,100),modes:modes.slice(0,100),truncated:prices.length>100||modes.length>100};
 }

@@ -16,6 +16,9 @@ for (const kind of ["price", "term", "agreement", "full_payout_terms"]) {
   }
 }
 operations.set("supply.rules.release.activate", { table: "rule_release", permission: ADMIN_PERMISSION.supplyRulesActivate, resultKey: "releaseId", bossOnly: true });
+for (const table of ["pricing_policy_schedule", "pricing_mode_schedule"]) {
+  operations.set(`supply.rules.${table}.create`, { table, permission: ADMIN_PERMISSION.supplyRulesActivate, bossOnly: true });
+}
 operations.set("supply.game.create", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage, bossOnly: true });
 operations.set("supply.game.update", { table: "game", permission: ADMIN_PERMISSION.supplyCatalogManage, scopeIsTarget: true });
 // 封面写的真实回执只有 gameId；目标取自回执本身，调用方 resourceId 只用于定位原作用域。
@@ -92,10 +95,13 @@ export async function readAdminSupplyOperationResult(client: PoolClient, actorId
     `SELECT ${definition.table === "game" ? "id" : "game_id"} AS "gameId"${definition.platformMedia ? ',ownership_kind AS "ownershipKind"' : ""}
        FROM zzsh_supply.${definition.table} WHERE id=$1`, [targetId],
   )).rows[0];
+  const isSchedule = definition.table === "pricing_policy_schedule" || definition.table === "pricing_mode_schedule";
+  if (isSchedule && (resourceId !== target?.gameId || body.gameId !== target?.gameId)) throw notFound();
   if (!target || (definition.platformMedia && target.ownershipKind !== "PLATFORM_CATALOG")) throw notFound();
   await assertGameScope(client, actorId, access.isBoss, target.gameId);
   const result: Record<string, string | number | boolean | null> = {};
-  for (const name of safeFields) {
+  const fields = isSchedule ? [...safeFields, "pricingModel", "priceVersionId", "announcementVersionId", "effectiveAt"] : safeFields;
+  for (const name of fields) {
     const value = body[name];
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length <= 160)) result[name] = value;
   }

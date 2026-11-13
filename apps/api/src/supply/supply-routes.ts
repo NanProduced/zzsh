@@ -907,12 +907,17 @@ async function handleAdminRead(
   const pricingSchedulesMatch=/^\/games\/([^/]+)\/pricing-schedules$/.exec(path);
   if(pricingSchedulesMatch){
     const gameId=decodeId(pricingSchedulesMatch[1]!);
-    if([...query.keys()].length)throw invalid("Unsupported pricing schedule query");
+    const scheduleId = query.get("scheduleId"), kind = query.get("kind");
+    if ([...query.keys()].some(key => !["scheduleId", "kind"].includes(key) || query.getAll(key).length !== 1)
+      || ((scheduleId !== null || kind !== null) && (!scheduleId || (kind !== "price" && kind !== "mode"))))
+      throw invalid("Unsupported pricing schedule query");
+    const confirmation: Parameters<typeof readPricingSchedules>[2] = scheduleId && (kind === "price" || kind === "mode") ? { id: decodeId(scheduleId), kind } : undefined;
     const result=await withTransaction(options.pool,async client=>{
       await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
       const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
       await assertGameScope(client,adminUserId,access.isBoss,gameId);await assertRulesGameSupported(client,gameId);
-      return readPricingSchedules(client,gameId);
+      return readPricingSchedules(client,gameId,confirmation);
     });
     sendJson(response,200,result,requestId);return;
   }
@@ -1068,6 +1073,7 @@ async function handleAdminWrite(
     gameIdResolver: (client: PoolClient) => Promise<string | undefined>,
     action: (client: PoolClient, access: EffectiveAdminAccess, gameId: string) => Promise<{ status: number; body: unknown; details?: Record<string, unknown> }>,
     auditAction?: string,
+    bossOnly = false,
   ): Promise<void> => {
     const fingerprintBody = request.body;
     await runIdempotentWrite(
@@ -1082,6 +1088,7 @@ async function handleAdminWrite(
         await assertAdminContextInTransaction(client, {userId:actor.id,sessionId:actor.sessionId});
         const access = await requireAdminAccess(client, actor.id);
         requirePermission(access, permission);
+        if (bossOnly && !access.isBoss) throw new SecurityApiError(403, "FORBIDDEN", "Only a boss can schedule pricing");
         const gameId = await gameIdResolver(client);
         if (gameId) await assertGameScope(client, actor.id, access.isBoss, gameId);
         if (gameId && operation.startsWith("supply.rules.")) await assertRulesGameSupported(client, gameId);
@@ -1416,7 +1423,7 @@ async function handleAdminWrite(
       await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
       const scheduled={...result,gameId,priceVersionId,pricingModel,announcementVersionId};
       return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
-    },"supply.rules.pricing_policy_scheduled");return;
+    },"supply.rules.pricing_policy_scheduled",true);return;
   }
   const pricingModeScheduleMatch=/^\/games\/([^/]+)\/pricing-mode-schedules$/.exec(path);
   if(pricingModeScheduleMatch&&method==="POST"){
@@ -1431,7 +1438,7 @@ async function handleAdminWrite(
       await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
       const scheduled={...result,gameId,pricingModel,announcementVersionId};
       return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
-    },"supply.rules.pricing_mode_scheduled");return;
+    },"supply.rules.pricing_mode_scheduled",true);return;
   }
   const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);
   if (priceUpdateMatch && method === "PUT") {
