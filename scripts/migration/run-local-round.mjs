@@ -628,8 +628,11 @@ try {
   await step("paths", "load-legacy-path-accounts.mjs", ["--apply", "--plan-dir", input.paths.path, "--plan-receipt-sha", input.paths.sha256, "--source-plan-dir", input.pathSourcePlan.path, "--source-dir", input.source.path, "--source-receipt-sha", input.source.sha256, "--api-dist", apiDist, "--credentials", input.credentials, "--actor-file", actorFile, ...target, "--not-before", input.window.notBefore, "--expires-at", input.window.expiresAt, "--out", pathsOut], stdout => {
     const result = JSON.parse(readFileSync(stdout, "utf8").trim().split(/\r?\n/).at(-1));
     assert.equal(result.status, "COMPLETE");
-    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE)
+    if (input.target.migrationProfile === NEXT_MIGRATION_PROFILE) {
       assert(result.targetFence === 'HELD_ACROSS_BATCHES' && result.targetFenceReleased === true, 'ROUND_PATH_TARGET_FENCE_UNCONFIRMED');
+      assert(result.receiptMode === 'SYSTEM_ACCOUNT_V1' && result.systemAccountId === read(checkpoint).binding.systemAccountId
+        && result.sourceDatasetSha256 === input.dataset.sha256, 'ROUND_SYSTEM_MEDIA_RECEIPT_UNCONFIRMED');
+    }
     assert.equal(result.applied + result.replayed, pathPlan.accounts);
     return result;
   });

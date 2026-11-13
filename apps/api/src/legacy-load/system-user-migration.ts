@@ -4,7 +4,7 @@ import { forbidden } from "../supply/supply-util";
 
 type MigrationTarget = Readonly<{ systemIdentifier: string; databaseOid: string; marker: string; nonce: string; roleOid: string }>;
 type UserSource = Readonly<{ sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; evidenceDigest: string }>;
-export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT" | "DISPLAY" | "HOLDINGS"; accountId: string;
+export type AccountSource = Readonly<{ operation: "CREATE" | "OBSERVATION" | "SNAPSHOT" | "DISPLAY" | "HOLDINGS" | "MEDIA"; accountId: string;
   sourceSystem: string; sourceEntity: string; legacyId: string; sourceDigest: string; payloadDigest: string }>;
 export type OrderSource = Readonly<{ orderId: string; legacyId: string; sourceDigest: string; bindingDigest: string;
   operation?: "CONTINUATION" | "LIABILITY" | "COMPLETED_COMMISSION"; payloadDigest?: string }>;
@@ -338,7 +338,7 @@ export function authorizeSystemUserMigration(client: PoolClient, actor: SystemUs
 export async function authorizeSystemAccountMigration(client: PoolClient, actor: SystemAccountMigrationActor, source: AccountSource): Promise<void> {
   if (actor.kind !== "SYSTEM_ACCOUNT_MIGRATION") throw forbidden("Legacy system migration kind is invalid");
   const expectedAccountId = `account_${createHash("sha256").update(JSON.stringify(["legacy-account", source.sourceSystem, source.sourceEntity, source.legacyId])).digest("hex").slice(0,40)}`;
-  if (!['CREATE','OBSERVATION','SNAPSHOT','DISPLAY','HOLDINGS'].includes(source.operation) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
+  if (!['CREATE','OBSERVATION','SNAPSHOT','DISPLAY','HOLDINGS','MEDIA'].includes(source.operation) || source.sourceSystem !== "legacy_mysql_restore" || source.sourceEntity !== "la_rental_accounts"
       || !/^[1-9][0-9]{0,23}$/.test(source.legacyId) || source.accountId !== expectedAccountId
       || !/^[a-f0-9]{64}$/.test(source.sourceDigest) || !/^[a-f0-9]{64}$/.test(source.payloadDigest))
     throw forbidden("Legacy system account source is invalid");
@@ -363,6 +363,28 @@ export async function authorizeSystemAccountMigration(client: PoolClient, actor:
       ,false) AS authorized FROM pg_roles r JOIN pg_class h ON h.oid=to_regclass('zzsh_supply.legacy_skin_holding')
       WHERE r.rolname=current_user`)).rows[0];
     if (guard?.authorized !== true) throw forbidden("Legacy system skin holding requires protected source guards");
+  }
+  if (source.operation === "MEDIA") {
+    const guard = (await client.query<{ authorized: boolean }>(`SELECT COALESCE(h.relowner=r.oid
+      AND EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conrelid=h.oid AND c.conname='legacy_media_paths_migration_source'
+        AND c.convalidated AND position('migration_batch_id' IN pg_get_constraintdef(c.oid))>0)
+      AND EXISTS (SELECT 1 FROM pg_proc p WHERE p.oid=to_regprocedure('zzsh_iam.guard_legacy_system_audit()')
+        AND position('legacy-media-batch:' IN p.prosrc)>0)
+      AND NOT EXISTS (SELECT 1 FROM (VALUES
+        ('legacy_account_media_paths_insert',7,'zzsh_supply.guard_legacy_account_media_paths()',NULL),
+        ('legacy_account_media_paths_immutable',27,'zzsh_supply.guard_release_immutable()',NULL),
+        ('legacy_system_media_paths_insert',7,'zzsh_supply.guard_legacy_system_snapshot()','(new.created_by_migration_id IS NOT NULL)'),
+        ('legacy_system_media_paths_audit',5,'zzsh_supply.guard_legacy_system_media_paths_audit()','(new.created_by_migration_id IS NOT NULL)')
+      ) required(name,kind,fn,qualification) WHERE NOT EXISTS (
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid WHERE t.tgrelid=h.oid AND t.tgname=required.name
+          AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=required.kind::smallint
+          AND p.oid=to_regprocedure(required.fn) AND p.proowner=r.oid AND NOT p.prosecdef
+          AND substring(pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE FUNCTION ') IS NOT DISTINCT FROM required.qualification
+          AND (required.name<>'legacy_system_media_paths_audit' OR (t.tgdeferrable AND t.tginitdeferred
+            AND position('legacy_migration_manifest_sha256' IN p.prosrc)>0))))
+      ,false) AS authorized FROM pg_roles r JOIN pg_class h ON h.oid=to_regclass('zzsh_supply.legacy_account_media_paths')
+      WHERE r.rolname=current_user`)).rows[0];
+    if (guard?.authorized !== true) throw forbidden("Legacy system image paths require protected source guards");
   }
 }
 export function authorizeSystemOrderMigration(client: PoolClient, actor: SystemOrderMigrationActor, source: OrderSource): Promise<void> {

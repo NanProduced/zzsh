@@ -650,7 +650,58 @@ try {
     if(openingEvidence)report.openings.systemAttribution={...openingEvidence,status:openingEvidence.sourceReconstructed&&openingEvidence.matched===openingEvidence.expected?'VERIFIED':'MISMATCH'};
     const pathDir = option("--paths-plan"), pm = JSON.parse(readFileSync(await checked(pathDir, "receipt.json", option("--paths-plan-sha"))));
     if (pm.datasetSha256 !== state.binding.datasetSha256) throw new Error("ADDITIVE_PATH_DATASET_DRIFT");
-    await compare("paths", rows(await checked(pathDir, pm.file, pm.fileSha256)), async batch => (await query("SELECT m.legacy_id key,m.version_id,p.observation_version_id,p.source_digest,p.display_paths,p.penalty_paths FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_account_media_paths p USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])", [batch.map(r => r.legacyId)])).rows, (r, a) => a && a.version_id === a.observation_version_id && a.source_digest === r.sourceDigest && canonical(a.display_paths) === canonical(r.displayPaths) && canonical(a.penalty_paths) === canonical(r.penaltyPaths), pm.accounts);
+    const systemPaths=state.binding.systemAccountId!==undefined;
+    if(systemPaths&&!systemCore)throw new Error('SYSTEM_MEDIA_RECEIPT_MODE_UNCONFIRMED');
+    const pathRows=[];for await(const row of rows(await checked(pathDir,pm.file,pm.fileSha256)))pathRows.push(row);
+    let pathSources,pathWriter;
+    if(systemPaths){
+      const entry=listedSourceReceipt.files?.accounts;
+      if(!entry||entry.file!==basename(entry.file))throw new Error('MEDIA_SOURCE_READBACK_UNCONFIRMED');
+      const wanted=new Set(pathRows.map(row=>row.legacyId));if(wanted.size!==pathRows.length)throw new Error('MEDIA_SOURCE_DUPLICATE');
+      pathSources=new Map();pathWriter=mod('legacy-load/legacy-path-records');
+      for await(const source of readBoundSourceRows(privatePath(join(manifest.source,entry.file)),entry))if(wanted.has(source.id)){
+        if(pathSources.has(source.id))throw new Error('MEDIA_SOURCE_DUPLICATE');pathSources.set(source.id,source);
+      }
+    }
+    const pathBatches=new Map();
+    await compare("paths",pathRows,async batch => (await query(`SELECT m.legacy_id key,m.account_id,m.version_id,p.observation_version_id,p.source_digest,p.display_paths,p.penalty_paths,
+      to_jsonb(p)->>'created_by_migration_id' migration_id,to_jsonb(p)->>'migration_manifest_sha256' migration_manifest,to_jsonb(p)->>'migration_batch_id' batch_id
+      FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.legacy_account_media_paths p USING(account_id) WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`,[batch.map(r=>r.legacyId)])).rows,(r,a)=>{
+      if(!a||a.version_id!==a.observation_version_id||a.source_digest!==r.sourceDigest||canonical(a.display_paths)!==canonical(r.displayPaths)||canonical(a.penalty_paths)!==canonical(r.penaltyPaths))return false;
+      if(systemPaths){
+        const source=pathSources.get(r.legacyId);if(!source)return false;
+        const fact=pathWriter.prepareLegacyPathRecord(source);
+        if(source.user_id!==r.legacyOwnerId||fact.ownerUserId!==r.ownerUserId||fact.sourceDigest!==r.sourceDigest
+          ||canonical(fact.displayPaths)!==canonical(r.displayPaths)||canonical(fact.penaltyPaths)!==canonical(r.penaltyPaths)
+          ||a.migration_id!==state.binding.systemAccountId||a.migration_manifest!==state.binding.datasetSha256
+          ||!/^legacy-media-batch:[a-f0-9]{64}$/.test(a.batch_id??''))return false;
+        const items=pathBatches.get(a.batch_id)??[];items.push({accountId:a.account_id,...fact});pathBatches.set(a.batch_id,items);
+      }
+      return true;
+    },pm.accounts);
+    if(systemPaths){
+      let matched=0;const actorId=state.binding.systemAccountId,operation='supply.legacy.image_paths',ids=[...pathBatches.keys()];
+      for(let start=0;start<ids.length;start+=500){
+        const group=ids.slice(start,start+500),scopes=group.map(id=>JSON.stringify(['system',actorId,operation,id]));
+        const audits=Map.groupBy((await query(`SELECT object_id,actor_type,actor_id,session_id,to_jsonb(a)->>'legacy_migration_manifest_sha256' source_manifest,details
+          FROM zzsh_iam.audit_event a WHERE action='supply.legacy.image_paths_recorded' AND object_type='legacy_media_batch' AND outcome='SUCCESS' AND object_id=ANY($1::text[])`,[group])).rows,row=>row.object_id);
+        const receipts=Map.groupBy((await query(`SELECT scope_key,key,request_fingerprint,response_status,response_body,publish_required
+          FROM zzsh_supply.idempotency_record WHERE scope_key=ANY($1::text[])`,[scopes])).rows,row=>row.scope_key);
+        for(const batchId of group){
+          const items=pathBatches.get(batchId).sort((a,b)=>a.accountId<b.accountId?-1:a.accountId>b.accountId?1:0),digest=hash(canonical(items));
+          const scope=JSON.stringify(['system',actorId,operation,batchId]),a=audits.get(batchId),r=receipts.get(scope),details=a?.[0]?.details;
+          const fingerprint=mod('supply/supply-util').fingerprintRequest(operation,batchId,items);
+          if(batchId!=='legacy-media-batch:'+digest||a?.length!==1||a[0].actor_type!=='system'||a[0].actor_id!==actorId||a[0].session_id!==null
+            ||a[0].source_manifest!==state.binding.datasetSha256||details?.sourceSystem!=='legacy_mysql_restore'||details.sourceEntity!=='la_rental_accounts'
+            ||details.sourceDatasetSha256!==state.binding.datasetSha256||details.migrationRunDigest!==actorId.slice('legacy-account-migration:'.length)
+            ||details.sourceBindingDigest!==digest||details.count!==items.length||r?.length!==1||r[0].key!==batchId
+            ||r[0].request_fingerprint!==fingerprint||r[0].response_status!==200||r[0].publish_required!==false
+            ||canonical(r[0].response_body)!==canonical({inserted:items.length,replayed:0}))difference('paths',batchId,'SYSTEM_MEDIA_BATCH_EVIDENCE_DRIFT');
+          else matched+=items.length;
+        }
+      }
+      report.paths.systemAttribution={expected:pm.accounts,matched,sourceReconstructed:true,status:matched===pm.accounts?'VERIFIED':'MISMATCH'};
+    }
     const totals = (await query("SELECT (SELECT count(*)::int FROM zzsh_supply.legacy_listing_display_snapshot) display,(SELECT count(*)::int FROM zzsh_supply.legacy_skin_holding WHERE source_system='legacy_mysql_restore') holdings,(SELECT count(*)::int FROM zzsh_order.finance_opening_basis WHERE source_system='legacy_mysql_restore') openings,(SELECT count(*)::int FROM zzsh_supply.legacy_account_media_paths) paths")).rows[0];
     for (const [name, count] of Object.entries(totals)) if (count !== report[name].expected) difference(name, "COHORT", "ADDITIVE_TARGET_COUNT_DRIFT");
   }

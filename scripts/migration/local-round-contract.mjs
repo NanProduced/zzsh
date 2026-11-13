@@ -643,6 +643,11 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
     if(!systemInvitationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_INVITATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemDisplayAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_DISPLAY_ATTRIBUTION_UNCONFIRMED');
     if(!systemHoldingsAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_HOLDINGS_ATTRIBUTION_UNCONFIRMED');
+    if(checkpoint?.binding?.systemAccountId!==undefined){
+      const result=readback?.paths,proof=result?.systemAttribution,count=expected?.paths?.accounts;
+      if(!Number.isSafeInteger(count)||count<0||result?.expected!==count||result.matched!==count||proof?.status!=='VERIFIED'
+        ||proof.expected!==count||proof.matched!==count||proof.sourceReconstructed!==true)issues.push('ROUND_SYSTEM_MEDIA_ATTRIBUTION_UNCONFIRMED');
+    }
     if(!systemContinuationAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_CONTINUATION_ATTRIBUTION_UNCONFIRMED');
     if(!systemLiabilityAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_LIABILITY_ATTRIBUTION_UNCONFIRMED');
     if(!systemCompletedCommissionAttributionMatches(checkpoint,readback))issues.push('ROUND_SYSTEM_COMPLETED_COMMISSION_ATTRIBUTION_UNCONFIRMED');

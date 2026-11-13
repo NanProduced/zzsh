@@ -8,7 +8,7 @@ import { readBoundSourceRows } from "./local-source-adapter.mjs";
 import { acquireMigrationSessionFence, advisoryLockSql, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, loadRegisteredTarget, maintenanceConnection, NEXT_MIGRATION_PROFILE, releaseMigrationSessionFence, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
-if (!args.includes("--verify") && !args.includes("--apply")) { console.log(JSON.stringify({ action: "PLAN", required: ["--verify or --apply", "--plan-dir", "--plan-receipt-sha", "--source-plan-dir", "--source-dir", "--source-receipt-sha", "--api-dist"], applyAlsoRequires: ["--credentials", "--actor-file", "--oid", "--nonce", "--out"], dbConnections: 0, targetWrites: 0 })); process.exit(0); }
+if (!args.includes("--verify") && !args.includes("--apply")) { console.log(JSON.stringify({ action: "PLAN", required: ["--verify or --apply", "--plan-dir", "--plan-receipt-sha", "--source-plan-dir", "--source-dir", "--source-receipt-sha", "--api-dist"], applyAlsoRequires: ["--credentials", "--oid", "--nonce", "--out"], legacyProfileAlsoRequires: ["--actor-file"], nextProfile: "SYSTEM_SOURCE_PENDING_ADMISSION", dbConnections: 0, targetWrites: 0 })); process.exit(0); }
 const apply = args.includes("--apply");
 if (apply && process.platform !== "win32") throw new Error("WINDOWS_PRIVATE_ACL_REQUIRED");
 const planDir = option("--plan-dir"), sourcePlanDir = option("--source-plan-dir"), sourceDir = option("--source-dir"), apiDist = option("--api-dist");
@@ -54,16 +54,27 @@ const withinWindow = () => {
   if ((notBefore || expiresAt) && !(Date.now() >= Date.parse(notBefore) && Date.now() < Date.parse(expiresAt))) throw new Error("PATH_LOAD_WINDOW_INACTIVE");
 };
 withinWindow();
-if (![credentialsFile, actorFile, out].every(path => path && isAbsolute(path)) || !/^[0-9]+$/.test(expectedOid ?? "") || !/^[a-z0-9]{12,40}$/.test(expectedNonce ?? "")) throw new Error("EXACT_TARGET_AND_ACTOR_REQUIRED");
-for (const path of [actorFile, out]) if (!resolve(path).toLowerCase().startsWith(privateRoot.toLowerCase() + "\\")) throw new Error("PRIVATE_PATH_REQUIRED");
-for (const path of [actorFile, credentialsFile]) { let p = resolve(path); for (;;) { if (lstatSync(p).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(p); if (parent === p || p === parse(p).root) break; p = parent; } }
+if (![credentialsFile, out].every(path => path && isAbsolute(path)) || !/^[0-9]+$/.test(expectedOid ?? "") || !/^[a-z0-9]{12,40}$/.test(expectedNonce ?? "")) throw new Error("EXACT_TARGET_REQUIRED");
+const registered = loadRegisteredTarget(credentialsFile), isNext = registered.migrationProfile === NEXT_MIGRATION_PROFILE;
+if (!isNext && (!actorFile || !isAbsolute(actorFile))) throw new Error("EXACT_TARGET_AND_ACTOR_REQUIRED");
+if (isNext && (![notBefore,expiresAt].every(value=>typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value)&&Number.isFinite(Date.parse(value)))
+  || Date.parse(notBefore) >= Date.parse(expiresAt))) throw new Error("NEXT_MEDIA_WINDOW_REQUIRED");
+for (const path of [out, ...(!isNext ? [actorFile] : [])]) if (!resolve(path).toLowerCase().startsWith(privateRoot.toLowerCase() + "\\")) throw new Error("PRIVATE_PATH_REQUIRED");
+for (const path of [credentialsFile, ...(!isNext ? [actorFile] : [])]) { let p = resolve(path); for (;;) { if (lstatSync(p).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(p); if (parent === p || p === parse(p).root) break; p = parent; } }
 if (existsSync(out)) throw new Error("NEW_OUTPUT_REQUIRED");
-const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json"))), credentials = JSON.parse(readFileSync(credentialsFile)), actorProof = JSON.parse(readFileSync(actorFile));
-const registered = loadRegisteredTarget(credentialsFile);
+const resource = JSON.parse(readFileSync(join(dirname(credentialsFile), "resource.json"))), credentials = JSON.parse(readFileSync(credentialsFile));
 if (apply) assertNextMigrationWriteReady(registered);
-const actor = { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId };
-if (actorProof.actorId && actorProof.actorId !== actor.id) throw new Error("TARGET_ACTOR_ALIASES_CONFLICT");
-if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || registered.oid !== expectedOid || registered.nonce !== expectedNonce || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset || credentials.migration?.name !== resource.roles?.migration?.name || credentials.migration?.oid !== resource.roles?.migration?.oid || credentials.migration?.name !== registered.migrationRole || credentials.migration?.oid !== registered.migrationRoleOid || typeof actor.id !== "string" || typeof actor.sessionId !== "string" || !actor.id || !actor.sessionId) throw new Error("TARGET_BINDING_INVALID");
+const actorProof = isNext ? null : JSON.parse(readFileSync(actorFile));
+const actor = actorProof ? { id: actorProof.id ?? actorProof.actorId, sessionId: actorProof.sessionId } : null;
+if (actorProof?.actorId && actorProof.actorId !== actor.id) throw new Error("TARGET_ACTOR_ALIASES_CONFLICT");
+if (resource.database !== "zzsh_test_regression" || registered.database !== resource.database || registered.oid !== expectedOid || registered.nonce !== expectedNonce || resource.oid !== expectedOid || resource.nonce !== expectedNonce || resource.pendingReset || credentials.migration?.name !== resource.roles?.migration?.name || credentials.migration?.oid !== resource.roles?.migration?.oid || credentials.migration?.name !== registered.migrationRole || credentials.migration?.oid !== registered.migrationRoleOid || (!isNext && (typeof actor?.id !== "string" || typeof actor?.sessionId !== "string" || !actor.id || !actor.sessionId))) throw new Error("TARGET_BINDING_INVALID");
+const system = isNext ? require(join(resolve(apiDist), "legacy-load/system-user-migration.js")) : null;
+if (isNext && (!/^[a-f0-9]{64}$/.test(plan.datasetSha256 ?? "") || typeof writer.legacyPathMigrationDigest !== "function"
+  || typeof system?.systemAccountMigrationId !== "function" || typeof system?.withSystemAccountMigrationBatch !== "function")) throw new Error("NEXT_SYSTEM_MEDIA_ADAPTER_REQUIRED");
+if (isNext && (registered.protectedDataset?.manifestSha256 !== plan.datasetSha256
+  || registered.protectedDataset?.epoch?.oid !== registered.oid || registered.protectedDataset?.epoch?.nonce !== registered.nonce)) throw new Error("NEXT_SYSTEM_MEDIA_DATASET_REQUIRED");
+const systemTarget = isNext ? {systemIdentifier:registered.instance?.systemIdentifier,databaseOid:registered.oid,marker:registered.marker,nonce:registered.nonce,roleOid:registered.migrationRoleOid} : null;
+const systemAccountId = isNext ? system.systemAccountMigrationId(plan.datasetSha256,systemTarget) : null;
 let ancestor = dirname(resolve(out)); for (;;) { if (lstatSync(ancestor).isSymbolicLink()) throw new Error("REPARSE_POINT_REFUSED"); const parent = dirname(ancestor); if (parent === ancestor || ancestor === parse(ancestor).root) break; ancestor = parent; }
 const user = spawnSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true, timeout: 5000 }), sid = /S-1-5-[0-9-]+/.exec(user.stdout)?.[0];
 if (user.status !== 0 || !sid) throw new Error("CURRENT_SID_REQUIRED");
@@ -95,8 +106,8 @@ try {
   const identity = (await client.query(targetIdentityQuery())).rows[0];
   assertLiveTarget(registered, identity);
   if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
-  if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.marker !== "zzsh:regression-test:v1" || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid) throw new Error("LIVE_TARGET_CHANGED");
-  await auth.assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
+  if (identity.oid !== expectedOid || identity.nonce !== expectedNonce || identity.marker !== registered.marker || identity.role !== credentials.migration.name || identity.role_oid !== credentials.migration.oid) throw new Error("LIVE_TARGET_CHANGED");
+  if (!isNext) await auth.assertAdminContextInTransaction(client, { userId: actor.id, sessionId: actor.sessionId });
   const rows = (await client.query(`SELECT m.legacy_id,m.account_id,m.source_digest,a.owner_user_id FROM zzsh_supply.legacy_supply_map m JOIN zzsh_supply.rental_account a ON a.id=m.account_id WHERE m.source_system='legacy_mysql_restore' AND m.source_entity='la_rental_accounts' AND m.legacy_id=ANY($1::text[])`, [[...prepared.keys()]])).rows;
   if (rows.length !== prepared.size) throw new Error("TARGET_MAPPING_COUNT_MISMATCH");
   for (const row of rows) { const entry = prepared.get(row.legacy_id); if (!entry || entry.accountId || row.source_digest !== entry.plan.sourceDigest || row.owner_user_id !== entry.plan.ownerUserId) throw new Error("TARGET_MAPPING_MISMATCH"); entry.accountId = row.account_id; }
@@ -107,8 +118,21 @@ try {
     const batch = items.slice(offset, offset + 100); log({ event: "BATCH_START", offset, count: batch.length });
     await client.query("BEGIN"); begun = true;
     if (fenceHeld) await assertMigrationFenceHeld(client, registered, fenceEpoch);
-    const requestId = `legacy_media_paths_${offset}`; await security.setAuditContext(client, "admin", actor.id, actor.sessionId, requestId);
-    const result = await writer.recordLegacyPathRecords(client, batch.map(entry => ({ accountId: entry.accountId, sourceRow: entry.sourceRow })), { id: actor.id, sessionId: actor.sessionId, requestId });
+    const requestId = `legacy_media_paths_${offset}`, entries=batch.map(entry => ({ accountId: entry.accountId, sourceRow: entry.sourceRow }));
+    let result;
+    if (isNext) {
+      if (!fenceHeld || !fenceEpoch) throw new Error("TARGET_FENCE_EPOCH_LOST");
+      const epoch=fenceEpoch,admitted=new Set(entries.map(entry=>{const fact=writer.prepareLegacyPathRecord(entry.sourceRow);return JSON.stringify({operation:'MEDIA',accountId:entry.accountId,
+        sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',legacyId:fact.legacyId,sourceDigest:fact.sourceDigest,
+        payloadDigest:writer.legacyPathMigrationDigest(entry.accountId,entry.sourceRow)});}));
+      const systemActor={kind:'SYSTEM_ACCOUNT_MIGRATION',id:systemAccountId,sourceDatasetSha256:plan.datasetSha256,target:systemTarget,requestId,
+        assertMigrationFence:async targetClient=>{withinWindow();if(!fenceHeld||fenceEpoch!==epoch)throw new Error('TARGET_FENCE_EPOCH_LOST');await assertMigrationFenceHeld(targetClient,registered,epoch);withinWindow();},
+        assertSourceEvidence:async source=>{if(!admitted.has(JSON.stringify(source)))throw new Error('LEGACY_SYSTEM_MEDIA_SOURCE_NOT_ADMITTED');}};
+      result=await system.withSystemAccountMigrationBatch(client,systemActor,()=>writer.recordLegacyPathRecords(client,entries,systemActor));
+    } else {
+      await security.setAuditContext(client, "admin", actor.id, actor.sessionId, requestId);
+      result=await writer.recordLegacyPathRecords(client,entries,{ id: actor.id, sessionId: actor.sessionId, requestId });
+    }
     const newCount = result.inserted, replayCount = result.replayed;
     log({ event: "BATCH_COMMIT_INTENT", offset, count: batch.length, planReceiptSha256: option("--plan-receipt-sha") });
     fsyncSync(fd);
@@ -138,4 +162,4 @@ try {
   closed = targetClosed && maintenanceClosed;
   closeSync(fd);
 }
-console.log(JSON.stringify({ status: state, accounts: prepared.size, applied, replayed, queries, chunks, closed, lockReleased, ...(fenceEpoch?{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased}:{}), failure, wallMs: performance.now() - started })); if (state !== "COMPLETE" || !closed || !lockReleased || fenceEpoch && targetFenceReleased !== true) process.exitCode = 1;
+console.log(JSON.stringify({ status: state, accounts: prepared.size, applied, replayed, queries, chunks, closed, lockReleased, ...(fenceEpoch?{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased}:{}), ...(isNext?{receiptMode:'SYSTEM_ACCOUNT_V1',systemAccountId,sourceDatasetSha256:plan.datasetSha256}:{}), failure, wallMs: performance.now() - started })); if (state !== "COMPLETE" || !closed || !lockReleased || fenceEpoch && targetFenceReleased !== true) process.exitCode = 1;
