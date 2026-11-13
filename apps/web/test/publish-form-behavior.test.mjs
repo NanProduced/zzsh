@@ -13,9 +13,12 @@ const { Window } = require("happy-dom");
 const ts = require("typescript");
 const actualSupply = require(path.join(tree, "apps/web/src/lib/supply-client.ts"));
 const publicationRequired = require(path.join(tree, "apps/web/src/lib/supply-publication-required.ts"));
-const compiled = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-}).outputText;
+const transpileOpts = { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } };
+const compiled = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/supply/publish-form.tsx"), "utf8"), transpileOpts).outputText;
+const compiledInfo = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/ui/information.tsx"), "utf8"), transpileOpts).outputText;
+const compiledLoading = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/auth/session-loading.tsx"), "utf8"), transpileOpts).outputText;
+const compiledControls = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/ui/form-controls.tsx"), "utf8"), transpileOpts).outputText;
+const compiledDialog = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/ui/alert-dialog.tsx"), "utf8"), transpileOpts).outputText;
 
 test("session feedback: pending identity uses the form skeleton without private data or writes", async () => {
   const p = await probe();
@@ -314,11 +317,12 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
     if (name.endsWith(".css")) return {};
     if (name === "../ui/information" || name === "../auth/session-loading") {
       const loadPresentation = (relative) => {
+        const isInfo = relative === "ui/information";
         const filename = path.join(tree, "apps/web/src/components", relative + ".tsx");
         const view = new Module(filename);
         view.filename = filename; view.paths = Module._nodeModulePaths(tree);
         view.require = dependency => dependency.endsWith(".css") ? {} : dependency === "../ui/information" ? loadPresentation("ui/information") : require(dependency);
-        view._compile(ts.transpileModule(fs.readFileSync(filename, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename);
+        view._compile(isInfo ? compiledInfo : compiledLoading, filename);
         return view.exports;
       };
       return loadPresentation(name === "../ui/information" ? "ui/information" : "auth/session-loading");
@@ -328,7 +332,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       const controlModule = new Module(controlPath);
       controlModule.filename = controlPath; controlModule.paths = Module._nodeModulePaths(tree);
       controlModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
-      controlModule._compile(ts.transpileModule(fs.readFileSync(controlPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, controlPath);
+      controlModule._compile(compiledControls, controlPath);
       return controlModule.exports;
     }
     if (name === "../ui/alert-dialog") {
@@ -336,7 +340,7 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       const dialogModule = new Module(dialogPath);
       dialogModule.filename = dialogPath; dialogModule.paths = Module._nodeModulePaths(tree);
       dialogModule.require = dependency => dependency.endsWith(".css") ? {} : require(dependency);
-      dialogModule._compile(ts.transpileModule(fs.readFileSync(dialogPath, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, dialogPath);
+      dialogModule._compile(compiledDialog, dialogPath);
       return dialogModule.exports;
     }
     if (name === "./skin-media-thumb") {
@@ -415,7 +419,17 @@ async function probe({ mode = "standard", accountId, editRequested = false, game
       });
       await settle();
     },
-    async close() { await React.act(async () => root.unmount()); await window.happyDOM.abort(); await window.happyDOM.close(); },
+    async close() {
+      await React.act(async () => root.unmount());
+      await window.happyDOM.abort();
+      await window.happyDOM.close();
+      listeners.clear();
+      host.replaceChildren();
+      if (globalThis.window === window) {
+        globalThis.window = undefined;
+        globalThis.document = undefined;
+      }
+    },
   };
 }
 
