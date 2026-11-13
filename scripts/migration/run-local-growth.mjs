@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writePrivate } from "../local-auth.mjs";
 import { assertGrowthScopePartition, buildLocalGrowthPlan } from "./local-growth-plan.mjs";
-import { assertGrowthPriorAttempt, executeGrowthEntry, growthFailureStatus, growthQueryCategory, growthRecoveryStatus, inlineGrowthIntent, openGrowthPackageReader, sameGrowthInstance, syncInlineGrowthLog, validateGrowthPackageEntries, verifyGrowthPackageBytes, verifyInlineGrowthLog, writeGrowthPackagePacks } from "./local-growth-packages.mjs";
+import { assertGrowthPriorAttempt, executeGrowthEntry, growthFailureStatus, growthQueryCategory, growthRecoveryStatus, inlineGrowthIntent, openGrowthPackageReader, sameGrowthInstance, syncInlineGrowthLog, validateGrowthPackageEntries, verifyGrowthPackageBytes, verifyInlineGrowthLog, verifyPendingGrowthReadback, writeGrowthPackagePacks } from "./local-growth-packages.mjs";
 import { readVerifiedSourceRows } from "./local-source-adapter.mjs";
 
 const args = process.argv.slice(2), option = name => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
@@ -36,7 +36,9 @@ function pinned(file, expected) {
 const inputSha256 = option("--input-sha"), input = pinned(privatePath(option("--input")), inputSha256);
 assert.equal(input.schema, "zzsh.local-round.v1");
 const growthInput = input.growth;
-assert(growthInput && typeof growthInput.policyId === "string" && Number.isFinite(Date.parse(growthInput.policyEffectiveAt)), "EXACT_CURRENT_GROWTH_POLICY_REQUIRED");
+const noPolicyBinding = input.target?.migrationProfile === NEXT_MIGRATION_PROFILE && growthInput?.policyId === undefined && growthInput?.policyEffectiveAt === undefined;
+assert(growthInput && (noPolicyBinding || typeof growthInput.policyId === "string" && Number.isFinite(Date.parse(growthInput.policyEffectiveAt))), "EXACT_CURRENT_GROWTH_POLICY_REQUIRED");
+const matchesPolicy = policy => noPolicyBinding ? ["NOT_CONFIGURED", "CONFIGURED_UNBOUND"].includes(policy?.state) : policy?.id === growthInput.policyId && Date.parse(policy.effectiveAt) === Date.parse(growthInput.policyEffectiveAt);
 assert(growthInput.packageLayout===undefined||growthInput.packageLayout==='PACKED_V2',"GROWTH_PACKAGE_LAYOUT_INVALID");
 const packed=growthInput.packageLayout==='PACKED_V2';
 assert(growthInput.approvalLayout === undefined || packed && growthInput.approvalLayout === 'INLINE_INTENT_V1', 'GROWTH_APPROVAL_LAYOUT_INVALID');
@@ -95,6 +97,7 @@ async function identity(client, role, roleOid) {
 }
 async function activePolicy(client) {
   const p = (await client.query("SELECT id,effective_at FROM zzsh_iam.membership_growth_policy WHERE status='APPROVED' AND effective_at<=transaction_timestamp() ORDER BY effective_at DESC,version DESC LIMIT 1")).rows[0];
+  if (noPolicyBinding) return { state: p ? "CONFIGURED_UNBOUND" : "NOT_CONFIGURED" };
   assert(p && p.id === growthInput.policyId && p.effective_at.toISOString() === new Date(growthInput.policyEffectiveAt).toISOString(), "ACTIVE_GROWTH_POLICY_CHANGED");
   return { id: p.id, effectiveAt: p.effective_at.toISOString() };
 }
@@ -143,8 +146,9 @@ const orderSql = `SELECT id,legacy_id AS "legacyId",account_id AS "accountId",le
 const model = mod("auth/membership-growth"), legacy = mod("auth/membership-growth-legacy"), canonicalize = mod("supply/content-hash").canonicalize;
 const pinManifest = () => {
   const path = privatePath(option("--manifest")), expected = option("--manifest-sha"), plan = pinned(path, expected);
-  assert(plan.schema === (packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1") && plan.status === "PREPARED_NOT_APPLIED" && plan.datasetSha256 === input.dataset.sha256 && plan.oid === target.oid && plan.nonce === target.nonce && (plan.migrationProfile??null)===(target.migrationProfile??null) && (!packed || sameGrowthInstance(plan.instance, target.instance)) && plan.policy.id === growthInput.policyId && plan.cutoff === cutoff && plan.buildDigest === sha(canonicalize(input.buildFiles)) && plan.packages.length === m.domains.users.ready && plan.summary.orders === m.domains.orders.ready, "GROWTH_PLAN_BINDING_CHANGED");
+  assert(plan.schema === (packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1") && plan.status === "PREPARED_NOT_APPLIED" && plan.datasetSha256 === input.dataset.sha256 && plan.oid === target.oid && plan.nonce === target.nonce && (plan.migrationProfile??null)===(target.migrationProfile??null) && (!packed || sameGrowthInstance(plan.instance, target.instance)) && matchesPolicy(plan.policy) && plan.cutoff === cutoff && plan.buildDigest === sha(canonicalize(input.buildFiles)) && plan.packages.length === m.domains.users.ready && plan.summary.orders === m.domains.orders.ready, "GROWTH_PLAN_BINDING_CHANGED");
   validateGrowthPackageEntries(plan);
+  if (noPolicyBinding) assert(plan.summary.policyProjection === "NOT_ASSESSED" && plan.summary.tiers === null && plan.summary.knownZero === null && plan.summary.positive === null && plan.summary.lifetimeCents === null && plan.summary.rollingCents === null && plan.packages.every(item => item.projection === null), "GROWTH_POLICY_PROJECTION_UNEXPECTED");
   result.manifestSha256 = expected;
   return { plan, directory: dirname(path) };
 };
@@ -169,8 +173,8 @@ try {
     const ruleFiles = growthInput.oldRuleFiles;
     assert(ruleFiles && Object.keys(ruleFiles).length > 0, "REVIEWED_OLD_RULE_FILES_REQUIRED");
     for (const [file, expected] of Object.entries(ruleFiles)) assert.equal(sha(readFileSync(file)), expected, "OLD_GROWTH_RULE_CHANGED");
-    const lineage = { captureReceiptSha256: input.source.sha256, scenarioManifestSha256: input.dataset.sha256, refundReceiptSha256: input.refundAttempts.sha256, targetFactsSha256: sha(canonicalize({ oid: target.oid, nonce: target.nonce, policy: targetProof.policy, orders: targetProof.orders })), orderFileSha256: capture.files.orders.sha256, paymentFileSha256: capture.files.pays.sha256, refundFileSha256: capture.files.refunds.sha256, refundLogFileSha256: refundsReceipt.files.refundLogs.sha256, cohortSha256: m.files.users.sha256, oldRuleFiles: ruleFiles, sourceCutoffMeaning: m.sourceOrigin.cutoffMeaning };
-    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)), isNextMigration: resource.migrationProfile === NEXT_MIGRATION_PROFILE });
+    const lineage = { captureReceiptSha256: input.source.sha256, scenarioManifestSha256: input.dataset.sha256, refundReceiptSha256: input.refundAttempts.sha256, targetFactsSha256: sha(canonicalize({ oid: target.oid, nonce: target.nonce, ...(resource.migrationProfile === NEXT_MIGRATION_PROFILE ? {} : { policy: targetProof.policy }), orders: targetProof.orders })), orderFileSha256: capture.files.orders.sha256, paymentFileSha256: capture.files.pays.sha256, refundFileSha256: capture.files.refunds.sha256, refundLogFileSha256: refundsReceipt.files.refundLogs.sha256, cohortSha256: m.files.users.sha256, oldRuleFiles: ruleFiles, sourceCutoffMeaning: m.sourceOrigin.cutoffMeaning };
+    const p = buildLocalGrowthPlan({ modules: { canonicalize, ...mod("order/legacy-growth-consumption"), ...legacy, ...model }, cohort, orders, growthExcluded, targets: targetProof.orders, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef: "local-growth-reviewed-source:" + sha(canonicalize(lineage)), isNextMigration: resource.migrationProfile === NEXT_MIGRATION_PROFILE, projectTiers: !noPolicyBinding });
     writePrivate(join(out, "source-review.json"), p.review);
     writePrivate(join(out, "unknown-sources.json"), p.unknownSources);
     let packs,packages;
@@ -188,7 +192,9 @@ try {
     Object.assign(result, { status: "PREPARED_NOT_APPLIED", manifestSha256: sha(readFileSync(join(out, "manifest.json"))), summary: p.summary });
   } else if (mode === "--readback") {
     const { plan } = pinManifest();
-    await readonly(async (db, i) => {
+    await readonly(async (db, i, policy) => {
+      if (!noPolicyBinding) assert.deepEqual(policy, plan.policy, "GROWTH_POLICY_STATE_CHANGED");
+      const projectTiers = !noPolicyBinding;
       const coverage = (await db.query('SELECT subject_user_id AS "userId",record_canonical canonical,record_digest digest FROM zzsh_iam.membership_growth_legacy_coverage ORDER BY subject_user_id')).rows;
       const rows = (await db.query(`SELECT user_id AS "userId",game_id AS "gameId",source_key AS "sourceKey",source_type AS "sourceType",source_id AS "sourceId",settlement_version AS "settlementVersion",revision,to_char(effective_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "effectiveAt",to_char(recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "recordedAt",amount_cents::text AS "amountCents",previous_amount_cents::text AS "previousAmountCents",correction_of_source_key AS "correctionOf",correction_mode AS "correctionMode",state AS status,eligible,source_digest AS "sourceDigest" FROM zzsh_iam.membership_growth_contribution ORDER BY user_id,source_key,revision`)).rows;
       assert.equal(coverage.length, plan.packages.length);
@@ -198,15 +204,28 @@ try {
         assert(Number.isSafeInteger(row.revision) && row.revision >= 0, "INVALID_STORED_GROWTH_REVISION");
         for (const key of ["previousAmountCents", "correctionOf", "correctionMode"]) if (row[key] === null) delete row[key];
       }
-      const byUser = Map.groupBy(rows, r => r.userId), expected = new Map(plan.packages.map(p => [p.userId, p]));
+      const byUser = Map.groupBy(rows, r => r.userId), expected = new Map(plan.packages.map(p => [p.userId, p])), seenCoverage = new Set();
       let complete = 0, pending = 0, lifetime = 0n, rolling = 0n;
-      const tiers = {}, currentTiers = {}, samples = new Map();
+      const tiers = {}, currentTiers = {}, samples = new Map(), pendingIds = [];
+      let pendingReaderCalls = 0;
+      const checkPending = async () => {
+        if (!pendingIds.length) return;
+        await verifyPendingGrowthReadback(db, pendingIds, i.as_of, mod("auth/membership-growth-integration").readMembershipGrowthBatch);
+        pendingReaderCalls++; pendingIds.length = 0;
+      };
       for (const stored of coverage) {
         const item = expected.get(stored.userId), own = byUser.get(stored.userId) ?? [], record = legacy.parseVerifiedLegacyCoverageRecord(stored.canonical, stored.digest);
-        assert(item && record && record.fingerprint === item.coverageFingerprint && record.coverageState === item.coverageState && record.executionKey === item.executionKey && own.length === item.contributionCount);
+        assert(item && !seenCoverage.has(stored.userId) && record && record.fingerprint === item.coverageFingerprint && record.coverageState === item.coverageState && record.executionKey === item.executionKey && own.length === item.contributionCount);
+        seenCoverage.add(stored.userId);
+        if (!projectTiers) assert.equal(item.projection, null, "GROWTH_POLICY_PROJECTION_UNEXPECTED");
         assert.equal(legacy.assessLegacyCoverageRecord(record, own).state, item.coverageState);
-        if (item.coverageState !== "COMPLETE") { pending++; samples.set(item.userId, { item }); continue; }
+        if (item.coverageState !== "COMPLETE") {
+          pending++;
+          if (projectTiers) { pendingIds.push(item.userId); if (pendingIds.length === 500) await checkPending(); }
+          continue;
+        }
         complete++;
+        if (!projectTiers) continue;
         const before = model.replayGrowthProjection({ userId: item.userId, asOf: cutoff, contributions: own });
         const now = model.replayGrowthProjection({ userId: item.userId, asOf: i.as_of, contributions: own });
         for (const key of ["effectiveTier", "rollingCents", "lifetimeCents"]) assert.equal(before[key], item.projection[key]);
@@ -216,14 +235,17 @@ try {
           if (!samples.has(before.effectiveTier)) samples.set(before.effectiveTier, { item, now });
         lifetime += BigInt(before.lifetimeCents); rolling += BigInt(before.rollingCents);
       }
-      assert.deepEqual({ complete, pending, lifetimeCents: String(lifetime), rollingCents: String(rolling), tiers }, { complete: plan.summary.complete, pending: plan.summary.pending, lifetimeCents: plan.summary.lifetimeCents, rollingCents: plan.summary.rollingCents, tiers: plan.summary.tiers });
-      for (const { item, now } of samples.values()) {
+      if (projectTiers) await checkPending();
+      assert.deepEqual({ complete, pending }, { complete: plan.summary.complete, pending: plan.summary.pending });
+      if (projectTiers) assert.deepEqual({ lifetimeCents: String(lifetime), rollingCents: String(rolling), tiers }, { lifetimeCents: plan.summary.lifetimeCents, rollingCents: plan.summary.rollingCents, tiers: plan.summary.tiers });
+      else assert(plan.summary.lifetimeCents === null && plan.summary.rollingCents === null && plan.summary.tiers === null && plan.summary.knownZero === null && plan.summary.positive === null, "GROWTH_POLICY_PROJECTION_UNEXPECTED");
+      for (const { item, now } of projectTiers ? samples.values() : []) {
         const response = await mod("auth/membership-growth-integration").readMembershipGrowth(db, item.userId, i.as_of);
         assert.equal(response?.growth.knowledge, now ? "KNOWN" : "UNKNOWN");
         if (now) { assert.equal(response.growth.effectiveTier, now.effectiveTier); assert.equal(response.growth.benefitsState, "CONFIGURED"); }
         else assert.equal(response.growth.rollingPoints, null);
       }
-      result.summary = { coverage: coverage.length, contributions: rows.length, complete, pending, currentTiers, officialReaderSamples: samples.size };
+      result.summary = { coverage: coverage.length, contributions: rows.length, complete, pending, currentTiers: projectTiers ? currentTiers : null, policyObservation: projectTiers ? "BOUND" : policy.state, policyProjection: projectTiers ? "COMPUTED" : "NOT_ASSESSED", officialReaderSamples: projectTiers ? samples.size + pending : 0, officialReaderCalls: projectTiers ? samples.size + pendingReaderCalls : 0, officialReaderStatus: projectTiers ? "ALL_PENDING_AND_COMPLETE_SAMPLES" : "NOT_RUN_POLICY_UNBOUND" };
     });
     assert(result.readOnlyRollbackAck && result.readOnlyClientClosed);
     result.status = "EXACT_ALL_RECORDS_AND_FACTS_VERIFIED";

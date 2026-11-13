@@ -60,8 +60,9 @@ export function assertGrowthScopePartition(allOrders, scope, payments) {
 }
 
 /** Original full-source cohort closes every renter source; no-order cohort members get reviewed empty coverage. */
-export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded = [], targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef, isNextMigration = false }) {
+export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded = [], targets, payments, refunds, refundLogs, cutoff, lineage, oldRuleEvidenceRef, isNextMigration = false, projectTiers = true }) {
     if (typeof isNextMigration !== "boolean") fail("GROWTH_MIGRATION_PROFILE_INVALID");
+    if (typeof projectTiers !== "boolean" || !projectTiers && !isNextMigration) fail("GROWTH_POLICY_PROJECTION_INVALID");
     const reason = isNextMigration ? "旧平台租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇" : "本地Nov3完整旧源租赁消费按正式90天成长合同承接；不产生资金分录或旧等级礼遇";
     const keyPrefix = isNextMigration ? "legacy-growth-" : "nov3-growth-";
     const canonical = modules.canonicalize, proof = value => { const canonicalText = canonical(value); return { canonical: canonicalText, digest: sha(canonicalText) }; };
@@ -119,7 +120,7 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded =
         const input = { binding, subjectUserId: userId, recordedAt: cutoff, origin: { kind, parentSourceSnapshot: parent, sourceRecord, components } };
         grouped.get(userId).push({ input, componentDigest: components.digest, sourceKey, refundReviewRefs, reason, componentBasis });
     }
-    const packages = [], summary = { users: cohort.length, orders: orders.length, complete: 0, pending: 0, knownZero: 0, noRenterOrders: 0, positive: 0, contributions: 0, orderKnowledge: {}, reasons: {}, tiers: {}, lifetimeCents: "0", rollingCents: "0", windowStart: modules.growthWindowStartAt(cutoff) };
+    const packages = [], summary = { users: cohort.length, orders: orders.length, complete: 0, pending: 0, knownZero: projectTiers ? 0 : null, noRenterOrders: 0, positive: projectTiers ? 0 : null, contributions: 0, orderKnowledge: {}, reasons: {}, tiers: projectTiers ? {} : null, lifetimeCents: null, rollingCents: null, windowStart: modules.growthWindowStartAt(cutoff) };
     let lifetime = 0n, rolling = 0n;
     for (const [userId, entries] of grouped) {
         const expectedSourceKeys = entries.map(row => row.sourceKey).sort();
@@ -138,15 +139,18 @@ export function buildLocalGrowthPlan({ modules, cohort, orders, growthExcluded =
         let projection = null;
         if (prepared.coverageState === "COMPLETE") {
             summary.complete++;
-            projection = modules.replayGrowthProjection({ userId, asOf: cutoff, contributions: prepared.rows.map(row => row.contribution) });
-            if (projection.lifetimeCents === "0") summary.knownZero++; else summary.positive++;
             if (!entries.length) summary.noRenterOrders++;
-            summary.tiers[projection.effectiveTier] = (summary.tiers[projection.effectiveTier] ?? 0) + 1;
-            lifetime += BigInt(projection.lifetimeCents); rolling += BigInt(projection.rollingCents);
+            if (projectTiers) {
+                projection = modules.replayGrowthProjection({ userId, asOf: cutoff, contributions: prepared.rows.map(row => row.contribution) });
+                if (projection.lifetimeCents === "0") summary.knownZero++; else summary.positive++;
+                summary.tiers[projection.effectiveTier] = (summary.tiers[projection.effectiveTier] ?? 0) + 1;
+                lifetime += BigInt(projection.lifetimeCents); rolling += BigInt(projection.rollingCents);
+            }
         } else summary.pending++;
         summary.contributions += prepared.rows.length;
         packages.push({ userId, bytes, sha256: businessSha256, executionKey: keyPrefix + businessSha256.slice(0, 48), prepared, projection });
     }
-    summary.lifetimeCents = lifetime.toString(); summary.rollingCents = rolling.toString();
+    if (projectTiers) { summary.lifetimeCents = lifetime.toString(); summary.rollingCents = rolling.toString(); }
+    else summary.policyProjection = "NOT_ASSESSED";
     return { packages, review, reviewDigest: reviewProof.digest, summary, unknownSources: audit };
 }

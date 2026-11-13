@@ -171,7 +171,14 @@ export function assertGrowthPlanEvidence({ input, inputSha256, expected, prepare
     && manifest && manifest.schema === (packed?"zzsh.local-growth-round-plan.v2":"zzsh.local-growth-round-plan.v1") && manifest.status === "PREPARED_NOT_APPLIED"
     && manifestSha256 === prepare.manifestSha256 && manifest.datasetSha256 === input.dataset.sha256 && sameTarget(manifest)
     && cutoff !== null && manifest.cutoff === cutoff && digest !== null && manifest.buildDigest === digest
-    && manifest.policy?.id === input.growth?.policyId && Date.parse(manifest.policy?.effectiveAt) === Date.parse(input.growth?.policyEffectiveAt)
+    && (input.target.migrationProfile === NEXT_MIGRATION_PROFILE && input.growth?.policyId === undefined && input.growth?.policyEffectiveAt === undefined
+      ? ["NOT_CONFIGURED", "CONFIGURED_UNBOUND"].includes(manifest.policy?.state) && manifest.summary?.policyProjection === "NOT_ASSESSED"
+        && manifest.summary?.tiers === null && manifest.summary?.knownZero === null && manifest.summary?.positive === null
+        && manifest.summary?.lifetimeCents === null && manifest.summary?.rollingCents === null
+        && prepare.summary?.policyProjection === "NOT_ASSESSED" && prepare.summary?.tiers === null
+        && prepare.summary?.knownZero === null && prepare.summary?.positive === null
+        && prepare.summary?.lifetimeCents === null && prepare.summary?.rollingCents === null
+      : manifest.policy?.id === input.growth?.policyId && Date.parse(manifest.policy?.effectiveAt) === Date.parse(input.growth?.policyEffectiveAt))
     && Array.isArray(manifest.packages) && manifest.packages.length === expected?.dataset?.domains?.users?.ready
     && prepare.summary?.users === expected?.dataset?.domains?.users?.ready && prepare.summary?.orders === expected?.dataset?.domains?.orders?.ready
     && ["users", "orders", "complete", "pending", "contributions"].every(key => manifest.summary?.[key] === prepare.summary?.[key]), "ROUND_GROWTH_PREPARE_UNCONFIRMED");
@@ -185,7 +192,8 @@ export function assertGrowthPlanEvidence({ input, inputSha256, expected, prepare
       && typeof item.userId === "string" && item.userId.length > 0 && typeof item.executionKey === "string" && item.executionKey.length > 0
       && /^[a-f0-9]{64}$/.test(item.sha256 ?? "") && /^[a-f0-9]{64}$/.test(item.coverageFingerprint ?? "")
       && ["COMPLETE", "BACKFILL_PENDING"].includes(item.coverageState) && Number.isSafeInteger(item.contributionCount) && item.contributionCount >= 0
-      && !seenUsers.has(item.userId) && !seenKeys.has(item.executionKey), "ROUND_GROWTH_PREPARE_UNCONFIRMED");
+      && !seenUsers.has(item.userId) && !seenKeys.has(item.executionKey)
+      && (manifest.summary?.policyProjection !== "NOT_ASSESSED" || item.projection === null), "ROUND_GROWTH_PREPARE_UNCONFIRMED");
     seenUsers.add(item.userId); seenKeys.add(item.executionKey);
     if (item.coverageState === "COMPLETE") complete++; else pending++;
     contributions += item.contributionCount;
@@ -753,6 +761,8 @@ export function assessRoundEvidence({ input, inputSha256, actorProof, receipt, c
         || result.readOnlyMaintenanceUnlock !== true || result.readOnlyMaintenanceClosed !== true)
       || result.summary?.coverage !== prepare?.summary?.users || result.summary?.contributions !== prepare?.summary?.contributions
       || result.summary?.complete !== prepare?.summary?.complete || result.summary?.pending !== prepare?.summary?.pending) issues.push("ROUND_GROWTH_READBACK_UNCONFIRMED");
+    if (target.migrationProfile === NEXT_MIGRATION_PROFILE && input.growth?.policyId === undefined && input.growth?.policyEffectiveAt === undefined)
+      issues.push("ROUND_GROWTH_POLICY_NOT_ASSESSED");
   }
   return { status: issues.length ? "INCOMPLETE" : "COMPLETE", dataset, growth: !input.growth ? "NOT_PLANNED" : issues.some(x => x.startsWith("ROUND_GROWTH_") || requiredGrowthStages.some(stage => x.endsWith(":" + stage))) ? "INCOMPLETE" : "PASS", issues };
 }
