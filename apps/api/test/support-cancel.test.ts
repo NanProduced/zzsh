@@ -54,7 +54,7 @@ function factsRow(patch: FactPatch = {}) {
   return { id: "order_1", status: "PAID", revision: "1", paid_confirmation_id: "pc_1", renter_user_id: "renter", owner_user_id: "owner",
     cancel_reason: null, cancelled_at: null, confirmation_id: "pc_1", payment_source: "JOINPAY", disposition: "APPLIED",
     currency: "CNY", amount_cents: "15908", merchant_identity_id: "merchant_1", merchant_order_no: "ORIGINAL_1",
-    channel_trx_no: "TRX_1", order_cents: "15908", opening_confirmed: false, has_posting: false, pending_settlement: false,
+    channel_trx_no: "TRX_1", order_cents: "15908", fixed_pricing: false, opening_confirmed: false, has_posting: false, pending_settlement: false,
     pending_adjustment: false, earning_count: "0", active_refund_count: "0", other_termination: false, ...patch };
 }
 function termRow(patch: FactPatch = {}) {
