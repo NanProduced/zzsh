@@ -58,6 +58,11 @@ __pycache__/
 .claude/
 .dsh/
 .dsh-tool-vision/
+.qoder/
+.workbuddy/
+
+# All Agents' work directories (temp - it needs to be cleaned up promptly.)
+.*-work/
 
 # Serena project configuration and caches are machine-local
 .serena/

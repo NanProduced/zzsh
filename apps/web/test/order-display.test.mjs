@@ -376,3 +376,141 @@ test("membership discount requires complete unique resource lines and an authori
  assert.equal(display.matchingResourceDiscount(personal,yuan('8.00'),[...reference,...reference]),null);
  assert.equal(display.matchingResourceDiscount(personal,yuan('8.00'),[...reference,{itemId:'item-2',quantity:'1',costAmount:'2.00'}]),null);
 });
+
+test("new quote displays actual growth tier and separate whole-price/deposit sources without old tier labels", () => {
+  const quote = {
+    membershipBenefits: {
+      schema: "membership-benefits-v1",
+      effectiveTier: "GOLD",
+      policyTier: "GOLD",
+      priceSource: "FRIEND",
+      depositSource: "GROWTH",
+      policyVersion: "1",
+    },
+    customerTier: "VIP",
+  };
+  assert.equal(display.personalMembershipLabel(quote), "金卡会员");
+  assert.equal(display.personalBenefitSources(quote), "价格：挚友礼遇；押金：成长权益");
+  assert(!display.personalMembershipLabel(quote).includes("VIP"));
+  quote.membershipBenefits.effectiveTier = "BLACK_GOLD";
+  quote.membershipBenefits.policyTier = "DIAMOND";
+  assert.equal(display.personalMembershipLabel(quote), "黑金会员·终身");
+  assert.equal(display.personalMembershipLabel({ customerTier: "SVIP" }), "既有确认方案");
+  assert.equal(display.personalMembershipLabel({}), "会员权益未记录");
+  assert.equal(display.personalBenefitSources({ customerTier: "STANDARD" }), null);
+});
+
+
+
+/* --- Order Aftersale DTO & Boundary Rules --- */
+
+
+import { parseAftersalePage, parseAftersaleRecord } from "../../../packages/im-client/src/aftersale.ts";
+
+const asRow=(id="ASrecord1",description="本人的订单问题")=>({id,orderSource:"NATIVE",orderId:"order",orderDisplayNo:"DD-TEST",requesterParty:"RENTER",description,state:"PENDING",result:null,version:1,handler:null,createdAt:"2026-11-01T00:00:00Z",updatedAt:"2026-11-01T00:00:00Z",resolvedAt:null});
+const asPage=(items=[],canSubmit=true)=>({items,canSubmit,nextCursor:null});
+
+test("aftersale response boundary rejects malformed status/handler instead of rendering false completion",()=>{
+  assert.equal(parseAftersaleRecord(asRow()).state,"PENDING");assert.throws(()=>parseAftersaleRecord({...asRow(),state:"RESOLVED"}));
+  assert.throws(()=>parseAftersaleRecord({...asRow(),orderSource:"LEGACY"}));assert.throws(()=>parseAftersaleRecord({...asRow(),handler:{id:"x",name:""}}));
+  assert.throws(()=>parseAftersalePage({items:[],nextCursor:null}));assert.equal(parseAftersalePage(asPage()).canSubmit,true);
+});
+
+
+/* --- Order Intent & IM Order Reference Rules --- */
+
+import { Window as OrderWindow } from "happy-dom";
+const orderWin = new OrderWindow({ url: "http://127.0.0.1/accounts" });
+globalThis.window = orderWin;
+const orderIntents = requireFromTree(path.join(tree, "apps/web/src/lib/order-intents.ts"));
+
+test("an intent is persisted per user, action and resource and reloads exactly", () => {
+  const saved = orderIntents.saveIntent({ userId: "user_A", kind: "order.create.v2", resourceId: "account_1", key: "key_1", body: {}, token: "token_1", context: { payable: "470.00" } });
+  assert.equal(saved.persisted, true);
+  const loaded = orderIntents.loadIntent("user_A", "order.create.v2", "account_1");
+  assert.equal(loaded.key, "key_1");
+  assert.equal(loaded.token, "token_1");
+  assert.equal(loaded.context.payable, "470.00");
+  assert.equal(loaded.version, 1);
+});
+
+test("another identity can never load or reuse the intent", () => {
+  orderIntents.saveIntent({ userId: "user_A", kind: "order.payment", resourceId: "order_1", key: "key_2", body: {} });
+  assert.equal(orderIntents.loadIntent("user_B", "order.payment", "order_1"), null);
+  assert.notEqual(orderIntents.loadIntent("user_A", "order.payment", "order_1"), null);
+});
+
+test("Native channel intent keeps its own method/key and never replaces the controlled payment slot", () => {
+  orderIntents.saveIntent({userId:"user_native",kind:"order.payment",resourceId:"same_order",key:"controlled_key",body:{}});
+  orderIntents.saveIntent({userId:"user_native",kind:"order.channel-payment",resourceId:"same_order",key:"native_key",body:{method:"WEIXIN_NATIVE"}});
+  const recovered=orderIntents.loadIntent("user_native","order.channel-payment","same_order");
+  assert.equal(recovered.key,"native_key");assert.deepEqual(recovered.body,{method:"WEIXIN_NATIVE"});
+  assert.equal(orderIntents.loadIntent("user_native","order.payment","same_order").key,"controlled_key");
+  assert.equal(orderIntents.loadIntent("other_user","order.channel-payment","same_order"),null);
+  orderIntents.clearIntent("user_native","order.channel-payment","same_order");orderIntents.clearIntent("user_native","order.payment","same_order");
+});
+
+test("saving again preserves the original key and creation time", async () => {
+  const first = orderIntents.saveIntent({ userId: "user_A", kind: "order.cancel", resourceId: "order_2", key: "key_3", body: {} }).intent;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const second = orderIntents.saveIntent({ userId: "user_A", kind: "order.cancel", resourceId: "order_2", key: "key_3", body: {} }).intent;
+  assert.equal(second.key, "key_3");
+  assert.equal(second.createdAt, first.createdAt);
+  assert.notEqual(second.updatedAt, first.updatedAt);
+});
+
+test("receipts are frozen on the intent and a different resource is a different slot", () => {
+  orderIntents.saveIntent({ userId: "user_A", kind: "settlement.submit", resourceId: "order_3", key: "key_4", body: { lines: [] } });
+  orderIntents.recordIntentReceipt("user_A", "settlement.submit", "order_3", { status: 200, body: { ok: true } });
+  assert.deepEqual(orderIntents.loadIntent("user_A", "settlement.submit", "order_3").receipt, { status: 200, body: { ok: true } });
+  assert.equal(orderIntents.loadIntent("user_A", "settlement.submit", "order_4"), null);
+  orderIntents.clearIntent("user_A", "settlement.submit", "order_3");
+  assert.equal(orderIntents.loadIntent("user_A", "settlement.submit", "order_3"), null);
+});
+
+test("age never deletes an unresolved intent; it only disables automatic replay", () => {
+  orderIntents.saveIntent({ userId: "user_A", kind: "order.payment", resourceId: "order_5", key: "key_5", body: { frozen: true } });
+  const storageKey = "zzsh.order-intent.v1:user_A:order.payment:order_5";
+  const stored = JSON.parse(orderWin.sessionStorage.getItem(storageKey));
+  stored.updatedAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+  orderWin.sessionStorage.setItem(storageKey, JSON.stringify(stored));
+  const loaded = orderIntents.loadIntent("user_A", "order.payment", "order_5");
+  assert.ok(loaded, "the unresolved responsibility must remain loadable");
+  assert.equal(loaded.key, "key_5");
+  assert.deepEqual(loaded.body, { frozen: true });
+  assert.equal(orderIntents.isIntentStale(loaded), true);
+  assert.equal(orderIntents.isIntentStale(orderIntents.loadIntent("user_A", "order.cancel", "order_2")), false);
+});
+
+test("storage failure is reported instead of pretending the intent is recoverable", () => {
+  const realWindow = globalThis.window;
+  globalThis.window = { sessionStorage: { getItem: () => null, setItem: () => { throw new Error("quota"); }, removeItem: () => {} } };
+  try {
+    const saved = orderIntents.saveIntent({ userId: "user_A", kind: "order.payment", resourceId: "order_6", key: "key_6", body: {} });
+    assert.equal(saved.persisted, false);
+    assert.equal(orderIntents.loadIntent("user_A", "order.payment", "order_6"), null);
+  } finally {
+    globalThis.window = realWindow;
+  }
+});
+
+test("order reference round trips a bounded reference and caption without quote facts", async () => {
+  const { encodeOrderReference, parseOrderReference, orderReferenceSummary } = await import(
+    "../../../packages/im-client/src/order-reference.ts"
+  );
+  const order = { id: "order-1", displayNo: "ZZ20261101-00001", title: "三角洲账号", party: "renter" };
+  const wire = encodeOrderReference({ ...order, amount: "untrusted", url: "https://bad.invalid" }, " 请核对 \n这笔订单 ");
+  assert.deepEqual(parseOrderReference(wire), { order, caption: "请核对 \n这笔订单" });
+  assert.doesNotMatch(wire, /untrusted|bad.invalid/);
+  assert.equal(orderReferenceSummary(wire), "[订单] 三角洲账号 · ZZ20261101-00001");
+
+  for (const patch of [{ id: "../users/private" }, { id: "javascript:bad" }, { title: "\n伪造" }, { party: "admin" }, { title: "x".repeat(241) }]) {
+    assert.throws(() => encodeOrderReference({ ...order, ...patch }));
+    assert.equal(parseOrderReference("【关联订单卡】" + JSON.stringify({ version: 1, ...order, ...patch })), null);
+  }
+  assert.equal(parseOrderReference("【关联订单卡】" + JSON.stringify({ version: 2, ...order })), null);
+  assert.equal(parseOrderReference("【关联订单卡】{"), null);
+  assert.throws(() => encodeOrderReference(order, "x".repeat(4000)));
+  assert.equal(orderReferenceSummary("普通消息"), "普通消息");
+  assert.equal(orderReferenceSummary("【关联订单卡】{\"version\":"), "[订单]");
+});

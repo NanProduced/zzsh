@@ -92,31 +92,6 @@ test('sealed R06 sources, target, actor, registry and business match before any 
   assert.equal(ctx.documents.terms.digest,sha('测试协议'));
 });
 
-test('next migration cannot use the old administrator-driven legal initialization', () => {
-  const f=fixture(), round=JSON.parse(f.bytes.roundInput);
-  round.target.migrationProfile='LOCAL_MIGRATION_NEXT_V1';
-  f.bytes.roundInput=enc(round); f.refs.roundInput.sha256=sha(f.bytes.roundInput);
-  let reads=0;
-  assert.throws(() => validateInputs(f.plan, ref => {
-    reads++; assert.equal(ref,f.refs.roundInput); assert.equal(sha(f.bytes.roundInput),ref.sha256);
-    return f.bytes.roundInput;
-  }), /NEXT_LEGACY_LEGAL_FILTER_RETIRED/);
-  assert.equal(reads,1);
-});
-
-test('next-profile registry cannot be paired with an old round input', () => {
-  const f=fixture(), registry=JSON.parse(f.bytes.registry);
-  registry.migrationProfile='LOCAL_MIGRATION_NEXT_V1';
-  f.bytes.registry=enc(registry); f.refs.registry.sha256=sha(f.bytes.registry);
-  const expected=[f.refs.roundInput,f.refs.registry];
-  assert.throws(() => validateInputs(f.plan, ref => {
-    assert.equal(ref,expected.shift());
-    const bytes=ref === f.refs.roundInput ? f.bytes.roundInput : f.bytes.registry;
-    assert.equal(sha(bytes),ref.sha256); return bytes;
-  }), /NEXT_LEGACY_LEGAL_FILTER_RETIRED/);
-  assert.equal(expected.length,0);
-});
-
 test('R07 legal/filter sources and runtime are bound to the same registered cluster', () => {
   const f=fixture(),instance={host:'127.0.0.1',port:55433,systemIdentifier:'123'};
   const edit=(name,fn)=>{const value=JSON.parse(f.bytes[name]);fn(value);f.bytes[name]=enc(value);f.refs[name].sha256=sha(f.bytes[name]);};

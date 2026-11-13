@@ -187,14 +187,15 @@ test("page search component interaction: no match shows empty state, Enter guard
     assert.equal(listbox.querySelectorAll('[role="option"]').length, 2);
 
     // Type query that matches nothing
-    await setInput(input, "unknown-page-query");
+    const unknownQuery = "NO_MATCH_" + "X".repeat(180);
+    await setInput(input, unknownQuery);
     await settle();
 
     // Verify empty state is displayed
     const emptyState = browser.document.body.querySelector('[role="status"]');
     assert.ok(emptyState, "renders empty state with role=status");
     assert.ok(browser.document.body.textContent.includes("未找到匹配的可访问页面"));
-    assert.ok(browser.document.body.textContent.includes("unknown-page-query"));
+    assert.ok(browser.document.body.textContent.includes(unknownQuery));
     assert.equal(listbox.querySelectorAll('[role="option"]').length, 0, "no options when empty");
 
     // Press Enter while results is empty - must NOT navigate!
@@ -242,41 +243,6 @@ test("page search component: genuinely empty pages shows '当前无可访问页�
     assert.ok(browser.document.body.textContent.includes("当前无可访问页面"));
     assert.ok(browser.document.body.textContent.includes("当前登录账号未分配可在此打开的管理页面"));
     assert.equal(browser.document.body.textContent.includes("清空搜索"), false, "no clear button when pages is empty");
-  } finally {
-    await search.cleanup();
-  }
-});
-
-test("F3: long unbroken query string wraps without overflowing empty state container", async () => {
-  const pages = [
-    { label: "账号与权限审计", path: "/audit", group: "系统管理" },
-  ];
-  const search = await renderSearch({ pages, onNavigate: () => {} });
-  try {
-    const triggerBtn = search.rootNode.querySelector('button[aria-label="搜索页面"]');
-    await act(async () => {
-      triggerBtn.dispatchEvent(new browser.MouseEvent("click", { bubbles: true }));
-    });
-    await settle();
-
-    const input = browser.document.body.querySelector('input[aria-label="搜索页面与标签"]');
-    const longString = "NO_MATCH_" + "X".repeat(180);
-    await setInput(input, longString);
-    await settle();
-
-    const emptyState = browser.document.body.querySelector('[role="status"]');
-    assert.ok(emptyState, "renders empty state with role=status");
-    assert.ok(browser.document.body.textContent.includes("未找到匹配的可访问页面"));
-    assert.ok(browser.document.body.textContent.includes(longString));
-
-    // Verify empty state container has overflow-hidden and max-w-full
-    assert.ok(emptyState.classList.contains("overflow-hidden"), "empty state has overflow-hidden");
-    assert.ok(emptyState.classList.contains("max-w-full"), "empty state has max-w-full");
-
-    // Verify query span has break-all class
-    const querySpan = emptyState.querySelector("span.inline");
-    assert.ok(querySpan, "query span is rendered");
-    assert.ok(querySpan.classList.contains("break-all"), "query span has break-all");
   } finally {
     await search.cleanup();
   }

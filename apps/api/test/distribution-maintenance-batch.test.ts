@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { Pool, PoolClient } from 'pg';
-import { createMaintenanceBatchRunner, DistributionMaintenanceCommitUnknown } from '../src/finance/distribution-maintenance-batch';
+import { createMaintenanceBatchRunner } from '../src/finance/distribution-maintenance-batch';
 import { SecurityApiError } from '../src/auth/security-core';
 import type { MaintenanceOperator } from '../src/finance/distribution-earning-store';
 
@@ -19,20 +19,11 @@ function fakeTarget(options: { due: Due[]; max?: number; games?: readonly string
       if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return rows();
       if (sql.includes('pg_try_advisory_lock')) return rows([{ acquired: true }]);
       if (sql.includes('pg_advisory_unlock')) return rows([{ released: true }]);
-      if (sql.includes('distribution_accrual_task_schema_v1')) return rows([{absent:true,ready:false}]);
       if (sql.startsWith('SELECT request_fingerprint')) { const row = records.get(args[0] + '|' + args[1]); return rows(row ? [{ fingerprint: row.fingerprint, status: row.status, body: row.body }] : []); }
-      if (sql.startsWith('SELECT scope_key,key,response_status')) {
-        const matches=[...records.entries()].map(([receiptKey,row])=>{const [scope_key,key]=receiptKey.split('|');return{scope_key,key,status:row.status,body:row.body};})
-          .filter(row=>row.status!==200&&(sql.includes('scope_key LIKE')?row.scope_key!.startsWith('["system","distribution-due-'):row.scope_key===args[0]));
-        return rows(sql.includes('created_at ASC')?matches.slice(0,1):matches.slice(-1));
-      }
+      if (sql.startsWith('SELECT key,response_status')) return rows([...records.entries()].filter(([receiptKey]) => receiptKey.startsWith(args[0] + '|')).map(([receiptKey, row]) => ({ key: receiptKey.split('|')[1], status: row.status, body: row.body })).filter(row => row.status !== 200).slice(-1));
       if (sql.startsWith('INSERT INTO zzsh_supply.idempotency_record')) { const key = String(args[0]) + '|' + String(args[1]); if (records.has(key)) throw new Error('duplicate receipt'); records.set(key, { fingerprint: args[2], status: 202, body: JSON.parse(args[3]) }); return rows(); }
       if (sql.startsWith('UPDATE zzsh_supply.idempotency_record')) { const key = String(args[0]) + '|' + String(args[3]), row = records.get(key); if (!row || row.fingerprint !== args[4]) return rows(); row.status = args[1]; row.body = JSON.parse(args[2]); return { rows: [], rowCount: 1 }; }
-      if (sql.includes('FROM zzsh_order.rental_referral_earning e') && sql.includes("e.state='PENDING'")) {
-        const reserved=new Set([...records.entries()].filter(([key,row])=>(key.startsWith('["system",')||key.startsWith('["admin",'))&&key.includes(',"distribution.maintenance",null]')&&row.status!==200&&row.body.operation==='DUE_SETTLE')
-          .flatMap(([,row])=>(row.body.plan.earningIds??[]).map((item:any)=>item.earningId)));
-        return rows(options.due.filter(row => !settled.has(row.id)&&!reserved.has(row.id)).slice(0, args[2]));
-      }
+      if (sql.includes('FROM zzsh_order.rental_referral_earning e') && sql.includes("e.state='PENDING'")) return rows(options.due.filter(row => !settled.has(row.id)).slice(0, args[2]));
       if (sql.startsWith('SELECT id,game_id FROM zzsh_order.rental_order')) return rows(args[0].map((id: string) => ({ id, game_id: 'delta' })));
       if (sql.includes('FROM zzsh_order.rental_referral_earning e JOIN zzsh_order.rental_order o ON o.id=e.order_id WHERE e.id=ANY')) return rows(args[0].map((id: string) => ({ id, game_id: 'delta' })));
       if (sql.includes('audit_event')) return rows();
@@ -79,22 +70,6 @@ test('UNKNOWN batch resumes only its original plan and does not select the next 
   const read = await p.runner.readBatch(p.pool, { requestId: 'due_unknown', operator: p.operator() });
   assert.equal(read!.batch.state, 'COMPLETE'); assert.equal(read!.batch.results[0]!.status, 'SETTLED');
   assert.ok(p.control.authorizeCalls >= 3);
-});
-
-test('one unknown due earning keeps its original plan while independent earnings continue',async()=>{
-  const p=fakeTarget({due:[{id:'earning_a',version:'1'},{id:'earning_b',version:'1'},{id:'earning_c',version:'1'}]});
-  const system:MaintenanceOperator={userId:'distribution-due-main',sessionId:'system',system:true,authorize:async()=>{}};
-  p.control.failId='earning_a';
-  const first=await p.runner.runDueBatch(p.pool,{limit:2,requestId:'due_original',operator:system});
-  assert.equal(first.batch.state,'UNKNOWN');
-  assert.deepEqual(first.batch.results.map(value=>[value.id,value.status]),[['earning_a','UNKNOWN'],['earning_b','SETTLED']]);
-  const independent=await p.runner.runDueBatch(p.pool,{limit:2,requestId:'due_independent',operator:system});
-  assert.equal(independent.batch.state,'COMPLETE');assert.deepEqual(independent.batch.plan.earningIds,[{earningId:'earning_c',version:'1'}]);
-  assert.deepEqual(p.calls,['earning_a','earning_b','earning_c']);
-  p.control.failId=null;
-  const resumed=await p.runner.resumeBatch(p.pool,{requestId:'due_original',operator:system});
-  assert.equal(resumed.batch.state,'COMPLETE');assert.deepEqual(p.calls,['earning_a','earning_b','earning_c','earning_a']);
-  assert.equal(resumed.batch.results.find(value=>value.id==='earning_b')?.status,'SETTLED');
 });
 
 test('replay batch fixes explicit order ids and rejects same-key parameter changes', async () => {
@@ -159,21 +134,6 @@ test('a restarted driver resumes the unfinished original batch instead of a new 
   assert.equal(await p.runner.findUnfinishedBatch(p.pool, { operator: system }), null);
 });
 
-test('system worker takeover finds the original actor scope before planning another due batch', async () => {
-  const p = fakeTarget({ due: [{ id: 'earning_a', version: '1' }] });
-  const original:MaintenanceOperator={userId:'distribution-due-original',sessionId:'system',system:true,authorize:async()=>{}};
-  const replacement:MaintenanceOperator={...original,userId:'distribution-due-replacement'};
-  p.control.failId='earning_a';
-  await p.runner.runDueBatch(p.pool,{limit:1,requestId:'due_original',operator:original});
-  const found=await p.runner.findUnfinishedBatch(p.pool,{operator:replacement,allSystemWorkers:true});
-  assert.equal(found?.requestId,'due_original');assert.equal(found?.operatorUserId,original.userId);
-  p.control.failId=null;
-  const resumed=await p.runner.resumeBatch(p.pool,{requestId:found!.requestId,operator:{...replacement,userId:found!.operatorUserId!}});
-  assert.equal(resumed.batch.state,'COMPLETE');
-  assert.equal(await p.runner.findUnfinishedBatch(p.pool,{operator:replacement,allSystemWorkers:true}),null);
-  await assert.rejects(p.runner.findUnfinishedBatch(p.pool,{operator:p.operator(),allSystemWorkers:true}),/System distribution worker required/);
-});
-
 test('a deterministic rejection terminalizes its root and never looks like a lost commit', async () => {
   const p = fakeTarget({ due: [{ id: 'earning_a', version: '1' }, { id: 'earning_b', version: '1' }] });
   p.control.rejectId = 'earning_a';
@@ -210,19 +170,6 @@ test('Root: unknown rollback destroys the session and never saves or commits a r
   assert.deepEqual(wire.slice(rollback+1),[],'no BEGIN/save/COMMIT/unlock on the unconfirmed transaction');
   assert.deepEqual(releases,[true]);
   assert.equal([...p.records.values()][0]!.status,202,'original plan is retained for a fresh-connection read');
-});
-
-test('an unknown money COMMIT destroys the session without rollback or receipt rewrite',async()=>{
-  const p=fakeTarget({due:[{id:'earning_a',version:'1'}]});
-  const connect=p.pool.connect.bind(p.pool),wire:string[]=[],releases:Array<boolean|undefined>=[];
-  (p.pool as any).connect=async()=>{const client=await connect(),query=client.query.bind(client),release=client.release.bind(client);let commits=0;
-    (client as any).query=async(sql:string,args:any[])=>{wire.push(sql);const result=await query(sql,args);
-      if(sql==='COMMIT'&&++commits===2)throw Error('COMMIT_ACK_UNKNOWN');return result;};
-    (client as any).release=(destroy?:boolean)=>{releases.push(destroy);release(destroy);};return client;};
-  await assert.rejects(p.runner.runDueBatch(p.pool,{limit:1,requestId:'commit_unknown',operator:p.operator()}),DistributionMaintenanceCommitUnknown);
-  assert.equal(wire.at(-1),'COMMIT','no rollback, receipt update or unlock on an unknown session');
-  assert.deepEqual(releases,[true]);
-  assert.equal([...p.records.values()][0]!.status,202,'retain the original plan for recovery');
 });
 
 

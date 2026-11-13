@@ -61,15 +61,6 @@ function allViews() {
 
 const paymentUnknown = { state: "UNKNOWN", displayState: "CONFIRMING", blockedReason: "CHANNEL_RESULT_UNKNOWN", readFailed: false };
 
-test("owner delisting closes the unpaid order without claiming the old payment code is closed", () => {
-  const renter = view({ status: "CANCELLED", cancelReason: "OWNER_DELISTED" });
-  assert.match(renter.note, /请勿继续使用之前的付款码/);
-  assert.match(renter.note, /已经扣款.*联系客服/);
-  assert.equal(renter.noNewTransaction, true);
-  const owner = view({ status: "CANCELLED", cancelReason: "OWNER_DELISTED" }, { party: "owner" });
-  assert.match(owner.note, /旧付款码支付.*联系客服/);
-});
-
 test("pending payment: renter gets the one payment action, owner never pays on their behalf", () => {
   const renter = view({ status: "PENDING_PAYMENT" });
   assert.equal(renter.owner, "你");

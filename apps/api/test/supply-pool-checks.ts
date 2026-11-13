@@ -225,12 +225,26 @@ export async function runSupplyPoolChecks(o: {
             undefined,
           );
           assert.equal(detail.status, 200);
-          for (const retired of ["pause", "resume"]) {
-            assert.equal((await call(
-              "/api/v1/supply/accounts/" + o.accountId + "/" + retired,
-              { expectedRevision: detail.body.account.revision }, false, undefined, "POST",
-            )).status, 404);
-          }
+          const pause = await call(
+            "/api/v1/supply/accounts/" + o.accountId + "/pause",
+            { expectedRevision: detail.body.account.revision },
+            false,
+            undefined,
+            "POST",
+          );
+          assert.equal(pause.status, 200);
+          assert.equal(
+            (
+              await call(
+                "/api/v1/supply/accounts/" + o.accountId + "/resume",
+                { expectedRevision: pause.body.account.revision },
+                false,
+                undefined,
+                "POST",
+              )
+            ).status,
+            200,
+          );
           const review = await call(
             "/api/bff/admin/supply/listing-reviews/" + o.accountId,
             undefined,

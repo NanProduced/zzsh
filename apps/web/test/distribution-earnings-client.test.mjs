@@ -1,5 +1,6 @@
 import {test} from 'node:test';import {strict as assert} from 'node:assert';
 import {earningsPage,earningsDetail,readEarnings,readEarningDetail,commissionRecord,commissionRecordSummary,commissionRecordMoney} from '../src/lib/distribution-earnings-client.ts';
+import {distributionSummary,readDistributionSummary} from '../src/lib/distribution-summary-client.ts';
 const at='2026-10-04T00:00:00.000000Z',base={contractVersion:'distribution-earnings.read.v1',subjectId:'self',snapshotVersion:'source-v1',asOf:at};
 export const old={id:'history:old',origin:'LEGACY_MYSQL',state:'SETTLED',role:'RENTER_REFERRAL',amount:{currency:'CNY',unit:'cent',amountCents:'1234'},occurredAt:at,dueAt:null,dueAtKnowledge:'UNKNOWN',fundsDisposition:'HISTORICAL_STATUS_ONLY',recoveryRequiredCents:null,includedInOpening:true,version:null,accountingEffect:'OBSERVATION_ONLY_NO_NEW_CREDIT',businessReference:{type:'LEGACY_UNRESOLVED',id:'legacy'},channelArrivalKnowledge:'UNKNOWN'};
 const page={...base,state:'ALL',knowledge:'UNKNOWN',count:null,mappedRecordCount:'1',reason:'HISTORICAL_EARNINGS_COVERAGE_NOT_CLOSED',totalAmountKnowledge:'UNKNOWN',items:[old],nextCursor:null};
@@ -104,3 +105,117 @@ test('duplicate economic records or inconsistent summary totals fail closed inst
  assert.throws(()=>earningsPage(v2([a],{recordSummary:recordSummary({mappedRecordCount:'2',count:'2',states:[{state:'SETTLED',count:'2',amountCents:'1234'}]})}),'self','ALL',2));
  assert.throws(()=>commissionRecordSummary(recordSummary({states:[{state:'SETTLED',count:'1',amountCents:'1234'},{state:'SETTLED',count:'0',amountCents:'0'}]})));
 });
+
+test('self distribution summary retains native/legacy separation and exact cents',()=>{
+ const known=(cents)=>({knowledge:'KNOWN',cents,count:'1',reasonCodes:[]});
+ const summaryBody={contractVersion:'distribution-self-summary.v1',asOf:'2026-11-02T03:00:00.000000Z',subjectId:'self',
+  native:{settled:known('100'),pending:known('50'),recovery:known('30'),revoked:known('0'),orders:known('0')},
+  legacy:{settled:known('200'),pending:known('40'),expired:known('0'),coverage:'UNKNOWN'},
+  flow:{accrued:known('10'),settled:known('100'),monthSettled:known('90'),reversed:known('0'),recovered:known('0')},
+  network:{inviter:known('0'),leader:{...known('0'),count:'2'}},
+  trend:[{date:'2026-11-02',cents:'100',knowledge:'KNOWN'}],
+  recent:[{id:'native:1',source:'NATIVE',beneficiaryId:'self',beneficiaryName:'我',role:'OWNER_REFERRAL',amountCents:'100',state:'SETTLED',occurredAt:'2026-11-02T00:00:00.000000Z'}],reasonCodes:[]};
+ const r=distributionSummary(summaryBody,'self');assert.equal(r.native.settled.cents,'100');assert.equal(r.legacy.settled.cents,'200');assert.equal(r.flow.monthSettled.cents,'90');assert.equal(r.network.leader.count,'2');assert.equal(r.recent[0].source,'NATIVE');assert.throws(()=>distributionSummary({...summaryBody,subjectId:'other'},'self'));assert.throws(()=>distributionSummary({...summaryBody,native:{...summaryBody.native,settled:{knowledge:'KNOWN',cents:null,count:'0',reasonCodes:[]}}},'self'));
+});
+
+test('summary read is GET same-origin and fails closed on API errors',async()=>{
+ const known=(cents)=>({knowledge:'KNOWN',cents,count:'1',reasonCodes:[]});
+ const summaryBody={contractVersion:'distribution-self-summary.v1',asOf:'2026-11-02T03:00:00.000000Z',subjectId:'self',
+  native:{settled:known('100'),pending:known('50'),recovery:known('30'),revoked:known('0'),orders:known('0')},
+  legacy:{settled:known('200'),pending:known('40'),expired:known('0'),coverage:'UNKNOWN'},
+  flow:{accrued:known('10'),settled:known('100'),monthSettled:known('90'),reversed:known('0'),recovered:known('0')},
+  network:{inviter:known('0'),leader:{...known('0'),count:'2'}},
+  trend:[{date:'2026-11-02',cents:'100',knowledge:'KNOWN'}],
+  recent:[{id:'native:1',source:'NATIVE',beneficiaryId:'self',beneficiaryName:'我',role:'OWNER_REFERRAL',amountCents:'100',state:'SETTLED',occurredAt:'2026-11-02T00:00:00.000000Z'}],reasonCodes:[]};
+ const previous=globalThis.fetch,seen=[];globalThis.fetch=async(url,options)=>{seen.push({url:String(url),options});return Response.json(summaryBody)};
+ try{const r=await readDistributionSummary();assert.equal(r.subjectId,'self');assert.equal(seen[0].url,'/api/account/distribution/summary');assert.equal(seen[0].options.credentials,'same-origin');globalThis.fetch=async()=>Response.json({error:{code:'FORBIDDEN'}},{status:403});await assert.rejects(readDistributionSummary(),e=>e.status===403);}finally{globalThis.fetch=previous;}
+});
+
+
+/* --- Uniform Distribution Consumer Rules --- */
+
+import {distributionTerms,readMyDistributionTerms,invitationRead,inviteesPage,readMyInvitees,pendingLeaderBinding,bindLeader,recoverLeaderBinding} from '../src/lib/invitation-client.ts';
+process.env.ZZSH_API_ORIGIN='http://127.0.0.1:4202';process.env.ZZSH_WEB_ORIGIN='http://127.0.0.1:4200';
+const {GET:termsGet}=await import('../src/lib/invitation-proxy.ts');
+const {GET:earningsGet}=await import('../src/lib/distribution-earnings-proxy.ts');
+const uniformAt='2026-10-04T00:00:00.000000Z',context=(path)=>({params:Promise.resolve({path})});
+const terms=(patch={})=>({schema:'distribution-terms.self.v2',subjectId:'self',scope:'LOCAL_CONTROLLED',knowledge:'KNOWN',applicable:true,reason:null,policyVersion:'p2',participantPolicyVersion:'p1',level:null,rateMode:'UNIFORM',rates:{renterPercent:'0',ownerPercent:'2.125'},accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:0,...patch});
+const calc=(patch={})=>({knowledge:'KNOWN',policyVersion:'frozen-p2',beneficiaryLevelCode:null,rateMode:'UNIFORM',percent:'0',basis:'FINAL_PLATFORM_CONTRIBUTION_MINUS_COMPENSATION_FEE',baseDisclosure:'INTERNAL_SETTLEMENT_ONLY',rounding:'HALF_UP_CENT',cap:'COMBINED_ROLES_NOT_ABOVE_BASE',scope:'LOCAL_CONTROLLED',orderNumber:null,...patch});
+const detail=(calculation=calc())=>({contractVersion:'distribution-earnings.read.v1',subjectId:'self',snapshotVersion:'self-snapshot',asOf:uniformAt,projectionVersion:2,item:{id:'native:one',origin:'NATIVE',state:'SETTLED',role:'RENTER_REFERRAL',amount:{currency:'CNY',unit:'cent',amountCents:'0'},occurredAt:at,dueAt:at,dueAtKnowledge:'KNOWN',fundsDisposition:'SETTLED',recoveryRequiredCents:null,includedInOpening:false,version:'2',accountingEffect:'EXISTING_LEDGER_EVENT',businessReference:{type:'RENTAL_ORDER',id:'order'},channelArrivalKnowledge:'UNKNOWN',currentFinance:null,calculation}});
+
+test('uniform self terms preserve real zero and null grade; legacy exact DTO is unchanged',()=>{
+ const v=distributionTerms(terms(),'self',2);assert.equal(v.rateMode,'UNIFORM');assert.equal(v.level,null);assert.equal(v.rates.renterPercent,'0');assert.equal(v.settlementDelayDays,0);
+ const level={code:'OLD',rank:1,renterPercent:'3',ownerPercent:'2'},legacy={...terms(),schema:'distribution-terms.self.v1',level};delete legacy.rateMode;delete legacy.rates;
+ assert.deepEqual(distributionTerms(legacy,'self',1),legacy);assert.throws(()=>distributionTerms(legacy,'self',2));
+ const migrated={...legacy,schema:'distribution-terms.self.v2',rateMode:'LEVEL',rates:{renterPercent:'3',ownerPercent:'2'}};assert.deepEqual(distributionTerms(migrated,'self',2),migrated);
+});
+test('uniform terms fail closed on invalid grade/rates/private fields and another subject',()=>{
+ for(const p of [{level:{code:'OLD',rank:1,renterPercent:'0',ownerPercent:'2.125'}},{rates:null},{rateMode:'LEVEL'},{rates:{renterPercent:'-1',ownerPercent:'2'}},{rates:{renterPercent:'101',ownerPercent:'2'}},{rates:{renterPercent:'0',ownerPercent:'2',baseCents:'PRIVATE'}},{levels:[]}])assert.throws(()=>distributionTerms(terms(p),'self',2));
+ assert.throws(()=>distributionTerms(terms(),'other',2),e=>e.status===401);
+ const unknown=terms({knowledge:'UNKNOWN',applicable:null,reason:'COMMISSION_FREEZE_STATE_UNKNOWN',rateMode:null,rates:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null});assert.equal(distributionTerms(unknown,'self',2).rates,null);
+ assert.throws(()=>distributionTerms({...unknown,rates:{renterPercent:'0',ownerPercent:'0'}},'self',2));
+ const off=distributionTerms(terms({applicable:false,reason:'POLICY_DISABLED'}),'self',2);assert.equal(off.applicable,false);assert.equal(off.rates.renterPercent,'0');
+});
+test('self client explicitly requests terms projection 2, carries identity and rejects downgrade',async()=>{
+ const previous=globalThis.fetch;let seen;try{globalThis.fetch=async(url,o)=>{seen={url:String(url),o};return Response.json(terms());};await readMyDistributionTerms('self');assert.equal(seen.url,'/api/account/distribution/terms?projectionVersion=2');assert.equal(seen.o.credentials,'same-origin');assert.equal(seen.o.cache,'no-store');
+  const legacy={...terms(),schema:'distribution-terms.self.v1',level:{code:'L',rank:1,renterPercent:'0',ownerPercent:'2'}};delete legacy.rateMode;delete legacy.rates;globalThis.fetch=async()=>Response.json(legacy);await assert.rejects(readMyDistributionTerms('self'),e=>e.status===502);
+ }finally{globalThis.fetch=previous;}
+});
+test('terms BFF forwards version 2 only at the terms seam and keeps default v1 exact',async()=>{
+ const previous=globalThis.fetch;let seen,calls=0;try{globalThis.fetch=async(url,o)=>{calls++;seen={url:String(url),o};return Response.json(terms());};const r=await termsGet(new Request('http://127.0.0.1:4200/api/account/distribution/terms?projectionVersion=2',{headers:{cookie:'zzsh_user.session_token=u; zzsh_admin.session_token=a'}}),context(['terms']));assert.equal(r.status,200);assert.deepEqual(await r.json(),terms());assert.equal(seen.url,'http://127.0.0.1:4202/api/v1/users/me/distribution/terms?projectionVersion=2');assert.equal(seen.o.headers.get('cookie'),'zzsh_user.session_token=u');assert.equal(r.headers.get('cache-control'),'no-store');
+  const n=calls;for(const suffix of ['/terms?projectionVersion=1','/terms?projectionVersion=2&projectionVersion=2','/terms?userId=other','?projectionVersion=2'])assert.equal((await termsGet(new Request('http://127.0.0.1:4200/api/account/distribution'+suffix),context(suffix.startsWith('/terms')?['terms']:[]))).status,400);assert.equal(calls,n);
+ }finally{globalThis.fetch=previous;}
+});
+test('server binding capability is independent from new-accrual enabled; absence never grants it',()=>{
+ const overview={scope:'LOCAL_CONTROLLED',subjectId:'self',policyKnowledge:'KNOWN',policyVersion:'p2',policyEnabled:false,canBindLeader:true,participant:{knowledge:'KNOWN',eligibility:'ELIGIBLE',levelCode:null,revision:'1'},ownCode:{knowledge:'KNOWN',code:'SELF'},inviter:{knowledge:'KNOWN_NONE',relation:null},leader:{knowledge:'KNOWN_NONE',relation:null}};
+ assert.equal(invitationRead(overview,'self').canBindLeader,true);assert.equal(invitationRead({...overview,canBindLeader:false},'self').canBindLeader,false);const old={...overview};delete old.canBindLeader;assert.equal(invitationRead(old,'self').canBindLeader,false);
+ for(const p of [{policyKnowledge:'UNKNOWN',policyVersion:null,policyEnabled:null},{participant:{knowledge:'UNKNOWN',eligibility:'UNKNOWN',levelCode:null,revision:null}},{leader:{knowledge:'UNKNOWN',relation:null}}])assert.throws(()=>invitationRead({...overview,...p},'self'));
+});
+test('uniform earning calculation preserves frozen rate/null grade and never discloses private base',()=>{
+ const d=detail(calc({baseCents:'PRIVATE_BASE',canonical_basis:'PRIVATE_RAW',partyUserId:'PRIVATE_PARTY'})),v=earningsDetail(d,'self','native:one',2);assert.equal(v.item.calculation.rateMode,'UNIFORM');assert.equal(v.item.calculation.beneficiaryLevelCode,null);assert.equal(v.item.calculation.percent,'0');assert.doesNotMatch(JSON.stringify(v),/PRIVATE_BASE|PRIVATE_RAW|PRIVATE_PARTY/);
+ for(const p of [{beneficiaryLevelCode:'OLD_GRADE'},{rateMode:'OTHER'},{rateMode:undefined,beneficiaryLevelCode:null}])assert.throws(()=>earningsDetail(detail(calc(p)),'self','native:one',2));
+ const old=earningsDetail(detail(calc({rateMode:undefined,beneficiaryLevelCode:'OLD'})),'self','native:one',2);assert.equal(old.item.calculation.beneficiaryLevelCode,'OLD');assert.equal(Object.hasOwn(old.item.calculation,'rateMode'),false);
+ assert.equal(earningsDetail(detail({knowledge:'UNKNOWN',reason:'UNIFORM_CALCULATION_REQUIRES_VERSION_2'}),'self','native:one',2).item.calculation.knowledge,'UNKNOWN');
+});
+test('earning detail client/BFF carry calculationVersion 2 together; bad or list-only inputs never reach API',async()=>{
+ const previous=globalThis.fetch;let seen,calls=0;try{globalThis.fetch=async(url,o)=>{seen={url:String(url),o};calls++;return Response.json(detail());};await readEarningDetail('self','native:one');assert.equal(new URL(seen.url,'http://fixture.invalid').searchParams.get('calculationVersion'),'2');
+  const root='http://127.0.0.1:4200/api/account/earnings';const r=await earningsGet(new Request(root+'/native%3Aone?projectionVersion=2&calculationVersion=2'),context(['native:one']));assert.equal(r.status,200);assert.equal((await r.json()).item.calculation.rateMode,'UNIFORM');assert.equal(new URL(seen.url).searchParams.get('calculationVersion'),'2');assert.equal(seen.o.method,'GET');
+  const n=calls;for(const suffix of ['?projectionVersion=2&calculationVersion=2','/native%3Aone?projectionVersion=1&calculationVersion=2','/native%3Aone?projectionVersion=2&calculationVersion=3','/native%3Aone?projectionVersion=2&calculationVersion=2&calculationVersion=2'])assert.equal((await earningsGet(new Request(root+suffix),context(suffix.startsWith('/native')?['native:one']:[]))).status,400);assert.equal(calls,n);
+ }finally{globalThis.fetch=previous;}
+});
+
+test('Native calculation source stays Native; unknown scopes and fabricated arrival reject',()=>{
+ const v=earningsDetail(detail(calc({scope:'NATIVE'})),'self','native:one',2);assert.equal(v.item.calculation.scope,'NATIVE');assert.equal(v.item.channelArrivalKnowledge,'UNKNOWN');
+ assert.throws(()=>earningsDetail(detail(calc({scope:'OTHER'})),'self','native:one',2));const falseArrival=detail(calc({scope:'NATIVE'}));falseArrival.item.channelArrivalKnowledge='KNOWN';assert.throws(()=>earningsDetail(falseArrival,'self','native:one',2));
+});
+test('NATIVE self terms survive the parser and only LOCAL/NATIVE scopes are accepted',()=>{
+ const native=terms({scope:'NATIVE'});assert.equal(distributionTerms(native,'self',2).scope,'NATIVE');
+ assert.equal(distributionTerms({...native,knowledge:'UNKNOWN',applicable:null,reason:'COMMISSION_FREEZE_STATE_UNKNOWN',rateMode:null,rates:null,accountModes:null,minimumAccrualCents:null,settlementDelayDays:null},'self',2).scope,'NATIVE');
+ assert.equal(distributionTerms(terms(),'self',2).scope,'LOCAL_CONTROLLED');
+ for(const bad of [{scope:'GLOBAL'},{scope:'LOCAL_CONTROLLED '},{scope:null}])assert.throws(()=>distributionTerms(terms(bad),'self',2));
+});
+test('invitation overview carries NATIVE but rejects any undeclared scope',()=>{
+ const overview={scope:'LOCAL_CONTROLLED',subjectId:'self',policyKnowledge:'KNOWN',policyVersion:'p2',policyEnabled:false,canBindLeader:true,participant:{knowledge:'KNOWN',eligibility:'ELIGIBLE',levelCode:null,revision:'1'},ownCode:{knowledge:'KNOWN',code:'SELF'},inviter:{knowledge:'KNOWN_NONE',relation:null},leader:{knowledge:'KNOWN_NONE',relation:null}};
+ assert.equal(invitationRead({...overview,scope:'NATIVE'},'self').scope,'NATIVE');
+ for(const scope of ['GLOBAL','LOCAL','native',null])assert.throws(()=>invitationRead({...overview,scope},'self'));
+});
+
+
+const invUser='self',invBody={code:'FX0001',policyVersion:'policy',expectedParticipantRevision:'1'},invRelation={id:'relation',type:'DISTRIBUTION_LEADER',childUserId:invUser,parentUserId:'parent',policyVersion:'policy'};
+const invUnknown={scope:'LOCAL_CONTROLLED',subjectId:invUser,policyKnowledge:'UNKNOWN',policyVersion:null,policyEnabled:null,participant:{knowledge:'UNKNOWN',eligibility:'UNKNOWN',levelCode:null,revision:null},ownCode:{knowledge:'UNKNOWN',code:null},inviter:{knowledge:'UNKNOWN',relation:null},leader:{knowledge:'UNKNOWN',relation:null}};
+const invLinked={...invUnknown,leader:{knowledge:'KNOWN_PARENT',relation:{id:'relation',parentUserId:'parent',sourceType:'LOCAL_CONTROLLED',boundAt:'2026-10-04T02:00:00Z'}}};
+
+test('legacy parent DTO keeps original binding time unknown even when an older response supplies migration time',()=>{const r=invitationRead({...invLinked,leader:{...invLinked.leader,relation:{...invLinked.leader.relation,sourceType:'LEGACY_MYSQL'}}},invUser);assert.equal(r.leader.relation.boundAt,null);assert.equal(r.leader.relation.boundAtKnowledge,'UNKNOWN');});
+test('partial list contract retains mapped counts and hides legacy import timestamps; inconsistent partial sources reject',()=>{
+ const partial={subjectId:invUser,knowledge:'UNKNOWN',type:'INVITER',snapshotVersion:'snapshot',count:null,mappedRelationCount:'2',nextCursor:'next',items:[{id:'r',type:'INVITER',nickname:'已确认用户',boundAt:'2026-10-04T00:00:00Z',sourceType:'LEGACY_MYSQL'}]};
+ const page=inviteesPage(partial,invUser,'INVITER');assert.equal(page.count,null);assert.equal(page.mappedRelationCount,'2');assert.equal(page.items[0].boundAt,null);assert.equal(page.items[0].boundAtKnowledge,'UNKNOWN');
+ for(const patch of [{mappedRelationCount:null},{mappedRelationCount:'0'},{snapshotVersion:null},{type:'ALL'},{count:'2'},{items:[partial.items[0],partial.items[0]]}])assert.throws(()=>inviteesPage({...partial,...patch},invUser,'INVITER'));
+ assert.throws(()=>inviteesPage({...partial,subjectId:'other'},invUser,'INVITER'),e=>e.status===401);
+});
+async function withInvBrowser(run){const previous=globalThis.fetch,storage=Object.getOwnPropertyDescriptor(globalThis,'localStorage'),nav=Object.getOwnPropertyDescriptor(globalThis,'navigator'),values=new Map();Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}});Object.defineProperty(globalThis,'navigator',{configurable:true,value:{locks:{request:async(_key,_opts,fn)=>fn({})}}});try{await run(values);}finally{globalThis.fetch=previous;if(storage)Object.defineProperty(globalThis,'localStorage',storage);else delete globalThis.localStorage;if(nav)Object.defineProperty(globalThis,'navigator',nav);else delete globalThis.navigator;}}
+test('unknown qualification and parents are preserved; inconsistent projection or another identity is rejected',()=>{assert.equal(invitationRead(invUnknown,invUser).participant.eligibility,'UNKNOWN');assert.throws(()=>invitationRead({...invUnknown,subjectId:'other'},invUser),e=>e.status===401);assert.throws(()=>invitationRead({...invUnknown,leader:{knowledge:'KNOWN_NONE',relation:invLinked.leader.relation}},invUser));assert.throws(()=>invitationRead({...invUnknown,policyKnowledge:'KNOWN'},invUser));});
+test('list UNKNOWN retains null count rather than displaying a fabricated zero',async()=>{const previous=globalThis.fetch;try{globalThis.fetch=async()=>Response.json({subjectId:invUser,knowledge:'UNKNOWN',count:null,items:[],nextCursor:null});assert.equal((await readMyInvitees(invUser,'ALL')).count,null);globalThis.fetch=async()=>Response.json({subjectId:invUser,knowledge:'UNKNOWN',count:'0',items:[],nextCursor:null});await assert.rejects(readMyInvitees(invUser,'ALL'));}finally{globalThis.fetch=previous;}});
+test('binding ACK loss persists original key and recovers through GET without repeating POST',()=>withInvBrowser(async()=>{let posts=0,key;globalThis.fetch=async(u,o)=>{if(o.method==='POST'){posts++;key=o.headers['idempotency-key'];assert(pendingLeaderBinding(invUser));throw Error('lost ACK');}assert(String(u).includes('/bind/receipt?key='+key));return Response.json({subjectId:invUser,knowledge:'UNKNOWN',receipt:null});};await assert.rejects(bindLeader(invUser,invBody,()=>true));await assert.rejects(bindLeader(invUser,invBody,()=>true),e=>e.code==='BINDING_UNRESOLVED');assert.equal(await recoverLeaderBinding(invUser,()=>true),null);assert(pendingLeaderBinding(invUser));globalThis.fetch=async u=>String(u).includes('/receipt?')?Response.json({subjectId:invUser,knowledge:'KNOWN',receipt:{relation:invRelation}}):Response.json(invLinked);assert.equal((await recoverLeaderBinding(invUser,()=>true)).leader.relation.id,'relation');assert.equal(posts,1);assert.equal(pendingLeaderBinding(invUser),null);}));
+test('accepted write then 401 readback or late identity change retains marker',()=>withInvBrowser(async()=>{globalThis.fetch=async(_u,o)=>o.method==='POST'?Response.json({relation:invRelation}):Response.json({error:{code:'UNAUTHENTICATED'}},{status:401});await assert.rejects(bindLeader(invUser,invBody,()=>true),e=>e.status===401);assert(pendingLeaderBinding(invUser));assert.equal(pendingLeaderBinding('other'),null);let active=false;assert.equal(await recoverLeaderBinding(invUser,()=>active),null);}));
+test('definite rejection can clear marker; malformed accepted response remains unresolved',()=>withInvBrowser(async()=>{globalThis.fetch=async()=>Response.json({error:{code:'CONFLICT'}},{status:409});await assert.rejects(bindLeader(invUser,invBody,()=>true));assert.equal(pendingLeaderBinding(invUser),null);globalThis.fetch=async()=>Response.json({relation:{...invRelation,childUserId:'other'}});await assert.rejects(bindLeader(invUser,invBody,()=>true));assert(pendingLeaderBinding(invUser));}));
+test('corrupt storage and another tab lock prevent submission',()=>withInvBrowser(async values=>{let posts=0;globalThis.fetch=async()=>{posts++;throw Error();};navigator.locks.request=async(_k,_o,fn)=>fn(null);await assert.rejects(bindLeader(invUser,invBody,()=>true));values.set('zzsh.invitation.binding.pending.v1:'+invUser,'broken');assert.throws(()=>pendingLeaderBinding(invUser),e=>e.code==='PENDING_MARKER_UNREADABLE');assert.equal(posts,0);}));

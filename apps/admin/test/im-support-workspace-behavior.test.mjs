@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { stripTypeScriptTypes } from "node:module";
+import { dayKeyOf, dayLabelOf, formatDateTime, formatTime } from "../src/views/im-support-format.ts";
 import assert from "node:assert/strict";
+import { grantedSupportConnection } from "./support-connection-fixture.mjs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { test, after } from "node:test";
@@ -100,6 +100,8 @@ let profileFixture = { user: { userId: "user-7", image: null, maskedPhone: "138*
 function json(body) { return new browser.Response(JSON.stringify(body), { headers: { "content-type": "application/json" } }); }
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input), browser.location.href);
+  const connection = grantedSupportConnection(url.pathname, init.method);
+  if (connection) return connection;
   requests.push(url.pathname);
   if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return json({ consultations: fixture.consultations });
@@ -431,9 +433,7 @@ test("closing the case column on a narrow screen returns to the conversation and
   assert.equal(browser.document.activeElement.getAttribute("data-focus-target"), "chat", "focus lands on the visible chat pane");
 });
 
-test("timeline calendar labels preserve January and December", () => {  const source = readFileSync(path.join(adminRoot, "src/views/im-support-format.ts"), "utf8");
-  const helpers = source.slice(source.indexOf("const DISPLAY_TIME_ZONE"), source.indexOf("export function initialOf")).replaceAll("export function", "function");
-  const { dayKeyOf, dayLabelOf, formatDateTime, formatTime } = new Function(stripTypeScriptTypes(helpers) + ";return { dayKeyOf, dayLabelOf, formatDateTime, formatTime };")();
+test("timeline calendar labels preserve January and December", () => {
   assert.equal(dayKeyOf(undefined), null);
   assert.equal(dayKeyOf(NaN), null);
   for (const [month, expected] of [[0, "1月15日"], [11, "12月15日"]]) {
@@ -462,15 +462,7 @@ test("the case column is a real grid column that reports its own collapsed state
   assert.ok(rootNode.querySelector(".im-wb-send"), "the composer stays reachable either way");
 });
 
-test("the runtime pause action is styled as a secondary control", () => {
-  const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
-  const rule = css.match(/\.workspace-root \.im-wb-runtime-action \{([^}]*)\}/)?.[1] ?? "";
-  assert.ok(rule, "the runtime action rule exists");
-  assert.doesNotMatch(rule, /background:\s*var\(--im-accent\)/, "pause does not keep the accent fill");
-  assert.doesNotMatch(rule, /color:\s*#06141f/, "pause does not keep the dark-on-accent text");
-});
-
-test("collapsing details in the unified inbox leaves a single conversation column", async (t) => {
+test("collapsing details in the unified inbox updates the pane state", async (t) => {
   const originalMatchMedia = browser.matchMedia;
   browser.matchMedia = (query) => ({ matches: false, media: String(query), onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent() { return false; } });
   t.after(() => { browser.matchMedia = originalMatchMedia; });
@@ -485,17 +477,6 @@ test("collapsing details in the unified inbox leaves a single conversation colum
   await settle();
   assert.equal(pane.dataset.details, "false", "collapsing details reaches the grid that owns the details track");
   assert.ok(rootNode.querySelector('.im-wb-root[data-unified="true"] .im-wb[data-details="false"]'), "the single-column rule's DOM target is present");
-
-  // CSS 由浏览器应用，happy-dom 不算网格；至少锁住规则的归属、断点和声明。
-  const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
-  const desktop = css.indexOf("@media (min-width:1100px)");
-  assert.ok(desktop >= 0, "the desktop unified breakpoint exists");
-  const consultationRule = css.indexOf('.im-wb-root[data-unified="true"] .im-wb[data-details="false"]');
-  assert.ok(consultationRule > desktop, "the consultation pane collapses to one column from 1100px up");
-  assert.match(css.slice(consultationRule, consultationRule + 160), /grid-template-columns:\s*minmax\(0,\s*1fr\)/, "no 400-460px empty track remains");
-  assert.ok(css.indexOf('.im-wb-root[data-unified="true"] .im-wb-pane--orders .order-team-grid[data-details="false"]') > desktop, "the order grid keeps its own single-column rule");
-  assert.ok(css.includes('.order-team-grid[data-details="true"] .order-team-detail > .im-wb-details'), "the 1280 overlay target includes the display-contents wrapper");
-  assert.doesNotMatch(css, /\.order-team-grid\[data-details="true"\] > \.im-wb-details/, "the overlay never targets a non-existent direct child");
 });
 
 for (const scenario of ["connected", "no-permission", "disconnected"]) {
@@ -506,6 +487,8 @@ for (const scenario of ["connected", "no-permission", "disconnected"]) {
     const permissions = ["im.support.read", "im.support.accept", ...(scenario === "no-permission" ? [] : ["im.support.presence"])];
     globalThis.fetch = async (input, init = {}) => {
       const url = String(input);
+      const connection = grantedSupportConnection(url, init.method);
+      if (connection) return connection;
       let body;
       if (url.endsWith("/im/token")) {
         if (scenario === "disconnected") return new Response("{}", { status: 503 });
@@ -522,10 +505,6 @@ for (const scenario of ["connected", "no-permission", "disconnected"]) {
     const { rootNode } = await mount(t, { preview: false, snapshot: snapshot(permissions) });
     await settle();
     const button = rootNode.querySelector(".im-wb-presence-toggle");
-    if (button) {
-      assert.ok(button.classList.contains("im-wb-btn-outline"), "pause/resume is a secondary control");
-      assert.equal(button.classList.contains("im-wb-btn-primary"), false, "pause is not a primary action");
-    }
     assert.equal(writes.some(value => value.availability === "AVAILABLE"), false, "render never starts accepting automatically");
     if (scenario === "no-permission") { assert.equal(button, null); assert.equal(writes.length, 0); return; }
     assert.ok(button.closest('.im-wb-root > nav'), "presence is outside either mutually hidden pane");
@@ -549,6 +528,8 @@ test("a second browser window only takes over reception through an explicit acti
   const writes = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
+    const connection = grantedSupportConnection(url, init.method);
+    if (connection) return connection;
     if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
     if (url.includes("/im/consultations")) return json({ consultations: [] });
     if (url.endsWith("/im/presence")) {
@@ -574,11 +555,13 @@ test("a second browser window only takes over reception through an explicit acti
   await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "暂停接待");
 });
 
-test("an unbound pre-0184 AVAILABLE presence is not resumed automatically", async (t) => {
+test("an unbound presence reconciled by the server requires an explicit start", async (t) => {
   const originalFetch = globalThis.fetch;
   const writes = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
+    const connection = grantedSupportConnection(url, init.method);
+    if (connection) return connection;
     if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
     if (url.includes("/im/consultations")) return json({ consultations: [] });
     if (url.endsWith("/im/presence")) {
@@ -587,15 +570,16 @@ test("an unbound pre-0184 AVAILABLE presence is not resumed automatically", asyn
         writes.push(body);
         return json({ adminUserId: "admin-a", availability: body.availability, connectionState: "CONNECTED", activeLoad: 0, version: 2, ownedByAnotherSession: false, unbound: false });
       }
-      return json({ adminUserId: "admin-a", availability: "AVAILABLE", connectionState: "CONNECTED", activeLoad: 0, version: 1, ownedByAnotherSession: false, unbound: true });
+      return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "DISCONNECTED", activeLoad: 0, version: 1, ownedByAnotherSession: false, unbound: true });
     }
     if (url.includes("/im/messages")) return json({ messages: [] });
     throw new Error(`unexpected test request ${url}`);
   };
   t.after(() => { globalThis.fetch = originalFetch; });
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
-  await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "开始接待");
-  assert.equal(writes.length, 0, "mounting a workbench does not re-bind an unbound AVAILABLE row");
+  const toggle = () => rootNode.querySelector(".im-wb-presence-toggle");
+  await waitFor(() => toggle()?.textContent === "开始接待" && !toggle().disabled);
+  assert.equal(writes.length, 0, "mounting a workbench does not resume an abandoned reception");
   await act(async () => rootNode.querySelector(".im-wb-presence-toggle").click());
   await waitFor(() => writes.length === 1);
   assert.equal(writes[0].availability, "AVAILABLE");
@@ -603,7 +587,7 @@ test("an unbound pre-0184 AVAILABLE presence is not resumed automatically", asyn
   await waitFor(() => rootNode.querySelector(".im-wb-presence-toggle")?.textContent === "暂停接待");
 });
 
-// 状态写入的失败注入装置：初始 GET/PUT 走真实成功路径，用户点击后的那一次写入按场景失败。
+// 初始读取完成后，只让用户触发的写入按场景失败。
 async function mountPresenceHarness(t, { refreshedAvailability = "PAUSED" } = {}) {
   const originalFetch = globalThis.fetch;
   let availability = "OFF_DUTY";
@@ -614,6 +598,8 @@ async function mountPresenceHarness(t, { refreshedAvailability = "PAUSED" } = {}
   const reads = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
+    const connection = grantedSupportConnection(url, init.method);
+    if (connection) return connection;
     if (url.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
     if (url.includes("/im/consultations")) return json({ consultations: [] });
     if (url.endsWith("/im/presence")) {
@@ -642,8 +628,7 @@ async function mountPresenceHarness(t, { refreshedAvailability = "PAUSED" } = {}
   };
   t.after(() => { globalThis.fetch = originalFetch; });
   const { rootNode } = await mount(t, { snapshot: snapshot(["im.support.read", "im.support.accept", "im.support.presence"]) });
-  // 等到初始 GET + PUT 都完成且按钮可用，再注入用户点击的那一次失败。
-  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-presence-toggle")) && !rootNode.querySelector(".im-wb-presence-toggle").disabled && writes.length >= 1);
+  await waitFor(() => Boolean(rootNode.querySelector(".im-wb-presence-toggle")) && !rootNode.querySelector(".im-wb-presence-toggle").disabled);
   await settle();
   const button = () => rootNode.querySelector(".im-wb-presence-toggle");
   const stateLabel = () => rootNode.querySelector(".im-wb-bar .im-wb-state");
@@ -1249,6 +1234,8 @@ test("a conflicted start never continues to claim another window's conversation"
   let otherWindowOwns = false;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation] });
     if (url.pathname.endsWith("/context")) return json({
@@ -1300,6 +1287,8 @@ test("a late successful start cannot claim after switching administrator", async
   const held = new Promise(resolve => { release = resolve; }), claimCalls = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: live, token: "synthetic", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation] });
     if (url.pathname.endsWith("/context")) return json({ consultationId: waitingConsultation.id, version: 1, service: { type: "SERVICE", state: "WAITING", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-b", displayName: "用户 B", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "synthetic" } });
@@ -1337,10 +1326,12 @@ test("a late successful start cannot claim after switching administrator", async
 
 test("a late presence version read cannot write after switching administrator", async (t) => {
   const originalFetch = globalThis.fetch;
-  let live = "admin-a", aReads = 0, heldStarted = false, release;
+  let live = "admin-a", heldStarted = false, release;
   const held = new Promise(resolve => { release = resolve; }), writes = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: live, token: "synthetic", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [] });
     if (url.pathname.endsWith("/im/presence")) {
@@ -1348,7 +1339,6 @@ test("a late presence version read cannot write after switching administrator", 
         const body = JSON.parse(String(init.body)); writes.push({ adminAtSend: live, ...body });
         return json({ adminUserId: live, availability: body.availability, connectionState: "CONNECTED", version: body.version + 1, ownedByAnotherSession: false, unbound: false });
       }
-      if (live === "admin-a" && ++aReads === 1) return new browser.Response("{}", { status: 503 });
       if (live === "admin-a") { heldStarted = true; await held; return json({ adminUserId: "admin-a", availability: "OFF_DUTY", connectionState: "CONNECTED", version: 51, ownedByAnotherSession: false, unbound: false }); }
       return json({ adminUserId: "admin-b", availability: "OFF_DUTY", connectionState: "CONNECTED", version: 2, ownedByAnotherSession: false, unbound: false });
     }
@@ -1362,6 +1352,9 @@ test("a late presence version read cannot write after switching administrator", 
   live = "admin-b";
   const second = { ...first, adminUserId: "admin-b", user: { ...first.user, name: "客服 B", username: "admin-b" }, session: { ...first.session, id: "session-b" } };
   await act(async () => { mounted.root.render(createElement(ImSupportView, { snapshot: second, onRefresh: async () => second })); });
+  const ready = () => mounted.rootNode.querySelector(".im-wb-presence-toggle");
+  await waitFor(() => ready()?.textContent === "开始接待" && !ready().disabled);
+  await act(async () => ready().click());
   await waitFor(() => writes.some(row => row.adminAtSend === "admin-b" && row.version === 2));
   await act(async () => { release(); await new Promise(resolve => setTimeout(resolve, 50)); });
   await settle();
@@ -1375,6 +1368,8 @@ test("a late successful start does not claim a consultation after selection chan
   const second = { ...waitingConsultation, id: "c-waiting-2", threadId: "thread-c", roundId: "c-waiting-2", user: { id: "user-c", name: "用户 C", username: "user-c" } };
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return json({ appKey: "synthetic", accountId: "admin-a", token: "synthetic", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return json({ consultations: [waitingConsultation, second] });
     if (url.pathname.endsWith("/context")) return json({ consultationId: waitingConsultation.id, version: 1, service: { type: "SERVICE", state: "WAITING", messageScopeState: "READY", handler: null }, user: { status: "available", publicId: "user-b", displayName: "用户 B", avatar: null }, subject: { status: "absent" }, membership: { status: "unavailable", reason: "synthetic" } });

@@ -9,11 +9,11 @@ import { LISTED_EXTRA_MODULES, LISTED_ROUND_SCRIPTS, ROUND_MODULES, verifyRoundD
 
 const sha=value=>createHash('sha256').update(value).digest('hex'),root=fileURLToPath(new URL('../..',import.meta.url));
 test('round preflight rejects source, compiled parser and dependency drift',async t=>{
- const dir=mkdtempSync(join(tmpdir(),'zzsh-distribution-preflight-')),configFile=join(dir,'config.jsonl'),levelsFile=join(dir,'levels.jsonl'),receiptFile=join(dir,'receipt.json');
+ const dir=mkdtempSync(join(tmpdir(),'zzsh-distribution-preflight-')),configFile=join(dir,'config.jsonl'),levelsFile=join(dir,'levels.jsonl');
  const sourceRoot=join(dir,'source'),api=join(dir,'build','src'),pkg=join(sourceRoot,'apps/api/package.json'),dependency=join(sourceRoot,'node_modules/fixture-policy/index.js'),
   content=join(api,'supply/content-hash.js'),parser=join(api,'finance/distribution-policy-change.js'),growth=join(api,'auth/membership-growth-legacy-cli.js');
  for(const path of [join(sourceRoot,'apps/api'),join(sourceRoot,'node_modules/fixture-policy'),join(api,'supply'),join(api,'finance'),join(api,'auth')])mkdirSync(path,{recursive:true});
- t.after(()=>{for(const file of [configFile,levelsFile,receiptFile,pkg,dependency,content,parser,growth])if(existsSync(file))unlinkSync(file);
+ t.after(()=>{for(const file of [configFile,levelsFile,pkg,dependency,content,parser,growth])if(existsSync(file))unlinkSync(file);
   for(const path of [join(sourceRoot,'apps/api'),join(sourceRoot,'apps'),join(sourceRoot,'node_modules/fixture-policy'),join(sourceRoot,'node_modules'),sourceRoot,
    join(api,'supply'),join(api,'finance'),join(api,'auth'),api,join(dir,'build'),dir])if(existsSync(path))rmdirSync(path)});
  writeFileSync(pkg,'{}');writeFileSync(dependency,"exports.normalize = value => value.replace(/\\.0+$/, '');\n");
@@ -25,12 +25,11 @@ test('round preflight rejects source, compiled parser and dependency drift',asyn
  writeFileSync(configFile,config);writeFileSync(levelsFile,levels);
  const source={status:'CAPTURED_READ_ONLY',rollbackConfirmed:true,clientClosed:true,files:{distributionConfig:{file:'config.jsonl',sha256:sha(config),rows:6},
   distributionLevels:{file:'levels.jsonl',sha256:sha(levels),rows:1}}};
- const receipt=Buffer.from(JSON.stringify(source));writeFileSync(receiptFile,receipt);
  const scriptDir=join(root,'scripts/migration'),scriptFiles=Object.fromEntries(LISTED_ROUND_SCRIPTS.map(name=>[name,sha(readFileSync(join(scriptDir,name)))]));
  const buildFiles={'supply/content-hash.js':sha(readFileSync(content)),'finance/distribution-policy-change.js':sha(readFileSync(parser))};
  const layout={apiDist:api,sourceRoot,moduleDirs:[join(sourceRoot,'apps/api/node_modules'),join(sourceRoot,'node_modules')],scriptFiles,
   extraEntrypoints:LISTED_EXTRA_MODULES.filter(name=>!ROUND_MODULES.includes(name))};
- const proof={closureFiles:[['node_modules/fixture-policy/index.js',sha(readFileSync(dependency))]]},input={apiDist:api,buildFiles,source:{path:dir,sha256:sha(receipt)}};
+ const proof={closureFiles:[['node_modules/fixture-policy/index.js',sha(readFileSync(dependency))]]},input={apiDist:api,buildFiles,source:{path:dir,sha256:'a'.repeat(64)}};
  const args={input,source,layout,proof,runnerDir:scriptDir,privatePath:value=>value},oldNodePath=process.env.NODE_PATH;
  const evidence=await verifyRoundDistributionSource(args);
  assert.equal(evidence.status,'DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN');assert.equal(evidence.settlementDelayDays,5);

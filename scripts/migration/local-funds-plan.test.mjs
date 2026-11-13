@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import {createHash} from 'node:crypto';
 import {test} from 'node:test';
-import {assertEmptyCoverageReceiptMode,assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,compareCompactCoverageEvidence,readCompactCoverageEvidence,readIndividualFinanceHistoryEvidence,readSystemFinanceHistoryEvidence,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
+import {assertFundsWriterCoverage,assertPendingCommissionCoverage,assertRebuiltEmptyCoverageChunk,assertRebuiltEmptyCoverageManifest,continuationCommissionEffects,createEmptyCoverageSink,isPreparedRefundRelationshipVerified,safeLegacyWithdrawalEvidence} from './local-funds-plan.mjs';
 import {isExactLegacyRefundRelationship,LEGACY_REFUND_RELATIONSHIP_POLICY} from './local-source-adapter.mjs';
 
 test('a refund relationship needs the original order, user and nonblank matching number',()=>{
@@ -45,99 +44,6 @@ test('streamed empty coverage is checked against regenerated source, exact bytes
  assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,chunks:[...saved.chunks].reverse()},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
  assert.throws(()=>assertRebuiltEmptyCoverageManifest({...saved,rows:400},rebuilt,2),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
  assert.throws(()=>assertRebuiltEmptyCoverageManifest(saved,rebuilt,1),/EMPTY_COVERAGE_REBUILT_MANIFEST_DIFFERS/);
-});
-
-test('compact coverage readback requires the exact physical batch receipt and audit',()=>{
- const actor={userId:'fixture_admin',sessionId:'fixture_session'},batchId='history-empty-batch-'+'b'.repeat(40);
- const expected=[{batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,coverageCount:2,actor,requestId:'fixture_request',financialEffect:'NONE'}}];
- const receipt=()=>({scope_key:JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),key:batchId,request_fingerprint:'a'.repeat(64),response_status:200,publish_required:false,response_body:{...expected[0].body}});
- const audit=()=>({object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:{...expected[0].body}});
- assert.deepEqual(compareCompactCoverageEvidence(expected,[receipt()],[audit()],actor),{expected:1,matched:1,differences:[]});
- for(const [receipts,audits] of [[[],[audit()]],[[receipt()],[]],[[{...receipt(),request_fingerprint:'f'.repeat(64)}],[audit()]],
-  [[{...receipt(),publish_required:true}],[audit()]],[[receipt()],[{...audit(),session_id:'other'}]],[[receipt()],[audit(),audit()]]])
-  assert.notDeepEqual(compareCompactCoverageEvidence(expected,receipts,audits,actor).differences,[]);
- assert.throws(()=>compareCompactCoverageEvidence([...expected,...expected],[receipt()],[audit()],actor),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
- assert.throws(()=>compareCompactCoverageEvidence(expected,[receipt()],[audit()],{}),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
-});
-
-test('individual history readback requires its original coverage, receipt and audit',async()=>{
- const actor={userId:'admin',sessionId:'session',requestId:'request',ref:'review',attempt:'attempt'},input={example:'source'};
- const c={id:'coverage',userId:'user',sourceKind:'HISTORICAL_WITHDRAWAL',sourceCount:1,importedCount:1,isolatedCount:0,bodyDigest:'coverage-digest',canonical:'source',inputSha256:'input-digest'},plan={coverage:c,key:'key',bodyDigest:'body-digest'};
- const body={coverageId:c.id,subjectId:c.userId,sourceKind:c.sourceKind,bodyDigest:plan.bodyDigest,importedCount:1,isolatedCount:0,financialEffect:'NONE'};
- const coverage={id:c.id,user_id:c.userId,source_kind:c.sourceKind,source_count:1,imported_count:1,isolated_count:0,body_digest:c.bodyDigest,source_canonical:c.canonical};
- const receipt={scope_key:JSON.stringify(['admin',actor.userId,'finance.history.import',null]),key:plan.key,request_fingerprint:createHash('sha256').update(JSON.stringify(['finance.history.import',c.id,input])).digest('hex'),response_status:200,response_body:body,publish_required:false};
- const audit={object_id:c.id,actor_type:'admin',actor_id:actor.userId,session_id:actor.sessionId,request_id:actor.requestId,outcome:'SUCCESS',details:{...body,coverageBodyDigest:c.bodyDigest,inputSha256:c.inputSha256,sourceCount:1,approvalRef:actor.ref,attempt:actor.attempt}};
- const query=(rows)=>async sql=>({rows:sql.includes('observation_coverage WHERE')?rows.coverage:sql.includes('idempotency_record')?rows.receipts:rows.audits});
- const groups=[{input}],getPlan=()=>plan,all={coverage:[coverage],receipts:[receipt],audits:[audit]};
- assert.deepEqual(await readIndividualFinanceHistoryEvidence(query(all),groups,actor,getPlan),{expected:1,matched:1,differences:[]});
- for(const rows of [{...all,coverage:[]},{...all,receipts:[{...receipt,request_fingerprint:'changed'}]},{...all,audits:[]},{...all,audits:[audit,audit]}])
-  assert.equal((await readIndividualFinanceHistoryEvidence(query(rows),groups,actor,getPlan)).matched,0);
- await assert.rejects(readIndividualFinanceHistoryEvidence(query(all),[...groups,...groups],actor,getPlan),/FINANCE_HISTORY_READBACK_INPUT_INVALID/);
-});
-
-test('system history readback binds batch evidence and every source coverage',async()=>{
- const actor={kind:'SYSTEM_FINANCE_MIGRATION',id:'legacy-finance-migration:'+'a'.repeat(64),sourceDatasetSha256:'b'.repeat(64),requestId:'request'},input={source:'test'};
- const c={id:'coverage',userId:'user',sourceKind:'HISTORICAL_WITHDRAWAL',sourceCount:1,importedCount:1,isolatedCount:0,bodyDigest:'digest',canonical:'source'},plan={coverage:c};
- const buildProof=inputs=>{const batchId='history-batch-'+'c'.repeat(40),body={schema:'finance-history-batch.system.v1',batchId,coverageCount:inputs.length,sourceDatasetSha256:actor.sourceDatasetSha256,inputsDigest:createHash('sha256').update(JSON.stringify(inputs)).digest('hex'),financialEffect:'NONE'};return{batchId,body,fingerprint:'f'.repeat(64)};};
- const proof=buildProof([input]),scope=JSON.stringify(['system',actor.id,'finance.history.batch.import.v1',null]);
- const coverage={id:c.id,user_id:c.userId,source_kind:c.sourceKind,source_count:1,imported_count:1,isolated_count:0,body_digest:c.bodyDigest,source_canonical:c.canonical};
- const receipt={scope_key:scope,key:proof.batchId,request_fingerprint:proof.fingerprint,response_status:200,response_body:proof.body,publish_required:false};
- const audit={object_id:proof.batchId,actor_type:'system',actor_id:actor.id,session_id:null,request_id:actor.requestId,outcome:'SUCCESS',source_manifest:actor.sourceDatasetSha256,details:proof.body};
- const query=rows=>async sql=>sql.includes('count(*)')?{rows:[{n:'1'}]}:sql.includes('observation_coverage WHERE')?{rows:rows.coverage}:sql.includes('idempotency_record')?{rows:rows.receipts}:{rows:rows.audits};
- const all={coverage:[coverage],receipts:[receipt],audits:[audit]},read=rows=>readSystemFinanceHistoryEvidence(query(rows),[{input}],actor,()=>plan,buildProof,JSON.stringify);
- assert.deepEqual(await read(all),{expectedGroups:1,matchedGroups:1,expectedBatches:1,matchedBatches:1,differences:[]});
- for(const rows of [{...all,coverage:[]},{...all,receipts:[{...receipt,publish_required:true}]},{...all,audits:[]}])assert.notEqual((await read(rows)).matchedGroups,1);
-});
-
-test('system compact coverage readback binds the system source and original receipt',async()=>{
- const actor={kind:'SYSTEM_FINANCE_MIGRATION',id:'legacy-finance-migration:'+'d'.repeat(64),sourceDatasetSha256:'c'.repeat(64)},batchId='history-empty-batch-'+'b'.repeat(40);
- const body={schema:'finance-empty-coverage-batch.system.v1',batchId,sourceDatasetSha256:actor.sourceDatasetSha256,migrationRunDigest:'d'.repeat(64),requestId:'synthetic',financialEffect:'NONE'};
- const proof={batchId,fingerprint:'a'.repeat(64),body},scope=JSON.stringify(['system',actor.id,'finance.history.empty_batch.import.v1',null]);
- const receipt={scope_key:scope,key:batchId,request_fingerprint:proof.fingerprint,response_status:200,publish_required:false,response_body:body};
- const audit={object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'system',outcome:'SUCCESS',
-  actor_id:actor.id,session_id:null,request_id:'synthetic',source_manifest:actor.sourceDatasetSha256,details:body};
- assert.deepEqual(compareCompactCoverageEvidence([proof],[receipt],[audit],actor),{expected:1,matched:1,differences:[]});
- for(const bad of [{...audit,actor_type:'admin'},{...audit,session_id:'fake'},{...audit,source_manifest:'e'.repeat(64)}])
-  assert.notDeepEqual(compareCompactCoverageEvidence([proof],[receipt],[bad],actor).differences,[]);
- const query=async(sql,args)=>sql.includes('count(*)')?{rows:[{n:'1'}]}:sql.includes('idempotency_record')
-  ?(assert.equal(args[0],scope),{rows:[receipt]}):{rows:[audit]};
- assert.equal((await readCompactCoverageEvidence(query,[proof],actor)).matched,1);
-});
-
-test('old and next migration checkpoints cannot silently exchange empty coverage receipt formats',()=>{
- assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({},false));
- assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},true));
- assert.doesNotThrow(()=>assertEmptyCoverageReceiptMode({receiptMode:'SYSTEM_BATCH_V1'},true));
- assert.throws(()=>assertEmptyCoverageReceiptMode({},true),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
- assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:'BATCH_V2'},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
- assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:'SYSTEM_BATCH_V1'},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
- assert.throws(()=>assertEmptyCoverageReceiptMode({receiptMode:null},false),/EMPTY_COVERAGE_RECEIPT_MODE_UNSUPPORTED/);
- assert.throws(()=>assertEmptyCoverageReceiptMode({},undefined),/EMPTY_COVERAGE_RECEIPT_MODE_UNPROVEN/);
-});
-
-test('compact readback queries only the bound batch and reports missing evidence',async()=>{
- const actor={userId:'fixture_admin',sessionId:'fixture_session'},batchId='history-empty-batch-'+'c'.repeat(40);
- const proof={batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,actor,requestId:'fixture_request'}};
- const scope=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]),calls=[];
- const query=async(sql,args)=>{calls.push(args);if(sql.includes('count(*)'))return{rows:[{n:'1'}]};if(sql.includes('idempotency_record'))return{rows:[{scope_key:scope,key:batchId,request_fingerprint:proof.fingerprint,response_status:200,publish_required:false,response_body:proof.body}]};
-  return{rows:[{object_id:batchId,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:proof.body}]};};
- assert.deepEqual(await readCompactCoverageEvidence(query,[proof],actor),{expected:1,matched:1,differences:[]});
- assert.deepEqual(calls,[[scope,[batchId]],[[batchId]],[',"finance.history.empty_batch.import.v1",null]'],[]]);
- assert.equal((await readCompactCoverageEvidence(async sql=>({rows:sql.includes('count(*)')?[{n:'0'}]:[]}),[proof],actor)).matched,0);
- assert((await readCompactCoverageEvidence(async sql=>({rows:sql.includes('count(*)')?[{n:'2'}]:[]}),[proof],actor)).differences.some(row=>row.reason==='BATCH_TOTAL_DIFFERS'));
- let callsOnBadInput=0;await assert.rejects(readCompactCoverageEvidence(async()=>{callsOnBadInput++;return{rows:[]};},[{...proof,batchId:'wrong'}],actor));
- assert.equal(callsOnBadInput,0);
-});
-
-test('compact readback keeps queries bounded and detects duplicate batch identities across pages',async()=>{
- const actor={userId:'fixture_admin',sessionId:'fixture_session'},scope=JSON.stringify(['admin',actor.userId,'finance.history.empty_batch.import.v1',null]);
- const proofs=Array.from({length:501},(_,i)=>{const batchId='history-empty-batch-'+i.toString(16).padStart(40,'0');return{batchId,fingerprint:'a'.repeat(64),body:{schema:'finance-empty-coverage-batch.v1',batchId,actor,requestId:'fixture_request'}};});
- const byId=new Map(proofs.map(proof=>[proof.batchId,proof])),sizes=[];
- const query=async(sql,args)=>{if(sql.includes('count(*)'))return{rows:[{n:'501'}]};const ids=sql.includes('idempotency_record')?args[1]:args[0];sizes.push(ids.length);
-  return{rows:ids.map(id=>{const p=byId.get(id);return sql.includes('idempotency_record')?{scope_key:scope,key:id,request_fingerprint:p.fingerprint,response_status:200,publish_required:false,response_body:p.body}:
-   {object_id:id,action:'finance.history.empty_batch.imported',object_type:'personal_finance_observation_coverage_batch',actor_type:'admin',outcome:'SUCCESS',actor_id:actor.userId,session_id:actor.sessionId,request_id:'fixture_request',details:p.body};})};};
- assert.equal((await readCompactCoverageEvidence(query,proofs,actor)).matched,501);assert.deepEqual(sizes,[500,500,1,1]);
- await assert.rejects(readCompactCoverageEvidence(query,[...proofs,proofs[0]],actor),/COMPACT_COVERAGE_READBACK_INPUT_INVALID/);
 });
 
 test('legacy withdrawal destinations become non-reusable masks and immutable restricted refs, never full identities, payout credentials or URLs',()=>{

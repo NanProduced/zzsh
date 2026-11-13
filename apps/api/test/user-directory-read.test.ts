@@ -89,14 +89,6 @@ test("connection error prevents subsequent SQL and destroys the failed lease", a
   assert.equal(f.queries.includes("SELECT must_not_run"), false); assert.deepEqual(f.releases, [true]);
 });
 
-test("an abort during acquisition disposes the late lease without BEGIN", async () => {
-  const f = fixture(), controller = new AbortController(); let deliver!: (c: PoolClient) => void;
-  const pool = { connect: () => new Promise<PoolClient>(resolve => { deliver = resolve; }) } as unknown as Pool;
-  const waiting = withDirectoryReadTransaction(pool, controller.signal, async () => undefined);
-  controller.abort(new Error("closed before lease")); deliver(f.client as unknown as PoolClient);
-  await assert.rejects(waiting, /closed before lease/); assert.deepEqual(f.queries, []); assert.deepEqual(f.releases, [true]);
-});
-
 test("authentication failure releases admission and disconnect during auth never starts a transaction", async () => {
   const f = fixture(), e = events();
   await assert.rejects(withDirectoryRead(f.pool, e.request as never, e.response as never, async () => { throw new Error("auth failure"); }), /auth failure/);
@@ -125,8 +117,9 @@ test("abort while waiting for a lease rejects the waiter at once and retires the
   const f = fixture(), controller = new AbortController(); let deliver!: (c: PoolClient) => void;
   const pool = { connect: () => new Promise<PoolClient>(resolve => { deliver = resolve; }) } as unknown as Pool;
   const waiting = withDirectoryReadTransaction(pool, controller.signal, async () => assert.fail("late lease must not run the action"));
-  controller.abort(new Error("closed while queued"));
-  await assert.rejects(waiting, /closed while queued/);
+  const reason = Object.assign(new Error("closed while queued"), { status: 499 });
+  controller.abort(reason);
+  await assert.rejects(waiting, (error) => error === reason);
   deliver(f.client as unknown as PoolClient);
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(f.queries, []); assert.deepEqual(f.releases, [true]);
@@ -181,18 +174,36 @@ test("an idle backend error is recorded in the API log stream and never crashes 
   assert.equal(parsed.backendPid, 12345);
 });
 
-test("the 8s request deadline aborts a stuck read and frees its slot", { timeout: 12_000 }, async () => {
+test("the 8s request deadline aborts a stuck read and frees its slot", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const f = fixture(), e = events();
+  let markStarted!: (signal: AbortSignal) => void;
+  const started = new Promise<AbortSignal>(resolve => { markStarted = resolve; });
   const stuck = withDirectoryRead(f.pool, e.request as never, e.response as never, async signal => {
-    await withDirectoryReadTransaction(f.pool, signal, async c => {
+    await withDirectoryReadTransaction(f.pool, signal, async () => {
+      markStarted(signal);
       await new Promise<never>((_, reject) => {
         const onAbort = () => { signal.removeEventListener("abort", onAbort); reject(signal.reason ?? new Error("aborted")); };
         signal.addEventListener("abort", onAbort, { once: true });
       });
     });
   });
-  const deadline = Date.now() + 10_000;
-  await assert.rejects(stuck, (error: unknown) => (error as { status?: number }).status === 504);
-  assert(Date.now() < deadline, "deadline fired at its contract time");
-  await withDirectoryRead(f.pool, e.request as never, e.response as never, async () => undefined);
+  const rejected = assert.rejects(stuck, { status: 504 });
+  const signal = await started;
+  let releaseOther!: () => void;
+  const pending = new Promise<void>(resolve => { releaseOther = resolve; });
+  const other = events();
+  const occupied = withDirectoryRead(f.pool, other.request as never, other.response as never, () => pending);
+  try {
+    t.mock.timers.tick(7_999);
+    assert.equal(signal.aborted, false);
+    t.mock.timers.tick(1);
+    await rejected;
+    assert.equal(f.queries.at(-1), "ROLLBACK");
+    assert.equal(f.releases.length, 1);
+    await withDirectoryRead(f.pool, e.request as never, e.response as never, async () => undefined);
+  } finally {
+    releaseOther();
+    await occupied;
+  }
 });

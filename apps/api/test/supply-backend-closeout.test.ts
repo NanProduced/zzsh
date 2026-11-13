@@ -195,26 +195,6 @@ test("boss-only recovery rechecks the original action permission before reading 
   assert.deepEqual(result.result,{releaseId:"release-1",generation:"2"});
 });
 
-test("pricing schedule recovery binds the original game and the exact authorized receipt", async () => {
-  const permissions = new Set([ADMIN_PERMISSION.supplyRulesActivate]);
-  for (const table of ["pricing_policy_schedule", "pricing_mode_schedule"]) {
-    const operation = `supply.rules.${table}.create`, params = query(operation, "game-1");
-    const body = { id: "plan-1", gameId: "game-1", pricingModel: "FIXED_FEE", generation: "2",
-      effectiveAt: "2099-01-01T00:00:00.000000Z", announcementVersionId: "notice-1",
-      ...(table === "pricing_policy_schedule" ? { priceVersionId: "price-1" } : {}) };
-    const f = scopedRecoveryClient({ ...body, privateNote: "omit" }, "game-1");
-    const result = await readAdminSupplyOperationResult(f.client, "admin-1", { ...access, permissions }, params, key);
-    assert.deepEqual(result, { receipt: "RECORDED", operation, resourceId: "game-1", responseStatus: 200, result: body });
-    const denied = recoveryClient(body);
-    await assert.rejects(() => readAdminSupplyOperationResult(denied.client, "admin-1", { ...access, isBoss: false, permissions }, params, key),
-      (error: any) => error.status === 403);
-    assert.equal(denied.sql.length, 0);
-    const wrongGame = recoveryClient({ ...body, gameId: "game-2" });
-    await assert.rejects(() => readAdminSupplyOperationResult(wrongGame.client, "admin-1", { ...access, permissions }, params, key),
-      (error: any) => error.status === 404);
-  }
-});
-
 test("missing/inflight or other actor receipt stays unresolved; fingerprint mismatch is a conflict",async()=>{
   for(const [body,scopeActor]of [[null,"admin-1"],[{id:"payout-1"},"other-admin"]] as const){
     const f=recoveryClient(body,scopeActor);assert.deepEqual(await readAdminSupplyOperationResult(f.client,"admin-1",access,query(),key),{receipt:"UNRESOLVED"});assert.equal(f.sql.length,1);

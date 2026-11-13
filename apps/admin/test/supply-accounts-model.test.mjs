@@ -76,8 +76,7 @@ test('missing flags and independent unknowns never become satisfied conditions',
   assert.deepEqual(g.satisfied, []);
   assert.deepEqual(g.pending.map(x => x.code).sort(), ['FUNDING_UNKNOWN', 'NEW_ORDERS_UNKNOWN', 'OCCUPANCY_UNKNOWN', 'PAUSE_UNKNOWN', 'PUBLIC_UNKNOWN', 'RESTRICTION_UNKNOWN'].sort());
   assert.equal(independentFacts(value).find(x => x.label === '运营限制').value, '待核');
-  assert.equal(independentFacts(value).find(x => x.label === '原账号状态').value, '待核');
-  assert.equal(independentFacts(facts({ ownerPaused: false })).some(x => x.label === '原账号状态'), false);
+  assert.equal(independentFacts(value).find(x => x.label === '号主暂停').value, '待核');
   assert.equal(groupConditions(facts({ occupancy: 'UNKNOWN', reasons: ['OCCUPANCY_UNKNOWN'] })).pending.filter(x => x.code === 'OCCUPANCY_UNKNOWN').length, 1);
 });
 
@@ -90,14 +89,14 @@ test('saved views validate corrupt, stale, foreign and partial data', () => {
   assert.deepEqual(parseSavedViews(null, 'me'), { views: [] });
 });
 
-import { compactTime, idTail } from '../src/views/supply-accounts/account-list-model.ts';
+import { compactTime, versionText, idTail } from '../src/views/supply-accounts/account-list-model.ts';
 test('row reason: primary + others, concrete next steps, compact time', () => {
   const r = primaryReason(facts({ staffRestricted: true, primaryReasonCode: 'STAFF_RESTRICTED', newOrders: false, reasons: ['STAFF_RESTRICTED', 'OCCUPIED', 'FUNDING_UNKNOWN'] }));
   assert.equal(r.code, 'STAFF_RESTRICTED'); assert.equal(r.others, 2);
   assert.equal(nextStep('RULE_CHANGED'), '按新规则重新核价并确认');
   assert.ok(!['STAFF_RESTRICTED','OWNER_PAUSED','RULE_CHANGED','FUNDING_UNKNOWN','X'].map(nextStep).includes('平台'));
   assert.equal(compactTime('2026-10-12T12:11:00.000000Z', new Date('2026-10-12T00:00:00Z')), '10-12 20:11');
-  assert.equal(idTail('account_362b3c1f8efe'), '…1f8efe');
+  assert.equal(versionText(null), '版本未提供'); assert.equal(idTail('account_362b3c1f8efe'), '…1f8efe');
 });
 
 /* ---------- F2：列表事实只来自正式摘要，缺值保持未提供 ---------- */

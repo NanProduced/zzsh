@@ -21,38 +21,14 @@ function fakeHealthDependencies(overrides: {
   };
 }
 
-async function startApp(options: Parameters<typeof createApp>[0] = {
-  health: { dependencies: fakeHealthDependencies() },
-}) {
+async function startApp(options: Parameters<typeof createApp>[0]) {
   const app = await createApp(options);
   await app.listen(0, "127.0.0.1");
   return app;
 }
 
-test("HTTP liveness is independent from explicit fake dependency readiness", async () => {
-  const app = await startApp();
-  try {
-    const url = await app.getUrl();
-    const health = await fetch(url + "/api/health");
-    assert.equal(health.status, 200);
-    assert.deepEqual(await health.json(), { status: "ok", service: "zzsh-api", scope: "liveness" });
-    assert.equal((await fetch(url + "/docs-json")).status, 200);
-    const ready = await fetch(url + "/api/ready");
-    assert.equal(ready.status, 200);
-    assert.deepEqual(await ready.json(), { status: "ok", service: "zzsh-api", scope: "readiness" });
-    assert.equal((await fetch(url + "/api/orders", { method: "POST" })).status, 404);
-    assert.equal((await fetch(url + "/api/v1/contracts/validate", { method: "POST" })).status, 404);
-    assert.equal((await fetch(url + "/api/logging/ok")).status, 404);
-    const spec = await (await fetch(url + "/docs-json")).json() as { paths: Record<string, unknown> };
-    assert.ok(spec.paths["/api/health"]);
-    assert.ok(spec.paths["/api/ready"]);
-    assert.equal(spec.paths["/api/v1/contracts/validate"], undefined);
-    assert.equal(spec.paths["/api/logging/ok"], undefined);
-  } finally { await app.close(); }
-});
-
-test("readiness returns safe 503 on dependency failure and recovers", async () => {
-  let databaseAvailable = false;
+test("HTTP liveness, readiness and startup route boundaries", async (t) => {
+  let databaseAvailable = true;
   let redisAvailable = true;
   const app = await startApp({
     health: {
@@ -67,8 +43,30 @@ test("readiness returns safe 503 on dependency failure and recovers", async () =
       }),
     },
   });
-  try {
-    const url = await app.getUrl();
+  t.after(() => app.close());
+  const url = await app.getUrl();
+
+  await t.test("serves liveness, readiness and the documented routes", async () => {
+    const health = await fetch(url + "/api/health");
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { status: "ok", service: "zzsh-api", scope: "liveness" });
+    const ready = await fetch(url + "/api/ready");
+    assert.equal(ready.status, 200);
+    assert.deepEqual(await ready.json(), { status: "ok", service: "zzsh-api", scope: "readiness" });
+    assert.equal((await fetch(url + "/api/orders", { method: "POST" })).status, 404);
+    assert.equal((await fetch(url + "/api/v1/contracts/validate", { method: "POST" })).status, 404);
+    assert.equal((await fetch(url + "/api/logging/ok")).status, 404);
+    const docs = await fetch(url + "/docs-json");
+    assert.equal(docs.status, 200);
+    const spec = await docs.json() as { paths: Record<string, unknown> };
+    assert.ok(spec.paths["/api/health"]);
+    assert.ok(spec.paths["/api/ready"]);
+    assert.equal(spec.paths["/api/v1/contracts/validate"], undefined);
+    assert.equal(spec.paths["/api/logging/ok"], undefined);
+  });
+
+  await t.test("returns safe 503 on dependency failure and recovers", async () => {
+    databaseAvailable = false;
     const failed = await fetch(url + "/api/ready", { headers: { "X-Request-Id": "req_ready_failure" } });
     assert.equal(failed.status, 503);
     assert.equal(failed.headers.get("x-request-id"), "req_ready_failure");
@@ -85,7 +83,7 @@ test("readiness returns safe 503 on dependency failure and recovers", async () =
     assert.equal(redisFailed.status, 503);
     assert.doesNotMatch(await redisFailed.text(), /private database|private redis/);
     assert.equal((await fetch(url + "/api/health")).status, 200);
-  } finally { await app.close(); }
+  });
 });
 
 test("readiness timeout is finite and shutdown is idempotent", async () => {

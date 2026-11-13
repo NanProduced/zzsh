@@ -40,7 +40,7 @@ export type Options = {
   gates: Map<string, SupplyGate>;
 };
 export async function runPublishingChecks(o: Options): Promise<void> {
-  let userPrefix = "/api/v1/supply/accounts/" + o.accountId,
+  const userPrefix = "/api/v1/supply/accounts/" + o.accountId,
     adminPrefix = "/api/bff/admin/supply/listing-reviews/" + o.accountId;
   const call = async (
     path: string,
@@ -182,7 +182,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
   );
   assert.equal(upload.status, 200);
-  let asset = await upload.json();
+  const asset = await upload.json();
   // Account display disposition now requires the image to be bound to the current
   // listing version plus an explicit account/version/asset confirmation context.
   d = await ok(
@@ -434,11 +434,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     occupancy: "FREE",
     reference: "fixture:m3c",
   });
-  const firstUserPrefix = userPrefix, firstSubmitBody = token(d), firstSubmitKey = "m3c_first_" + randomUUID();
-  const firstSubmission = await call(firstUserPrefix + "/submit", firstSubmitBody, o.user, "POST", firstSubmitKey);
-  assert.equal(firstSubmission.status, 200);
-  assert.deepEqual((await call(firstUserPrefix + "/submit", firstSubmitBody, o.user, "POST", firstSubmitKey)).body, firstSubmission.body);
-  d = firstSubmission.body;
+  d = await ok(userPrefix + "/submit", token(d));
   assert.equal(d.version.reviewState, "PUBLISHED");
   const publishedId = d.version.id;
   const publication = (
@@ -472,9 +468,19 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       ),
     { code: "40001" },
   );
-  for (const retired of ["pause", "resume"]) {
-    assert.equal((await call(userPrefix + "/" + retired, { expectedRevision: d.account.revision })).status, 404);
-  }
+  d = await ok(userPrefix + "/pause", {
+    expectedRevision: d.account.revision,
+    reason: "审核期间暂不接单",
+  });
+  assert.equal(d.account.owner_paused, true);
+  // api-v1-contract.md: a paused account leaves the rentable list; its approved public
+  // detail stays readable and reports the non-createable state instead of 404.
+  const pausedListing = await ok("/api/v1/supply/listings/" + o.accountId, undefined);
+  assert.equal(pausedListing.availability.state, "OFFLINE");
+  assert.equal(pausedListing.canCreateOrder, false);
+  d = await ok(userPrefix + "/resume", {
+    expectedRevision: d.account.revision,
+  });
   assert.equal(
     (
       await call("/api/auth/user/account/cancel", {
@@ -537,7 +543,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
         expectedRevision: d.account.revision,
       })
     ).status,
-    404,
+    409,
   );
   d = await ok(
     adminPrefix + "/restriction",
@@ -548,8 +554,16 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
     o.boss,
   );
-  assert.equal((await call(userPrefix + "/drafts", { expectedRevision: d.account.revision })).status, 409);
-  assert.equal((await ok("/api/v1/supply/listings/" + o.accountId, undefined)).canCreateOrder, true);
+  d = await ok(userPrefix + "/drafts", {
+    expectedRevision: d.account.revision,
+  });
+  assert.notEqual(d.version.id, publishedId);
+  // Starting a new draft does not withdraw the published version: the detail stays readable as
+  // OFFLINE (not orderable) and the still-published version keeps its media until the new version
+  // is submitted. Only pause/restriction/withdraw remove the public access.
+  const editedPublic = await ok("/api/v1/supply/listings/" + o.accountId, undefined);
+  assert.equal(editedPublic.availability.state, "OFFLINE");
+  assert.equal(editedPublic.canCreateOrder, false);
   assert.equal((await fetch(o.base + publicListing.media[0].url)).status, 200);
   assert.equal(
     (
@@ -560,6 +574,23 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     ).rows[0].content_hash,
     priceHash,
   );
+  const history = await ok(userPrefix + "?versionId=" + publishedId, undefined);
+  assert.equal(history.version.id, publishedId);
+  assert.equal(history.available, false);
+  assert.equal(history.version.quote.resourceTotal.amount, "150.00");
+  d = await ok(
+    userPrefix + "/draft",
+    {
+      ...declaration,
+      title: "退回修改样例",
+      expectedRevision: d.account.revision,
+    },
+    o.user,
+    "PUT",
+  );
+  d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
+  d = await ok(userPrefix + "/accept-rules", token(d));
+  d = await ok(userPrefix + "/submit", token(d));
   const raceToken = token(d);
   const race = await Promise.all([
     call(
@@ -576,33 +607,11 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   assert.deepEqual(race.map((r) => r.status).sort(), [409, 409]);
   d = await get();
   assert.equal(d.version.reviewState, "PUBLISHED");
-
-  // A new rental offer is a new account; media ownership must follow that account too.
-  const freshDraft = async () => {
-    const created = await ok("/api/v1/supply/accounts", { gameId: o.gameId });
-    o.accountId = created.accountId;
-    userPrefix = "/api/v1/supply/accounts/" + o.accountId;
-    adminPrefix = "/api/bff/admin/supply/listing-reviews/" + o.accountId;
-    o.gates.set(o.accountId, { publisherBail: "NOT_REQUIRED", occupancy: "FREE", reference: "fixture:fresh-listing" });
-    let draft = await ok(userPrefix + "/drafts", { expectedRevision: "1" });
-    const uploadForAccount = async (purpose: "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE") => {
-      const nextIntent = await ok("/api/v1/supply/media/upload-intents", { gameId: o.gameId, accountId: o.accountId, mime: "image/png", size: o.bytes.length, purpose });
-      const response = await fetch(o.base + "/api/v1/supply/media/uploads/" + nextIntent.intentId, {
-        method: "PUT", headers: { origin: o.userOrigin, cookie: o.user.header(), "content-type": "image/png", "x-upload-token": nextIntent.uploadToken, "idempotency-key": "m3c_fresh_upload_" + randomUUID() },
-        body: new Uint8Array(o.bytes),
-      });
-      const result = await response.json(); assert.equal(response.status, 200, JSON.stringify(result)); return result;
-    };
-    asset = await uploadForAccount("ACCOUNT_DISPLAY");
-    const evidence = await uploadForAccount("ACCOUNT_EVIDENCE"); o.evidenceAssetId = evidence.assetId;
-    declaration.mediaBindings.splice(0, declaration.mediaBindings.length, { assetId: asset.assetId, position: 0 }, { assetId: evidence.assetId, position: 1 });
-    draft = await ok(userPrefix + "/draft", { ...declaration, expectedRevision: draft.account.revision }, o.user, "PUT");
-    return draft;
-  };
-  d = await freshDraft();
+  d = await ok(userPrefix + "/drafts", {
+    expectedRevision: d.account.revision,
+  });
   d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
   d = await ok(userPrefix + "/accept-rules", token(d));
-  const staleDraftHash = d.version.contentHash;
   const g = (
     await o.pool.query(
       `SELECT r.* FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=g.current_release_id WHERE g.id=$1`,
@@ -626,7 +635,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     "rule replacement invalidates prior acceptance",
   );
   d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
-  assert.notEqual(d.version.contentHash, staleDraftHash);
+  assert.notEqual(d.version.contentHash, priceHash);
   d = await ok(userPrefix + "/accept-rules", token(d));
   // Occupancy is order-derived (M4-A): a real occupying order must block submit,
   // and cancelling it re-enables the existing gates. No fixture occupancy source.
@@ -829,7 +838,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     [o.operatorId, o.gameId, o.bossId],
   );
   const beforeDuplicate = await get();
-  const retiredDuplicate = await call(
+  await ok(
     adminPrefix + "/duplicates",
     {
       expectedRevision: beforeDuplicate.account.revision,
@@ -840,7 +849,6 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     },
     o.boss,
   );
-  assert.equal(retiredDuplicate.status, 404, "manual duplicate registration is no longer offered");
   const afterDuplicate = await ok(adminPrefix, undefined, o.boss);
   assert.equal(
     afterDuplicate.version.reviewState,
@@ -850,7 +858,11 @@ export async function runPublishingChecks(o: Options): Promise<void> {
     afterDuplicate.account.owner_paused,
     beforeDuplicate.account.owner_paused,
   );
-  assert.equal(Object.hasOwn(afterDuplicate, "duplicateHints"), false);
+  assert.ok(
+    afterDuplicate.duplicateHints.some(
+      (h: any) => h.result === "POSSIBLE_SAME",
+    ),
+  );
   assert.equal(
     (await call(userPrefix + "?versionId=not_this_accounts_version", undefined))
       .status,
@@ -862,7 +874,7 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       [o.accountId],
     )
   ).rows;
-  assert.ok(audits.length > 0);
+  assert.ok(audits.length > 15);
   assert.ok(
     audits.every((r) => r.reason && r.details.before && r.details.after),
   );
@@ -927,7 +939,24 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       .account.id,
     o.accountId,
   );
-  // The existing native publication remains available for subsequent read checks.
+  // Leave a real direct publication for browser replay; API operations remain fixture-only.
+  d = await ok(userPrefix + "/drafts", {
+    expectedRevision: d.account.revision,
+  });
+  d = await ok(
+    userPrefix + "/draft",
+    {
+      ...declaration,
+      title: "补充资料复审样例",
+      inventory: [{ itemId: o.itemId, quantity: "50000000" }],
+      expectedRevision: d.account.revision,
+    },
+    o.user,
+    "PUT",
+  );
+  d = await ok(userPrefix + "/quote", { expectedRevision: d.account.revision });
+  d = await ok(userPrefix + "/accept-rules", token(d));
+  d = await ok(userPrefix + "/submit", token(d));
   await o.testContext.test(
     "M3-C review R1: anonymous versionless account is closed",
     async () => {
@@ -982,16 +1011,42 @@ export async function runPublishingChecks(o: Options): Promise<void> {
   await o.testContext.test(
     "M3-C publication R2: direct publish replay preserves the receipt",
     async () => {
-      const first = firstSubmission;
+      const draft = await ok(userPrefix + "/drafts", {
+        expectedRevision: d.account.revision,
+      });
+      const edited = await ok(
+        userPrefix + "/draft",
+        {
+          ...declaration,
+          title: "直发布回放样例",
+          inventory: [{ itemId: o.itemId, quantity: "50000000" }],
+          expectedRevision: draft.account.revision,
+        },
+        o.user,
+        "PUT",
+      );
+      const quoted = await ok(userPrefix + "/quote", {
+        expectedRevision: edited.account.revision,
+      });
+      const accepted = await ok(userPrefix + "/accept-rules", token(quoted));
+      const body = token(accepted),
+        key = "publication_r2_" + randomUUID();
+      const first = await call(
+        userPrefix + "/submit",
+        body,
+        o.user,
+        "POST",
+        key,
+      );
       assert.equal(first.status, 200);
       assert.equal(first.body.version.reviewState, "PUBLISHED");
       assert.ok(first.body.version.quote.ownerTotal);
       const replay = await call(
-        firstUserPrefix + "/submit",
-        firstSubmitBody,
+        userPrefix + "/submit",
+        body,
         o.user,
         "POST",
-        firstSubmitKey,
+        key,
       );
       assert.equal(replay.status, 200);
       assert.deepEqual(replay.body, first.body);
@@ -1016,10 +1071,11 @@ export async function runPublishingChecks(o: Options): Promise<void> {
       const cached = (
         await o.pool.query(
           `SELECT response_body FROM zzsh_supply.idempotency_record WHERE key=$1`,
-          [firstSubmitKey],
+          [key],
         )
       ).rows[0].response_body;
       assert.deepEqual(cached, first.body, "receipt must remain immutable");
+      d = first.body;
     },
   );
   await o.testContext.test(

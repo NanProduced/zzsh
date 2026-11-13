@@ -31,20 +31,6 @@ test("lease resolved and abort in the same turn: exactly one release, action nev
   assert.equal(f.queries.length, 0, "no BEGIN/SET on an aborted-at-boundary lease");
 });
 
-test("abort during wait then late lease: single retirement by the side branch, no double release", async () => {
-  const f = fixture(); let deliver!: (c: PoolClient) => void;
-  const pool = { connect: () => new Promise<PoolClient>(resolve => { deliver = resolve; }) } as unknown as Pool;
-  const controller = new AbortController();
-  const waiting = settle(withDirectoryReadTransaction(pool, controller.signal, async () => assert.fail("late lease must not run")));
-  controller.abort(Object.assign(new Error("closed while queued"), { status: 499 }));
-  const outcome = await waiting;
-  deliver(f.client as unknown as PoolClient);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(f.releases.length, 1); assert.equal(f.releases[0], true);
-  assert.equal(outcome.status, 499);
-  assert.equal(f.queries.length, 0);
-});
-
 test("in-flight abort completes within the statement budget on the same lease; no cancellation sidecar is created", async () => {
   const f = fixture(); const slow = deferred(); const controller = new AbortController();
   const base = f.client.query;

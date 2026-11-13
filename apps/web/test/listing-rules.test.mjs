@@ -1,5 +1,465 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  activeListingFilterCount,
+  resolveSkinOwner,
+  buildServiceWindow,
+  describeServiceWindow,
+  formatServiceWindowMinute,
+  listingFilterKey,
+  listingFiltersUrl,
+  listingQuery,
+  listingUrlRejectedValues,
+  listingRequestBudget,
+  listingRequestTargets,
+  normalizeListingQuery,
+  parseListingFilters,
+  reconcileListingFilters,
+  resourceInputFromBase,
+  resourceInputToBase,
+  resourceItemDisplayName,
+  resourceUnitHint,
+  resourceUnitShort,
+  resourceUnitLabel,
+  validateResourceQuantityInput,
+  toggleSkinId,
+  skinGroupOptions,
+  regionProvinceSelectionState,
+  toggleRegionSelection,
+  withFilterChange,
+} from '../src/lib/listing-filters.ts';
+
+test('both registered six-round aliases convert once while other ammunition and insurance keep their base units',()=>{
+  for(const code of ['level6_round','df_billable_level6_bullet']) {
+    const item={code,unit:'ROUND'};
+    assert.equal(resourceInputToBase('2',item),'120');
+    assert.equal(resourceInputFromBase('120',item),'2');
+    assert.equal(validateResourceQuantityInput('0',item,{min:'0',max:'120'}),'0');
+    assert.equal(resourceInputToBase('120',item,'base'),'120');
+    assert.equal(resourceUnitShort(item),'组');
+  }
+  for(const code of ['awm_round','df_billable_awm_bullet','df_billable_barrett_bullet']) assert.equal(resourceInputToBase('2',{code,unit:'ROUND'}),'2');
+  assert.equal(resourceUnitLabel('PIECE','top_insure_card_piece'),'张');
+  assert.equal(resourceUnitLabel('DAY','top_insure_card_piece'),'天');
+  assert.equal(resourceUnitLabel('PIECE','coffee'),'件');
+  assert.equal(resourceUnitLabel('PIECE','df_billable_turtle_backpack_45'),'个');
+  assert.equal(resourceInputToBase('3',{code:'df_billable_turtle_backpack_45',unit:'PIECE'}),'3');
+});
+
+const metadata = {
+  available: true,
+  reasonCode: null,
+  gameId: 'game_delta',
+  queryVersion: 2,
+  resourceQuantityRange: true,
+  filterRevision: '4',
+  catalogRevision: '9',
+  ruleReleaseId: 'release_1',
+  defaultSort: { sort: 'latest', direction: 'DESC', label: '最新发布' },
+  fields: [
+    { key: 'resources', operator: 'MIN', label: '资源', enabled: true, order: 1, items: [{ itemId: 'item_haff', min: '0', max: '999999999999999999999999' }] },
+    { key: 'safeBoxCodes', operator: 'IN', label: '安全箱', enabled: true, order: 2, options: [{ value: 'safe_1', label: '基础安全箱' }] },
+    { key: 'gradingCodes', operator: 'IN', label: '段位', enabled: true, order: 3, options: [{ value: 'grade_1', label: '青铜' }] },
+    { key: 'loginMethodCodes', operator: 'IN', label: '登录方式', enabled: true, order: 4, options: [{ value: 'login_1', label: '微信扫码' }] },
+    { key: 'vitality', operator: 'MIN', label: '体力', enabled: true, order: 5, levels: [4, 5, 6] },
+    { key: 'bear', operator: 'MIN', label: '负重', enabled: true, order: 6, levels: [4, 5, 6] },
+    { key: 'regions', operator: 'IN', label: '地区', enabled: true, order: 7, regions: [{ province: '省', city: '市' }] },
+    { key: 'serviceWindow', operator: 'OVERLAPS', label: '在线时间', enabled: true, order: 8 },
+    { key: 'skinGroups', operator: 'GROUPED', label: '皮肤', enabled: true, order: 9, categoryIds: ['category_agent'] },
+  ],
+  sorts: [
+    { key: 'latest', label: '最新发布', enabled: true, order: 1 },
+    { key: 'resourceTotal', label: '资源报价金额', enabled: true, order: 2 },
+    { key: 'coreQuantity', label: '核心资源数量', enabled: true, order: 3, itemIds: ['item_haff'] },
+    { key: 'value', label: '综合性价比', enabled: false, order: 4 },
+  ],
+  directions: ['ASC', 'DESC'],
+  items: [{ id: 'item_haff', code: 'haff', name: '哈夫币', unit: 'HAFF_BASE' }],
+  categories: [{ id: 'category_agent', parentId: null, name: '干员皮肤' }],
+  skinCatalogUrl: '/api/supply/games/game_delta/catalog',
+  limits: { urlBytes: 8192, resources: 16, skinGroups: 8, skinIds: 50, enumValues: 50, regions: 20, limit: 50, scanBudget: 200 },
+  livePages: true,
+};
+
+const base = parseListingFilters({});
+
+test('type-based skin filters keep their meaning through selection, URL and reconciliation', () => {
+  const typeField = { key: 'skinGroups', operator: 'GROUPED', label: '皮肤', enabled: true, order: 9, ownerKinds: ['AGENT', 'FIREARM', 'MELEE_TYPE'] };
+  const typedMetadata = { ...metadata, skinGrouping: 'TYPE', categories: [], fields: metadata.fields.map(field => field.key === 'skinGroups' ? typeField : field) };
+  assert.deepEqual(skinGroupOptions(typeField, null).map(item => item.name), ['干员外观', '枪械外观', '近战外观']);
+  const selected = toggleSkinId({ ...base, game: 'game_delta' }, 'MELEE_TYPE', 'skin_melee');
+  assert.deepEqual(selected.filters.skinGroups, [{ ownerKind: 'MELEE_TYPE', ids: ['skin_melee'], match: 'ANY' }]);
+  const parsed = parseListingFilters(Object.fromEntries(new URL(listingFiltersUrl(selected), 'https://example.test').searchParams));
+  assert.deepEqual(parsed.filters.skinGroups, selected.filters.skinGroups);
+  assert.deepEqual(reconcileListingFilters(parsed, typedMetadata).filters.skinGroups, selected.filters.skinGroups);
+  const legacy = toggleSkinId({ ...base, game: 'game_delta' }, 'category_agent', 'skin_agent');
+  assert.equal(reconcileListingFilters(legacy, typedMetadata).filters.skinGroups, undefined);
+});
+
+
+test('resource display names prefer stable codes and gate legacy names to Delta context', () => {
+  assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_bullet', name: '六级子弹' }), '6级子弹');
+  assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_helmet', name: '六级头盔' }), '6级头盔');
+  assert.equal(resourceItemDisplayName({ code: 'df_billable_level6_armor', name: '六级护甲' }), '6级护甲');
+  assert.equal(resourceItemDisplayName({ code: 'different_resource', name: '六级子弹' }, { gameCode: 'delta' }), '6级子弹');
+  assert.equal(resourceItemDisplayName({ name: '六级子弹' }, { gameCode: 'delta' }), '6级子弹');
+  assert.equal(resourceItemDisplayName({ name: '六级头盔' }, { gameCode: 'delta' }), '6级头盔');
+  assert.equal(resourceItemDisplayName({ name: '六级子弹' }), '六级子弹');
+  assert.equal(resourceItemDisplayName(undefined), '未确认');
+  assert.equal(resourceItemDisplayName({ code: 'unknown_resource' }), '未确认');
+});
+
+test('URL state is normalized and v2 query includes metadata revisions and supported semantics', () => {
+  const parsed = parseListingFilters({
+    game: 'game_delta',
+    filters: JSON.stringify({
+      resources: [{ itemId: 'item_haff', minQuantity: '20000000' }],
+      skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a', 'skin_a', 'bad skin', 'skin_b'], match: 'ALL' }],
+    }),
+    sort: 'coreQuantity',
+    direction: 'ASC',
+    coreItemId: 'item_haff',
+    q: '  M4A1   金色 ',
+    cursor: 'eyJpZCI6ImEifQ',
+    limit: '3',
+    view: 'grid',
+  });
+  assert.deepEqual(parsed, {
+    game: 'game_delta',
+    filters: {
+      resources: [{ itemId: 'item_haff', minQuantity: '20000000' }],
+      skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a', 'skin_b'], match: 'ALL' }],
+    },
+    q: 'M4A1 金色', sort: 'coreQuantity', direction: 'ASC', coreItemId: 'item_haff',
+    cursor: 'eyJpZCI6ImEifQ', limit: 3, viewMode: 'grid',
+  });
+  const query = listingQuery(parsed, metadata);
+  assert.equal(query.get('queryVersion'), '2');
+  assert.equal(query.get('filterRevision'), '4');
+  assert.equal(query.get('catalogRevision'), '9');
+  assert.equal(query.get('ruleReleaseId'), 'release_1');
+  assert.deepEqual(JSON.parse(query.get('filters')), parsed.filters);
+  assert.equal(query.get('sort'), 'coreQuantity');
+  assert.equal(query.get('coreItemId'), 'item_haff');
+  assert.equal(query.get('cursor'), parsed.cursor);
+  assert.equal(query.get('minQuantity'), null);
+  assert.equal(normalizeListingQuery('   '), null);
+});
+
+test('filter changes replace state and clear cursor; presentation mode does not affect the API key', () => {
+  const paged = { ...base, game: 'game_delta', filters: { skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a'], match: 'ANY' }] }, cursor: 'cur_1' };
+  assert.equal(withFilterChange(paged, { q: 'M4' }).cursor, null);
+  assert.equal(listingFilterKey(paged, metadata), listingFilterKey({ ...paged, cursor: null, viewMode: 'grid' }, metadata));
+  assert.equal(listingFiltersUrl(paged).includes('cursor=cur_1'), false);
+  assert.equal(listingFiltersUrl(withFilterChange(paged, { q: 'M4' })).includes('cursor'), false);
+  assert.equal(listingFiltersUrl(base), '/accounts');
+  assert.equal(listingFiltersUrl({ ...base, viewMode: 'grid' }), '/accounts?view=grid');
+  assert.equal(listingFiltersUrl({ ...paged, coreItemId: 'item_haff' }).includes('coreItemId'), false);
+  assert.equal(listingFiltersUrl({ ...paged, sort: 'coreQuantity', coreItemId: 'item_haff', limit: 3 }).includes('limit='), false);
+});
+
+test('share URL canonicalizes unordered condition collections', () => {
+  const first = { ...base, game: 'game_delta', filters: {
+    resources: [{ itemId: 'item_haff', minQuantity: '2' }],
+    safeBoxCodes: ['safe_2', 'safe_1'],
+    regions: [{ province: '乙省', city: '乙市' }, { province: '甲省', city: '甲市' }],
+    skinGroups: [{ categoryId: 'category_agent', ids: ['skin_b', 'skin_a'], match: 'ALL' }],
+  } };
+  const second = { ...first, filters: {
+    resources: [{ itemId: 'item_haff', minQuantity: '2' }],
+    safeBoxCodes: ['safe_1', 'safe_2'],
+    regions: [{ province: '甲省', city: '甲市' }, { province: '乙省', city: '乙市' }],
+    skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a', 'skin_b'], match: 'ALL' }],
+  } };
+  assert.equal(listingFiltersUrl(first), listingFiltersUrl(second));
+});
+
+test('listing URL budget guards every real GET prefix, not only the share page', () => {
+  const conditions = {
+    resources: Array.from({ length: 16 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, '0')}${'x'.repeat(90)}`,
+      minQuantity: '1',
+      maxQuantity: '999999999999999999999999',
+    })),
+    skinGroups: [{
+      categoryId: 'category_1',
+      match: 'ALL',
+      ids: Array.from({ length: 33 }, (_, index) => `skin_${String(index).padStart(3, '0')}${'x'.repeat(118)}`),
+    }],
+  };
+  const longMetadata = { ...metadata, filterRevision: '123', catalogRevision: '456', ruleReleaseId: `release_${'r'.repeat(90)}` };
+  const filters = parseListingFilters({ game: 'game_delta', filters: JSON.stringify(conditions) });
+  const targets = listingRequestTargets(filters, longMetadata, null);
+
+  assert.deepEqual(targets.map(({ kind, bytes }) => ({ kind, bytes })), [
+    { kind: 'page', bytes: 8005 },
+    { kind: 'webBff', bytes: 8221 },
+    { kind: 'apiBff', bytes: 8230 },
+    { kind: 'api', bytes: 8224 },
+  ]);
+  assert.equal(listingRequestBudget(filters, longMetadata, null)?.kind, 'webBff');
+  assert.equal(filters.filters.resources.length, 16);
+  assert.equal(filters.filters.skinGroups[0].ids.length, 33);
+  assert.equal(listingRequestBudget({ ...filters, filters: {} }, longMetadata, null), null);
+  const nextPage = listingRequestTargets({ ...filters, cursor: 'cursor_' + 'x'.repeat(1000) }, longMetadata, 'cursor_' + 'x'.repeat(1000));
+  assert.equal(nextPage.find(({ kind }) => kind === 'webBff').bytes > 8192, true);
+});
+
+test('resource bounds normalize as inclusive min/max strings and remain cursor-bound', () => {
+  const inputs = [
+    { itemId: 'item_haff', minQuantity: '0' },
+    { itemId: 'item_haff', maxQuantity: '9007199254740993' },
+    { itemId: 'item_haff', minQuantity: '9007199254740993', maxQuantity: '9007199254740993' },
+  ];
+  for (const resource of inputs) {
+    const parsed = parseListingFilters({ filters: JSON.stringify({ resources: [resource] }) });
+    assert.deepEqual(parsed.filters.resources, [resource]);
+    assert.deepEqual(JSON.parse(listingQuery({ ...parsed, game: 'game_delta' }, metadata).get('filters')), { resources: [resource] });
+  }
+  const lower = { ...base, game: 'game_delta', filters: { resources: [{ itemId: 'item_haff', minQuantity: '10' }] } };
+  const bounded = { ...lower, filters: { resources: [{ itemId: 'item_haff', minQuantity: '10', maxQuantity: '20' }] } };
+  assert.notEqual(listingFilterKey(lower, metadata), listingFilterKey(bounded, metadata));
+  assert.deepEqual(parseListingFilters({ filters: JSON.stringify({ resources: [{ itemId: 'item_haff' }, { itemId: 'item_haff', minQuantity: '', maxQuantity: '2' }, { itemId: 'item_haff', minQuantity: '3', maxQuantity: '2' }] }) }).filters, {});
+});
+
+test('invalid URL values are ignored, while URL query conditions survive JSON encoding', () => {
+  const hostile = parseListingFilters({
+    game: '../admin', filters: '{"safeBoxCodes":["bad value"],"vitality":{"min":999}}',
+    q: '\u0000bad', cursor: 'not a cursor!', limit: '999', view: 'tile',
+  });
+  assert.deepEqual(hostile, { ...base });
+  const q = '[SEC真实来源] 100%_';
+  const paged = { ...base, game: 'game_delta', q, cursor: 'cur_2' };
+  assert.equal(listingQuery(paged).get('q'), q);
+  assert.equal(listingFilterKey(paged), listingFilterKey({ ...paged, cursor: null }));
+  assert.deepEqual(withFilterChange(paged, { q: null }), { ...paged, q: null, cursor: null });
+});
+
+test('skin groups preserve ANY/ALL, toggle by category, and count real conditions', () => {
+  const first = toggleSkinId(base, 'category_agent', 'skin_a');
+  assert.deepEqual(first.filters.skinGroups, [{ categoryId: 'category_agent', ids: ['skin_a'], match: 'ANY' }]);
+  assert.deepEqual(toggleSkinId(first, 'category_agent', 'skin_a').filters.skinGroups, undefined);
+  const active = {
+    ...base,
+    filters: {
+      resources: [{ itemId: 'item_haff', minQuantity: '5' }], safeBoxCodes: ['safe_1'],
+      skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a', 'skin_b'], match: 'ALL' }],
+    }, q: 'x',
+  };
+  assert.equal(activeListingFilterCount(active), 5);
+});
+
+test('409 metadata reconciliation retains only still-enabled conditions and sorts', () => {
+  const stale = {
+    ...base,
+    game: 'game_old', sort: 'value', coreItemId: 'removed', direction: 'SIDEWAYS',
+    filters: {
+      resources: [{ itemId: 'item_haff', minQuantity: '2' }, { itemId: 'removed', minQuantity: '3' }],
+      safeBoxCodes: ['safe_1', 'removed'], gradingCodes: ['removed'], loginMethodCodes: ['login_1'],
+      vitality: { min: 5 }, bear: { min: 7 }, regions: [{ province: '省', city: '市' }, { province: 'other', city: 'city' }],
+      skinGroups: [
+        { categoryId: 'category_agent', ids: ['skin_a', 'skin_gone'], match: 'ALL' },
+        { categoryId: 'category_removed', ids: ['skin_b'], match: 'ANY' },
+      ],
+    }, cursor: 'cur_old',
+  };
+  const reconciled = reconcileListingFilters(stale, metadata, new Set(['skin_a']));
+  assert.equal(reconciled.game, 'game_delta');
+  assert.equal(reconciled.sort, 'latest');
+  assert.equal(reconciled.direction, 'DESC');
+  assert.equal(reconciled.coreItemId, null);
+  assert.equal(reconciled.cursor, null);
+  assert.deepEqual(reconciled.filters, {
+    resources: [{ itemId: 'item_haff', minQuantity: '2' }], safeBoxCodes: ['safe_1'],
+    loginMethodCodes: ['login_1'], vitality: { min: 5 }, regions: [{ province: '省', city: '市' }],
+    skinGroups: [{ categoryId: 'category_agent', ids: ['skin_a'], match: 'ALL' }],
+  });
+});
+
+test('resource reconciliation checks each supplied endpoint and drops unsupported upper bounds visibly', () => {
+  const rangeMetadata = { ...metadata, items: [...metadata.items, { id: 'item_kit', code: 'kit', name: '道具', unit: 'PIECE' }], fields: metadata.fields.map((entry) => entry.key === 'resources' ? { ...entry, items: [...entry.items, { itemId: 'item_kit', min: '0', max: '10' }] } : entry) };
+  const range = { ...base, game: 'game_delta', filters: { resources: [
+    { itemId: 'item_haff', minQuantity: '2', maxQuantity: '3' },
+    { itemId: 'item_kit', maxQuantity: '4' },
+  ] } };
+  assert.deepEqual(reconcileListingFilters(range, rangeMetadata).filters.resources, [
+    { itemId: 'item_haff', minQuantity: '2', maxQuantity: '3' },
+    { itemId: 'item_kit', maxQuantity: '4' },
+  ]);
+  const maxOnly = { ...range, filters: { resources: [{ itemId: 'item_kit', maxQuantity: '4' }] } };
+  assert.deepEqual(reconcileListingFilters(maxOnly, rangeMetadata).filters.resources, [{ itemId: 'item_kit', maxQuantity: '4' }]);
+  for (const rangeCapability of [false, undefined]) {
+    const legacyMetadata = { ...rangeMetadata };
+    if (rangeCapability === undefined) delete legacyMetadata.resourceQuantityRange;
+    else legacyMetadata.resourceQuantityRange = rangeCapability;
+    const minOnly = reconcileListingFilters(range, legacyMetadata);
+    assert.deepEqual(minOnly.filters.resources, [{ itemId: 'item_haff', minQuantity: '2' }]);
+    assert.notEqual(listingFiltersUrl(minOnly), listingFiltersUrl(range));
+    assert.doesNotMatch(listingQuery(minOnly, legacyMetadata).get('filters') ?? '', /maxQuantity/);
+    const unsupportedMaxOnly = reconcileListingFilters(maxOnly, legacyMetadata);
+    assert.equal(unsupportedMaxOnly.filters.resources, undefined);
+    assert.equal(listingQuery(unsupportedMaxOnly, legacyMetadata).has('filters'), false);
+  }
+});
+
+test('province tri-state expands only configured cities and rejects over-budget selection atomically', () => {
+  const regions = [
+    ...Array.from({ length: 12 }, (_, index) => ({ province: '甲省', city: `甲市${index}` })),
+    ...Array.from({ length: 10 }, (_, index) => ({ province: '乙省', city: `乙市${index}` })),
+  ];
+  const synthetic = { ...metadata, fields: metadata.fields.map((entry) => entry.key === 'regions' ? { ...entry, regions } : entry) };
+  assert.equal(regionProvinceSelectionState([], '甲省', regions.slice(0, 12).map(({ city }) => city)), 'none');
+  const first = toggleRegionSelection(base, '甲省', regions.slice(0, 12).map(({ city }) => city), synthetic, 'province');
+  assert.equal(first.error, null);
+  assert.equal(first.filters.filters.regions.length, 12);
+  assert.equal(regionProvinceSelectionState([{ province: '甲省', city: '甲市0' }], '甲省', regions.slice(0, 12).map(({ city }) => city)), 'partial');
+  const denied = toggleRegionSelection(first.filters, '乙省', regions.slice(12).map(({ city }) => city), synthetic, 'province');
+  assert.match(denied.error, /最多可选 20 个地区/);
+  assert.equal(denied.filters, first.filters);
+  const removed = toggleRegionSelection(first.filters, '甲省', [], synthetic, 'city', '甲市0');
+  assert.equal(removed.error, null);
+  assert.equal(removed.filters.filters.regions.length, 11);
+  const selectedThenCleared = toggleRegionSelection(first.filters, '甲省', regions.slice(0, 12).map(({ city }) => city), synthetic, 'province');
+  assert.deepEqual(selectedThenCleared.filters.filters.regions, undefined);
+  const tinyUrl = { ...synthetic, limits: { ...synthetic.limits, urlBytes: 10 } };
+  const tooLong = toggleRegionSelection(base, '甲省', regions.slice(0, 1).map(({ city }) => city), tinyUrl, 'province');
+  assert.match(tooLong.error, /筛选条件过长/);
+  assert.equal(tooLong.filters, base);
+});
+
+test('display quantities convert exactly to API base units, including decimal M and 60-round groups', () => {
+  const haff = { unit: 'HAFF_BASE', code: 'haff' };
+  const bullets = { unit: 'ROUND', code: 'df_billable_level6_bullet' };
+  assert.equal(resourceInputToBase('2.5', haff), '2500000');
+  assert.equal(resourceInputFromBase('2500000', haff), '2.5');
+  assert.equal(resourceInputToBase('3', bullets), '180');
+  assert.equal(resourceInputFromBase('181', bullets), null);
+  assert.equal(resourceInputFromBase('181', bullets, 'base'), '181');
+  assert.throws(() => resourceInputToBase('0.01', bullets), /无法精确换算/);
+});
+
+test('resource unit labels stay explicit about contract units without fabricated defaults', () => {
+  const haff = { unit: 'HAFF_BASE', code: 'haff' };
+  const bullets = { unit: 'ROUND', code: 'df_billable_level6_bullet' };
+  const days = { unit: 'DAY', code: 'term' };
+  assert.equal(resourceUnitShort(haff), 'M');
+  assert.equal(resourceUnitHint(haff), '1 M = 1,000,000 哈夫币');
+  assert.equal(resourceUnitShort(bullets), '组');
+  assert.equal(resourceUnitHint(bullets), '1 组 = 60 发');
+  assert.equal(resourceUnitShort(days), '天');
+  assert.equal(resourceUnitHint(days), null);
+  assert.equal(resourceUnitShort(bullets, 'base'), '发');
+  assert.equal(resourceUnitHint(bullets, 'base'), null);
+});
+
+test('service window builder enforces half-hour options, full-day and cross-midnight semantics', () => {
+  assert.equal(formatServiceWindowMinute(0), '00:00');
+  assert.equal(formatServiceWindowMinute(1410), '23:30');
+  assert.equal(formatServiceWindowMinute(1440), '24:00');
+  assert.deepEqual(buildServiceWindow(null, 120), { ok: false, reason: 'missing' });
+  assert.deepEqual(buildServiceWindow(480, 480), { ok: false, reason: 'equal' });
+  assert.deepEqual(buildServiceWindow(0, 0), { ok: false, reason: 'equal' });
+  assert.deepEqual(buildServiceWindow(1439, 120), { ok: false, reason: 'missing' });
+  assert.deepEqual(buildServiceWindow(0, 1440), {
+    ok: true,
+    value: { startMinute: 0, endMinute: 1440, crossMidnight: false, timezone: 'Asia/Shanghai' },
+  });
+  assert.deepEqual(buildServiceWindow(1320, 120), {
+    ok: true,
+    value: { startMinute: 1320, endMinute: 120, crossMidnight: true, timezone: 'Asia/Shanghai' },
+  });
+  assert.equal(describeServiceWindow({ startMinute: 0, endMinute: 1440, crossMidnight: false, timezone: 'Asia/Shanghai' }), '00:00–24:00（全天）');
+  assert.equal(describeServiceWindow({ startMinute: 1320, endMinute: 120, crossMidnight: true, timezone: 'Asia/Shanghai' }), '22:00–02:00（跨日）');
+  assert.equal(describeServiceWindow({ startMinute: 480, endMinute: 720, crossMidnight: false, timezone: 'Asia/Shanghai' }), '08:00–12:00');
+});
+
+
+test('resource input validates canonical integer text and exact display bounds', () => {
+  const bullets = { unit: 'ROUND', code: 'df_billable_level6_bullet' };
+  const bounds = { min: '61', max: '181' };
+  assert.equal(validateResourceQuantityInput('2', bullets, bounds), '120');
+  assert.equal(validateResourceQuantityInput('3', bullets, bounds), '180');
+  for (const value of ['', '0', '1', '4', '02', '2.0', '2e0', '-2', ' 2', '2 ', '２', '1,000']) {
+    assert.throws(() => validateResourceQuantityInput(value, bullets, bounds), /2 至 3 组/);
+  }
+  assert.equal(validateResourceQuantityInput('181', bullets, bounds, 'base'), '181');
+  assert.equal(validateResourceQuantityInput('0', { unit: 'PIECE' }, { min: '0', max: '9' }), '0');
+  assert.equal(validateResourceQuantityInput('999999999999999999999999', { unit: 'PIECE' }, { min: '0', max: '999999999999999999999999' }), '999999999999999999999999');
+  assert.throws(() => validateResourceQuantityInput('1000000000000000000000000', { unit: 'PIECE' }, { min: '0', max: '999999999999999999999999' }));
+});
+
+test('normalizing a URL only warns when a recognizable value was actually rejected', () => {
+  // 静默规范化：补默认游戏、补默认排序、省掉与默认值相同的 direction、忽略无法识别的多余 query。
+  assert.deepEqual(listingUrlRejectedValues({}, parseListingFilters({})), []);
+  assert.deepEqual(listingUrlRejectedValues({ game: 'game_4a3eebc1f36f40a5bbadc97e44f5023b' }, parseListingFilters({ game: 'game_4a3eebc1f36f40a5bbadc97e44f5023b' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'latest' }, parseListingFilters({ sort: 'latest' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'DESC' }, parseListingFilters({ direction: 'DESC' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'ASC' }, parseListingFilters({ direction: 'ASC' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ q: 'awm' }, parseListingFilters({ q: 'awm' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ unknownParam: 'x', cursor: 'not-a-cursor' }, parseListingFilters({ unknownParam: 'x', cursor: 'not-a-cursor' })), []);
+
+  // 真的被拒绝/改写：形状非法的 sort、非法 direction、非法 game、空 q、无法解析的 filters。
+  // 注意：形状合法但服务端未启用的 sort（如 'bogus'）由 reconcileListingFilters 依 metadata
+  // 收敛，走 changed 分支的另一条提示，不归本函数判定。
+  assert.deepEqual(listingUrlRejectedValues({ sort: '!!' }, parseListingFilters({ sort: '!!' })), ['sort']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'a'.repeat(65) }, parseListingFilters({ sort: 'a'.repeat(65) })), ['sort']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: 'bogus' }, parseListingFilters({ sort: 'bogus' })), []);
+  assert.deepEqual(listingUrlRejectedValues({ direction: 'sideways' }, parseListingFilters({ direction: 'sideways' })), ['direction']);
+  assert.deepEqual(listingUrlRejectedValues({ game: '!!' }, parseListingFilters({ game: '!!' })), ['game']);
+  assert.deepEqual(listingUrlRejectedValues({ q: '   ' }, parseListingFilters({ q: '   ' })), ['q']);
+  assert.deepEqual(listingUrlRejectedValues({ filters: 'not-json' }, parseListingFilters({ filters: 'not-json' })), ['filters']);
+  assert.deepEqual(listingUrlRejectedValues({ filters: '{"regions":[]}' }, parseListingFilters({ filters: '{"regions":[]}' })), ['filters']);
+  assert.deepEqual(listingUrlRejectedValues({ sort: '!!', direction: 'sideways' }, parseListingFilters({ sort: '!!', direction: 'sideways' })), ['sort', 'direction']);
+});
+
+test('skin owner stays scoped to the active category kind', () => {
+  const owners = [{ id: 'owner_agent', kind: 'AGENT' }, { id: 'owner_firearm', kind: 'FIREARM' }];
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'AGENT'), 'owner_agent');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'MELEE_TYPE'), '', '近战类别在 2108 后没有 owner，重读回落时不得继续带旧 ownerId');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', 'FIREARM'), '');
+  assert.equal(resolveSkinOwner(owners, 'owner_agent', null), 'owner_agent', '旧类别无 ownerKind 时保持原行为');
+  assert.equal(resolveSkinOwner(owners, '', 'AGENT'), '');
+  assert.equal(resolveSkinOwner(undefined, 'owner_agent', 'AGENT'), '');
+});
+
+test('ratio sort and tactical core items serialize and reconcile correctly', () => {
+  const multiSortMetadata = {
+    ...metadata,
+    sorts: [
+      ...metadata.sorts.filter(s => s.key !== 'coreQuantity'),
+      { key: 'coreQuantity', label: '核心资源数量', enabled: true, order: 3, itemIds: ['item_haff', 'item_awm', 'item_helmet', 'item_armor'] },
+      { key: 'ratio', label: '比例排序', enabled: true, order: 5, itemIds: ['item_haff'] },
+    ],
+    items: [
+      ...metadata.items,
+      { id: 'item_awm', code: 'awm_round', name: 'AWM子弹', unit: 'ROUND' },
+      { id: 'item_helmet', code: 'level6_helmet', name: '6级头盔', unit: 'PIECE' },
+      { id: 'item_armor', code: 'level6_armor', name: '6级护甲', unit: 'PIECE' },
+    ],
+  };
+
+  const ratioFilters = { ...base, game: 'game_delta', sort: 'ratio', coreItemId: 'item_haff', direction: 'DESC' };
+  const ratioQuery = listingQuery(ratioFilters, multiSortMetadata);
+  assert.equal(ratioQuery.get('sort'), 'ratio');
+  assert.equal(ratioQuery.get('coreItemId'), 'item_haff');
+  assert.equal(ratioQuery.get('direction'), 'DESC');
+  assert.equal(listingFiltersUrl(ratioFilters), '/accounts?game=game_delta&sort=ratio&coreItemId=item_haff');
+
+  const tacticalFilters = { ...base, game: 'game_delta', sort: 'coreQuantity', coreItemId: 'item_awm', direction: 'ASC' };
+  const tacticalQuery = listingQuery(tacticalFilters, multiSortMetadata);
+  assert.equal(tacticalQuery.get('sort'), 'coreQuantity');
+  assert.equal(tacticalQuery.get('coreItemId'), 'item_awm');
+  assert.equal(tacticalQuery.get('direction'), 'ASC');
+  assert.equal(listingFiltersUrl(tacticalFilters), '/accounts?game=game_delta&sort=coreQuantity&direction=ASC&coreItemId=item_awm');
+
+  const reconciled = reconcileListingFilters(ratioFilters, multiSortMetadata);
+  assert.equal(reconciled.sort, 'ratio');
+  assert.equal(reconciled.coreItemId, 'item_haff');
+});
+
+
+/* --- Listing View Presentation Rules --- */
+
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as listingFilters from '../src/lib/listing-filters.ts';
@@ -12,7 +472,6 @@ import {
   termLabel,
   listingResourceLinesLabel,
   publicAvailabilityLabel,
-  previewListingCard,
   resourceQuantityLabel,
   toListingCard,
   toListingDetail,
@@ -579,25 +1038,6 @@ test('historical listing keeps exact source amounts without inventing a current 
   assert.throws(() => toListingCard({ ...listing, quote: null }));
 });
 
-test('a public favorite with an explicitly unknown price keeps its card without rental or money', () => {
-  const unpriced = { ...listing, quote: null, canCreateOrder: false, availability: { state: 'UNKNOWN' } };
-  const preview = previewListingCard(unpriced);
-  assert.equal(preview.ok, true);
-  const card = preview.card;
-  assert.equal(card.title, listing.title);
-  assert.equal(card.imageUrl, listing.media[1].url);
-  assert.deepEqual(card.skinNames, ['M4A1 金色']);
-  assert.equal(card.resourceTotalLabel, '以平台确认为准');
-  assert.equal(card.haffRentLabel, null);
-  assert.equal(card.itemResourceTotalLabel, null);
-  assert.equal(card.payableTotalLabel, null);
-  assert.equal(card.canCreateOrder, false);
-  assert.equal(toListingDetail(unpriced).description, listing.description);
-  assert.equal(previewListingCard({ ...unpriced, canCreateOrder: true }).ok, false);
-  assert.equal(previewListingCard({ ...unpriced, availability: { state: 'RENTABLE' } }).ok, false);
-  assert.equal(previewListingCard({ ...unpriced, availability: {} }).ok, false);
-});
-
 test('legacy image slots keep order without replacing actual bound media', () => {
   const money = amount => ({ currency: 'CNY', unit: 'yuan', amount, scale: 2 });
   const historical = { ...listing, source: 'LEGACY_READ_ONLY', canCreateOrder: false, quote: null, media: [],
@@ -783,4 +1223,21 @@ test('public declarations keep false distinct and never expose private source', 
   assert.equal(rows.find(r => r.key === 'demulan_unlocked').value, '已解锁');
   assert.equal(rows.some(r => r.key === 'info_source'), false);
   assert.equal(conditionLines({ next_season_pass: null }).some(r => r.key === 'next_season_pass'), false);
+});
+
+
+test('public resource projections preserve all eight facts and never turn frozen days into cards',()=>{
+  const items=[['haff','haff_base','HAFF_BASE','2000000','1000000'],['six','level6_round','ROUND','120','60'],['awm','awm_round','ROUND','2','1'],['barrett','df_billable_barrett_bullet','ROUND','2','1'],['armor','level6_armor','PIECE','0','1'],['helmet','level6_helmet','PIECE','1','1'],['coffee','coffee','PIECE','1','1'],['card','top_insure_card_piece','PIECE','3','1'],['old-card','df_billable_top_insure_card','DAY','4','1']];
+  const money=amount=>({currency:'CNY',unit:'yuan',amount,scale:2});
+  const listing={id:'synthetic',title:'synthetic contract',attributes:{},description:null,media:[],presentation:{items:items.map(([id,code,unit])=>({id,code,unit,name:code})),skins:[],entitlements:[]},quote:{lines:items.map(([itemId,,unit,quantity,unitQuantity])=>({itemId,unit,quantity,unitQuantity,buyerAmount:money('1.00'),buyerUnitAmount:money('1.00')})),resourceTotal:money('9.00'),tenantDeposit:null,tenantPayableTotal:null,termSeconds:'86400',expiryDisclosures:[]}};
+  const card=toListingCard(listing);
+  assert.equal(card.resourceLines.length,9);
+  const line=id=>card.resourceLines.find(row=>row.itemId===id);
+  assert.equal(line('six').quantityLabel,'2组（120发）');
+  assert.equal(line('awm').quantity,'2');assert.equal(line('barrett').quantity,'2');
+  assert.equal(resourceQuantityLabel(line('armor')),'0件');
+  assert.equal(resourceQuantityLabel(line('card')),'3张');
+  assert.equal(resourceQuantityLabel(line('old-card')),'4天');
+  assert.equal(resourceQuantityLabel(line('coffee')),'1件');
+  assert.equal(card.depositLabel,null);
 });

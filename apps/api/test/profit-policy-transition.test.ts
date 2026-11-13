@@ -4,18 +4,6 @@ import { computeDeltaQuote, computeLegacyListedQuote, type QuoteInput } from "..
 import { computeContentHash } from "../src/supply/content-hash";
 import { legacyPayload } from "./legacy-listed-fixture";
 import { compatRule } from "./pricing-compat-fixture";
-import type { PoolClient } from "pg";
-import { readEffectivePricingMode } from "../src/supply/pricing-policy-schedule";
-
-test("new-listing mode requires a matching sealed policy and never guesses missing prices",async()=>{
-  const {compatibility,...base}=compatRule();
-  const row={id:"mode",generation:"1",effectiveAt:"2026-11-01T00:00:00.000000Z",pricingModel:"FIXED_FEE",priceScheduleId:"schedule",priceVersionId:"price",priceMode:"PERCENT",priceStatus:"SEALED",roundingPolicy:"HALF_UP_CENT_V1",rates:{ordinary:"0.10",custom:"0.08",fast:"0.12"},haffRule:{...base,schema:"haff-ratio-v3",fixedModes:compatibility!.modes}};
-  const client=(value:unknown)=>({query:async()=>({rows:value?[value]:[]})}) as unknown as PoolClient;
-  assert.equal(await readEffectivePricingMode(client(null),"game","2026-11-02T00:00:00Z"),null);
-  assert.equal((await readEffectivePricingMode(client(row),"game","2026-11-02T00:00:00Z"))?.pricingModel,"FIXED_FEE");
-  for(const changed of [{...row,priceScheduleId:null},{...row,priceStatus:"DRAFT"},{...row,roundingPolicy:"UNKNOWN"},{...row,rates:{ordinary:"0.1"}},{...row,priceMode:"SPREAD"}])
-    await assert.rejects(readEffectivePricingMode(client(changed),"game","2026-11-02T00:00:00Z"));
-});
 
 test("new standard quotes use six for ordinary and custom, while fast remains twelve", () => {
   const oldRule=compatRule("52"), newRule=structuredClone(oldRule);

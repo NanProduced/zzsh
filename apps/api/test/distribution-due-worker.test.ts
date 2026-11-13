@@ -2,17 +2,16 @@ import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 import type { Pool, PoolClient } from 'pg';
 import { DistributionDueService, loadDistributionDueRuntime } from '../src/finance/distribution-due.module';
-import { assertDistributionAccrualTask, DistributionAccrualSessionLost, runDistributionAccrualTasks } from '../src/finance/distribution-accrual-tasks';
 const legacy:typeof import('../src/finance/legacy-commission-due-worker')=require('../src/finance/legacy-commission-due-worker');
 
-type Drive = { kind: 'new' | 'resume' | 'find'; requestId?: string; limit?: number; client: string | null; operatorUserId?:string; allSystemWorkers?:boolean };
+type Drive = { kind: 'new' | 'resume' | 'find'; requestId?: string; limit?: number; client: string | null };
 let sessionSequence = 0;
 
 /** One fake server shared by both instances: exactly one session may hold advisory key 806007. */
 function harness(options: { batchLimit?: number; workerId?: string; server?: { holder: string | null }; legacyDue?:boolean } = { batchLimit: 20 }) {
   const locks = options.server ?? { holder: null as string | null };
   const driven: Drive[] = [];
-  const control = { unfinished: null as null | { requestId: string; operatorUserId?:string }, state: 'COMPLETE' as 'COMPLETE' | 'UNKNOWN', failNew: false, failResume: false };
+  const control = { unfinished: null as null | { requestId: string }, state: 'COMPLETE' as 'COMPLETE' | 'UNKNOWN', failNew: false, failResume: false };
   let sequence = sessionSequence;
   sessionSequence += 100;
   const clients: Array<PoolClient & { id: string; alive: boolean; dropped: boolean }> = [];
@@ -43,10 +42,9 @@ function harness(options: { batchLimit?: number; workerId?: string; server?: { h
   const pool = { async connect() { return makeClient(); } } as unknown as Pool;
   let newKey: string | null = null;
   const store = {
-    async pendingAccrualTasks() { return { available:true,items:[] }; },
-    async findUnfinishedBatch(_p: Pool, input: { client?: PoolClient; operator:{userId:string}; allSystemWorkers?:boolean }) { driven.push({ kind: 'find', client: (input.client as any)?.id ?? null,operatorUserId:input.operator.userId,allSystemWorkers:input.allSystemWorkers }); return control.unfinished; },
-    async resumeBatch(_p: Pool, input: { requestId: string; client?: PoolClient; operator:{userId:string} }) {
-      driven.push({ kind: 'resume', requestId: input.requestId, client: (input.client as any)?.id ?? null,operatorUserId:input.operator.userId });
+    async findUnfinishedBatch(_p: Pool, input: { client?: PoolClient }) { driven.push({ kind: 'find', client: (input.client as any)?.id ?? null }); return control.unfinished; },
+    async resumeBatch(_p: Pool, input: { requestId: string; client?: PoolClient }) {
+      driven.push({ kind: 'resume', requestId: input.requestId, client: (input.client as any)?.id ?? null });
       if (control.failResume) throw new Error('original receipt read failed');
       control.unfinished = null;
       return { httpStatus: 200, batch: { state: control.state, requestId: input.requestId, results: [{ id: 'earning_a' }], notAttempted: 0 }, replayed: true };
@@ -114,18 +112,6 @@ test('an UNKNOWN batch is resumed under its original key instead of selecting th
   assert.equal(h.driven.filter(d => d.kind === 'resume').length, 1);
 });
 
-test('an unresolved original batch is retried while a separate due batch may proceed',async()=>{
-  const h=harness();
-  h.control.unfinished={requestId:'due_original',operatorUserId:'distribution-due-original'};
-  h.control.state='UNKNOWN';
-  await h.service.tick();
-  assert.equal(h.driven.find(item=>item.kind==='resume')?.requestId,'due_original');
-  const independent=h.driven.find(item=>item.kind==='new');
-  assert.ok(independent);assert.notEqual(independent.requestId,'due_original');
-  assert.equal(independent.client,h.driven.find(item=>item.kind==='resume')?.client);
-  await h.service.onApplicationShutdown();
-});
-
 test('a restarted driver resumes the persisted original batch before planning a new one', async () => {
   const first = harness();
   await first.service.tick();
@@ -138,98 +124,6 @@ test('a restarted driver resumes the persisted original batch before planning a 
   assert.equal(second.driven.filter(d => d.kind === 'resume').length, 1);
   assert.equal(second.driven.filter(d => d.kind === 'new').length, 0, 'a rebuilt worker must not pick the next batch');
   assert.equal(second.driven.find(d => d.kind === 'resume')!.requestId, original);
-});
-
-test('posting gate preserves an absent legacy schema and rejects partial or missing task contracts', async () => {
-  let schema:'ABSENT'|'PARTIAL'|'READY'='ABSENT',taskExists=true;
-  const client={async query(sql:string){
-    if(sql.includes('distribution_accrual_task_schema_v1'))return{rows:[{absent:schema==='ABSENT',ready:schema==='READY'}]};
-    if(sql.startsWith('SELECT 1 FROM zzsh_order.distribution_accrual_task'))return{rows:[],rowCount:taskExists?1:0};
-    throw Error('unexpected query');
-  }} as unknown as PoolClient;
-  await assertDistributionAccrualTask(client,'posting',false);
-  await assert.rejects(assertDistributionAccrualTask(client,'posting',true),/contract is unavailable/);
-  schema='PARTIAL';
-  await assert.rejects(assertDistributionAccrualTask(client,'posting',false),/contract is unavailable/);
-  schema='READY';await assertDistributionAccrualTask(client,'posting',true);
-  taskExists=false;await assert.rejects(assertDistributionAccrualTask(client,'posting',false),/task is unavailable/);
-});
-
-test('a different worker resumes the original system actor and batch key', async () => {
-  const h = harness({ workerId: 'replacement' });
-  h.control.unfinished = { requestId: 'due_original', operatorUserId: 'distribution-due-original' };
-  await h.service.tick();
-  assert.equal(h.driven.find(d => d.kind === 'find')?.allSystemWorkers, true);
-  const resumed = h.driven.find(d => d.kind === 'resume');
-  assert.equal(resumed?.requestId, 'due_original');
-  assert.equal(resumed?.operatorUserId, 'distribution-due-original');
-  assert.equal(h.driven.some(d => d.kind === 'new'), false);
-  await h.service.onApplicationShutdown();
-});
-
-test('accrual tasks keep unknowns for review and delay failures without starving other postings', async () => {
-  const tasks = ['ok','skip','unknown','evidence','retry','later'].map(id => ({ postingId:`posting_${id}`,orderId:`order_${id}` }));
-  const states = new Map(tasks.map(task => [task.postingId, { state:'PENDING', reason:null as string|null }]));
-  const attempts:string[] = [], requests = new Map<string,string[]>();
-  let retry = true;
-  const client = { async query(sql:string,args:any[] = []) {
-    if(sql.startsWith('UPDATE zzsh_order.distribution_accrual_task')) {
-      const state=states.get(args[0]); if(!state || state.state!=='PENDING') return {rowCount:0,rows:[]};
-      if(sql.includes('SET state=$2')) {state.state=args[1];state.reason=args[2];}
-      else if(sql.includes("state='REVIEW_REQUIRED'")) {state.state='REVIEW_REQUIRED';state.reason=args[1];}
-      else state.reason=args[1];
-      return {rowCount:1,rows:[]};
-    }
-    return {rowCount:0,rows:[]};
-  }} as unknown as PoolClient;
-  const store = {
-    async pendingAccrualTasks() {return {available:true,items:tasks.filter(t=>states.get(t.postingId)!.state==='PENDING')};},
-    async accrueOn(_c:PoolClient,orderId:string,key:string) {
-      attempts.push(orderId);requests.set(orderId,[...(requests.get(orderId)??[]),key]);
-      if(orderId==='order_retry'&&retry) throw Object.assign(new Error('network unavailable'),{code:'ECONNRESET'});
-      if(orderId==='order_evidence') throw Object.assign(new Error('source evidence unavailable'),{status:503,code:'EVIDENCE_UNAVAILABLE'});
-      if(orderId==='order_unknown') return {knowledge:'UNKNOWN',reason:'MISSING_ORIGINAL_BASIS',items:[]};
-      if(orderId==='order_skip') return {knowledge:'KNOWN',skipReason:'NO_PAYABLE_COMMISSION',items:[]};
-      return {knowledge:'KNOWN',items:[{replayed:false}]};
-    },
-  } as any;
-  const operator = {userId:'distribution-due-main',sessionId:'system',system:true,authorize:async()=>{}};
-  const first=await runDistributionAccrualTasks(client,store,operator,10,()=>true);
-  assert.deepEqual(first,{available:true,examined:6,completed:3,review:2});
-  assert.equal(states.get('posting_unknown')?.state,'REVIEW_REQUIRED');
-  assert.equal(states.get('posting_unknown')?.reason,'MISSING_ORIGINAL_BASIS');
-  assert.equal(states.get('posting_skip')?.state,'SKIPPED');
-  assert.equal(states.get('posting_evidence')?.state,'REVIEW_REQUIRED');
-  assert.equal(states.get('posting_retry')?.state,'PENDING');
-  assert.equal(states.get('posting_retry')?.reason,'ECONNRESET');
-  assert.equal(states.get('posting_later')?.state,'DONE');
-  retry=false;
-  await runDistributionAccrualTasks(client,store,operator,10,()=>true);
-  assert.equal(states.get('posting_retry')?.state,'DONE');
-  assert.equal(new Set(requests.get('order_retry')).size,1,'the original posting keeps one recovery key');
-  assert.equal(attempts.filter(id=>id==='order_unknown').length,1,'unknown evidence is not silently retried');
-});
-
-test('loss of the driving session rolls back and stops accrual tasks', async () => {
-  let held=true;const wire:string[]=[];
-  const client={async query(sql:string){wire.push(sql);return{rowCount:1,rows:[]};}} as unknown as PoolClient;
-  const store={async pendingAccrualTasks(){return{available:true,items:[{postingId:'posting_1',orderId:'order_1'},{postingId:'posting_2',orderId:'order_2'}]};},
-    async accrueOn(){held=false;return{knowledge:'KNOWN',items:[{}]};}} as any;
-  await assert.rejects(runDistributionAccrualTasks(client,store,{userId:'distribution-due-main',sessionId:'system',system:true,authorize:async()=>{}},2,()=>held),DistributionAccrualSessionLost);
-  assert.equal(wire.filter(sql=>sql==='ROLLBACK').length,1);
-  assert.equal(wire.filter(sql=>sql==='COMMIT').length,1,'only discovery commits');
-  assert.equal(wire.filter(sql=>sql==='BEGIN').length,2);
-});
-
-test('an unknown accrual COMMIT never rolls back or writes a retry state on the same session', async () => {
-  const wire:string[]=[];let commits=0;
-  const client={async query(sql:string){wire.push(sql);if(sql==='COMMIT'&&++commits===2)throw Error('COMMIT_ACK_UNKNOWN');return{rowCount:1,rows:[]};}} as unknown as PoolClient;
-  const store={async pendingAccrualTasks(){return{available:true,items:[{postingId:'posting_1',orderId:'order_1'}]};},
-    async accrueOn(){return{knowledge:'KNOWN',items:[{}]};}} as any;
-  await assert.rejects(runDistributionAccrualTasks(client,store,{userId:'distribution-due-main',sessionId:'system',system:true,authorize:async()=>{}},1,()=>true),DistributionAccrualSessionLost);
-  assert.equal(wire.at(-1),'COMMIT');
-  assert.equal(wire.filter(sql=>sql==='ROLLBACK').length,0);
-  assert.equal(wire.filter(sql=>sql.startsWith('UPDATE zzsh_order.distribution_accrual_task')).length,1);
 });
 
 test('changing the interval or batch limit cannot change the original batch input', async () => {

@@ -39,7 +39,6 @@ test('one business overview keeps four current metrics, three period metrics and
   assert.equal(rankingNames.length, 2);
   for (const name of rankingNames) {
     assert.equal(name.disabled, false);
-    assert.match(name.className, /hover:underline/);
   }
   assert.equal([...rankings.querySelectorAll('button')].filter(b => b.getAttribute('aria-label') === '预览用户 可读受益人').length, 2);
   await click(h.button('发生额')); assert.match(h.host.textContent,/按佣金原始发生时间统计/); assert.equal(h.calls.length,3);

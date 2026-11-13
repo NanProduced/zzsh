@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { makeR07DistributionCandidate } from './prepare-round07-distribution-candidate.mjs';
-import { legacyDistributionPolicy, loadLegacyDistributionPrerequisite, normalizedDistributionPolicyFormat, validatedLegacyDistributionPayload, verifyLegacyDistributionPrerequisite } from './local-distribution-qualification-plan.mjs';
+import { legacyDistributionPolicy, normalizedDistributionPolicyFormat, validatedLegacyDistributionPayload, verifyLegacyDistributionPrerequisite } from './local-distribution-qualification-plan.mjs';
 
 test('candidate retains exact source rows required by the read-only qualification planner',()=>{
  const digest='a'.repeat(64),source={receiptSha256:digest,configurationSha256:digest,levelsSha256:digest};
@@ -35,13 +35,10 @@ test('distribution candidate binds the bytes actually consumed and refuses chang
   {parseDistributionPolicyChange}=require('../../apps/api/dist/src/finance/distribution-policy-change.js');
  const proof=await verifyLegacyDistributionPrerequisite({sourceDir:source,receipt:JSON.parse(receipt),sourceSha256:sha(receipt),canonicalize,parsePolicy:parseDistributionPolicyChange});
  assert.equal(proof.status,'DISTRIBUTION_SOURCE_PRECHECK_PASSED_TARGET_NOT_RUN');assert.equal(proof.activeLevels,1);assert.equal(proof.settlementDelayDays,7);assert.equal(proof.targetWrites,0);
- const loaded=await loadLegacyDistributionPrerequisite({sourceDir:source,receipt:JSON.parse(receipt),sourceSha256:sha(receipt),canonicalize,parsePolicy:parseDistributionPolicyChange});
- assert.deepEqual(loaded.summary,proof);assert.equal(loaded.payload.config.legacySource.receiptSha256,sha(receipt));
  const sourceRef={receiptSha256:sha(receipt),configurationSha256:sha(config),levelsSha256:sha(levelBytes)},candidate=makeR07DistributionCandidate(sourceRef,configuration,levels);
  assert.equal(candidate.rawLevels[0].first_ratio,'20.00');
  const normalized=parseDistributionPolicyChange(candidate.approvalPayloads[0]);assert.equal(normalized.config.levels[0].renterPercent,'20');
  assert.deepEqual(validatedLegacyDistributionPayload(candidate.approvalPayloads[0],parseDistributionPolicyChange,canonicalize,true),normalized);
- assert.deepEqual(loaded.payload,normalized);
  assert.throws(()=>validatedLegacyDistributionPayload(candidate.approvalPayloads[0],parseDistributionPolicyChange,canonicalize,false),/DISTRIBUTION_POLICY_INVALID/);
  assert.equal(proof.policyDigest,sha(canonicalize(normalized.config)));
  assert.equal(normalizedDistributionPolicyFormat('SOURCE_API_NORMALIZED_V1',{distributionSourcePreflight:proof}),true);
@@ -57,6 +54,4 @@ test('distribution candidate binds the bytes actually consumed and refuses chang
  const invalid=Buffer.from(JSON.stringify({...levels[0],first_ratio:'101.00'})+'\n'),invalidReceipt=JSON.parse(receipt);
  writeFileSync(levelsFile,invalid);invalidReceipt.files.distributionLevels.sha256=sha(invalid);
  await assert.rejects(verifyLegacyDistributionPrerequisite({sourceDir:source,receipt:invalidReceipt,sourceSha256:sha(JSON.stringify(invalidReceipt)),canonicalize,parsePolicy:parseDistributionPolicyChange}));
- writeFileSync(levelsFile,levelBytes);writeFileSync(receiptFile,Buffer.from('{}'));
- await assert.rejects(loadLegacyDistributionPrerequisite({sourceDir:source,receipt:JSON.parse(receipt),sourceSha256:sha(receipt),canonicalize,parsePolicy:parseDistributionPolicyChange}),/DISTRIBUTION_PREFLIGHT_RECEIPT_CHANGED/);
 });

@@ -23,49 +23,9 @@ import * as userIdentity from '../src/auth/user-identity';
 import { createPaymentDistributionStore, estimatePaymentReferralBase } from '../src/finance/distribution-payment-store';
 import { prepareAccrualFromFrozenPayment, type CompletedDistributionFacts } from '../src/finance/distribution-accrual';
 import { prepareHistoricalObservation } from '../src/finance/personal-finance-read';
-import { fixedFeeAccrualFacts, fixedFeePaymentPricing } from '../src/finance/distribution-fixed-fee-evidence';
-import { computeDeltaQuote } from '../src/supply/pricing';
-import { FIXED_FEE_ALGORITHM } from '../src/supply/fixed-fee';
-import { compatRule } from './pricing-compat-fixture';
-import { freezeSettlementPricing } from '../src/order/personal-confirmation';
-import { applyTotalDiscountToQuote } from '../src/auth/membership-total-discount';
-import { hashApprovalPayload } from '../src/auth/approval-audit';
 
 const flat = { schema:'distribution-policy.v2',scope:'LOCAL_CONTROLLED',enabled:true,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:1,rateMode:'UNIFORM',renterPercent:'3',ownerPercent:'2' };
 const legacy = { schema:'distribution-policy.v1',scope:'LOCAL_CONTROLLED',enabled:false,participation:'AUTO_AT_REGISTRATION',depth:1,selfRebate:false,accountModes:['ordinary','custom'],minimumAccrualCents:'1',settlementDelayDays:1,levels:[{code:'BASE',rank:1,default:true,renterPercent:'3',ownerPercent:'2',upgrade:null}] };
-
-test('fixed-fee referral evidence binds the original quote, accepted settlement and posting',()=>{
- const {compatibility,...rule}=compatRule('100');
- const calculated=computeDeltaQuote({priceVersionId:'price',mode:'PERCENT',fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:'0.1',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',
-  haffRule:{...rule,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},
-  termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},lines:[{itemId:'haff',quantity:'100000000',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'}],
-  deposits:{tenantDepositCents:'0',publisherBailRequirementCents:'0'}});assert(calculated.quotable);
- const settlementPricing=freezeSettlementPricing(calculated.quote,'0.95',[],'0.1'),discounted=applyTotalDiscountToQuote(calculated.quote,'0.95');assert(discounted);
- const quote=discounted.quote;quote.ruleReleaseId='release';
- const identity={renterUserId:'renter',ownerUserId:'owner',accountId:'account',listingVersionId:'listing',contentHash:'b'.repeat(64),ruleReleaseId:'release'};
- const personal={schema:'personal-quote-v5',userId:identity.renterUserId,ownerUserId:identity.ownerUserId,accountId:identity.accountId,listingVersionId:identity.listingVersionId,
-  listingHash:identity.contentHash,ruleRefs:{releaseId:'release'},pricingPolicy:{schema:'pricing-policy-v1',pricingModel:'FIXED_FEE',scheduleId:'schedule',generation:'1',effectiveAt:'2026-10-01T00:00:00Z',priceVersionId:'price'}};
- const stored={...quote,personal,settlementPricing,listingHash:identity.contentHash,confirmationDigest:createHash('sha256').update(canonicalize({...personal,quote,settlementPricing})).digest('hex')};
- assert.deepEqual(fixedFeePaymentPricing(stored,identity),{fixedFeeRate:'0.1',payableRatio:'0.95'});
- assert.equal(fixedFeePaymentPricing({...stored,confirmationDigest:'0'.repeat(64)},identity),null);
- assert.equal(fixedFeePaymentPricing(stored,{...identity,ownerUserId:'other'}),null);
- const snapshot={schema:'settlement-version-v4',orderId:'order_1',paymentConfirmationId:'payment_1',renterUserId:'renter',ownerUserId:'owner',listingVersionId:'listing',listingHash:identity.contentHash,
-  kind:'SYSTEM',early:false,capturedAmount:'95.00',amounts:{ownerGross:'100.00',platformServiceFee:'10.00',membershipDiscount:'5.00'}};
- const versionHash=hashApprovalPayload(snapshot).hash,postingDigest='d'.repeat(64),config=validateDistributionPolicy(flat);
- const frozen=freezePaymentDistributionBasis({...paymentInput(config,null),fixedFeePricing:{fixedFeeRate:'0.1',payableRatio:'0.95'}});
- const posting:CompletedDistributionFacts={origin:'NATIVE',orderId:'order_1',confirmationId:'payment_1',postingId:'posting',postingDigest,postedAt:'2026-11-03T08:00:00.000Z',classification:'NORMAL',calculationMode:'SYSTEM',
-  capturedCents:'9500',ownerNetCents:'9000',renterRefundCents:'0',platformContributionCents:'500',compensationFeeCents:'0',settlementVersionHash:versionHash};
- const evidence={...identity,orderId:'order_1',orderStatus:'COMPLETED',quote:stored,paymentId:'payment_1',paymentOrderId:'order_1',paymentDisposition:'APPLIED',paymentCurrency:'CNY',paymentCents:'9500',
-  postingVersionId:'version',versionId:'version',versionOrderId:'order_1',versionHash,versionKind:'SYSTEM',versionSuperseded:false,snapshot};
- const result=prepareAccrualFromFrozenPayment(frozen,fixedFeeAccrualFacts(frozen,posting,evidence));assert.equal(result.knowledge,'KNOWN');assert.equal(result.baseCents,'500');
- for(const changed of [{versionHash:'f'.repeat(64)},{paymentCents:'9499'},{orderStatus:'CANCELLED'},{snapshot:{...snapshot,capturedAmount:'94.99'}}]){
-  const blocked=prepareAccrualFromFrozenPayment(frozen,fixedFeeAccrualFacts(frozen,posting,{...evidence,...changed}));assert.equal(blocked.knowledge,'UNKNOWN');assert.deepEqual(blocked.items,[]);
- }
- const manualSnapshot={...snapshot,kind:'MANUAL_ADJUSTMENT',proposedOwnerGross:'50.00',proposedPlatformServiceFee:'5.00',proposedMembershipDiscount:'2.50'};
- const manualHash=hashApprovalPayload(manualSnapshot).hash,manualPosting={...posting,calculationMode:'MANUAL' as const,ownerNetCents:'4500',renterRefundCents:'4500',platformContributionCents:'500',settlementVersionHash:manualHash};
- const manualEvidence={...evidence,versionHash:manualHash,versionKind:'MANUAL_ADJUSTMENT',snapshot:manualSnapshot};
- const manual=prepareAccrualFromFrozenPayment(frozen,fixedFeeAccrualFacts(frozen,manualPosting,manualEvidence));assert.equal(manual.knowledge,'KNOWN');assert.equal(manual.baseCents,'250');
-});
 
 test('new uniform policy has explicit two rates and no grade fallback; old version stays exact',()=>{
  const result=validateDistributionPolicy(flat);

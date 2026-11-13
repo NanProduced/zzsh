@@ -152,57 +152,6 @@ test("ADM-R1-02：仅 content.read 的内容首页直接读取游戏手册，不
   await view.close();
 });
 
-test("ADM-R1-03a：有线索时翻第二页仍写 page2，线索不落 URL", async (t) => {
-  const h = await harness(t, { permissions: ["order.read"], path: "/orders" });
-  const queries = [];
-  const view = await h.mount(h.AdminOrderChainView, {
-    snapshot: snapshot("r1-order-clue", h.permissions), onOpenPath: noop, refreshNonce: 0,
-    initialQuery: {}, onQueryChange: (query) => queries.push(query),
-  });
-  await h.until(() => view.element.textContent.includes("ORDER_R1"));
-  await h.change(view.element, "查找线索", "PRIVATE_CLUE_PROBE");
-  await h.click(view.element, "查询");
-  const lastOrderList = () => h.requests.filter(url => url.split("?", 1)[0] === "/api/bff/admin/orders").at(-1);
-  await h.until(() => lastOrderList()?.includes("qValue=PRIVATE_CLUE_PROBE"));
-  await h.until(() => !view.element.querySelector('[aria-label="下一页"]')?.disabled);
-  await h.click(view.element, "下一页", true);
-  await h.until(() => lastOrderList()?.includes("page=2"));
-  await h.until(() => queries.some((query) => query.page === "2"), `queries=${JSON.stringify(queries)}`);
-  assert.deepEqual(queries.at(-1), { page: "2" }, "只投影 page，线索不参与也不写入");
-  assert.ok(lastOrderList().includes("qValue=PRIVATE_CLUE_PROBE"), "线索仍随订单列表请求发送");
-  assert.equal(JSON.stringify(queries).includes("PRIVATE_CLUE_PROBE"), false, "线索不出现在任何 URL 写回里");
-  await view.close();
-});
-
-test("ADM-R1-03b：UI 每页 3 条与 URL 往返一致", async (t) => {
-  const h = await harness(t, { permissions: ["order.read"], path: "/orders" });
-  const queries = [];
-  const view = await h.mount(h.AdminOrderChainView, {
-    snapshot: snapshot("r1-order-size", h.permissions), onOpenPath: noop, refreshNonce: 0,
-    initialQuery: {}, onQueryChange: (query) => queries.push(query),
-  });
-  await h.until(() => view.element.textContent.includes("ORDER_R1"));
-  await h.click(view.element, "每页容量", true);
-  await h.until(() => h.browser.document.querySelector('[role="option"]'));
-  const sizeOption = [...h.browser.document.querySelectorAll('[role="option"]')].find(option => option.textContent.includes("3 条/页"));
-  assert.ok(sizeOption, "共享分页提供 3 条/页");
-  await act(async () => sizeOption.click());
-  await h.until(() => h.requests.at(-1)?.includes("pageSize=3"));
-  await h.until(() => queries.some((query) => query.size === "3"), `queries=${JSON.stringify(queries)}`);
-  assert.deepEqual(queries.at(-1), { size: "3" }, "选 3 回写 size=3");
-  assert.ok(view.element.querySelector('[aria-label="每页容量"]').textContent.includes("3"));
-  await view.close();
-  // 全新挂载 size=3：必须恢复成 3，而不是 20
-  const reloaded = await h.mount(h.AdminOrderChainView, {
-    snapshot: snapshot("r1-order-size-reload", h.permissions), onOpenPath: noop, refreshNonce: 0,
-    initialQuery: { size: "3" }, onQueryChange: noop,
-  });
-  await h.until(() => reloaded.element.textContent.includes("ORDER_R1"));
-  assert.ok(reloaded.element.querySelector('[aria-label="每页容量"]').textContent.includes("3"), "按 URL 恢复每页 3 条");
-  assert.ok(h.requests.at(-1).includes("pageSize=3"), "恢复后请求按 3 条");
-  await reloaded.close();
-});
-
 test("ADM-R1-03c：显式 CANCELLED 地址优先于旧 PAID/page2 缓存", async (t) => {
   const h = await harness(t, { permissions: ["order.read"], path: "/orders" });
   const queries = [];
@@ -232,19 +181,19 @@ test("同一订单列表返回时保留本地线索，线索仍不进入地址�
   const queries = [];
   const props = {
     snapshot: snapshot("root-order-return", h.permissions), onOpenPath: noop, refreshNonce: 0,
-    initialQuery: {}, onQueryChange: (query) => queries.push(query),
+    initialQuery: { range: "all" }, onQueryChange: (query) => queries.push(query),
   };
   const first = await h.mount(h.AdminOrderChainView, props);
   await h.until(() => first.element.textContent.includes("ORDER_R1"));
   await h.change(first.element, "查找线索", "ORDER_R1");
   await h.click(first.element, "查询");
-  await h.until(() => h.requests.at(-1)?.includes("qValue=ORDER_R1"));
+  await h.until(() => h.requests.some(url => url.includes("qValue=ORDER_R1")));
   await first.close();
   h.requests.length = 0;
   const returned = await h.mount(h.AdminOrderChainView, props);
   await h.until(() => returned.element.textContent.includes("ORDER_R1"));
   assert.equal(returned.element.querySelector('[aria-label="查找线索"]').value, "ORDER_R1");
-  assert.ok(h.requests.at(-1).includes("qValue=ORDER_R1"), "同地址返回保持原查找范围");
+  assert.ok(h.requests.some(url => url.includes("qValue=ORDER_R1")), "同地址返回保持原查找范围");
   assert.equal(JSON.stringify(queries).includes("ORDER_R1"), false, "线索始终只留在内存");
   await returned.close();
 });

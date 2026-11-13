@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';import {createRequire} from 'node:module';
 import {spawnSync} from 'node:child_process';import {fileURLToPath} from 'node:url';
 import {existsSync,lstatSync,mkdirSync,mkdtempSync,rmdirSync,unlinkSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
-import {LISTED_API_MODULES,readListedCompiledProof,assertLegacyAutoPublicationPermitted,legacyListedSourceGameId,assertSameCapturePolicyMigration,isSameCaptureListedPolicy,sameCapturePolicyGuardDigest,validateLegacyListedExecutionPlan,validateListedExecutionCheckpoint,validateListedBatchReadbackSet,readUnexpectedListedTarget,readListedExecutionProof,readVerifiedLegacySkinIds} from './legacy-listed-execution-plan.mjs';
+import {LISTED_API_MODULES,readListedCompiledProof,assertSameCapturePolicyMigration,isSameCaptureListedPolicy,sameCapturePolicyGuardDigest,validateLegacyListedExecutionPlan,validateListedExecutionCheckpoint,validateListedBatchReadbackSet,readUnexpectedListedTarget,readListedExecutionProof,readVerifiedLegacySkinIds} from './legacy-listed-execution-plan.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),canonical=x=>JSON.stringify(x);
 function fixture(){
  const sourceCanonical='{"id":"1"}',policyCanonical='{"evidence":"fixture"}',sourceDigest=sha(sourceCanonical),proofSha256=sha(policyCanonical),sourceReceiptSha256='a'.repeat(64);
@@ -11,20 +11,6 @@ function fixture(){
   rows:[{sourceId:'1',body:{intake},scope:'scope',key:'key',fingerprint:'fingerprint',sourceQuoteDigest:'b'.repeat(64),policyDigest:'c'.repeat(64)}]};
 }
 const binding=()=>({scope:'scope',key:'key',fingerprint:'fingerprint'}),check=x=>validateLegacyListedExecutionPlan(x,{oid:'1'},{api:'hash'},canonical,binding);
-test('Delta republication is disabled while known other games retain their existing path',()=>{
- const bindings={'1':'delta','2':'other-game'};
- assert.throws(()=>assertLegacyAutoPublicationPermitted('1',bindings),/DELTA_LISTING_REPUBLICATION_DISABLED/);
- assert.throws(()=>assertLegacyAutoPublicationPermitted('2',bindings,'delta'),/DELTA_LISTING_REPUBLICATION_DISABLED/);
- assert.equal(assertLegacyAutoPublicationPermitted('2',bindings,'other-game'),'other-game');
- assert.throws(()=>assertLegacyAutoPublicationPermitted('3',bindings),/GAME_UNVERIFIED/);
- assert.throws(()=>assertLegacyAutoPublicationPermitted('2',bindings,'wrong-game'),/GAME_BINDING_CHANGED/);
- const sourceCanonical=canonical({id:'1',game_id:'2'}),sourceDigest=sha(sourceCanonical);
- const row={sourceId:'1',body:{intake:{source:{sourceSystem:'legacy_mysql_restore',sourceEntity:'la_rental_accounts',legacyId:'1',sourceDigest},
-  legacyQuoteEvidence:{sourceCanonical,policyBinding:{legacyGameId:'2'}}}}};
- assert.equal(legacyListedSourceGameId(row),'2');
- for(const changed of [{...row,sourceId:'2'}, {...row,body:{intake:{...row.body.intake,legacyQuoteEvidence:{...row.body.intake.legacyQuoteEvidence,policyBinding:{legacyGameId:'3'}}}}}])
-  assert.throws(()=>legacyListedSourceGameId(changed),/GAME_UNVERIFIED/);
-});
 test('all-batch readback defaults to a zero-connection plan and refuses incomplete arguments',()=>{
  const script=fileURLToPath(new URL('./readback-listed-batches.mjs',import.meta.url));
  const plan=spawnSync(process.execPath,[script],{encoding:'utf8',timeout:5000});assert.equal(plan.status,0,plan.stderr);

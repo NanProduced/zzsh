@@ -21,21 +21,14 @@ test("enabled deployment fails before mounting auth when schema/ACL/contract is 
     await assert.rejects(()=>mountAuthHandlers({} as never,{pool,creditGuaranteeEnabled:true} as never),/schema or runtime privileges/);
     await assert.rejects(()=>mountAuthHandlers({} as never,{pool,creditGuaranteeEnabled:false} as never),/schema or runtime privileges/);
   }
-  await preflightCreditGuarantee({query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):sql.includes("AS mismatch")?[{mismatch:false,waiverReady:true}]:[{version:1,schemaCreate:false}]})} as never);
-});
-
-test("formal credit startup rejects simulated guarantee receipts from a copied test database",async()=>{
-  const pool={query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):sql.includes("AS mismatch")?[{mismatch:true,waiverReady:true}]:[{version:1,schemaCreate:false}]})} as never;
-  await assert.rejects(()=>preflightCreditGuarantee(pool),/schema or runtime privileges/);
-  const missing={query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):sql.includes("AS mismatch")?[{mismatch:false,waiverReady:false}]:[{version:1,schemaCreate:false}]})} as never;
-  await assert.rejects(()=>preflightCreditGuarantee(missing),/schema or runtime privileges/);
+  await preflightCreditGuarantee({query:async(sql:string)=>({rows:sql.includes("unnest")?CREDIT_TABLES.map(name=>({name,present:true,readable:true})):[{version:1,schemaCreate:false}]})} as never);
 });
 
 test("credit ACL converges all columns without granting event/reconciliation updates or deletes",async()=>{
-  const seen:string[]=[];const pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);return{rows:sql.startsWith("SELECT name")?args[0].map((name:string)=>({name,present:true})):sql.startsWith("SELECT attname")?[{attname:"id"},{attname:"unlisted_column"}]:sql.includes("guard_auto_delisted_guarantee_refund")?[{present:false,ready:false}]:[]};}} as never;
+  const seen:string[]=[];const pool={query:async(sql:string,args:any[]=[])=>{seen.push(sql);return{rows:sql.startsWith("SELECT name")?args[0].map((name:string)=>({name,present:true})):sql.startsWith("SELECT attname")?[{attname:"id"},{attname:"unlisted_column"}]:[]};}} as never;
   await configureCreditGuaranteePrivileges(pool,"runtime_role");const first=[...seen];seen.length=0;await configureCreditGuaranteePrivileges(pool,"runtime_role");assert.deepEqual(seen,first);
   assert.equal(seen.filter(s=>s.startsWith("REVOKE ALL ON TABLE")).length,7);assert(seen.filter(s=>s.startsWith("REVOKE ALL ON TABLE")).every(s=>s.includes('"unlisted_column"')));
-  const grant=seen.find(s=>s.includes("GRANT INSERT(user_id,score,revision)"))!;assert(!grant.includes("unlisted_column"));assert(!/GRANT\s+(?:DELETE|TRUNCATE)/.test(grant));assert(grant.includes("UPDATE(status,updated_at) ON zzsh_order.owner_guarantee_requirement"));assert(!/UPDATE[^;]*ON zzsh_credit.credit_event/.test(grant));assert(!/UPDATE[^;]*ON zzsh_order.owner_guarantee_reconciliation/.test(grant));assert(grant.includes("runtime_contract_version()"));
+  const grant=seen.at(-1)!;assert(!grant.includes("unlisted_column"));assert(!/GRANT\s+(?:DELETE|TRUNCATE)/.test(grant));assert(grant.includes("UPDATE(status,updated_at) ON zzsh_order.owner_guarantee_requirement"));assert(!/UPDATE[^;]*ON zzsh_credit.credit_event/.test(grant));assert(!/UPDATE[^;]*ON zzsh_order.owner_guarantee_reconciliation/.test(grant));assert(grant.includes("runtime_contract_version()"));
   seen.length=0;await assert.rejects(()=>configureCreditGuaranteePrivileges(pool,"unsafe;role"));assert.equal(seen.length,0);
   let writes=0;await configureCreditGuaranteePrivileges({query:async()=>{writes++;return{rows:CREDIT_TABLES.map(name=>({name,present:false}))};}} as never,"runtime_role");assert.equal(writes,1);
   await assert.rejects(()=>configureCreditGuaranteePrivileges({query:async()=>({rows:CREDIT_TABLES.map((name,i)=>({name,present:i===0}))})} as never,"runtime_role"),/partially/);

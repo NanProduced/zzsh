@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
 import { handleAdminSecurity, type AuthSecurityOptions } from "../src/auth/auth-security";
-import { initializeFirstAdministrators, readFirstAdministrators, type InitialAdministratorsInput } from "../src/auth/initial-administrators";
+import { initializeFirstAdministrators, type InitialAdministratorsInput } from "../src/auth/initial-administrators";
 
 type Security = {
   status: "PENDING_ENROLLMENT" | "ACTIVE";
@@ -91,49 +91,4 @@ test("initial administrator creation refuses occupied targets and an unsafe oper
       occupied ? /INITIAL_ADMINS_TARGET_NOT_EMPTY/ : /INITIAL_ADMINS_OPERATIONS_ROLE_NOT_READY/);
     assert.equal(hashes, 0); assert.equal(writes, 0);
   }
-});
-
-function initialReadFixture() {
-  const state = { isolation: "repeatable read", read_only: "on", users: 4, credentials: 4, security: 4, sessions: 0, factors: 0, ops_role_ready: true };
-  const passwords=[...initialInput.bosses,...initialInput.operations];
-  const rows=passwords.map((account,index)=>({id:`admin_fixture_${index}`,actor_type:"system",actor_id:null,session_id:null,outcome:"SUCCESS",
-    details:{username:`ZZ${String(index+1).padStart(5,'0')}`,role:index<2?"BOSS":"OPERATIONS"},name:account.name,
-    username:`zz${String(index+1).padStart(5,'0')}`,two_factor:false,suspended:false,status:"PENDING_ENROLLMENT",is_boss:index<2,
-    password_change_required:true,first_activated_at:null,bootstrap_used_at:null,expiry_null:index<2,expiry_infinite:index>=2,
-    game_scope_mode:"ALL_GAMES",credential_count:1,password_hash:`hash_${index}`,roles:index<2?null:["role_preset_ops"],individual_permissions:0}));
-  const client={getTransactionStatus:()=>"T",query:async(sql:string)=>sql.includes("current_setting('transaction_isolation')")?{rows:[state]}:{rows:[...rows].reverse()}} as unknown as PoolClient;
-  const verify=async({password,hash}:{password:string;hash:string})=>password===passwords[Number(hash.slice(5))]?.password;
-  return {state,rows,client,verify};
-}
-
-test("initial administrator recovery only confirms the same four pending accounts and passwords",async()=>{
-  const f=initialReadFixture(),result=await readFirstAdministrators(f.client,initialInput,f.verify,"initial-fixture");
-  assert.deepEqual(result,{knowledge:"KNOWN",accounts:[{username:"ZZ00001",role:"BOSS"},{username:"ZZ00002",role:"BOSS"},
-    {username:"ZZ00003",role:"OPERATIONS"},{username:"ZZ00004",role:"OPERATIONS"}]});
-  assert(!JSON.stringify(result).includes("fixture-password"));assert(!JSON.stringify(result).includes("hash_"));
-  const changed=structuredClone(initialInput);changed.operations[1].password="different-password-123";
-  await assert.rejects(readFirstAdministrators(f.client,changed,f.verify,"initial-fixture"),/INITIAL_ADMINS_READBACK_CONFLICT/);
-});
-
-test("initial administrator recovery preserves unknown and rejects partial or changed evidence",async()=>{
-  const f=initialReadFixture();f.rows.length=0;Object.assign(f.state,{users:0,credentials:0,security:0});
-  assert.deepEqual(await readFirstAdministrators(f.client,initialInput,f.verify,"initial-fixture"),{knowledge:"UNKNOWN",accounts:null});
-  f.state.users=1;await assert.rejects(readFirstAdministrators(f.client,initialInput,f.verify,"initial-fixture"),/INITIAL_ADMINS_READBACK_CONFLICT/);
-  for(const mutate of [
-    (x:ReturnType<typeof initialReadFixture>)=>{x.rows[0]!.outcome="FAILURE";},
-    (x:ReturnType<typeof initialReadFixture>)=>{x.rows[2]!.expiry_infinite=false;},
-    (x:ReturnType<typeof initialReadFixture>)=>{x.rows[3]!.roles=["role_preset_ops","role_extra"];},
-    (x:ReturnType<typeof initialReadFixture>)=>{x.state.sessions=1;},
-    (x:ReturnType<typeof initialReadFixture>)=>{x.state.ops_role_ready=false;},
-    (x:ReturnType<typeof initialReadFixture>)=>{x.rows.push({...x.rows[0]!});},
-  ]){const sample=initialReadFixture();mutate(sample);await assert.rejects(readFirstAdministrators(sample.client,initialInput,sample.verify,"initial-fixture"),/INITIAL_ADMINS_READBACK_CONFLICT/);}
-});
-
-test("initial administrator recovery requires a read-only snapshot and sanitizes verifier failures",async()=>{
-  const f=initialReadFixture();f.state.read_only="off";
-  await assert.rejects(readFirstAdministrators(f.client,initialInput,f.verify,"initial-fixture"),/INITIAL_ADMINS_READ_ONLY_REQUIRED/);
-  f.state.read_only="on";f.state.isolation="read committed";
-  await assert.rejects(readFirstAdministrators(f.client,initialInput,f.verify,"initial-fixture"),/INITIAL_ADMINS_READ_ONLY_REQUIRED/);
-  f.state.isolation="repeatable read";
-  await assert.rejects(readFirstAdministrators(f.client,initialInput,async()=>{throw Error("sensitive-fixture");},"initial-fixture"),error=>error instanceof Error&&error.message==="INITIAL_ADMINS_VERIFY_FAILED");
 });

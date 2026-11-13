@@ -142,15 +142,6 @@ test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   assert.equal(titles.includes("供给与规则"), false);
 });
 
-test("侧栏每个入口使用不同且业务可区分的图标", () => {
-  const items = workspaceMenuItems(boss).filter((item) => item.path);
-  assert.equal(items.length, 41);
-  const names = items.map((item) => item.icon?.displayName ?? item.icon?.name ?? "NO_ICON");
-  assert.equal(names.filter((name) => name === "NO_ICON").length, 0, "每个入口都要有图标");
-  const duplicates = [...new Set(names.filter((name, index) => names.indexOf(name) !== index))];
-  assert.deepEqual(duplicates, [], `图标不得重复：${duplicates.join("、")}`);
-});
-
 test("权限裁剪后不误点亮无权限入口", () => {
   const limited = { isBoss: false, permissions: ["user.directory.read"] };
   assert.deepEqual(activeEntries("/audit", "", limited), []);

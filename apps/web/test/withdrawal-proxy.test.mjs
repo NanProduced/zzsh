@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {userId,bankRead,channelQuote,nativeIntent,historyRead,json} from './withdrawal-fixtures.mjs';
+import {userId,bankRead,channelQuote,nativeIntent,historyRead,joinpayRow,json} from './withdrawal-fixtures.mjs';
 process.env.ZZSH_API_ORIGIN='http://127.0.0.1:3102';process.env.ZZSH_WEB_ORIGIN='http://127.0.0.1:3100';
 const {forwardWithdrawalRequest}=await import('../src/lib/withdrawal-proxy.ts');
 const ctx=(path=[])=>({params:Promise.resolve({path})});
@@ -103,3 +103,111 @@ test('demo withdrawal proxy preserves uncertain writes and rejects unexpected pa
  const stale=await forwardWithdrawalRequest(req('demo-withdrawal','/target','POST',{bankBindingId:'bank_1',bankBindingRevision:'1',amountCents:'10000'}),ctx(['target']),'demo-withdrawal');
  assert.equal(stale.status,401);assert.equal(commands,1);
 }));
+
+/* --- Withdrawal History Client Tests --- */
+import {parseWithdrawalHistory,projectWithdrawalHistory,parseWithdrawalHistoryDetail,parseWithdrawalHistoryRecovery,readWithdrawalHistory,withdrawalHistoryQuery} from '../src/lib/withdrawal-history-client.ts';
+import { advanceWithdrawalTimeline, emptyWithdrawalTimeline, hasMoreWithdrawalTimeline, removeWithdrawalTimelineSource, withdrawalTimeMicros } from '../src/lib/withdrawal-timeline.ts';
+import {WithdrawalRequestError} from '../src/lib/withdrawal-client-core.ts';
+import {withStorage} from './withdrawal-fixtures.mjs';
+
+test('three source history retains separate cursors/count scopes and roundtrips the controlled wire envelope',()=>{
+ const raw=historyRead();raw.sections.joinpay.data.nextCursor='native_cursor';raw.sections.joinpay.data.count='10';raw.sections.controlled.data.pagination.nextCursor='controlled_cursor';raw.sections.controlled.data.pagination.mappedRecordCount='2';
+ const result=parseWithdrawalHistory(raw,userId);assert.equal(result.sections.historical.data.count,'0');assert.equal(result.sections.controlled.data.pagination.nextCursor,'controlled_cursor');assert.equal(result.sections.joinpay.data.nextCursor,'native_cursor');assert.equal(result.sections.joinpay.data.scope,'LOCAL_NATIVE_INTENTS_ONLY');
+ const projected=projectWithdrawalHistory(raw,userId);assert.equal(projected.sections.controlled.data.scope,'LOCAL_CONTROLLED');assert.deepEqual(parseWithdrawalHistory(projected,userId),result);
+});
+test('a legacy delegated source identity error retains its authorization type',()=>{
+ const raw=historyRead();raw.sections.controlled.data.subjectId='different_user';
+ assert.throws(()=>parseWithdrawalHistory(raw,userId),e=>e instanceof WithdrawalRequestError&&e.status===401&&e.code==='IDENTITY_CHANGED');
+});
+test('missing response source/filter metadata is not silently defaulted to ALL',()=>{
+ const raw=historyRead();delete raw.source;delete raw.state;
+ assert.throws(()=>parseWithdrawalHistory(raw,userId),e=>e.status===502&&e.code==='WITHDRAWAL_CONTRACT_REQUIRED');
+});
+test('unavailable source is not empty, and authorization failure remains an error',async()=>{
+ const raw=historyRead();raw.sections.historical={availability:'UNAVAILABLE',reasonCodes:['HISTORICAL_LOCAL_EVIDENCE_UNAVAILABLE'],data:null};const result=parseWithdrawalHistory(raw,userId);assert.equal(result.sections.historical.data,null);assert.equal(result.sections.joinpay.data.count,'1');
+ assert.throws(()=>parseWithdrawalHistory(raw,'other_user'),e=>e.code==='IDENTITY_CHANGED');
+ await withStorage(async()=>{globalThis.fetch=async()=>json({error:{code:'FORBIDDEN'}},403);await assert.rejects(()=>readWithdrawalHistory(userId),e=>e.status===403);});
+});
+test('ALL cannot have combined cursor or state filter and JOINPAY requests only its own page',()=>withStorage(async()=>{
+ assert.throws(()=>withdrawalHistoryQuery({source:'ALL',cursor:'x'}));assert.throws(()=>withdrawalHistoryQuery({source:'ALL',state:'SUCCEEDED'}));assert.throws(()=>withdrawalHistoryQuery({source:'JOINPAY',state:'RECONCILIATION_REQUIRED'}));
+ const raw=historyRead();raw.source='JOINPAY';raw.sections.historical={availability:'NOT_REQUESTED',reasonCodes:[],data:null};raw.sections.controlled={availability:'NOT_REQUESTED',reasonCodes:[],data:null};let requested;
+ globalThis.fetch=async url=>{requested=String(url);return json(raw);};await readWithdrawalHistory(userId,{source:'JOINPAY',cursor:'native_cursor',limit:10});assert.match(requested,/source=JOINPAY/);assert.match(requested,/cursor=native_cursor/);assert(!requested.includes('state=ALL'));
+ globalThis.fetch=async()=>json({error:{code:'CONFLICT'}},409);await assert.rejects(()=>readWithdrawalHistory(userId,{source:'JOINPAY',cursor:'stale'}),e=>e.status===409);
+}));
+test('Native history detail uses data.item and original-key recovery is current local intent, not ACK or arrival',()=>{
+ const row=joinpayRow();row.originalDestination.cardMask=null;const detail=parseWithdrawalHistoryDetail({contractVersion:'personal-withdrawals.read.v2',subjectId:userId,source:'JOINPAY',availability:'AVAILABLE',reasonCodes:[],data:{scope:'LOCAL_NATIVE_INTENTS_ONLY',item:row}},userId,row.id);
+ assert.equal(detail.data.item.originalDestination.cardMask,null);
+ const found=parseWithdrawalHistoryRecovery({contractVersion:'personal-withdrawals.read.v2',subjectId:userId,source:'JOINPAY',knowledge:'KNOWN',item:{...row,state:'SUCCEEDED'},mayResubmit:false,receiptMeaning:'CURRENT_LOCAL_INTENT_ORIGINAL_KEY_NOT_ORIGINAL_ACK'},userId);
+ assert.equal(found.item.bankArrival,'UNKNOWN');assert.equal(found.item.evidenceLevel,'LOCAL_RECORDS_NOT_REVALIDATED');assert.equal(found.mayResubmit,false);
+ assert.throws(()=>parseWithdrawalHistoryRecovery({...found,receiptMeaning:'ORIGINAL_ACK'},userId));
+});
+
+const sources = ['HISTORICAL', 'LOCAL_CONTROLLED', 'JOINPAY'];
+const snapshot = { available: true, coverageKnown: true, snapshot: 'snapshot', asOf: '2026-10-30T00:00:00.000Z' };
+
+test('merges independent source cursors across pages without losing or repeating records', async () => {
+  const all = Array.from({ length: 75 }, (_, n) => ({ id: `record-${n}`, source: sources[n % 3], at: new Date(Date.UTC(2026, 9, 30) - n * 1000).toISOString() }));
+  const calls = [];
+  const read = async (source, cursor) => {
+    const rows = all.filter(row => row.source === source), offset = Number(cursor ?? 0), items = rows.slice(offset, offset + 4);
+    calls.push({ source, cursor });
+    return { ...snapshot, items, cursor: offset + items.length < rows.length ? String(offset + items.length) : null };
+  };
+  let state = emptyWithdrawalTimeline();
+  while (hasMoreWithdrawalTimeline(state)) state = await advanceWithdrawalTimeline(state, read);
+  assert.deepEqual(state.items.map(item => item.id), all.map(item => item.id));
+  assert.equal(new Set(state.items.map(item => item.id)).size, 75);
+  assert(sources.every(source => calls.filter(call => call.source === source).length > 1));
+  assert.equal(state.partial, false);
+});
+
+test('unavailable source is partial and cannot be represented as a complete empty history', async () => {
+  const state = await advanceWithdrawalTimeline(emptyWithdrawalTimeline(), async source => source === 'JOINPAY'
+    ? { ...snapshot, available: false, coverageKnown: false, items: [], cursor: null }
+    : { ...snapshot, items: source === 'HISTORICAL' ? [{ source, id: 'history:1', at: '2026-10-29T00:00:00Z' }] : [], cursor: null });
+  assert.equal(state.partial, true);
+  assert.deepEqual(state.items.map(item => item.id), ['history:1']);
+  assert.equal(hasMoreWithdrawalTimeline(state), false);
+  const revoked = removeWithdrawalTimelineSource(state, 'HISTORICAL');
+  assert.deepEqual(revoked.items, []);
+  assert.equal(revoked.partial, true);
+});
+
+test('a source snapshot change on continuation rejects instead of merging inconsistent pages', async () => {
+  const read = async (source, cursor) => ({ ...snapshot, snapshot: cursor ? 'changed' : snapshot.snapshot,
+    items: source === 'HISTORICAL' ? [{ source, id: cursor ? 'history:2' : 'history:1', at: cursor ? '2026-10-28T00:00:00Z' : '2026-10-29T00:00:00Z' }] : [],
+    cursor: source === 'HISTORICAL' && !cursor ? 'next' : null });
+  const first = await advanceWithdrawalTimeline(emptyWithdrawalTimeline(), read, 1);
+  await assert.rejects(() => advanceWithdrawalTimeline(first, read, 1), /WITHDRAWAL_SNAPSHOT_CHANGED/);
+  assert.deepEqual(first.items.map(item => item.id), ['history:1']);
+});
+
+test('orders sub-millisecond records by exact time, then breaks exact ties by ID', async () => {
+  assert.equal(withdrawalTimeMicros('2026-10-30T08:00:00.123456+08:00') - withdrawalTimeMicros('2026-10-30T00:00:00.123000Z'), 456n);
+  assert.throws(() => withdrawalTimeMicros('invalid'), /WITHDRAWAL_TIME_INVALID/);
+  assert.throws(() => withdrawalTimeMicros('2026-02-30T00:00:00.000Z'), /WITHDRAWAL_TIME_INVALID/);
+  const state = await advanceWithdrawalTimeline(emptyWithdrawalTimeline(), async source => ({ ...snapshot,
+    items: source === 'HISTORICAL' ? [{ source, id: 'history:1', at: '2026-10-30T00:00:00.123456Z' }]
+      : source === 'LOCAL_CONTROLLED' ? [{ source, id: 'controlled:1', at: '2026-10-30T08:00:00.123789+08:00' }]
+      : [{ source, id: 'joinpay:1', at: '2026-10-30T00:00:00.123456Z' }], cursor: null }));
+  assert.deepEqual(state.items.map(item => item.id), ['controlled:1', 'joinpay:1', 'history:1']);
+  assert.equal(state.temporalTies, true);
+});
+
+test('bounded scan returns a continuation when many short source pages are needed', async () => {
+  let calls = 0;
+  const read = async (source, cursor) => {
+    calls++;
+    if (source !== 'HISTORICAL') return { ...snapshot, items: [], cursor: null };
+    const n = Number(cursor ?? 0);
+    return { ...snapshot, items: [{ source, id: `history:${n}`, at: new Date(Date.UTC(2026, 9, 30) - n * 1000).toISOString() }], cursor: n < 19 ? String(n + 1) : null };
+  };
+  let state = await advanceWithdrawalTimeline(emptyWithdrawalTimeline(), read);
+  assert.equal(calls, 12);
+  assert.equal(state.scanIncomplete, true);
+  assert.equal(hasMoreWithdrawalTimeline(state), true);
+  state = await advanceWithdrawalTimeline(state, read);
+  assert.equal(state.items.length, 20);
+  assert.equal(hasMoreWithdrawalTimeline(state), false);
+});
+

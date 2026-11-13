@@ -61,8 +61,6 @@ test("v2 creation bounds the original credential body without pre-validating suc
 import { createControlledConfirmationFundingReader, issuePersonalConfirmation, rebuildPersonalConfirmation, verifyPersonalConfirmation } from "../src/order/personal-confirmation";
 import { computeContentHash, type ContentPayloadInput } from "../src/supply/content-hash";
 import { computeQuote } from "../src/supply/pricing";
-import { quoteToGrowthOfferPlan } from "../src/auth/membership-growth";
-import { compatRule } from "./pricing-compat-fixture";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
 import { evaluatePublication } from "../src/supply/publishing";
 import { withIdempotency } from "../src/supply/supply-util";
@@ -108,48 +106,6 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
 
-test("scheduled spread remains closed while an old listing without a plan retains v4 pricing",async()=>{
-  const f=personalRefsFixture(true,"SPREAD"),oldRule=compatRule("47");
-  const input={priceVersionId:"price-1",mode:"SPREAD" as const,roundingPolicy:"HALF_UP_CENT_V1",customerTier:"STANDARD" as const,haffRule:oldRule,
-    lines:[{itemId:"haff",quantity:"60000000",unit:"HAFF_BASE" as const,pricingKind:"HAFF_RATIO" as const,customerTier:"STANDARD" as const},
-      {itemId:"item",quantity:"5",unit:"PIECE" as const,pricingKind:"FIXED_UNIT" as const,unitQuantity:"1",buyerUnitAmount:"2",ownerUnitAmount:"1",customerTier:"STANDARD" as const}],
-    conditions:{safeBoxCode:"box-a",vitLevel:6,bearLevel:6,termOptionCode:"daily-10m",rentalPricing:{rentalMode:"custom" as const,ownerRatioB:"45"}},
-    termOption:{code:"daily-10m",dailyConsumption:"10000000",durationRounding:"CEIL_DAY" as const},deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}};
-  const old=computeQuote(input);assert(old.quotable);old.quote.ruleReleaseId=f.input.releaseId;
-  f.payload.schemaVersion=2;f.payload.declaration.attributes={safe_box_code:"box-a",vit_level:6,bear_level:6,rentalPricing:input.conditions.rentalPricing,
-    full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}};
-  f.payload.declaration.inventory=input.lines.map(line=>({itemId:line.itemId,quantity:line.quantity}));
-  f.payload.declaration.termOptionCode="daily-10m";f.payload.declaration.pricingOptionCode="";
-  f.payload.quoteValues=old.quote as unknown as Record<string,unknown>;f.rehash();
-  const frozen=JSON.stringify(f.payload);
-  const original=(f.client as any).query.bind(f.client),client={query:async(sql:string,values?:unknown[])=>{
-    if(sql.includes('FROM zzsh_supply.pricing_policy_schedule')) assert.fail("a frozen listing must not resolve a current policy");
-    if(sql.includes('SELECT current_release_id,enabled FROM zzsh_supply.game'))
-      return {rows:[{enabled:true,current_release_id:"release-next"}],rowCount:1};
-    if(sql.includes('AS at'))return{rows:[{at:'2026-10-25T00:00:00.000000Z'}],rowCount:1};
-    if(sql.includes('SELECT p.id,p.status'))return{rows:[{id:'price-1',status:'SEALED',mode:'SPREAD',haff_rule:oldRule,commission_rate:null,rounding_policy:'HALF_UP_CENT_V1',term_version_id:'term-1'}],rowCount:1};
-    if(sql.includes('/* current-trade-resources */'))return{rows:[{id:'haff',code:'haff_base',unit:'HAFF_BASE',enabled:true},{id:'item',code:'fixture',unit:'PIECE',enabled:true}],rowCount:2};
-    if(sql.includes('FROM zzsh_supply.price_line'))return{rows:[{item_id:'haff',pricing_kind:'HAFF_RATIO',unit_quantity:null,buyer_unit_amount:null,owner_unit_amount:null,item_unit:'HAFF_BASE',item_enabled:true},
-      {item_id:'item',pricing_kind:'FIXED_UNIT',unit_quantity:'1',buyer_unit_amount:'2',owner_unit_amount:'1',item_unit:'PIECE',item_enabled:true}],rowCount:2};
-    if(sql.includes('FROM zzsh_supply.term_option'))return{rows:[input.termOption],rowCount:1};
-    return original(sql,values);
-  }} as never;
-  const options={...f.options,membershipGrowthReader:async(_client:unknown,request:any)=>{
-    const binding={userId:request.userId,ownerUserId:request.ownerUserId,accountId:request.accountId,listingVersionId:request.listingVersionId,ruleReleaseId:request.ruleReleaseId,quantityDigest:request.quantityDigest};
-    return {knowledge:"KNOWN" as const,policyVersion:"1",effectiveTier:"STANDARD" as const,policyTier:"STANDARD" as const,asOfUtc:request.asOfUtc,entitlementIds:[],
-      candidates:[{quote:request.baseQuote,payableRatio:"1",plan:quoteToGrowthOfferPlan(request.baseQuote,{source:"GROWTH",benefitVersion:"1",binding})}]};
-  }};
-  const legacy=await rebuildPersonalConfirmation(client,f.context,f.input,options);
-  assert.equal(legacy.snapshot.schema,"personal-quote-v4");assert.equal(legacy.snapshot.quote.priceVersionId,"price-1");
-  assert.equal(JSON.stringify(f.payload),frozen);
-  const issued=await issuePersonalConfirmation(client,f.context,f.input,options);
-  await verifyPersonalConfirmation(client,f.context,f.input,issued.confirmationToken,options);
-  const listingQuote=structuredClone(old.quote);listingQuote.priceVersionId="listing-price";
-  f.payload.quoteValues=listingQuote as unknown as Record<string,unknown>;
-  f.payload.pricingPolicy={schema:"pricing-policy-v1",pricingModel:"SPREAD",scheduleId:"listing-schedule",generation:"1",effectiveAt:"2026-01-01T00:00:00Z",priceVersionId:"listing-price"};
-  f.rehash();await assert.rejects(rebuildPersonalConfirmation(client,f.context,f.input,options),(error:{code?:string})=>error.code==="CONFIRMATION_DEPENDENCY_UNAVAILABLE");
-});
-
 test("an agreed reservation freezes the current early settlement disclosure and refuses a missing version", async () => {
   const f = personalRefsFixture();
   const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
@@ -157,7 +113,6 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   const disclosure = { versionId: "legal_early_v2", body, digest: legalDigest(body) };
   const row = { id: disclosure.versionId, body, digest: disclosure.digest, bodyFormat: "text", status: "SEALED" };
   let current: typeof row | null = row;
-  let insertError = Error("OFFLINE_INSERT_CAPTURED");
   let inserted: Record<string, unknown> | undefined;
   const transport = f.client as unknown as { query: (sql: string, values?: unknown[]) => Promise<unknown> };
   const query = transport.query.bind(transport);
@@ -168,7 +123,7 @@ test("an agreed reservation freezes the current early settlement disclosure and 
     }
     if (sql.startsWith("INSERT INTO zzsh_order.rental_order")) {
       inserted = JSON.parse(values![12] as string);
-      throw insertError;
+      throw Error("OFFLINE_INSERT_CAPTURED");
     }
     return query(sql, values);
   };
@@ -178,11 +133,6 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   assert.equal(inserted?.agreementAcceptanceSchema, 1);
   assert.deepEqual(inserted?.agreementAcceptance, issued.agreementAcceptance);
   assert.deepEqual(inserted?.earlySettlementDisclosure, disclosure);
-
-  for (const message of ["fixed fee published policy differs", "scheduled spread published policy differs", "fixed fee effective policy changed", "scheduled spread effective policy changed"]) {
-    insertError = Object.assign(Error(message), { code: "40001" });
-    await assert.rejects(create, { status: 409, code: "CONFIRMATION_CHANGED" });
-  }
 
   current = null;
   inserted = undefined;

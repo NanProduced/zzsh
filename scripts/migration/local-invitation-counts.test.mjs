@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyInvitationDomains } from "./local-target-finance.mjs";
-import { assessInvitationChildSet, assertInvitationCountPackets, compareSystemInvitationPacketEvidence, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
+import { assessInvitationChildSet, assertInvitationCountPackets, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 const hash=value=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function fixture(mode="SELECTED_BUSINESS_SCOPE") {
@@ -70,31 +70,12 @@ test("child-set comparison preserves UNKNOWN and rejects missing or changed rela
   assert.deepEqual(assessInvitationChildSet({children:child(1,0)},{...actual,INVITER:[]},hash),{knowledge:"KNOWN",matches:false});
 });
 
-test('system invitation readback binds original import and count receipts to system audits',()=>{
-  const packet=fixture().packets[0],plan={key:packet.key,bodyDigest:packet.bodyDigest,subjects:[{userId:'user_1',sourceDigest:'a'.repeat(64)}],relations:[]};
-  const actor={id:'legacy-invitation-migration:'+'b'.repeat(64),sourceDatasetSha256:'c'.repeat(64),requestId:'system-request'};
-  const imported={bodyDigest:plan.bodyDigest,sourceDigest:hash(packet.input.source),policyVersionId:null,participants:1,codes:1,relations:0,financialEffects:false,subjectProofs:[{userId:'user_1',sourceDigest:'a'.repeat(64)}]};
-  const count={bodyDigest:plan.bodyDigest,sourceDigest:hash(packet.input.source),subjects:1,known:1,unknown:0,financialEffects:false};
-  const make=(operation,action,body,details)=>({receipt:{scope_key:JSON.stringify(['system',actor.id,operation,null]),key:plan.key,request_fingerprint:hash([operation,null,{bodyDigest:plan.bodyDigest}]),response_status:200,response_body:body,publish_required:false},
-    audit:{object_id:plan.bodyDigest,action,object_type:'legacy_invitation_batch',outcome:'SUCCESS',actor_type:'system',actor_id:actor.id,session_id:null,request_id:actor.requestId,source_manifest:actor.sourceDatasetSha256,details}});
-  const one=make('distribution.legacy-facts.v2.import','distribution.legacy_facts.imported',imported,{bodyDigest:plan.bodyDigest,source:packet.input.source,facts:packet.input.subjects,financialEffects:false});
-  const two=make('distribution.legacy-facts.v2.counts','distribution.legacy_facts.counts_closed',count,count);
-  const read=(receipts,audits)=>compareSystemInvitationPacketEvidence({packet,plan,actor,receipts,audits,countBody:count,canonical:JSON.stringify,sourceHash:hash});
-  assert.deepEqual(read([one.receipt,two.receipt],[one.audit,two.audit]),{importMatched:true,countMatched:true});
-  assert.equal(read([one.receipt],[one.audit,two.audit]).countMatched,false);
-  assert.equal(read([one.receipt,two.receipt],[{...one.audit,actor_type:'admin'},two.audit]).importMatched,false);
-  assert.equal(read([one.receipt,two.receipt],[one.audit,one.audit,two.audit]).importMatched,false);
-  assert.equal(read([{...one.receipt,request_fingerprint:'0'.repeat(64)},two.receipt],[one.audit,two.audit]).importMatched,false);
-});
-
 function harness({mode="SELECTED_BUSINESS_SCOPE",importQuarantine=false,failCount=false}={}) {
   const {manifest,packets}=fixture(mode),events=[],state={resource:{owner_oid:"10"},phases:{}};
   const backend={async bindReviewedLegacyInvitationFacts(_c,_a,review){events.push(`bind:${review.phase}`);return review;},
     async importReviewedLegacyInvitationFacts(_c,_a,input,digest,scope){assert.equal(scope.phase,"IMPORT");assert.equal(digest,hash(input));events.push(`import:${input.subjects[0].legacyId}`);return {replayed:false};},
     async closeReviewedLegacyInvitationCounts(_c,_a,input,digest,scope){assert.equal(scope.phase,"COUNTS");assert.equal(digest,hash(input));events.push(`count:${input.subjects[0].legacyId}`);if(failCount)throw Object.assign(Error("source set differs"),{status:409});return {replayed:false};}};
   const ctx={client:{},actor:{userId:"operator"},manifest,state,invitationPackets:packets,mod:()=>backend,
-    systemInvitation:{async import(packet){events.push(`system-import:${packet.input.subjects[0].legacyId}`);return {replayed:false};},
-      async closeCounts(packet){events.push(`system-count:${packet.input.subjects[0].legacyId}`);return {replayed:false};}},
     async runItems(domain,rows,fn){let count=0;for await(const row of rows){await fn(row);count++;}state.phases[domain]={complete:true,nextIndex:count,quarantined:domain==="invitationFacts"&&importQuarantine?1:0};}};
   return {ctx,events,review:{ref:"test",attempt:"once",actor:{userId:"operator",sessionId:"session"},notBefore:"start",expiresAt:"end"},resource:{port:55433}};
 }
@@ -107,23 +88,6 @@ test("count closure begins only after all original invitation batches imported",
   await applyInvitationDomains(streamed.ctx,streamed.review,streamed.resource,JSON.stringify);assert.equal(opened,2);assert.deepEqual(streamed.events,h.events);
   const partial=harness({mode:"SCENARIO_SELECTION"});await applyInvitationDomains(partial.ctx,partial.review,partial.resource,JSON.stringify);
   assert.equal(partial.ctx.state.phases.invitationCounts,undefined);
-});
-
-test("next-profile financial source is verified before any imported record is written",async t=>{
-  const dir=mkdtempSync(join(tmpdir(),"zzsh-finance-source-"));t.after(()=>rmSync(dir,{recursive:true}));
-  const file=join(dir,"invitation-facts.jsonl"),h=harness(),packets=h.ctx.invitationPackets;
-  const bytes=Buffer.from(packets.map(row=>JSON.stringify(row)).join("\n")+"\n");
-  writeFileSync(file,bytes);delete h.ctx.invitationPackets;h.ctx.isNextMigration=true;
-  h.ctx.domainFile=()=>file;h.ctx.readRows=()=>{throw Error("UNBOUND_READ")};
-  h.ctx.manifest.files["invitation-facts"]={rows:packets.length,sha256:createHash("sha256").update(bytes).digest("hex")};
-  await applyInvitationDomains(h.ctx,h.review,h.resource,JSON.stringify);assert.deepEqual(h.events,['system-import:1','system-import:2','system-count:1','system-count:2']);
-  const changed=harness();delete changed.ctx.invitationPackets;changed.ctx.isNextMigration=true;
-  changed.ctx.domainFile=()=>file;changed.ctx.readRows=h.ctx.readRows;changed.ctx.manifest.files["invitation-facts"]=h.ctx.manifest.files["invitation-facts"];
-  writeFileSync(file,Buffer.concat([bytes,Buffer.from("\n")]));
-  await assert.rejects(applyInvitationDomains(changed.ctx,changed.review,changed.resource,JSON.stringify),/SOURCE_STREAM_CHANGED/);
-  assert.deepEqual(changed.events,[]);
-  const missing=harness();missing.ctx.isNextMigration=true;delete missing.ctx.systemInvitation;
-  await assert.rejects(applyInvitationDomains(missing.ctx,missing.review,missing.resource,JSON.stringify),/NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED/);assert.deepEqual(missing.events,[]);
 });
 
 test("failed or incomplete import and count conflicts stop without closing later batches",async()=>{

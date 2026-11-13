@@ -658,14 +658,14 @@ test("preview shows named server amounts and editing invalidates the accepted ha
   assert.equal(find(host, "生成结算方案"), undefined, "editing invalidates the preview hash");
 });
 
-test("固定费人工调整按毛额提交并展示手续费、包赔费与净额",async t=>{
+test("人工调整按扣费前收入提交并显示服务端计算的包赔费与净额",async t=>{
  const requests=[];
  globalThis.fetch=async(input,init={})=>{
   const url=String(input);
   if(url.endsWith("/orders/order-A/settlement"))return response(confirmedOpening);
   if(url.endsWith("/orders/order-A/settlement-preview")){
    requests.push(JSON.parse(init.body));
-   return response({accepted:false,early:false,amounts:{},versionHash:"hash_manual",proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",proposedPlatformServiceFee:"12.00",proposedMembershipDiscount:"6.00",proposedOwnerNet:"98.40",proposedRenterRefund:"470.00"});
+   return response({accepted:false,early:false,amounts:{},versionHash:"hash_manual",proposedOwnerGross:"120.00",proposedFullPayoutFee:"9.60",proposedOwnerNet:"110.40",proposedRenterRefund:"470.00"});
   }
   throw Error(`unexpected request ${url}`);
  };
@@ -676,7 +676,7 @@ test("固定费人工调整按毛额提交并展示手续费、包赔费与净�
  await set("元，如 123.45","120");await set("元，如 12.00","470");await set("不少于3字","双方核对调整");
  await click(host,"生成调整预览");
  assert.equal(requests[0].proposedOwnerGross,"120");assert.equal(requests[0].proposedOwnerNet,undefined);
- assert.match(document.body.textContent,/120\.00 元/);assert.match(document.body.textContent,/9\.60 元/);assert.match(document.body.textContent,/12\.00 元/);assert.match(document.body.textContent,/98\.40 元/);
+ assert.match(document.body.textContent,/120\.00 元/);assert.match(document.body.textContent,/9\.60 元/);assert.match(document.body.textContent,/110\.40 元/);
 });
 
 test("staff preview keeps the customer's actual consumption and includes a zero-opening resource", async (t) => {

@@ -1,8 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  collapseImSystemNotices,
   createLocalFakeNimWebClientFactory,
   createNimWebClientFactory,
+  decodeImSystemNotice,
+  imSystemNoticeLabel,
   mergeImMessages,
   NimImageSendError,
   NimLoginTerminalError,
@@ -1249,3 +1252,55 @@ test("real NIM audio/video/file messages map into the safe media envelope and un
   await handle.dispose();
   assert.equal(listeners.size, 0);
 });
+
+test("support notices speak the consultation language and hide team metadata churn", () => {
+  assert.equal(imSystemNoticeLabel("TEAM_CREATED", "SERVICE"), "咨询已开始");
+  assert.equal(imSystemNoticeLabel("TEAM_CREATED", "COMPLAINT"), "投诉已提交");
+  assert.equal(imSystemNoticeLabel("MEMBER_JOINED", "SERVICE"), "客服已接入");
+  assert.equal(imSystemNoticeLabel("MEMBER_LEFT", "COMPLAINT"), "本轮接待已结束");
+  assert.equal(imSystemNoticeLabel("TEAM_DISMISSED", "SERVICE"), "咨询已结束");
+  assert.equal(imSystemNoticeLabel("UNKNOWN", "COMPLAINT"), null, "unmapped vendor events stay hidden instead of showing a vague line");
+  assert.equal(imSystemNoticeLabel("TEAM_UPDATED", "SERVICE"), null, "technical team metadata updates stay hidden in support");
+  assert.equal(imSystemNoticeLabel("TEAM_UPDATED", "ORDER"), "会话信息已更新", "order groups keep the group wording");
+  assert.equal(imSystemNoticeLabel("MEMBER_JOINED", "ORDER"), "成员已加入会话");
+});
+
+test("decodes NIM notification type before using the legacy ope hint", () => {
+  const invite = decodeImSystemNotice({ messageType: 5, attachment: { type: 0 } });
+  assert.deepEqual(invite, { kind: "MEMBER_JOINED", text: "成员已加入会话" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { ope: 0, tname: "订单群", accids: ["u-1"] } }), { kind: "TEAM_CREATED", text: "群聊已创建" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { ope: 0, type: 0 } }), { kind: "MEMBER_JOINED", text: "成员已加入会话" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { type: 1 } }), { kind: "MEMBER_LEFT", text: "成员已离开会话" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { type: 3 } }), { kind: "TEAM_UPDATED", text: "会话信息已更新" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { type: 4 } }), { kind: "TEAM_DISMISSED", text: "会话已解散" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { type: 405 } }), { kind: "TEAM_DISMISSED", text: "会话已解散" });
+  assert.deepEqual(decodeImSystemNotice({ messageType: 5, attachment: { type: 99 } }), { kind: "UNKNOWN", text: "会话信息有变化" });
+  assert.equal(decodeImSystemNotice({ messageType: 0, attachment: { type: 0 } }), null);
+});
+
+test("collapses Bot-covered and repeated system notices without inventing business facts", () => {
+  const system = (id, createTime, kind, text) => ({ id, createTime, notice: { kind, text } });
+  const regular = (id, createTime) => ({ id, createTime, notice: null });
+  const options = { noticeOf: (message) => message.notice };
+  const messages = [
+    system("created", 0, "TEAM_CREATED", "群聊已创建"),
+    system("joined-1", 1_000, "MEMBER_JOINED", "成员已加入会话"),
+    system("joined-2", 2_000, "MEMBER_JOINED", "成员已加入会话"),
+    regular("hello", 3_000),
+    system("updated-1", 4_000, "TEAM_UPDATED", "会话信息已更新"),
+    system("updated-2", 5_000, "TEAM_UPDATED", "会话信息已更新"),
+    system("updated-3", 6 * 60_000, "TEAM_UPDATED", "会话信息已更新"),
+  ];
+
+  assert.deepEqual(
+    collapseImSystemNotices(messages, { ...options, hasBotMessage: false }).map((message) => message.id),
+    ["created", "hello", "updated-1", "updated-3"],
+    "one fallback for team creation/member join, and same-kind bursts merge",
+  );
+  assert.deepEqual(
+    collapseImSystemNotices(messages, { ...options, hasBotMessage: true }).map((message) => message.id),
+    ["hello", "updated-1", "updated-3"],
+    "Bot welcome/stage cards hide team-created and member-joined notices only",
+  );
+});
+

@@ -5,9 +5,9 @@ import {canonicalize} from '../src/supply/content-hash';
 import {sha256Hex,conflict} from '../src/supply/supply-util';
 import {legacyOwnerUserId} from '../src/supply/legacy-user-migration';
 import {legacyAccountId} from '../src/legacy-load/legacy-account-seam';
-import {systemOrderMigrationId} from '../src/legacy-load/system-user-migration';
 import {assembleLegacyContinuationBatch,type LegacyInflightCurrentFacts,type LegacyInflightIdentityFact,type LegacyInflightSourceReceipt,type LegacyInflightSourcePacket,type LegacyInflightCurrentPacket,type LegacyInflightImportCommand,type LegacyInflightRegisterCommand} from '../src/order/legacy-continuation-source-preparation';
 import {initialLegacyFacts,sealLegacyFacts,projectLegacyContinuation,type LegacyContinuationActor,type LegacyEvidenceRow,type LegacyDutyRow} from '../src/order/legacy-continuation-model';
+import {planLegacyContinuation} from '../src/order/legacy-continuation-calc';
 import {importLegacyContinuationEvidence} from '../src/order/legacy-continuation-evidence';
 import {registerLegacyInflight,type LegacyInflightRegisterInput} from '../src/order/legacy-liability-intake';
 import {legacySource} from './legacy-continuation-fixture';
@@ -84,12 +84,11 @@ test('source cutoff retains microseconds and insuranceDAY quantity; source input
   const f=fixture();(f.parameters[0]!.quantities as Raw).card='4';reseal(f);const a=importCommand(f);assert.equal(a.body.sourceAsOf,'2026-09-13T13:31:22.123456Z');assert.equal(a.body.source.quantities.card,'4');assert.equal(a.body.source.policy.advanceOrderSetRatio,f.policy.advanceOrderSetRatio);
   f.pending.reverse();f.members.reverse();f.parameters.reverse();reseal(f);const b=importCommand(f);assert.deepEqual(a,b);assert.equal(a.body.sourceAsOf.endsWith('123456Z'),true);
 });
-test('prepared source reads 3/8/9; old pending proposals require a new confirmation',()=>{
+test('prepared source reads3/8/9; support can confirm the existing proposal under its own identity',()=>{
   const f=fixture(),b=result(f);for(let i=0;i<3;i++){const command=b.rows[i]!.command as LegacyInflightImportCommand,body=command.body,binding=f.facts.parents[i]!.binding,facts=initialLegacyFacts(body.source,body.commissionEvidence),sealed=sealLegacyFacts(facts),row:LegacyEvidenceRow={id:'fixture_evidence_'+i,orderId:binding.id,evidenceVersion:'1',sourceKind:'SOURCE_IMPORT',sourceDigest:binding.sourceDigest,factsCanonical:sealed.canonical,factsDigest:sealed.digest,facts};
-    const role=i===1?'owner':'renter',userId=role==='owner'?binding.ownerUserId:binding.renterUserId,view=projectLegacyContinuation(binding,{realm:'user',userId,sessionId:'fixture',requestId:'fixture'},row,null,[]);assert.equal(view.availability,'KNOWN');assert.equal(view.revision,null);
-    if(!i)assert(view.capabilities.includes('propose'));
-    else {assert(!view.capabilities.includes('confirm'));assert(view.reasons.includes('LEGACY_PROPOSAL_RECONFIRM_REQUIRED'));
-      const support=projectLegacyContinuation(binding,{realm:'admin',userId:'staff',sessionId:'session',requestId:'request'},row,null,[],true,'NONE',false,true);assert(!support.capabilities.includes('confirm'));assert(support.reasons.includes('LEGACY_PROPOSAL_RECONFIRM_REQUIRED'));
+    const role=i===1?'owner':'renter',userId=role==='owner'?binding.ownerUserId:binding.renterUserId,view=projectLegacyContinuation(binding,{realm:'user',userId,sessionId:'fixture',requestId:'fixture'},row,null,[]);assert.equal(view.availability,'KNOWN');assert.equal(view.revision,null);assert(view.capabilities.includes(i===0?'propose':'confirm'));
+    if(i){const plan=planLegacyContinuation(facts.evidence,{kind:'confirm',caller:{role,legacyUserId:role==='owner'?'22':'11'}});assert(plan.ok);assert.equal(plan.nextStatus,'4');const admin=planLegacyContinuation(facts.evidence,{kind:'confirm',caller:{role:'admin',legacyUserId:''}});assert(admin.ok);assert.equal(admin.nextStatus,'4');assert.notEqual(admin.fingerprint,plan.fingerprint);
+      const support=projectLegacyContinuation(binding,{realm:'admin',userId:'staff',sessionId:'session',requestId:'request'},row,null,[],true,'NONE',false,true);assert(support.capabilities.includes('confirm'));assert(support.confirmationAmounts?.ownerNet);assert(support.confirmationAmounts?.refundNet);
       const noSettlement=projectLegacyContinuation(binding,{realm:'admin',userId:'staff',sessionId:'session',requestId:'request'},row,null,[],true,'NONE');assert(!noSettlement.capabilities.includes('confirm'));assert(noSettlement.capabilities.includes('reject'));
       const unknown=projectLegacyContinuation(binding,{realm:'admin',userId:'staff',sessionId:'session',requestId:'request'},row,null,[],true,'UNKNOWN');assert(!unknown.capabilities.includes('confirm'));}}
 });
@@ -111,16 +110,6 @@ function importClient(f:Fixture,command:LegacyInflightImportCommand){
     if(/INSERT INTO[^\n]*audit_event/.test(sql))audits++;return{rows,rowCount:rows.length};}} as unknown as PoolClient;
   return{client,calls,duties,records,get evidence(){return evidence;},get audits(){return audits;},setBeneficiary(present:boolean){beneficiaryPresent=present;}};
 }
-test('system continuation cannot import without its bound migration batch',async()=>{
-  const f=fixture(),command=importCommand(f),p=importClient(f,command),original=p.client.query.bind(p.client);
-  p.client.query=(async(sql:string,values?:unknown[])=>sql.includes('SELECT o.binding_digest AS')
-    ? {rows:[{bindingDigest:'e'.repeat(64)}],rowCount:1} : original(sql,values)) as typeof p.client.query;
-  const target={systemIdentifier:'1',databaseOid:'2',marker:'synthetic:test',nonce:'a'.repeat(24),roleOid:'3'},sourceDatasetSha256='b'.repeat(64);
-  const actor={kind:'SYSTEM_ORDER_MIGRATION' as const,id:systemOrderMigrationId(sourceDatasetSha256,target),sourceDatasetSha256,target,
-    requestId:'synthetic',assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
-  await assert.rejects(importLegacyContinuationEvidence(p.client,actor,command.body),/batch is unavailable/);
-  assert(!p.calls.some(call=>call.sql.includes('INSERT INTO zzsh_order.legacy_continuation_evidence')));
-});
 test('real SOURCE_IMPORT matches prepared key/fingerprint, writes no head, empty parents still import; replay and body409 preserve one audit',async t=>{
   const revoke=allowImport(t);for(const index of [0,1]){const f=fixture(),command=importCommand(f,index),p=importClient(f,command),first=await importLegacyContinuationEvidence(p.client,who,command.body);assert.equal(first.status,200);assert(p.evidence);assert.equal(p.evidence.sourceKind,'SOURCE_IMPORT');assert.equal(p.duties.length,index===0?1:0);assert(p.duties.every(d=>d.maturityAt===null));assert(!p.calls.some(q=>q.sql.includes('INSERT INTO zzsh_order.legacy_continuation_version')));
     const receipt=p.records.get(JSON.stringify([command.scopeKey,command.idempotencyKey]));assert(receipt);assert.equal(receipt.requestFingerprint,command.fingerprint);assert.equal(p.audits,1);

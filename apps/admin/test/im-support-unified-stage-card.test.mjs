@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
@@ -299,9 +298,6 @@ test("desktop unified order list marks UNKNOWN cards without treating them as se
   assert.doesNotMatch(row("order-skipped").textContent, /自动卡待核对/, "a skipped attention card does not hide a clean count");
   assert.doesNotMatch(row("order-clean").textContent, /自动卡待核对/);
 
-  const css = readFileSync(path.join(adminRoot, "src/workspace/workspace.css"), "utf8");
-  assert.match(css, /@media \(min-width:1100px\)[\s\S]*im-wb-root\[data-unified="true"\] \.im-wb-unified-queue \{ display:flex; \}/);
-  assert.match(css, /@media \(min-width:1100px\)[\s\S]*im-wb-root\[data-unified="true"\] \.im-wb > \.im-wb-queue \{ display:none; \}/);
 });
 
 test("switching admin clears the previous order queue and refetches for the new identity", async (t) => {

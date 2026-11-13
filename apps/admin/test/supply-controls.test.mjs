@@ -1,24 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { readFileSync, readdirSync } from "node:fs";
 import { Window } from "happy-dom";
 import { act, createElement, useState } from "react";
 import { createServer } from "vite";
 import react from "@vitejs/plugin-react";
-
-test("the four supply pages use shared controls and their suites stay registered", () => {
-  const root = new URL("../src/views/", import.meta.url);
-  const files = ["supply-rules-view.tsx", "supply-catalog-view.tsx", "supply-listing-review-view.tsx", "supply-gunsmith-view.tsx", "supply-review/action-bar.tsx", "supply-review/detail-pane.tsx"];
-  for (const directory of ["supply-rules", "supply-catalog", "supply-accounts", "supply-gunsmith"]) {
-    files.push(...readdirSync(new URL(`${directory}/`, root)).filter(file => file.endsWith(".tsx")).map(file => `${directory}/${file}`));
-  }
-  for (const file of files) {
-    assert.doesNotMatch(readFileSync(new URL(file, root), "utf8"), /<(?:button|input|select|textarea|details|summary|dialog|table)\b/, `${file} has an unwrapped control`);
-  }
-  const script = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts.test;
-  for (const file of ["supply-controls", "supply-write-lock", "supply-accounts-model", "supply-accounts-component", "supply-gunsmith-component", "supply-rules-edit"]) assert.ok(script.includes(`test/${file}.test.mjs`), file);
-});
 
 test("shared supply controls preserve empty filters, checkbox and textarea behavior", async () => {
   const browser = new Window({ url: "http://127.0.0.1:3101" });

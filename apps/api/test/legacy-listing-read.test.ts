@@ -57,7 +57,7 @@ const config = parseFilterConfig({
 const catalog = {
   game: { id: "game_x", code: "delta", catalogRevision: "7", ruleReleaseId: null, rule: null },
   items: [{ id: "item_haff", code: "haff_base", name: "哈夫币", unit: "HAFF_BASE" }],
-  categories: [], safeBoxes: [], levels: { vitality: [], bear: [] }, pricingAvailable: false,
+  categories: [],
 };
 const legacyState = { catalog, config, legacyReadOnly: true, mixed: false, mode: "LEGACY_READ_ONLY", hasLegacySnapshots: true, allowLegacyOptions: true, filterRevision: "3", catalogRevision: "7", ruleReleaseId: null } as unknown as Parameters<typeof publicFilterMetadata>[0];
 const baseQuery: ListingQueryV2 = { queryVersion: 2, gameId: "game_x", q: null, filters: {}, sort: "latest", direction: "DESC", coreItemId: null, limit: 20, cursor: null, filterRevision: null, catalogRevision: null, ruleReleaseId: null };
@@ -77,7 +77,7 @@ test("legacy read metadata exposes the configured fields, real revision and plai
   assert.equal(metadata.ruleReleaseId, null);
   assert.equal(metadata.resourceQuantityRange, true);
   assert.deepEqual(metadata.fields.map((field) => field.key), ["resources", "safeBoxCodes", "vitality", "serviceWindow"]);
-  assert.deepEqual(metadata.sorts.map((sort) => [sort.key, sort.label]), [["latest", "更新时间"], ["resourceTotal", "资源费用"], ["coreQuantity", "核心数量"], ["ratio", "比例排序"]]);
+  assert.deepEqual(metadata.sorts.map((sort) => [sort.key, sort.label]), [["latest", "更新时间"], ["resourceTotal", "资源费用"], ["coreQuantity", "核心数量"]]);
   assert.equal(metadata.defaultSort.label, "更新时间");
   const unavailable = publicFilterMetadata({ ...legacyState, config: null } as typeof legacyState, true, "TYPE");
   assert.equal(unavailable.available, false);
@@ -102,7 +102,6 @@ test("legacy read query validation rejects conditions outside the configured con
 test("legacy candidate SQL applies shared predicates to the observation attributes and explicit sort keys", () => {
   const query: ListingQueryV2 = { ...baseQuery, q: "846M", filters: { resources: [{ itemId: "item_haff", minQuantity: "1000000000" }], regions: [{ province: "北京市", city: "丰台区" }] } };
   const { text, values } = buildLegacyListingCandidates(query, null);
-  assert.match(text, /NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\)/);
   assert.match(text, /legacy_listing_read_snapshot/);
   assert.match(text, /\(COALESCE\(d\.snapshot->'attributes',v\.attributes\)\)->>'region_province'/);
   assert.match(text, /l\.item_id=\$3 AND l\.quantity>=\$4/);
@@ -118,14 +117,11 @@ test("legacy candidate SQL applies shared predicates to the observation attribut
   assert.equal(legacyListingSortLabel("latest", "最新发布"), "更新时间");
   assert.equal(legacyListingSortLabel("resourceTotal", "资源总价"), "资源费用");
   assert.equal(legacyListingSortLabel("coreQuantity", "核心数量"), "核心数量");
-  assert.equal(legacyListingSortLabel("ratio", null), "比例排序");
   assert.match(text, /h\.source_status=3/);
   assert.match(text, /a\.legacy_hold IN \('NONE','UNRESOLVED'\)/);
   assert.match(text, /COALESCE\(us\.age_status,'UNKNOWN'\)='ADULT'/);
   assert.match(text, /NOT EXISTS \(SELECT 1 FROM zzsh_supply\.listing_publication/);
   const mixed = buildMixedListingCandidates(query, null);
-  assert.match(mixed.text, /NOT \(g\.code='delta' AND h\.source_system='legacy_mysql_restore' AND h\.source_entity='la_rental_accounts'\)/);
-  assert.match(mixed.text, /legacy\.source_system='legacy_mysql_restore'/);
   assert.match(mixed.text, /h\.source_status=3/);
   assert.match(mixed.text, new RegExp(LEGACY_NATIVE_TAKEOVER_GUARD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });

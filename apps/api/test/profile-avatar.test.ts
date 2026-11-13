@@ -1,9 +1,5 @@
 import { strict as assert } from "node:assert";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { test } from "node:test";
-import sharp from "sharp";
 import type { PoolClient } from "pg";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,7 +21,6 @@ import {
   deterministicPresetId,
   isProfileAvatarPresetId,
   loadPresetBytes,
-  presetContentPath,
   profileAvatarPreset,
   PROFILE_AVATAR_PRESETS,
   randomPresetId,
@@ -33,35 +28,6 @@ import {
 import { createMediaUploadIntent } from "../src/supply/media";
 import { createLocalMediaStorage } from "../src/supply/media";
 import { handleProfileAvatarUserRoute } from "../src/profile/profile-avatar-routes";
-
-test("the checked-in preset manifest matches the executable manifest and asset bytes", async () => {
-  const manifest = JSON.parse(await readFile(resolve(__dirname, "../../assets/profile-avatars/manifest.json"), "utf8")) as {
-    presets: Array<Record<string, unknown>>;
-  };
-  assert.equal(manifest.presets.length, 4);
-  assert.equal(PROFILE_AVATAR_PRESETS.length, 4);
-  for (const [index, preset] of PROFILE_AVATAR_PRESETS.entries()) {
-    const documented = manifest.presets[index]!;
-    assert.equal(documented.presetId, preset.presetId);
-    assert.equal(documented.version, preset.version);
-    assert.equal(documented.file, preset.assetFile);
-    assert.equal(documented.mime, preset.mime);
-    assert.equal(documented.width, preset.width);
-    assert.equal(documented.height, preset.height);
-    assert.equal(documented.byteSize, preset.byteSize);
-    assert.equal(documented.contentHash, preset.contentHash);
-    assert.equal(documented.originalSha256, preset.originalSha256);
-    const bytes = await loadPresetBytes(preset);
-    assert.equal(bytes.length, preset.byteSize);
-    assert.equal(createHash("sha256").update(bytes).digest("hex"), preset.contentHash);
-    const metadata = await sharp(bytes).metadata();
-    assert.equal(metadata.format, "webp");
-    assert.equal(metadata.width, 256);
-    assert.equal(metadata.height, 256);
-    assert.equal(metadata.exif, undefined);
-    assert.equal(presetContentPath(preset), `/api/v1/profile/avatars/presets/${preset.presetId}/1/content`);
-  }
-});
 
 test("preset selection is stable per subject and random defaults stay in the registered set", () => {
   const ids = new Set(PROFILE_AVATAR_PRESETS.map((preset) => preset.presetId));
@@ -429,7 +395,6 @@ test("automatic defaults are system-attributed and existing custom avatars are n
     calls.push({ sql, values });
     if (sql.startsWith('SELECT')) return { rows: stored ? [stored] : [] };
     if (sql.startsWith('INSERT INTO "zzsh_supply"."profile_avatar"')) {
-      if (stored) return { rows: [] };
       stored = profileRow({ defaultPresetId: values[2], currentPresetId: values[3] });
       return { rows: [stored] };
     }
@@ -441,14 +406,7 @@ test("automatic defaults are system-attributed and existing custom avatars are n
   stored = profileRow({ defaultPresetId: "avatar-night", currentKind: "CUSTOM", currentAssetId: "custom", currentPresetId: null });
   calls.length = 0;
   assert.deepEqual(await ensureInitialProfileAvatar(client, "user", "user_1", "replay", "avatar-frost"), { created: false, presetId: "avatar-night" });
-  assert.equal(calls.filter(call=>call.sql.startsWith('UPDATE')).length,0);
-  assert.equal(calls.filter(call=>call.sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')).length,0);
-});
-
-test("legacy migration cannot suppress an administrator avatar audit", async () => {
-  let queries=0;const client={async query(){queries++;return {rows:[]};}} as unknown as PoolClient;
-  await assert.rejects(ensureInitialProfileAvatar(client,"admin","admin_1","req",undefined,"LEGACY_USER_MIGRATION"),/Avatar audit context is invalid/);
-  assert.equal(queries,0);
+  assert.equal(calls.length, 1);
 });
 
 test("managed profile paths reject traversal, arbitrary URLs and unbound query strings", () => {

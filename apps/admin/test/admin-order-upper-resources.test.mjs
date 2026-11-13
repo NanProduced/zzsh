@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createOfflineAdminSource } from "./offline-admin-source.mjs";
 
-const source = await createOfflineAdminSource({ root: path.resolve("apps/admin/src") });
+const source = await createOfflineAdminSource({ root: fileURLToPath(new URL("../src", import.meta.url)) });
 const { orderUpperResources } = await source.ssrLoadModule("/views/admin-order-upper-resources.ts");
 const frozen = { source: "ORDER_VERSION", haff: { itemId: "haff-dynamic", code: "df_billable_haff", name: "哈夫币", quantity: "150000000", unit: "HAFF_BASE" }, materials: [
   { itemId: "bullet-dynamic", code: "df_billable_level6_bullet", name: "6级子弹", quantity: "120", unit: "ROUND" },

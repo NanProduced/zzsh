@@ -544,10 +544,29 @@ export async function runQueryContractChecks(o: {
         "/media/" +
         published.displayId;
       assert.equal((await fetch(o.base + publicMedia)).status, 200);
-      for (const retired of ["pause", "resume"]) {
-        assert.equal((await call("/api/v1/supply/accounts/" + published.accountId + "/" + retired,
-          { expectedRevision: owner.account.revision })).status, 404);
-      }
+      const paused = await ok(
+        "/api/v1/supply/accounts/" + published.accountId + "/pause",
+        {
+          expectedRevision: owner.account.revision,
+          reason: "暂停接单核对公开图",
+        },
+      );
+      const afterPause = paused.version.declaration.mediaBindings.find(
+        (b: any) => b.assetId === published.displayId,
+      );
+      // account-visibility composition (f6883a00): an owner pause keeps the approved public
+      // detail and its display media readable; only staff restriction/withdrawal hide them.
+      assert.equal(afterPause.publicDisplayEligible, true);
+      assert.equal(afterPause.publiclyReadable, true);
+      assert.equal((await fetch(o.base + publicMedia)).status, 200);
+      const resumed = await ok(
+        "/api/v1/supply/accounts/" + published.accountId + "/resume",
+        { expectedRevision: paused.account.revision },
+      );
+      const afterResume = resumed.version.declaration.mediaBindings.find(
+        (b: any) => b.assetId === published.displayId,
+      );
+      assert.equal(afterResume.publiclyReadable, true);
       assert.equal((await fetch(o.base + publicMedia)).status, 200);
       assert.equal(
         (await call("/api/v1/supply/accounts/" + published.accountId, undefined, o.stranger))
@@ -722,11 +741,12 @@ export async function runQueryContractChecks(o: {
       assert.equal(revoked.reviewState, "APPROVED");
       assert.equal(revoked.publicDisplayEligible, false);
       assert.equal(revoked.publiclyReadable, false);
-      assert.equal((await call("/api/v1/supply/accounts/" + published.accountId + "/drafts",
-        { expectedRevision: afterRevoke.account.revision })).status, 409);
-      const drafted = rejected;
+      const drafted = await ok(
+        "/api/v1/supply/accounts/" + published.accountId + "/drafts",
+        { expectedRevision: afterRevoke.account.revision },
+      );
       const extraDisplay = await uploadApproved(
-        pendingAccount.accountId,
+        published.accountId,
         "ACCOUNT_DISPLAY",
         "PUBLIC_DISPLAY",
         drafted,
@@ -739,7 +759,7 @@ export async function runQueryContractChecks(o: {
         position: draftedBindings.length,
       });
       const withDraftImage = await ok(
-        "/api/v1/supply/accounts/" + pendingAccount.accountId + "/draft",
+        "/api/v1/supply/accounts/" + published.accountId + "/draft",
         {
           title: "媒体状态样例",
           description: "合成检索资料，不含登录凭据",

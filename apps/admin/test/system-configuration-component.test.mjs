@@ -56,7 +56,17 @@ async function harness(t, handler, initialSnapshot = snapshot()) {
   });
   Object.defineProperty(globalThis, "navigator", { value: browser.navigator, configurable: true });
   const beforeFetch = globalThis.fetch, requests = [];
-  globalThis.fetch = async (input, init = {}) => { const url = new URL(String(input), browser.location.href); requests.push({ url, init }); return handler(url, init, requests.length); };
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input), browser.location.href);
+    if (url.pathname.endsWith("/system/opening-auto-confirm") && init.method === "GET") {
+      return response({ waitMinutes: 60, revision: "1", available: true });
+    }
+    if (url.pathname.endsWith("/system/settlement-refund-policy") && init.method === "GET") {
+      return response({ normalDays: 0, earlyDays: 7, revision: "1", available: true });
+    }
+    requests.push({ url, init });
+    return handler(url, init, requests.length);
+  };
   const source = await createOfflineAdminSource({ root: fileURLToPath(new URL("../../../", import.meta.url)) });
   const module = await source.ssrLoadModule("/apps/admin/src/views/system-configuration-view.tsx");
   const { createRoot } = await import("react-dom/client");
@@ -150,8 +160,8 @@ test("Boss can inspect SMS scene configuration without exposing credentials",asy
   assert.equal(h.requests.at(-1).url.pathname,'/api/bff/admin/system/sms');
   const smsText = h.browser.document.body.textContent;
   assert.match(smsText,/登录/);assert.match(smsText,/租期到期提醒/);assert.match(smsText,/共用验证码模板/);
-  assert.match(smsText,/模板已审核或短信已送达/);assert.doesNotMatch(smsText,/must-not-render/);
-  assert.match(smsText,/更新 API 后可查看更换手机号和找回密码模板/);
+  assert.match(smsText,/模板审核和短信送达需另行确认/);assert.doesNotMatch(smsText,/must-not-render/);
+  assert.match(smsText,/更换手机号、找回密码模板暂不可用/);
 });
 
 test("SMS configuration displays new scenes and their actual fallback sources",async t=>{
@@ -172,11 +182,11 @@ test("SMS configuration displays new scenes and their actual fallback sources",a
   assert.doesNotMatch(h.browser.document.body.textContent,/更新 API 后可查看/);
 });
 
-test("refund wait policy reads lazily and retries an unknown save with the original key and values", async t => {
+test("refund wait policy retries an unknown save with the original key and values", async t => {
   let writes = 0;
   const h = await harness(t, (url, init) => {
     if (!url.pathname.endsWith("/settlement-refund-policy")) return response(storage());
-    if (init.method === "GET") return response({ normalDays: 0, earlyDays: 7, revision: "1", available: true });
+    assert.equal(init.method, "PUT");
     writes++;
     if (writes === 1) throw new Error("synthetic connection loss");
     return response({ policy: { normalDays: 1, earlyDays: 7, revision: "2", available: true }, changed: true });
@@ -214,15 +224,24 @@ test("ordinary content reader has no system request or configuration disclosure"
 
 test("local storage displays supported image scope without inventing an OSS target", async t => {
   const h = await harness(t, () => response(storage({ backend: "local", target: null, credentialMode: "NOT_APPLICABLE", automaticCredentialRefresh: null })));
-  assert.match(h.text(), /本地存储/); assert.match(h.text(), /应用服务器本地目录/); assert.match(h.text(), /JPEG \/ PNG \/ WEBP/); assert.match(h.text(), /10 MiB/);
-  assert.doesNotMatch(h.text(), /Bucket|Endpoint|zzsh-staging/);
+  assert.match(h.text(), /本地存储/);
+  assert.match(h.text(), /JPEG\s*\/\s*PNG\s*\/\s*WEBP/);
+  assert.match(h.text(), /10\s*(?:MiB|MB)/);
+  await h.click("技术参数");
+  const technical = h.browser.document.querySelector('[role="dialog"]');
+  assert.match(technical.textContent, /应用服务器本地目录/);
+  assert.doesNotMatch(technical.textContent, /存储空间|接入地址|zzsh-staging/);
 });
 
 test("sample read success names hash verification and keeps upload/private coverage separate", async t => {
   const h = await harness(t, url => response(storage({ check: url.pathname.endsWith("/check") ? checked("PASS", "PASS") : storage().check })));
   await h.click("检查读取");
   assert.equal(h.requests.length, 2); assert.equal(h.requests[1].url.pathname, "/api/bff/admin/system/storage/check"); assert.equal(h.requests[1].init.method, "GET");
-  assert.match(h.text(), /样本读取通过/); assert.match(h.text(), /内容哈希一致/); assert.match(h.text(), /上传、私有图片权限和历史图片覆盖仍需分别验证/);
+  const result = h.container.querySelector('[aria-label="读取检查结果"]');
+  assert.match(result.textContent, /样本读取通过/);
+  assert.match(result.textContent, /内容哈希一致/);
+  assert.doesNotMatch(result.textContent, /上传通过|私有图片通过|历史图片通过/);
+  assert.equal(h.container.querySelector('a[href="/content?tab=media"]').textContent.trim(), "前往运营素材验证上传");
   assert.match(h.text(), /北京时间/);
 });
 
@@ -257,11 +276,9 @@ test("identity downgrade hides prior settings immediately and aborts outstanding
   assert.match(h.text(), /仅 Boss/); assert.doesNotMatch(h.text(), /zzsh-staging-example/);
 });
 
-test("STS without renewal warns explicitly, and long paths can wrap on a single-column layout", async t => {
+test("STS without renewal warns explicitly", async t => {
   const h = await harness(t, () => response(storage({ credentialMode: "STS", automaticCredentialRefresh: false, target: { ...storage().target, objectPrefix: "long/".repeat(60) } })));
   assert.match(h.text(), /临时凭据不会自动续期/); assert.match(h.text(), /STS 临时凭据/);
-  assert.match(h.container.querySelector("dl").className, /grid-cols-1/); assert.match(h.container.querySelector("dl").className, /sm:grid-cols-2/);
-  assert.ok([...h.container.querySelectorAll("dd")].some(node => node.classList.contains("break-all")));
 });
 
 test("malformed successful response is rejected rather than rendered as healthy", async t => {

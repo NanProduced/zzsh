@@ -69,7 +69,7 @@ test("account business state is authoritative; pending payment is a substate and
   assert.equal(accountBusinessStatus({ ...facts, businessState: null, publicVisible: false }, "IMPORTED_UNVERIFIED").label, "状态待核");
   assert.equal(accountBusinessStatus({ ...facts, newOrders: true }).label, "上架中");
   assert.equal(accountBusinessStatus({ ...facts, occupancy: "OCCUPIED", occupancyKind: "PENDING_PAYMENT" }).detail, "待付款占用");
-  assert.equal(accountBusinessStatus({ ...facts, ownerPaused: true }).label, "旧状态待核");
+  assert.equal(accountBusinessStatus({ ...facts, ownerPaused: true }).label, "号主暂停");
   assert.equal(accountBusinessStatus({ ...facts, staffRestricted: true }).label, "运营限制");
   assert.equal(accountBusinessStatus(facts).label, "状态待核", "lifecycle or unrelated order history cannot create a completed state");
 });
@@ -158,11 +158,11 @@ test("supervision views, sources and state labels are explicit", () => {
 });
 
 test("blocker labels and rentability separate pause, restriction and qualification", () => {
-  assert.equal(blockerLabel("RULE_CHANGED"), "规则已调整，请核对");
+  assert.equal(blockerLabel("RULE_CHANGED"), "规则已切换(需新版本)");
   assert.equal(blockerLabel("OCCUPANCY_UNKNOWN"), "占用状态未知");
   assert.equal(blockerLabel("CONFIRMATION_OR_MEDIA_REQUIRED"), "规则接受或展示图尚未同时满足");
   assert.equal(blockerLabel("MEDIA_REQUIRED"), "展示图不满足");
-  assert.equal(blockerLabel("OWNER_PAUSED"), "存在旧暂停记录");
+  assert.equal(blockerLabel("OWNER_PAUSED"), "号主已暂停");
   assert.equal(blockerLabel("STAFF_RESTRICTED"), "运营限制中");
   assert.equal(blockerLabel("CUSTOM_CODE"), "CUSTOM_CODE");
 
@@ -171,7 +171,7 @@ test("blocker labels and rentability separate pause, restriction and qualificati
   assert.equal(availabilityText(base), "当前可公开出租");
   const paused = { ...base, account: { ...base.account, owner_paused: true } };
   assert.equal(effectiveRentable(paused), false);
-  assert.equal(availabilityText(paused), "存在旧暂停记录，请核对当前状态");
+  assert.equal(availabilityText(paused), "号主已暂停(隐藏于公开列表)");
   const restricted = { ...base, account: { ...base.account, staff_restricted: true } };
   assert.equal(effectiveRentable(restricted), false);
   assert.equal(availabilityText(restricted), "运营限制中(已隐藏公开展示并阻止新订单)");

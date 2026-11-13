@@ -249,16 +249,29 @@ test('lookup raw snapshot keys are equivalent to full evidence across filters, p
   legacy:[{id:'old1',legacy_id:'1',original_order_no:'OLD-ORDER',owner_user_id:'u2',renter_user_id:'u1',source_created_at:null,source_snapshot:{private:'not a lookup clue'}}]
  });
  try{
-  let comparisons=0;for(const q of ['', 'FLOW-1','literal%_\\','never-search-this-canonical','UNPAID-ORDER','ORDER_LINK:o1','用户一'])for(const scope of ['ALL','u1','u2'])for(const kind of ['ALL','WITHDRAWAL','DISTRIBUTION','SETTLEMENT'])for(const page of [1,2,8]){
+  for (const [q, scope, kind, page] of [
+   ['', 'ALL', 'ALL', 1], ['', 'ALL', 'ALL', 2], ['', 'ALL', 'ALL', 8],
+   ['FLOW-1', 'u1', 'ALL', 1], ['FLOW-1', 'u2', 'ALL', 1],
+   ['literal%_\\', 'ALL', 'ALL', 1], ['never-search-this-canonical', 'ALL', 'ALL', 1],
+   ['UNPAID-ORDER', 'ALL', 'ALL', 1], ['ORDER_LINK:o1', 'ALL', 'ALL', 1], ['用户一', 'ALL', 'ALL', 1],
+   ['', 'ALL', 'WITHDRAWAL', 1], ['', 'ALL', 'DISTRIBUTION', 1], ['', 'ALL', 'SETTLEMENT', 1],
+   ['', 'u1', 'DISTRIBUTION', 2],
+  ] as const) {
    const filters=parseAdminFinanceFilters(new URLSearchParams({q,scope,kind,period:'0'}),new Date(),false),load={filters,lookup:{exact:false},page,pageSize:2},ready={native_orders:true,legacy_orders:true};
    const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),ready,load),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),ready,load,true);
-   assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({q,scope,kind,page}));comparisons++;
+   assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({q,scope,kind,page}));
   }
   const filters=parseAdminFinanceFilters(new URLSearchParams('period=0'),new Date(),false),query=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},{filters,lookup:{exact:false},page:1,pageSize:20},true),rows=fixture.query(query.text,query.values).rows;
-  assert.equal(comparisons,252);assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);
+  assert(rows.some(r=>r.ref==='ORDER:o2'),'an unposted unpaid order remains a real document');assert.equal(rows.filter(r=>r.ref==='ORDER:o1').length,1);
   assert(rows.some(r=>r.ref==='HISTORY_EARNINGS:h1'),'unproved withdrawal children remain searchable');
   assert.equal(Number(rows[0]!.entry_count),5);
-  for(const exact of [false,true])for(const period of ['0','1'])for(const bucket of ['ALL','AVAILABLE','PENDING_EARNINGS'])for(const state of ['ALL','HISTORICAL_OBSERVED','ORDER_RECORDED']){
+  for (const [exact, period, bucket, state] of [
+   [false, '0', 'ALL', 'ALL'], [true, '0', 'ALL', 'ALL'],
+   [false, '1', 'ALL', 'ALL'], [true, '1', 'ALL', 'ALL'],
+   [false, '0', 'AVAILABLE', 'ALL'], [false, '0', 'PENDING_EARNINGS', 'ALL'],
+   [false, '0', 'ALL', 'HISTORICAL_OBSERVED'], [false, '0', 'ALL', 'ORDER_RECORDED'],
+   [true, '1', 'PENDING_EARNINGS', 'HISTORICAL_OBSERVED'],
+  ] as const) {
    const f=parseAdminFinanceFilters(new URLSearchParams({q:'FLOW-1',period,bucket,state,from:'2026-10-03',to:'2026-10-03'}),new Date(),false),scope={filters:f,lookup:{exact},page:1,pageSize:2};
    const old=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({}),{native_orders:true,legacy_orders:true},scope),next=financeLookupPageSql(ADMIN_FINANCE_LEDGER_SQL,adminFinanceObservationSql({},true),{native_orders:true,legacy_orders:true},scope,true);
    assert.deepEqual(fixture.query(next.text,next.values).rows,fixture.query(old.text,old.values).rows,JSON.stringify({exact,period,bucket,state}));

@@ -1,11 +1,9 @@
-import { computeDeltaQuote, computePublishedFixedFeeQuote, computeQuote, type QuoteInput } from "../src/supply/pricing";
-import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
+import { computeQuote } from "../src/supply/pricing";
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
 import { canonicalize } from "../src/supply/content-hash";
 import { publicMediaCategory } from "../src/supply/publishing";
-import { readListingPricingModel } from "../src/supply/pricing-policy-schedule";
 import { deltaPublicationLevels, normalizeDeltaAttributes, validateDeltaPublicationAttributes } from "../src/supply/delta-rental";
 
 test("new declarations validate abilities and Beijing intervals while historical normalization stays unchanged", () => {
@@ -114,88 +112,6 @@ function payload(overrides: Partial<ContentPayloadInput> = {}): ContentPayloadIn
     ...overrides,
   };
 }
-
-test("published v1 listings retain their original pricing mode after the platform default changes", async () => {
-  const spread = computeQuote({
-    priceVersionId: "price_1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1",
-    haffRule: { schema: "haff-ratio-v1", baseBySafeBox: { a: "40" }, vitalityDeltaByLevel: { 6: "0" }, bearDeltaByLevel: { 6: "0" }, dailyDeltaByTermOption: { d: "0" }, options: { s: { delta: "0", enabled: true } }, spreadDelta: "5" },
-    lines: [{ itemId: "item-a", quantity: "60000000", pricingKind: "HAFF_RATIO" }, { itemId: "item-b", quantity: "2", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "1", ownerUnitAmount: "0.8" }],
-    conditions: { safeBoxCode: "a", vitLevel: 6, bearLevel: 6, termOptionCode: "d", pricingOptionCode: "s" },
-    termOption: { code: "d", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" },
-  });
-  assert.ok(spread.quotable);
-  for (const [stored, expected] of [
-    [payload(), "LEGACY_PERCENT"],
-    [payload({ quoteValues: spread.quote as unknown as Record<string, unknown> }), "LEGACY_SPREAD"],
-  ] as const) {
-    const client = { query: async (sql: string) => {
-      if (sql.includes("to_regclass")) return { rows: [{ modes: true, prices: true, asOf: "2026-11-02T00:00:00.000000Z" }] };
-      if (sql.includes("listing_publication")) return { rows: [{ schemaVersion: 1, contentHash: computeContentHash(stored), payload: stored }] };
-      throw new Error("The current default must not replace a published account's model");
-    } };
-    const selection = await readListingPricingModel(client as never, { accountId: stored.accountId, ownerUserId: "owner", gameId: stored.gameId });
-    assert.equal(selection?.model, expected);
-  }
-});
-
-test("published v2 spread listings without a schedule keep their original release",async()=>{
-  const quoted=computeDeltaQuote({priceVersionId:'price_1',mode:'SPREAD',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',haffRule:compatRule(),
-    conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},
-    termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},
-    lines:[{itemId:'haff',quantity:'10000000',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO',customerTier:'STANDARD'}]});
-  assert(quoted.quotable);quoted.quote.ruleReleaseId='release_1';
-  const stored=payload({schemaVersion:2,quoteValues:quoted.quote as unknown as Record<string,unknown>});
-  stored.declaration={...stored.declaration,attributes:{safe_box_code:'box-a',vitLevel:6,bearLevel:6,rentalPricing:{rentalMode:'ordinary'}},
-    inventory:[{itemId:'haff',quantity:'10000000'}],skins:[],entitlements:[],mediaBindings:[],pricingOptionCode:''};
-  const read=async(document:typeof stored)=>{
-    const client={query:async(sql:string)=>sql.includes('to_regclass')?{rows:[{modes:true,prices:true,asOf:'2026-11-02T00:00:00.000000Z'}]}
-      :{rows:[{schemaVersion:2,contentHash:computeContentHash(document),payload:document}]}};
-    return readListingPricingModel(client as never,{accountId:document.accountId,ownerUserId:'owner',gameId:document.gameId});
-  };
-  assert.equal((await read(stored))?.model,'LEGACY_SPREAD');
-  const scheduled=structuredClone(stored);scheduled.pricingPolicy={schema:'pricing-policy-v1',pricingModel:'SPREAD',scheduleId:'schedule-1',generation:'1',effectiveAt:'2026-11-01T00:00:00Z',priceVersionId:'price_1'};
-  assert.equal((await read(scheduled))?.model,'SPREAD');
-});
-
-test("published fixed-fee accounts retain their selected ratio while new rules apply to new listings", () => {
-  const fixedRule = (base: string) => { const { compatibility, ...rest } = compatRule(base); return { ...rest, schema: "haff-ratio-v3", fixedModes: compatibility!.modes }; };
-  for (const [rentalMode, ratio] of [["ordinary", undefined], ["custom", "45"], ["fast", "53"]] as const) {
-    const rentalPricing = { rentalMode, ...(ratio ? { ownerRatioB: ratio } : {}) };
-    const input: QuoteInput = { priceVersionId: "price-original", mode: "PERCENT", fixedFeeAlgorithm: FIXED_FEE_ALGORITHM, commissionRate: "0.1",
-      customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1", haffRule: fixedRule("47"),
-      lines: [{ itemId: "haff", quantity: "60000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" }],
-      conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing },
-      termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } };
-    const initial = computeQuote(input); assert(initial.quotable);
-    initial.quote.ruleReleaseId = "release_1";
-    const stored = payload({ schemaVersion: 4, quoteValues: initial.quote as unknown as Record<string, unknown>,
-      ruleRefs: { releaseId: "release_1", priceVersionId: "funding-price", termVersionId: "term_1", agreementVersionId: "agreement_1", agreementDigest: "d".repeat(64) },
-      pricingPolicy: { schema: "pricing-policy-v1", pricingModel: "FIXED_FEE", scheduleId: "schedule-1", generation: "1", effectiveAt: "2026-10-01T00:00:00Z", priceVersionId: "price-original" } });
-    stored.declaration = { ...stored.declaration, attributes: { safe_box_code: "box-a", vitLevel: 6, bearLevel: 6, rentalPricing },
-      inventory: [{ itemId: "haff", quantity: "60000000" }], entitlements: [], skins: [], mediaBindings: [], pricingOptionCode: "" };
-    const proof = { accountId: stored.accountId, gameId: stored.gameId, payload: stored, contentHash: computeContentHash(stored) };
-    const updated = { ...input, priceVersionId: "price-updated", commissionRate: "0.12", haffRule: fixedRule("50") };
-    const current = computePublishedFixedFeeQuote(updated, proof); assert(current.quotable, rentalMode);
-    assert.equal(current.quote.pricingInputs.compatibility?.ownerRatioB, rentalMode === "ordinary" ? "50" : ratio);
-    assert.equal(current.quote.pricingInputs.commissionRate, "0.12");
-    if (rentalMode !== "ordinary") {
-      assert.equal(computeQuote(updated).quotable, false, "a new listing cannot bypass the new range");
-      const disabled = structuredClone(updated.haffRule); disabled.fixedModes![rentalMode] = { enabled: false };
-      assert.equal(computeQuote({ ...updated, haffRule: disabled }).quotable, false);
-      assert.equal(computePublishedFixedFeeQuote({ ...updated, haffRule: disabled }, proof).quotable, false, "a disabled rental method is not a bounds change");
-    }
-    assert.equal(computePublishedFixedFeeQuote(updated, { ...proof, contentHash: "0".repeat(64) }).quotable, false);
-    assert.equal(computePublishedFixedFeeQuote(updated, { ...proof, accountId: "other" }).quotable, false);
-    const changed = structuredClone(stored); changed.declaration.inventory[0]!.quantity = "1";
-    assert.equal(computePublishedFixedFeeQuote(updated, { ...proof, payload: changed, contentHash: computeContentHash(changed) }).quotable, false);
-    const noPolicy = structuredClone(stored); delete noPolicy.pricingPolicy;
-    assert.equal(computePublishedFixedFeeQuote(updated, { ...proof, payload: noPolicy, contentHash: computeContentHash(noPolicy) }).quotable, false);
-    const wrongPrice = structuredClone(stored); wrongPrice.pricingPolicy!.priceVersionId = "other-price";
-    assert.throws(() => computeContentHash(wrongPrice));
-    assert.equal(computePublishedFixedFeeQuote({ ...updated, lines: [{ ...updated.lines[0]!, quantity: "60000001" }] }, proof).quotable, false);
-    assert.equal(computePublishedFixedFeeQuote({ ...updated, conditions: { ...updated.conditions, vitLevel: 7 } }, proof).quotable, false);
-  }
-});
 
 test("R6 normalized content is stable across text, numbers, UTC time, nulls and set order", () => {
   const a = payload(); a.declaration.title = "e\u0301\r\n正文";

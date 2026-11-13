@@ -214,10 +214,12 @@ async function jsonResponse(response: Response): Promise<Record<string, any>> {
   return (await response.json()) as Record<string, any>;
 }
 
-test("API v1 OpenAPI and runtime contract use portable JSON semantics", async () => {
+test("API v1 HTTP and OpenAPI contracts", async (t) => {
   const app = await startContractProbe();
-  try {
-    const baseUrl = await app.getUrl();
+  t.after(() => app.close());
+  const baseUrl = await app.getUrl();
+
+  await t.test("OpenAPI and runtime use portable JSON semantics", async () => {
     const specResponse = await fetch(`${baseUrl}/docs-json`);
     assert.equal(specResponse.status, 200);
     const spec = (await specResponse.json()) as {
@@ -310,15 +312,9 @@ test("API v1 OpenAPI and runtime contract use portable JSON semantics", async ()
     const missingKeyBody = await jsonResponse(missingKeyResponse);
     assert.equal(missingKeyBody.error.code, API_V1_ERROR_CODES.MISSING_IDEMPOTENCY_KEY);
     assert.equal(missingKeyBody.error.requestId, "req_missing_key");
-  } finally {
-    await app.close();
-  }
-});
+  });
 
-test("API v1 request IDs and unknown errors are safe", async () => {
-  const app = await startContractProbe();
-  try {
-    const baseUrl = await app.getUrl();
+  await t.test("request IDs and unknown errors are safe", async () => {
     const response = await fetch(`${baseUrl}/api/v1/contracts/failure`, {
       headers: { "X-Request-Id": "../../do-not-echo" },
     });
@@ -346,9 +342,7 @@ test("API v1 request IDs and unknown errors are safe", async () => {
       assert.equal(mappedBody.error.requestId, `req_${route}`);
       assert.doesNotMatch(JSON.stringify(mappedBody), /private (authentication|authorization|rate) detail/);
     }
-  } finally {
-    await app.close();
-  }
+  });
 });
 
 test("RFC3339 subset validates calendar, leap years, clock and offset ranges", () => {

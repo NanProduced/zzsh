@@ -7,26 +7,20 @@ const appCode="synthetic_appcode_123456789";
 const clock=()=>new Date("2026-11-02T00:00:00Z");
 
 test("marketplace provider posts the legacy fields once and interprets match and mismatch",async()=>{
-  for(const [value,status] of [[1,"VERIFIED"],[2,"REJECTED"],[9,"UNKNOWN"]] as const){
+  for(const [value,status,reference] of [[1,"VERIFIED","market-request-1"],[2,"REJECTED","1400000000000000000"],[9,"UNKNOWN","market-request-1"]] as const){
     let calls=0;
     const send:typeof fetch=async(url,init)=>{
       calls++;assert.equal(String(url),"https://sfzybx.market.alicloudapi.com/idcard/verify");
       assert.equal(init?.method,"POST");assert.equal(init?.redirect,"error");
       assert.equal(new Headers(init?.headers).get("authorization"),`APPCODE ${appCode}`);
       assert.equal(String(init?.body),new URLSearchParams({idcard:input.documentNumber,name:input.fullName}).toString());
-      return Response.json({code:200,requestid:"market-request-1",data:{result:value}});
+      return Response.json({code:200,requestid:reference,data:{result:value}});
     };
     const provider=createAliyunMarketRealNameProvider(appCode,send,clock);
     assert.equal(calls,0);const result=await provider.verify(input);
     assert.equal(calls,1);assert.equal(result.status,status);assert.equal(result.provider,"aliyun-market-id2");
-    assert.equal(result.providerReference,"market-request-1");assert.equal(result.ageStatus,status==="VERIFIED"?"ADULT":"UNKNOWN");
+    assert.equal(result.providerReference,reference);assert.equal(result.ageStatus,status==="VERIFIED"?"ADULT":"UNKNOWN");
   }
-});
-
-test("marketplace mismatch example is rejected while preserving the request reference",async()=>{
-  const provider=createAliyunMarketRealNameProvider(appCode,async()=>Response.json({code:200,requestid:"1400000000000000000",message:"成功",data:{result:2,msg:"核验不一致"}}),clock);
-  const result=await provider.verify(input);
-  assert.equal(result.status,"REJECTED");assert.equal(result.providerReference,"1400000000000000000");assert.equal(result.ageStatus,"UNKNOWN");
 });
 
 test("missing product request id uses the explicitly labeled API Gateway request id",async()=>{

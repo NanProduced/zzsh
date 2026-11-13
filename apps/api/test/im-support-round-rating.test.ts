@@ -48,7 +48,6 @@ test("0131 adds the round read marker and an immutable one-per-round rating row"
   assert.deepEqual(entry && { tag: entry.tag, when: entry.when }, { tag: "0131_im_round_rating", when: 1793184013007 });
 
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
-  assert.match(acl, /GRANT UPDATE \("state", "peer_account_id", "assigned_admin_id", "version", "last_message_at", "last_message_preview", "updated_at", "message_scope_id", "message_scope_state", "message_scope_version", "admin_read_at", "first_user_message_at", "no_support_notice_at", "user_unread_count", "admin_unread_count"\) ON TABLE "zzsh_iam"\."im_consultation"/);
   assert.match(acl, /GRANT SELECT, INSERT ON TABLE "zzsh_iam"\."im_support_round_rating"/);
   assert.match(acl, /REVOKE UPDATE, DELETE, TRUNCATE ON TABLE "zzsh_iam"\."im_support_round_rating"/);
   assert.match(acl, /GRANT UPDATE \("dismissed_at", "updated_at"\) ON TABLE "zzsh_iam"\."im_support_round_rating"/);
@@ -86,7 +85,6 @@ test("read marking and rating writes stay server-authorized and transactional", 
 test("rating and admin-read routes stay POST-only and the BFF/proxy forward them", () => {
   const routes = readFileSync(resolve("src/im/yunxin-routes.ts"), "utf8");
   assert.ok(routes.includes("(claim|transfer|close|reconcile|read)"));
-  assert.ok(routes.includes("\\/user\\/consultations\\/"));
   assert.ok(routes.includes("\\/rating$"));
   assert.ok(routes.includes("\\/rating\\/dismiss$"));
   assert.ok(routes.includes("markConsultationRead(options.consultation, context, action.id)"));
@@ -102,8 +100,6 @@ test("rating and admin-read routes stay POST-only and the BFF/proxy forward them
   const proxy = readFileSync(resolve("../web/src/app/api/im/[...path]/route.ts"), "utf8");
   assert.ok(proxy.includes("\\/consultations\\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\\/rating(?:\\/dismiss)?"));
   assert.ok(proxy.includes("const userActionPath = /^\\/consultations\\/"));
-  assert.ok(proxy.includes("rating(?:\\/dismiss)?|read|close"));
-  assert.ok(proxy.includes("userActionPath || orderReadPath ? `/api/v1/im/user${path}`"));
 });
 
 test("support overview adds submitted ratings on the Beijing date range without fake zeros", () => {

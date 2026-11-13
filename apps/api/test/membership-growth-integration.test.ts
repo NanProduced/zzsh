@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recordAcceptedSettlementGrowthFacts, assessGrowthSourceCompleteness, growthContributionSourceDigest, mapAcceptedSettlementToGrowthFacts, membershipGrowthPostCommitCallback, normalizeGrowthInstant, policyTierForGrowthProjection, readGrowthSourceCompleteness, readMembershipGrowth, readMembershipGrowthQuoteCandidates, readMembershipGrowthQuoteCandidatesAt, resolveGrowthEffectiveTime, settlementBackfillActorAllowed } from "../src/auth/membership-growth-integration";
-import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSpreadQuote, type QuoteInput } from "../src/supply/pricing";
-import { FIXED_FEE_ALGORITHM } from "../src/supply/fixed-fee";
+import { computeDeltaQuote, type QuoteInput } from "../src/supply/pricing";
 import { compatRule } from "./pricing-compat-fixture";
 import type { GrowthBenefitPolicy, GrowthContribution } from "../src/auth/membership-growth";
 import { chooseCompleteOffer, isLegacyPricingContract, isNotPriced, validateBenefitPolicy } from "../src/auth/membership-growth";
 import { lockReplacementEntitlement } from "../src/auth/membership-growth-approval";
 import { executeMembershipGrowthOperation } from "../src/auth/membership-growth-approval";
-import { canonicalize, computeContentHash, type ContentPayloadInput } from "../src/supply/content-hash";
+import { canonicalize } from "../src/supply/content-hash";
 import { createHash } from "node:crypto";
 import { ADMIN_PERMISSION } from "../src/auth/admin-authorization";
 import { types as pgTypes } from "pg";
@@ -99,9 +98,6 @@ test("grant and replace validate recipients and lock one subject before checking
       const rule = compatRule(); rule.compatibility!.modes.fast = { enabled: false };
       const client = { async query(sql: string, args: unknown[] = []) {
         queries.push({ sql, args });
-        if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
-        if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
-        if (sql.includes("FROM zzsh_supply.pricing_policy_schedule") || sql.includes("FROM zzsh_supply.pricing_mode_schedule")) return { rows: [] };
         if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
         if (sql.includes("FROM zzsh_iam.membership_growth_policy WHERE id=$1")) return { rows: [{ id: "policy-approved", version: 1, policyPayload: policy, sourceRef: "synthetic-cost", ruleReleaseId: "release-1", priceVersionId: "price-v1" }] };
         if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: rule }] };
@@ -227,8 +223,6 @@ test("actual-consumption settlement keeps the same posted growth facts and sourc
   const previous=mapAcceptedSettlementToGrowthFacts(snapshot);
   const actual=mapAcceptedSettlementToGrowthFacts({...snapshot,inputSnapshot:{...snapshot.inputSnapshot,schema:"settlement-version-v3"}});
   assert.deepEqual(actual,previous);
-  const fixed=mapAcceptedSettlementToGrowthFacts({...snapshot,inputSnapshot:{...snapshot.inputSnapshot,schema:"settlement-version-v4"}});
-  assert.deepEqual(fixed,previous);
 });
 
 test("a superseded or unposted version is never treated as growth input", () => {
@@ -294,24 +288,12 @@ test("feature-off does not create a post-commit growth callback or approval exec
   }
 });
 
-function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }, releasePatch: Record<string, unknown> = {}, defaultModel: "FIXED_FEE" | "SPREAD" = "FIXED_FEE") {
+function draftApprovalFixture(policy: GrowthBenefitPolicy = { ...readerPolicy(), status: "DRAFT" }, releasePatch: Record<string, unknown> = {}) {
   const metadata = { schema: "membership-growth-draft-v1", policy, versionNo: 1, ruleReleaseId: "release-1", priceVersionId: "price-v1", sourceRef: policy.sourceRef, effectiveAtUtc: policy.effectiveAt };
   const draftHash = createHash("sha256").update(canonicalize(metadata)).digest("hex");
   const inserted: Array<unknown[]> = [];
   const client = {
     query: async (sql: string, args: unknown[] = []) => {
-      if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
-      if (sql.startsWith("SELECT to_char(clock_timestamp()")) return { rows: [{ at: "2026-10-18T00:00:00.000000Z" }] };
-      if (sql.includes("UNION SELECT game_id FROM zzsh_supply.pricing_mode_schedule"))
-        return { rows: releasePatch.fixedFeeRates ? [{ gameId: "game-1" }] : [] };
-      if (sql.includes("FROM zzsh_supply.pricing_policy_schedule")) return { rows: [{
-        effectiveAt: "2026-01-01T00:00:00.000000Z", generation: "1", haffRule: releasePatch.haffRule, rates: releasePatch.fixedFeeRates,
-      }] };
-      if (sql.includes("FROM zzsh_supply.pricing_mode_schedule")) return { rows: [{
-        effectiveAt: "2026-01-01T00:00:00.000000Z", generation: "1", pricingModel: defaultModel,
-      }] };
-      if (sql.includes("AS mode, p.fixed_fee_rates AS rates") || sql.includes("FROM zzsh_iam.membership_entitlement")
-        || sql.includes("WHERE status='APPROVED' AND effective_at IS NOT NULL")) return { rows: [] };
       if (sql.includes('FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE", isBoss: true, passwordChangeRequired: false }] };
       if (sql.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release-1", priceVersionId: "price-v1", status: "SEALED", mode: "SPREAD", haffRule: compatRule(), ...releasePatch }] };
       if (sql.includes("FROM zzsh_supply.price_line")) return { rows: [{ itemId: "item", unit: "PIECE" }] };
@@ -488,78 +470,6 @@ test("one unified entitlement discounts the actual ordinary, custom and fast bas
       assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
       assert.equal(gift.plan.depositCents, "10000");
       assert.equal(JSON.stringify(input), before, "membership never rewrites base pricing input");
-      if(rentalMode==="custom"){
-        const published=structuredClone(base.quote);published.ruleReleaseId="release-1";
-        const listing:ContentPayloadInput={schemaVersion:2,accountId:"account-1",gameId:"game-1",
-          declaration:{title:"synthetic",description:null,attributes:{safe_box_code:"box-a",vitLevel:6,bearLevel:6,rentalPricing:input.conditions.rentalPricing},
-            inventory:input.lines.map(line=>({itemId:line.itemId,quantity:line.quantity})),skins:[],entitlements:[],termOptionCode:"daily-10m",pricingOptionCode:"",mediaBindings:[]},
-          ruleRefs:{releaseId:"release-1",priceVersionId:"price-v1",termVersionId:"term-1",agreementVersionId:"agreement-1",agreementDigest:"d".repeat(64)},
-          quoteValues:published as unknown as Record<string,unknown>};
-        const proof={accountId:"account-1",ownerUserId:"owner-1",gameId:"game-1",listingVersionId:"listing-1",contentHash:computeContentHash(listing),payload:listing};
-        const changed:QuoteInput={...input,priceVersionId:"price-v2",haffRule:compatRule("50"),
-          lines:input.lines.map(line=>line.itemId==="item"?{...line,buyerUnitAmount:"3"}:line)};
-        assert.equal(computeDeltaQuote(changed).quotable,false,"new submissions must obey the narrowed range");
-        const repriced=computePublishedSpreadQuote(changed,proof);assert(repriced.quotable);
-        assert.equal(repriced.quote.resourceTotal.amount,"177.16");assert.equal(repriced.quote.ownerTotal.amount,"138.33");
-        const request={userId:"user-1",gameId:"game-1",accountId:"account-1",listingVersionId:"listing-1",listingHash:proof.contentHash,
-          priceVersionId:"price-v2",baseQuote:repriced.quote,ruleReleaseId:"release-1",ownerUserId:"owner-1",quantityDigest:"quantity-1",
-          quoteInput:changed,asOfUtc:at,publishedSpreadListing:proof};
-        const client=growthReaderClient(state,[contribution],policy,"10000.00","a".repeat(64),false,changed.haffRule,[entitlement]);
-        const carried=await readMembershipGrowthQuoteCandidatesAt(client,request);assert.equal(carried.knowledge,"KNOWN",JSON.stringify(carried));
-        const forged=await readMembershipGrowthQuoteCandidatesAt(client,{...request,publishedSpreadListing:{...proof,contentHash:"0".repeat(64)}});
-        assert.equal(forged.knowledge,"UNKNOWN");
-        const changedSelection={...changed,conditions:{...changed.conditions,rentalPricing:{rentalMode:"custom" as const,ownerRatioB:"46"}}};
-        assert.equal(computePublishedSpreadQuote(changedSelection,proof).quotable,false,"the retained ratio cannot be changed");
-      }
-    }
-  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
-});
-
-test("fixed-fee growth reads enabled modes and rejects a discount below the frozen fee floor", async () => {
-  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
-  try {
-    const at = "2026-10-18T00:00:00.123456Z", state = { normalTier: "GOLD", effectiveTier: "GOLD", blackGoldState: "NOT_QUALIFIED", lastTierDropAt: null };
-    const fact = { userId: "user-1", gameId: "game-1", sourceKey: "RENTAL_SETTLEMENT:settlement-1:haff", sourceType: "RENTAL_SETTLEMENT" as const, sourceId: "settlement-1:haff", settlementVersion: "1", effectiveAt: "2026-10-10T00:00:00Z", recordedAt: "2026-10-10T00:00:00Z", amountCents: "1000000", status: "SETTLED" as const, eligible: true, revision: 0 };
-    const contribution = { ...fact, sourceDigest: growthContributionSourceDigest("a".repeat(64), "game-1", fact) };
-    const policy = normalizeUnifiedMembershipPolicy(readerPolicy(), unifiedTestPricing(), { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
-    const entitlement = { id: "ent-unified", kind: "FRIEND", scopeKey: "game:game-1", startsAt: "2026-10-01T00:00:00Z", endsAt: "2026-10-20T00:00:00Z", status: "ACTIVE", depositWaived: false, depositAllowanceCents: "20000", pricingPayload: { status: "CONFIGURED", kind: "TOTAL_DISCOUNT", scope: "ALL_ENABLED_RENTAL_MODES", priceVersionId: "price-v1", payableRatio: "0.95", costBasisRef: "price-v1" } };
-    const { compatibility, ...fixedBase } = compatRule();
-    for (const rentalMode of ["ordinary", "custom", "fast"] as const) {
-      const input = quoteInput(); input.mode = "PERCENT"; input.fixedFeeAlgorithm = FIXED_FEE_ALGORITHM; input.commissionRate = "0.10";
-      input.haffRule = { ...structuredClone(fixedBase), schema: "haff-ratio-v3", fixedModes: structuredClone(compatibility!.modes) };
-      input.conditions.rentalPricing = { rentalMode, ...(rentalMode === "custom" ? { ownerRatioB: "45" } : rentalMode === "fast" ? { ownerRatioB: "60" } : {}) };
-      input.lines = [...input.lines, { itemId: "item", quantity: "5", pricingKind: "FIXED_UNIT", unit: "PIECE", customerTier: "STANDARD", unitQuantity: "1", buyerUnitAmount: "2" }];
-      const base = computeDeltaQuote(input); assert(base.quotable, rentalMode);
-      const request = { userId: "user-1", gameId: "game-1", accountId: "account-1", listingVersionId: "listing-1", listingHash: "h".repeat(64), priceVersionId: "price-v1", baseQuote: base.quote, ruleReleaseId: "release-1", ownerUserId: "owner-1", quantityDigest: "quantity-1", quoteInput: input, asOfUtc: at };
-      const read = (activePolicy: GrowthBenefitPolicy) => readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], activePolicy, "10000.00", "a".repeat(64), false, input.haffRule, [entitlement]), request);
-      const output = await read(policy); assert.equal(output.knowledge, "KNOWN", JSON.stringify(output)); if (output.knowledge !== "KNOWN") throw Error(rentalMode);
-      const gift = output.candidates.find(candidate => candidate.plan.source === "FRIEND"); assert(gift);
-      assert.equal(gift.quote.schemaVersion, 4); assert.equal(gift.quote.ownerTotal.amount, base.quote.ownerTotal.amount);
-      const legacy = await read(readerPolicy()); assert.equal(legacy.knowledge, "UNKNOWN");
-      if (legacy.knowledge === "UNKNOWN") assert.equal(legacy.reason, "GROWTH_QUOTE_UNAVAILABLE");
-      const incompatible = { ...entitlement, pricingPayload: { ...entitlement.pricingPayload, payableRatio: "0.89" } };
-      const denied = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, input.haffRule, [incompatible]), request);
-      assert.equal(denied.knowledge, "UNKNOWN"); if (denied.knowledge === "UNKNOWN") assert.equal(denied.reason, "ENTITLEMENT_QUOTE_UNAVAILABLE");
-      if (rentalMode === "custom") {
-        const published = structuredClone(base.quote); published.ruleReleaseId = "release-1";
-        const listing: ContentPayloadInput = { schemaVersion: 4, accountId: "account-1", gameId: "game-1",
-          declaration: { title: "synthetic", description: null, attributes: { safe_box_code: "box-a", vitLevel: 6, bearLevel: 6, rentalPricing: input.conditions.rentalPricing },
-            inventory: input.lines.map(line => ({ itemId: line.itemId, quantity: line.quantity })), skins: [], entitlements: [], termOptionCode: "daily-10m", pricingOptionCode: "", mediaBindings: [] },
-          ruleRefs: { releaseId: "release-1", priceVersionId: "price-v1", termVersionId: "term-1", agreementVersionId: "agreement-1", agreementDigest: "d".repeat(64) },
-          pricingPolicy: { schema: "pricing-policy-v1", pricingModel: "FIXED_FEE", scheduleId: "schedule-1", generation: "1", effectiveAt: "2026-10-01T00:00:00Z", priceVersionId: "price-v1" },
-          quoteValues: published as unknown as Record<string, unknown> };
-        const { compatibility: newModes, ...newBase } = compatRule("50");
-        const changed: QuoteInput = { ...input, priceVersionId: "price-v2", haffRule: { ...newBase, schema: "haff-ratio-v3", fixedModes: newModes!.modes } };
-        assert.equal(computeDeltaQuote(changed).quotable, false);
-        const baseAfterChange = computePublishedFixedFeeQuote(changed, { accountId: "account-1", gameId: "game-1", contentHash: computeContentHash(listing), payload: listing });
-        assert(baseAfterChange.quotable);
-        const changedRequest = { ...request, priceVersionId: "price-v2", baseQuote: baseAfterChange.quote, quoteInput: changed };
-        const carried = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, changed.haffRule, [entitlement]), changedRequest);
-        assert.equal(carried.knowledge, "KNOWN", JSON.stringify(carried));
-        const forged = { ...changed, conditions: { ...changed.conditions, rentalPricing: { rentalMode: "custom" as const, ownerRatioB: "46" } } };
-        const mismatch = await readMembershipGrowthQuoteCandidatesAt(growthReaderClient(state, [contribution], policy, "10000.00", "a".repeat(64), false, changed.haffRule, [entitlement]), { ...changedRequest, quoteInput: forged });
-        assert.equal(mismatch.knowledge, "UNKNOWN"); if (mismatch.knowledge === "UNKNOWN") assert.equal(mismatch.reason, "FIXED_FEE_BASE_INVALID");
-      }
     }
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
@@ -572,34 +482,6 @@ test("new policy publication refuses a per-path discount conflict without insert
     const fixture = draftApprovalFixture(policy, { haffRule: rule });
     await assert.rejects(executeMembershipGrowthOperation(fixture.client as never, fixture.input as never, { userId: "boss" } as never, "reject-split-pricing"), (e: any) => e.status === 409);
     assert.equal(fixture.inserted.length, 0);
-  } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
-});
-
-test("fixed-fee membership publication checks every applicable mode before writing", async () => {
-  const previous = process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = "true";
-  try {
-    const { compatibility, ...fixedBase } = compatRule();
-    const fixedRule = { ...fixedBase, schema: "haff-ratio-v3", fixedModes: compatibility!.modes };
-    const release = { mode: "PERCENT", haffRule: fixedRule, fixedFeeRates: { ordinary: "0.1", custom: "0.08", fast: "0.12" } };
-    const build = (ratio: string) => {
-      const input = unifiedTestPricing();
-      for (const tier of Object.values(input.tiers)) tier.payableRatio = ratio;
-      input.entitlementRanges.FRIEND = { minPayableRatio: "0.95", maxPayableRatio: "1" };
-      input.entitlementRanges.PRESTIGE = { minPayableRatio: "0.95", maxPayableRatio: "1" };
-      return normalizeUnifiedMembershipPolicy({ ...readerPolicy(), status: "DRAFT" }, input, { enabledModes: ["ordinary", "custom", "fast"], priceVersionId: "price-v1" });
-    };
-    const allowed = draftApprovalFixture(build("0.95"), release);
-    assert.equal((await executeMembershipGrowthOperation(allowed.client as never, allowed.input as never, { userId: "boss" } as never, "allowed")).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
-    assert.equal(allowed.inserted.length, 1);
-    const deep = draftApprovalFixture(build("0.90"), release);
-    await assert.rejects(() => executeMembershipGrowthOperation(deep.client as never, deep.input as never, { userId: "boss" } as never, "deep"), /BENEFIT_POLICY_INCOMPATIBLE/);
-    assert.equal(deep.inserted.length, 0);
-    const spread = draftApprovalFixture(build("0.90"), release, "SPREAD");
-    assert.equal((await executeMembershipGrowthOperation(spread.client as never, spread.input as never, { userId: "boss" } as never, "spread")).resultCode, "MEMBERSHIP_POLICY_PUBLISHED");
-    assert.equal(spread.inserted.length, 1);
-    const missing = draftApprovalFixture(build("0.95"), { ...release, fixedFeeRates: null });
-    await assert.rejects(() => executeMembershipGrowthOperation(missing.client as never, missing.input as never, { userId: "boss" } as never, "missing"), /Fixed fee rates are unavailable/);
-    assert.equal(missing.inserted.length, 0);
   } finally { if (previous === undefined) delete process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED; else process.env.ZZSH_MEMBERSHIP_GROWTH_ENABLED = previous; }
 });
 

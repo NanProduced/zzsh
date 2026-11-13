@@ -1,3 +1,6 @@
+import { createElement } from "react";
+import { UserSessionStore } from "../src/lib/user-session-store.ts";
+import * as avatarApi from "../src/lib/profile-avatar-client.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mountAuthComponent, deferred } from "./react-auth-harness.mjs";
@@ -864,4 +867,492 @@ test("安全说明按钮支持触屏点按开合，合成 click 不误关，键�
     await p.React.act(async () => { outside.dispatchEvent(new p.window.MouseEvent("pointerdown", { bubbles: true, cancelable: true })); await new Promise(resolve => setImmediate(resolve)); });
     assert.equal(open(), null, "外部点按关闭说明");
   } finally { await p.close(); }
+});
+
+
+/* --- Identity Verification Form Tests --- */
+
+const identityFile = 'apps/web/src/components/account/identity-verification-form.tsx';
+const capability = () => ({ available: true, real: true, idempotencyRequired: true,
+  privacy: { versionId: 'privacy_1', digest: 'a'.repeat(64), title: '测试隐私政策', bodyPath: '/api/v1/legal-documents/privacy?version=privacy_1' },
+  disclosure: { versionId: 'identity-provider-transfer-v1', digest: 'b'.repeat(64), body: '本次将姓名和身份证号码提交给阿里云二要素实名核验服务，仅用于本次身份核验。' } });
+const completed = () => ({ status: 'VERIFIED', ageStatus: 'ADULT', message: '实名校验已通过。', verificationAttempt: { state: 'COMPLETED', replayed: false } });
+const unknown = () => ({ status: 'UNKNOWN', ageStatus: 'UNKNOWN', message: '原核验未决。', verificationAttempt: { state: 'UNKNOWN', noReissue: true } });
+const storage = 'zzsh.identity-verification.user_A';
+const mountIdentity = (options = {}, props = {}) => mountAuthComponent(identityFile, 'IdentityVerificationForm', { userId: 'user_A', identityStatus: 'UNVERIFIED', capability: capability(), canAct: () => true, onCompleted() {}, ...props }, { initialStatus: 'authenticated', ...options });
+async function fill(p, agree = true) { await p.input('identity-full-name', '合成姓名'); await p.input('identity-document-number', '110101200001010000'); if (agree) await p.input('identity-verification-consent', true); }
+
+test('marketplace disclosure is shown and submitted as its own consent version', async () => {
+  const seen = [], current = capability();
+  current.disclosure = { ...current.disclosure, versionId: 'identity-provider-transfer-market-v1', body: '本次将姓名和身份证号码提交至云市场实名认证服务商。' };
+  const p = await mountIdentity({ fetch: async (_url, body) => { seen.push(body); return Response.json(completed()); } }, { capability: current });
+  try {
+    assert.match(p.host.textContent, /云市场实名认证服务商/);
+    await fill(p); await p.submit();
+    assert.equal(seen[0].privacyAcceptance.disclosureVersion, 'identity-provider-transfer-market-v1');
+  } finally { await p.close(); }
+});
+
+test('real verification needs current published privacy and separate per-attempt consent', async () => {
+  const seen = [];
+  const p = await mountIdentity({ fetch: async (_url, body, init) => { seen.push({ body, init }); return Response.json(completed()); } });
+  try {
+    await fill(p, false); await p.submit(); assert.equal(seen.length, 0); assert.match(p.host.textContent, /单独确认本次核验/);
+    const link = p.host.querySelector('a'); assert.equal(link.getAttribute('href'), '/legal/privacy?version=privacy_1');
+    await p.input('identity-verification-consent', true); await p.submit();
+    assert.equal(seen.length, 1); assert.match(new Headers(seen[0].init.headers).get('idempotency-key'), /^identity_/);
+    assert.deepEqual(seen[0].body.privacyAcceptance, { accepted: true, versionId: 'privacy_1', digest: 'a'.repeat(64), disclosureVersion: 'identity-provider-transfer-v1' });
+    assert.equal(p.window.sessionStorage.getItem(storage), null);
+    assert.equal(p.host.querySelector('#identity-full-name').value, ''); assert.equal(p.host.querySelector('#identity-document-number').value, '');
+    assert.doesNotMatch(JSON.stringify(p.window.localStorage), /110101|合成姓名/);
+  } finally { await p.close(); }
+  const closed = await mountIdentity({}, { capability: { ...capability(), privacy: null } });
+  try { assert.equal(closed.host.querySelector('form'), null); assert.equal(closed.calls.length, 0); } finally { await closed.close(); }
+});
+
+test('202 retains only the opaque key and reads the same request without another POST or private body', async () => {
+  let key; const seen = [];
+  const p = await mountIdentity({ fetch: async (url, body, init) => { seen.push({ url, body, init }); if (url.endsWith('/verify')) { key = new Headers(init.headers).get('idempotency-key'); return Response.json(unknown(), { status: 202 }); } return Response.json(completed()); } });
+  try {
+    await fill(p); await p.submit();
+    assert.equal(p.window.sessionStorage.getItem(storage), key); assert.doesNotMatch(p.window.sessionStorage.getItem(storage), /110101|合成姓名/);
+    assert.equal(p.host.querySelector('form'), null); assert.match(p.host.textContent, /不要重新提交/);
+    await p.click('查询原核验结果');
+    assert.equal(seen.length, 2); assert.equal(seen[1].init.method, 'GET'); assert.equal(seen[1].body, undefined);
+    assert.equal(new Headers(seen[1].init.headers).get('idempotency-key'), key);
+    assert.equal(p.window.sessionStorage.getItem(storage), null);
+  } finally { await p.close(); }
+});
+
+test('a cold remount recovers the original opaque key even when the provider or privacy is no longer available', async () => {
+  const seen = [];
+  const p = await mountIdentity({ initialSessionStorage: { [storage]: 'identity_original' }, fetch: async (url, body, init) => { seen.push({ url, body, init }); return Response.json(unknown(), { status: 202 }); } }, { capability: { available: false, real: true, idempotencyRequired: true, privacy: null } });
+  try {
+    assert.equal(p.host.querySelector('input'), null);
+    await p.click('查询原核验结果');
+    assert.equal(seen.length, 1); assert.equal(seen[0].init.method, 'GET'); assert.equal(seen[0].body, undefined);
+    assert.equal(new Headers(seen[0].init.headers).get('idempotency-key'), 'identity_original');
+    assert.equal(p.window.sessionStorage.getItem(storage), 'identity_original');
+  } finally { await p.close(); }
+});
+
+test('recovery with an unavailable capability requires an actual attempt receipt before clearing its original key', async () => {
+  const seen = [], notices = [];
+  const p = await mountIdentity({ initialSessionStorage: { [storage]: 'identity_original' }, fetch: async (url, body, init) => {
+    seen.push({ url, body, init });
+    const receipt = completed();
+    if (seen.length === 1) delete receipt.verificationAttempt;
+    return Response.json(receipt);
+  } }, { capability: undefined, onCompleted: value => notices.push(value) });
+  try {
+    await p.click('查询原核验结果');
+    assert.equal(p.window.sessionStorage.getItem(storage), 'identity_original'); assert.deepEqual(notices, []);
+    assert.equal(p.host.querySelector('form'), null); assert.match(p.host.textContent, /原请求仍保留/);
+    await p.click('查询原核验结果');
+    assert.equal(p.window.sessionStorage.getItem(storage), null); assert.equal(notices.length, 1);
+    assert.ok(seen.every(call => call.init.method === 'GET' && call.body === undefined && new Headers(call.init.headers).get('idempotency-key') === 'identity_original'));
+  } finally { await p.close(); }
+});
+
+test('an unreadable browser receipt prevents all new paid verification attempts', async () => {
+  const p = await mountIdentity({ initialSessionStorage: { [storage]: 'invalid key' }, fetch: () => { throw Error('must not call'); } });
+  try { assert.equal(p.host.querySelector('form'), null); assert.match(p.host.textContent, /阻止新的提交/); assert.equal(p.calls.length, 0); } finally { await p.close(); }
+});
+
+test('network unknown and malformed successful receipts preserve the original key instead of enabling a new request', async () => {
+  for (const mode of ['network', 'malformed']) {
+    const p = await mountIdentity({ fetch: async () => { if (mode === 'network') throw Error('response lost'); return Response.json({ status: 'VERIFIED' }); } });
+    try { await fill(p); await p.submit(); assert.match(p.window.sessionStorage.getItem(storage), /^identity_/); assert.equal(p.host.querySelector('form'), null); assert.match(p.host.textContent, /只查询原结果|只查询原/); } finally { await p.close(); }
+  }
+});
+
+test('a late response from an old identity cannot clear its key or display a successful verification on another account', async () => {
+  const pending = deferred(), notices = [];
+  const p = await mountIdentity({ fetch: () => pending.promise }, { onCompleted: value => notices.push(value) });
+  try {
+    await fill(p); await p.submit(); const key = p.window.sessionStorage.getItem(storage);
+    p.identity.userId = 'user_B'; p.identity.identityVersion++; await p.render({ userId: 'user_B' });
+    await p.React.act(async () => pending.resolve(Response.json(completed()))); await p.settle();
+    assert.equal(p.window.sessionStorage.getItem(storage), key); assert.deepEqual(notices, []); assert.doesNotMatch(p.host.textContent, /实名校验已通过/);
+  } finally { await p.close(); }
+});
+
+test('a changed privacy version clears the checkbox, and explicit fake capability remains visibly simulated', async () => {
+  const p = await mountIdentity();
+  try { await fill(p); await p.render({ capability: { ...capability(), privacy: { ...capability().privacy, versionId: 'privacy_2' } } }); assert.equal(p.host.querySelector('#identity-verification-consent').checked, false); } finally { await p.close(); }
+  const fake = await mountIdentity({}, { capability: { available: true, real: false, idempotencyRequired: false } });
+  try { assert.match(fake.host.textContent, /本地模拟校验/); assert.match(fake.host.textContent, /请勿填写真实姓名或身份证/); } finally { await fake.close(); }
+});
+
+/* --- Nickname Edit UI Tests --- */
+// 昵称编辑已从账号安全页迁到总览「编辑资料」入口；这组用例承接原安全页昵称保障：
+// 身份隔离、提交锁、未知结果恢复、草稿跨卸载保留、概况失败撤下入口（F1 同一语义）。
+const nicknameFile = "apps/web/src/components/account/nickname-edit.tsx";
+
+
+function nicknameHandler(options = {}) {
+  return async (url) => {
+    if (url.endsWith("/security/overview")) {
+      if (options.read) return options.read();
+      return response({ ...overview, nickname: options.committed?.() ?? overview.nickname });
+    }
+    if (url.endsWith("/profile/nickname")) {
+      if (options.write) return options.write();
+      return response({ status: true });
+    }
+    return response({ status: true });
+  };
+}
+const mountNickname = (options = {}, props = {}) =>
+  mountAuthComponent(nicknameFile, "NicknameEditEntry", { userId: "user_A", ...props }, { initialStatus: "authenticated", fetch: nicknameHandler(options) });
+const nicknameWrites = p => p.calls.filter(item => item.url.endsWith("/profile/nickname"));
+const nicknameDialog = p => p.host.querySelector('[role="dialog"]');
+
+test('nickname uses an accessible pencil action and one counter rather than duplicate instructions',async()=>{
+ const p=await mountNickname();try{await p.settle();const trigger=p.findButton('修改昵称');assert(trigger.querySelector('svg'));assert.equal(trigger.textContent,'');await p.click('修改昵称');assert.equal(nicknameDialog(p).querySelectorAll('#profile-nickname-helper').length,1);assert.match(nicknameDialog(p).querySelector('#profile-nickname-helper').textContent,/\/64$/);assert.doesNotMatch(nicknameDialog(p).textContent,/1–64 个字符，仅用于对外展示/)}finally{await p.close()}
+});
+
+test('unchanged and invalid names cannot save; cancelling a draft requires explicit discard',async()=>{
+ const nicknameDraft={current:null},p=await mountNickname({}, {nicknameDraft});
+ try{await p.settle();await p.click('修改昵称');assert.equal(p.findButton('保存昵称').disabled,true);for(const value of ['','  ','超'.repeat(65),'坏\u0001昵称']){await p.input('profile-nickname',value);assert.equal(p.findButton('保存昵称').disabled,true)}await p.input('profile-nickname','新的昵称');assert.equal(p.findButton('保存昵称').disabled,false);assert.match(nicknameDialog(p).textContent,/4\/64/);await p.click('取消');assert.match(nicknameDialog(p).textContent,/放弃修改/);await p.click('继续编辑');assert.equal(p.host.querySelector('#profile-nickname').value,'新的昵称');await p.click('取消');await p.click('放弃修改');assert.equal(nicknameDialog(p),null);assert.equal(nicknameDraft.current,null);assert.equal(nicknameWrites(p).length,0);await p.click('修改昵称');assert.equal(p.host.querySelector('#profile-nickname').value,overview.nickname)}finally{await p.close()}
+});
+
+test("概况读取成功后才出现编辑入口；读取失败与401都不出现（对齐安全页F1）", async () => {
+  let mode = "ok";
+  const p = await mountNickname({ read: () => mode === "ok" ? response(overview) : Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }) });
+  try {
+    await p.settle();
+    assert.ok(p.host.querySelector('[data-testid="edit-profile"]'));
+    mode = "forbidden";
+    // 重新触发读取：换主体重挂载（同主体读取失败时入口随事实撤下）
+    await p.render({ key: "retry", userId: "user_A" });
+    await p.settle();
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null, "概况失败撤下编辑入口");
+  } finally { await p.close(); }
+});
+
+test("概况401经共享会话刷新撤下入口，不展示任何昵称事实", async () => {
+  let revalidated = 0;
+  const p = await mountAuthComponent(nicknameFile, "NicknameEditEntry", { userId: "user_A" }, {
+    initialStatus: "authenticated",
+    fetch: async url => url.endsWith("/security/overview") ? Response.json({ error: { code: "UNAUTHENTICATED" } }, { status: 401 }) : response({ status: true }),
+    revalidate: () => { revalidated += 1; },
+  });
+  try {
+    await p.settle();
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null);
+    assert.equal(revalidated, 1);
+    assert.doesNotMatch(p.host.textContent, /自己的昵称/);
+  } finally { await p.close(); }
+});
+
+test("昵称校验沿用 1–64 规则，错误逐字段绑定", async () => {
+  const p = await mountNickname();
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "   ");
+    await p.submit('form[aria-label="修改昵称"]');
+    assert.match(p.host.querySelector("#profile-nickname-result").textContent, /1–64/);
+    assert.equal(p.host.querySelector("#profile-nickname").getAttribute("aria-invalid"), "true");
+    assert.equal(nicknameWrites(p).length, 0, "校验失败不发写入");
+    await p.input("profile-nickname", "超".repeat(65));
+    await p.submit('form[aria-label="修改昵称"]');
+    assert.equal(nicknameWrites(p).length, 0);
+    assert.equal(p.host.querySelector("#profile-nickname").getAttribute("aria-invalid"), "true");
+  } finally { await p.close(); }
+});
+
+test("保存成功只发一次写入、回读确认后关闭并清空草稿", async () => {
+  const nicknameDraft = { current: null };
+  let committed = false;
+  const p = await mountNickname({ committed: () => committed ? "新昵称" : overview.nickname, write: async () => { committed = true; return response({ status: true }); } }, { nicknameDraft });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    assert.equal(p.host.querySelector("#profile-nickname").value, overview.nickname, "打开时采用服务端昵称");
+    await p.input("profile-nickname", "新昵称");
+    assert.equal(nicknameDraft.current.value, "新昵称", "草稿写入共享容器");
+    await p.submit('form[aria-label="修改昵称"]');
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 1);
+    assert.equal(nicknameDialog(p), null, "确认成功后关闭");
+    assert.equal(nicknameDraft.current, null, "成功后清空草稿");
+    // 重新打开采用服务端已确认的新昵称。
+    await p.click("修改昵称");
+    assert.equal(p.host.querySelector("#profile-nickname").value, "新昵称");
+  } finally { await p.close(); }
+});
+
+test("未知写入保留待确认意图：弹窗内可恢复，关闭后入口仍在，只查询不重发", async () => {
+  const pendingWrite = { current: null }, nicknameDraft = { current: null };
+  let committed = false;
+  const p = await mountNickname({
+    committed: () => committed ? "新昵称" : overview.nickname,
+    write: async () => { if (!committed) { committed = true; throw new Error("network dropped after apply"); } return response({ status: true }); },
+  }, { pendingWrite, nicknameDraft });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "新昵称");
+    await p.submit('form[aria-label="修改昵称"]');
+    assert.match(p.host.textContent, /操作结果待确认/);
+    assert.ok(p.findButton("保存昵称").disabled, "提交锁保持");
+    assert.ok(pendingWrite.current, "意图写入共享容器");
+    assert.equal(pendingWrite.current.intent.action, "nickname");
+    // 关闭弹窗不丢意图：入口旁出现待确认提示。
+    await p.click("取消");
+    assert.ok(pendingWrite.current, "关闭后意图仍在");
+    assert.match(p.host.textContent, /昵称修改结果待确认/);
+    // 重新打开与页面级恢复走同一查询，不产生第二次写入。
+    await p.click("重新确认结果");
+    await p.settle();
+    assert.equal(pendingWrite.current, null);
+    assert.equal(nicknameWrites(p).length, 1, "只有最初的那次写入");
+    assert.equal(nicknameDraft.current, null);
+  } finally { await p.close(); }
+});
+
+test("同主体重挂载保留未保存草稿；换主体丢弃草稿并读取新主体概况", async () => {
+  let id = "user_A";
+  const nicknameDraft = { current: null };
+  const p = await mountNickname({ read: () => response({ ...overview, userId: id }) }, { nicknameDraft });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "尚未保存的私人草稿");
+    await p.render({ key: "same-user-confirmed" });
+    await p.settle();
+    await p.click("修改昵称");
+    assert.equal(p.host.querySelector("#profile-nickname").value, "尚未保存的私人草稿");
+    await p.click("取消");
+    // 换主体：共享草稿按 userId 隔离，输入回落到新主体的服务端昵称。
+    id = "user_B"; p.identity.userId = "user_B"; nicknameDraft.current = null;
+    await p.render({ key: "changed-user", userId: "user_B" });
+    await p.settle();
+    await p.click("修改昵称");
+    assert.equal(p.host.querySelector("#profile-nickname").value, overview.nickname);
+    assert.doesNotMatch(p.host.textContent, /尚未保存的私人草稿/);
+  } finally { await p.close(); }
+});
+
+// ===== repair-20261014 返修：F1 实时主体守卫 / F2 跨页意图互斥 / F3 成功后失权（反例回归底线） =====
+
+for (const [label, mutate] of [
+  ["A→B 换主体", (identity) => { identity.userId = "user_B"; }],
+  ["退出登录变 guest", (identity) => { identity.status = "guest"; identity.userId = null; }],
+  ["同主体 identityVersion 变化", (identity) => { identity.identityVersion += 1; }],
+]) test(`F1 提交前同步核共享身份（${label}）阻断昵称 POST 并撤下入口`, async () => {
+  const pendingWrite = { current: null };
+  const p = await mountNickname({}, { pendingWrite });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "新昵称");
+    mutate(p.identity);
+    await p.submit('form[aria-label="修改昵称"]');
+    assert.equal(nicknameWrites(p).length, 0, "共享身份已变化不发昵称写入");
+    assert.equal(pendingWrite.current, null, "不写入共享意图");
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null, "旧主体入口撤下");
+    assert.match(p.host.textContent, /登录状态已变化/);
+  } finally { await p.close(); }
+});
+
+test("F1 迟到的概况响应在共享身份切换后不回填旧主体事实", async () => {
+  let release = () => {};
+  const gate = new Promise((resolve) => { release = resolve; });
+  const p = await mountNickname({ read: async () => { await gate; return response(overview); } });
+  try {
+    // 读取在途时共享会话换主体，props 尚未更新。
+    p.identity.userId = "user_B";
+    release();
+    await p.settle();
+    await p.settle();
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null, "迟到响应不回填编辑入口");
+    assert.doesNotMatch(p.host.textContent, /自己的昵称/);
+  } finally { release(); await p.close(); }
+});
+
+test("F3 保存403撤下编辑入口与旧概况，明确说明且不残留意图", async () => {
+  const pendingWrite = { current: null };
+  const p = await mountNickname({ write: async () => Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }) }, { pendingWrite });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "新昵称");
+    await p.submit('form[aria-label="修改昵称"]');
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 1);
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null, "403 撤下编辑资格");
+    assert.doesNotMatch(p.host.textContent, /自己的昵称/, "撤下旧概况事实");
+    assert.equal(pendingWrite.current, null, "确定失败不残留意图");
+    assert.match(p.host.textContent, /当前身份无法执行该操作/);
+  } finally { await p.close(); }
+});
+
+test("F3 先成功再失权：确认读取403撤下入口但保留已接受意图，恢复只查询不重发", async () => {
+  const pendingWrite = { current: null };
+  let committed = false;
+  const p = await mountNickname({
+    read: () => committed ? Response.json({ error: { code: "FORBIDDEN" } }, { status: 403 }) : response(overview),
+    write: async () => { committed = true; return response({ status: true }); },
+  }, { pendingWrite });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "新昵称");
+    await p.submit('form[aria-label="修改昵称"]');
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 1, "写入已发出");
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null, "确认读取403撤下编辑资格");
+    assert.ok(pendingWrite.current, "已接受意图保留");
+    assert.equal(pendingWrite.current.intent.action, "nickname");
+    assert.equal(pendingWrite.current.accepted, true);
+    assert.match(p.host.textContent, /昵称修改结果待确认/, "恢复入口留在页面上");
+    const before = nicknameWrites(p).length;
+    await p.click("重新确认结果");
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, before, "恢复只查询不重发");
+    assert.ok(pendingWrite.current, "确认读取仍403时意图不清除");
+    assert.equal(pendingWrite.current.accepted, true, "已接受状态保留");
+    assert.equal(p.host.querySelector('[data-testid="edit-profile"]'), null);
+  } finally { await p.close(); }
+});
+
+test("F2 安全侧未决写入暂停昵称修改：说明、返回恢复入口、互斥与重挂载", async () => {
+  const pendingWrite = { current: { userId: "user_A", intent: { action: "sessions", scope: "others" }, accepted: true, target: "" } };
+  const original = pendingWrite.current;
+  const p = await mountNickname({}, { pendingWrite });
+  try {
+    await p.settle();
+    assert.match(p.host.textContent, /其他操作结果待确认/, "给出暂停说明");
+    assert.ok(p.host.querySelector('a[href="/account?view=security"]'), "返回安全页的恢复入口");
+    await p.click("修改昵称");
+    assert.match(nicknameDialog(p).textContent, /其他操作结果待确认/, "弹窗内同样给出说明");
+    assert.ok(p.findButton("保存昵称").disabled, "表单与提交同步锁定");
+    await p.submit('form[aria-label="修改昵称"]');
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 0, "不发昵称写入");
+    assert.equal(pendingWrite.current, original, "他类意图不被覆盖或清除");
+    assert.equal(pendingWrite.current.accepted, true, "对方已接受状态保留");
+    // 卸载/重挂载后互斥与说明仍在。
+    await p.render({ key: "remount" });
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 0, "重挂载后仍互斥");
+    assert.equal(pendingWrite.current, original);
+    assert.match(p.host.textContent, /其他操作结果待确认/);
+  } finally { await p.close(); }
+});
+
+test("F2 他类意图在渲染之后到达也在调用时同步阻止新写", async () => {
+  const pendingWrite = { current: null };
+  const p = await mountNickname({}, { pendingWrite });
+  try {
+    await p.settle();
+    await p.click("修改昵称");
+    await p.input("profile-nickname", "新昵称");
+    // 安全页写入随后落入共享容器，本组件尚未重渲染。
+    pendingWrite.current = { userId: "user_A", intent: { action: "password", operationId: "a".repeat(32) }, accepted: false, target: "" };
+    const slot = pendingWrite.current;
+    await p.submit('form[aria-label="修改昵称"]');
+    await p.settle();
+    assert.equal(nicknameWrites(p).length, 0, "调用时活读共享容器并阻止新写");
+    assert.equal(pendingWrite.current, slot, "不覆盖他类意图");
+  } finally { await p.close(); }
+});
+
+test("same-user identityVersion changes discard an in-flight overview instead of reauthorizing it", async () => {
+ let release; const gate = new Promise(resolve => { release = resolve; });
+ const p = await mountNickname({read: async () => { await gate; return response(overview); }});
+ try { p.identity.identityVersion += 1; release(); await p.settle(); assert.equal(Boolean(p.host.querySelector('[data-testid="edit-profile"]')),false); }
+ finally { await p.close(); }
+});
+
+/* --- Profile Avatar Editor Tests --- */
+const presets=['strike','night','frost','aurora'].map(name=>({presetId:'avatar-'+name,version:1,url:'/api/v1/profile/avatars/presets/avatar-'+name+'/1/content',width:256,height:256}));
+const state=(id='user_A',preset='avatar-strike',version='1')=>({revision:version,updatedAt:null,current:{kind:'DEFAULT',assetId:null,presetId:preset,url:'/api/v1/profile/avatars/user/'+id+'/'+version,currentVersion:version},defaultPresetId:'avatar-strike',presets,pending:null,lastReview:null});
+const clickElement=async(p,el)=>{assert(el);await p.React.act(async()=>el.click());await p.settle();};
+const choose=async(p,index=1)=>{await clickElement(p,p.host.querySelectorAll('.avatar-preset')[index]);await p.click('使用此头像');};
+async function uploadAvatarFile(p){await p.click('上传图片');const oldCreate=URL.createObjectURL,oldRevoke=URL.revokeObjectURL;URL.createObjectURL=()=> 'blob:avatar-test';URL.revokeObjectURL=()=>{};const input=p.host.querySelector('input[type=file]');Object.defineProperty(input,'files',{configurable:true,value:[new p.window.File([new Uint8Array([1,2,3])],'avatar.png',{type:'image/png'})]});await p.React.act(async()=>input.dispatchEvent(new p.window.Event('change',{bubbles:true})));await p.settle();await p.click('完成裁剪');return()=>{URL.createObjectURL=oldCreate;URL.revokeObjectURL=oldRevoke;};}
+// Crop bytes are a boundary fixture here; actual canvas/zoom/pixel output is checked in Chromium.
+const cropBoundary={AvatarCropper:({file,onConfirm,onCancel})=>createElement('div',{'aria-label':'裁剪头像'},createElement('button',{type:'button',onClick:()=>onConfirm(file)},'完成裁剪'),createElement('button',{type:'button',onClick:onCancel},'返回选择'))};
+const mountAvatar=(overrides,props={})=>mountAuthComponent('apps/web/src/components/account/avatar-edit.tsx','AvatarEditEntry',{userId:'user_A',...props},{initialStatus:'authenticated',stubModules:{'@zzsh/ui/avatar-crop':cropBoundary,'@/lib/profile-avatar-client':{...avatarApi,readAvatarState:async()=>state(),...overrides}}});
+const policy=requiresReview=>({requiresReview,available:true,revision:'2'});
+const appliedState=(assetId='asset_policy')=>({...state('user_A','avatar-strike','3'),current:{kind:'CUSTOM',assetId,presetId:null,url:'/api/v1/profile/avatars/user/user_A/3',currentVersion:'3'},policy:policy(false),lastReview:{assetId,state:'APPROVED',reason:null,reviewedAt:'2026-11-03T00:00:00Z',applied:true,source:'SYSTEM_POLICY',policyRevision:'2'}});
+const uploadResult=(review,assetId='asset_policy')=>({assetId,avatarSubmission:{disposition:review?'PENDING_REVIEW':'APPLIED_BY_POLICY',requiresReview:review,approvalSource:review?'MANUAL_REVIEW_REQUIRED':'SYSTEM_POLICY',policyRevision:'2'}});
+
+test('policy-off upload only announces an update after the returned asset is current',async()=>{
+ let submitted=false;const p=await mountAvatar({readAvatarState:async()=>submitted?appliedState():{...state(),policy:policy(false)},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{submitted=true;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);assert.match(p.host.textContent,/确认保存后生效/);await p.click('保存头像');assert.equal(p.host.querySelector('[role=dialog]'),null);assert.deepEqual(p.profileNotices,[{userId:'user_A',kind:'avatar'}])}finally{await p.close();restore()}
+});
+
+test('a policy toggle during upload follows the final result, not the earlier button label',async()=>{
+ for(const startedReview of [false,true]){let submitted=false;const after=startedReview?appliedState():{...state(),policy:policy(true),pending:{assetId:'asset_policy',submittedAt:null,reviewState:'PENDING',width:512,height:512,byteSize:'3'}};const p=await mountAvatar({readAvatarState:async()=>submitted?after:{...state(),policy:policy(startedReview)},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{submitted=true;return uploadResult(!startedReview)}});let restore=()=>{};
+  try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click(startedReview?'上传并提交审核':'保存头像');if(startedReview){assert.equal(p.host.querySelector('[role=dialog]'),null);assert.equal(p.profileNotices.length,1)}else{assert.match(p.host.textContent,/已提交审核/);assert.match(p.host.textContent,/新头像审核中/);assert.equal(p.profileNotices.length,0);assert(p.host.querySelector('[role=dialog]'))}}finally{await p.close();restore()}
+ }
+});
+
+test('disabling review does not approve an existing pending avatar or mislabel a newer current selection',async()=>{
+ let writes=0,submitted=false;const oldPending={assetId:'asset_old_pending',submittedAt:null,reviewState:'PENDING',width:256,height:256,byteSize:'3'},p=await mountAvatar({readAvatarState:async()=>submitted?appliedState('asset_newer_device'):{...state(),policy:policy(false),pending:oldPending},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{writes++;submitted=true;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');assert.match(p.host.textContent,/新头像审核中/);assert.equal(writes,0);restore=await uploadAvatarFile(p);await p.click('保存头像');assert.equal(writes,1);assert.equal(p.profileNotices.length,0);assert.match(p.host.textContent,/已读取当前头像状态/);assert(p.host.querySelector('[role=dialog]'))}finally{await p.close();restore()}
+});
+
+test('a successful upload with a failed follow-up read offers only state refresh, not another byte upload',async()=>{
+ let reads=0,writes=0;const p=await mountAvatar({readAvatarState:async()=>{reads++;if(reads===2)throw new Error('read unavailable');return reads>2?appliedState():{...state(),policy:policy(false)}},createAvatarUploadIntent:async()=>({intentId:'new_intent',uploadToken:'memory_only'}),uploadAvatar:async()=>{writes++;return uploadResult(false)}});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click('保存头像');assert.equal(writes,1);assert.equal(p.profileNotices.length,0);assert(p.findButton('重新读取头像状态'));assert.equal([...p.host.querySelectorAll('button')].some(b=>b.textContent==='重试上传'),false);await p.click('重新读取头像状态');assert.equal(writes,1)}finally{await p.close();restore()}
+});
+
+test('avatar picture itself is the named edit control, without a second text action',async()=>{
+ const p=await mountAvatar({}, {children:createElement('span',{'data-hero-avatar':true},'头像画面')});
+ try{const trigger=p.findButton('更换头像');assert(trigger.querySelector('[data-hero-avatar]'));assert.equal(trigger.textContent,'头像画面');await p.click('更换头像');assert(p.host.querySelector('[role=dialog]'));assert.equal(p.host.querySelectorAll('.avatar-selection-preview img').length,1);assert.equal(p.host.querySelector('.avatar-current'),null)}finally{await p.close()}
+});
+
+test('preset selection is only a preview; cancel makes no command and explicit confirm shows success',async()=>{
+ let writes=0;const p=await mountAvatar({selectDefaultAvatar:async preset=>{writes++;return state('user_A',preset,'2')}});
+ try{await p.click('更换头像');assert.equal(p.findButton('使用此头像').disabled,true);await clickElement(p,p.host.querySelectorAll('.avatar-preset')[1]);assert.equal(writes,0);assert.equal(p.profileNotices.length,0);assert.equal(p.host.querySelector('.avatar-selection-preview img').getAttribute('src'),presets[1].url);await p.click('取消');assert.equal(writes,0);assert.equal(p.host.querySelector('[role=dialog]'),null);await p.click('更换头像');await choose(p);assert.equal(writes,1);assert.equal(p.host.querySelector('[role=dialog]'),null);assert.deepEqual(p.profileNotices,[{userId:'user_A',kind:'avatar'}])}finally{await p.close()}
+});
+
+test('profile success notice survives child unmount and refresh loading, then clears on a confirmed identity switch or logout',async()=>{
+ const pending=deferred();let reads=0;const store=new UserSessionStore({session:async()=>++reads===1?{userId:'user_A'}:reads===2?pending.promise:{userId:null},signOut:async()=>true});
+ const provider='apps/web/src/components/session/user-session-provider.tsx',p=await mountAuthComponent(provider,'UserSessionProvider',{children:createElement('div',{'data-editor':true},'编辑器')},{stubModules:{'@/lib/user-session-client':{USER_SESSION_CHANNEL:'profile-notice-test',createBrowserUserSessionStore:()=>store,performSignOut:async()=>{},publishUserSessionChange(){}}}});
+ try{await p.settle();const publish=p.loadSource(provider).publishProfileUpdateNotice;await p.React.act(async()=>publish('foreign','avatar'));assert.equal(p.host.querySelector('.profile-change-toast'),null);await p.React.act(async()=>publish('user_A','avatar'));assert.match(p.host.textContent,/头像已更新/);let refresh;await p.React.act(async()=>{refresh=store.confirm();await Promise.resolve()});await p.render({children:null});assert.equal(store.getSnapshot().status,'loading');assert.match(p.host.textContent,/头像已更新/);await p.React.act(async()=>{pending.resolve({userId:'user_B'});await refresh});assert.equal(p.host.querySelector('.profile-change-toast'),null);await p.React.act(async()=>publish('user_B','nickname'));assert.match(p.host.textContent,/昵称已更新/);await p.React.act(async()=>store.confirm());assert.equal(p.host.querySelector('.profile-change-toast'),null)}finally{await p.close()}
+});
+
+test('profile success notice has a six-second expiry and can be dismissed without changing session authority',async()=>{
+ const store=new UserSessionStore({session:async()=>({userId:'user_A'}),signOut:async()=>true}),provider='apps/web/src/components/session/user-session-provider.tsx',oldTimer=globalThis.setTimeout;let expiry;
+ globalThis.setTimeout=(fn,ms,...args)=>{if(ms===6000)expiry=fn;return oldTimer(fn,ms,...args)};
+ const p=await mountAuthComponent(provider,'UserSessionProvider',{}, {stubModules:{'@/lib/user-session-client':{USER_SESSION_CHANNEL:'profile-notice-ttl-test',createBrowserUserSessionStore:()=>store,performSignOut:async()=>{},publishUserSessionChange(){}}}});
+ try{await p.settle();const publish=p.loadSource(provider).publishProfileUpdateNotice;await p.React.act(async()=>publish('user_A','nickname'));assert.equal(typeof expiry,'function');await p.React.act(async()=>expiry());assert.equal(p.host.querySelector('.profile-change-toast'),null);await p.React.act(async()=>publish('user_A','avatar'));await p.click('关闭资料更新提示');assert.equal(p.host.querySelector('.profile-change-toast'),null);assert.equal(store.getSnapshot().userId,'user_A');assert.equal(store.getSnapshot().status,'authenticated')}finally{await p.close();globalThis.setTimeout=oldTimer}
+});
+
+test('closing an uncertain upload preserves its original preparation key for a later explicit retry',async()=>{
+ const first=deferred();let keys=[],uploads=0;const p=await mountAvatar({createAvatarUploadIntent:async(_file,key)=>{keys.push(key);if(keys.length===1)return first.promise;return{intentId:'intent_same',uploadToken:'same_token'}},uploadAvatar:async()=>uploads++});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click('上传并提交审核');await p.click('关闭头像设置');await p.React.act(async()=>first.resolve({intentId:'intent_same',uploadToken:'same_token'}));await p.settle();assert.equal(uploads,0);await p.click('更换头像');await p.click('上传并提交审核');assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);assert.equal(uploads,1)}finally{await p.close();restore()}
+});
+
+test('Root: unknown default selection survives remount and recovers by original GET only',async()=>{
+ let writes=0,originalKey,readKey;const p=await mountAvatar({selectDefaultAvatar:async(_preset,_rev,key)=>{writes++;originalKey=key;throw new avatarApi.ProfileAvatarError('network',0,'NETWORK');},readAvatarOperationResult:async key=>{readKey=key;return{receipt:'RECORDED',responseStatus:200,result:state('user_A','avatar-night','2')};}});
+ try{await p.click('更换头像');await choose(p);assert.equal(writes,1);assert.match(p.host.textContent,/上次头像选择结果待确认/);assert(!JSON.stringify([...Array(p.window.sessionStorage.length)].map((_,i)=>p.window.sessionStorage.getItem(p.window.sessionStorage.key(i)))).includes('uploadToken'));
+ await p.render({key:'cold'});await p.click('更换头像');await p.click('读取原头像结果');assert.equal(writes,1);assert.equal(readKey,originalKey);assert.equal(avatarApi.readPendingAvatarDefault('user_A'),null);
+ }finally{await p.close();}
+});
+test('Root: an old identity write cannot leave the next identity busy or refresh its session',async()=>{
+ const write=deferred();const p=await mountAvatar({readAvatarState:async()=>state(p?.identity.userId??'user_A'),selectDefaultAvatar:()=>write.promise});
+ try{await p.click('更换头像');await choose(p);p.identity.userId='user_B';p.identity.identityVersion++;await p.render({userId:'user_B'});await p.click('更换头像');await p.React.act(async()=>write.resolve(state('user_A','avatar-night','2')));await p.settle();assert.equal(p.confirmations,0);assert.equal(p.host.querySelector('.avatar-selection-preview img').getAttribute('src'),state('user_B').current.url);assert.equal(p.host.querySelector('fieldset').disabled,false);
+ }finally{await p.close();}
+});
+test('Root: removing the file preview does not abort the post-upload state read',async()=>{
+ const after=deferred();let reads=0,signal;const p=await mountAvatar({readAvatarState:async nextSignal=>{reads++;if(reads===1)return state();signal=nextSignal;return after.promise;},createAvatarUploadIntent:async()=>({intentId:'intent_fixture',uploadToken:'synthetic_token'}),uploadAvatar:async()=>{}});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click('上传并提交审核');assert(signal);assert.equal(signal.aborted,false);await p.React.act(async()=>after.resolve({...state(),pending:{assetId:'asset_pending',submittedAt:null,reviewState:'PENDING',width:256,height:256,byteSize:'3'}}));await p.settle();assert.match(p.host.textContent,/新头像审核中/);
+ }finally{await p.close();restore();}
+});
+test('Root: closing during intent creation cannot dispatch a hidden byte upload',async()=>{
+ const intent=deferred();let uploads=0;const p=await mountAvatar({createAvatarUploadIntent:()=>intent.promise,uploadAvatar:async()=>uploads++});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click('上传并提交审核');await p.click('关闭头像设置');await p.React.act(async()=>intent.resolve({intentId:'intent_fixture',uploadToken:'synthetic_token'}));await p.settle();assert.equal(uploads,0);
+ }finally{await p.close();restore();}
+});
+test('Root: retrying an uncertain intent keeps the original creation key',async()=>{
+ const keys=[];let writes=0;const p=await mountAvatar({createAvatarUploadIntent:async(_file,key)=>{keys.push(key);if(keys.length===1)throw new avatarApi.ProfileAvatarError('unknown',0,'NETWORK');return{intentId:'intent_fixture',uploadToken:'synthetic_token'};},uploadAvatar:async()=>writes++});let restore=()=>{};
+ try{await p.click('更换头像');restore=await uploadAvatarFile(p);await p.click('上传并提交审核');await p.click('上传并提交审核');assert.equal(keys.length,2);assert.equal(keys[0],keys[1]);assert.equal(writes,1);
+ }finally{await p.close();restore();}
 });

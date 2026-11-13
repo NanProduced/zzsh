@@ -10,7 +10,6 @@ import type { SupplyRuntimeOptions } from "../src/supply/supply-routes";
 import type { IncomePreviewItem, IncomePreviewRelease } from "../src/supply/publishing";
 import { compatRule } from "./pricing-compat-fixture";
 import { fundingPolicyFixture } from "./funding-authority-fixtures";
-import { computeContentHash, normalizeContentPayload } from "../src/supply/content-hash";
 
 const origin = "http://preview.invalid", path = "/games/fixture_game/owner-income-preview";
 const forbiddenSql = /^\s*(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE)\b|\bFOR\s+(UPDATE|SHARE|KEY\s+SHARE|NO\s+KEY\s+UPDATE)\b|pg_(?:try_)?advisory(?:_xact)?_lock/i;
@@ -69,12 +68,8 @@ function body(): OwnerIncomePreviewInput {
     inventory: [{ itemId: "haff", quantity: "100000000" }, { itemId: "ammo", quantity: "120" }, { itemId: "card", quantity: "3" }], entitlements: [] };
 }
 function fixture() {
-  const state = { userId: "fixture_owner", authenticated: true, active: true, sessionValid: true, gameEnabled: true, accountOwner: "fixture_owner", accountGame: "fixture_game", accountExists: true, ruleExists: true, policyExists: true, sdkFailure: false, failSql: "",
-    schedules:false,partialSchedules:false,defaultMode:'FIXED_FEE' as 'FIXED_FEE'|'SPREAD',previous:null as Record<string,unknown>|null };
+  const state = { userId: "fixture_owner", authenticated: true, active: true, sessionValid: true, gameEnabled: true, accountOwner: "fixture_owner", accountGame: "fixture_game", accountExists: true, ruleExists: true, policyExists: true, sdkFailure: false, failSql: "" };
   const release: IncomePreviewRelease = { releaseId: "fixture_release", generation: "1", priceVersionId: "fixture_price", termVersionId: "fixture_term", catalogRevision: "1", priceStatus: "SEALED", mode: "SPREAD", commissionRate: null, roundingPolicy: "HALF_UP_CENT_V1", haffRule: compatRule("47") };
-  const {compatibility,...fixedBase}=compatRule('47');
-  const fixedRule={...fixedBase,schema:'haff-ratio-v3' as const,fixedModes:compatibility!.modes};
-  const rates={ordinary:'0.10',custom:'0.12',fast:'0.15'};
   const items: IncomePreviewItem[] = [
     { itemId: "haff", code: "haff", name: "哈夫币", unit: "HAFF_BASE", enabled: true, required: true, pricingKind: "HAFF_RATIO", unitQuantity: null, buyerUnitAmount: null, ownerUnitAmount: null },
     { itemId: "ammo", code: "level6_round", name: "六级子弹", unit: "ROUND", enabled: true, required: false, pricingKind: "FIXED_UNIT", unitQuantity: "60", buyerUnitAmount: "8", ownerUnitAmount: "4" },
@@ -96,13 +91,6 @@ function fixture() {
     else if (sql.includes('FROM "zzsh_auth_user"."session"')) rows = state.sessionValid ? [{}] : [];
     else if (sql.includes('game_service_operation')) rows = [{ id: "fixture_service", gameId: "fixture_game", gameCode: "delta", gameEnabled: state.gameEnabled, enabled: state.gameEnabled, revision: "1", serviceCode: "ACCOUNT_RENTAL" }];
     else if (sql.includes('SELECT * FROM zzsh_supply.rental_account')) rows = state.accountExists ? [{ owner_user_id: state.accountOwner, game_id: state.accountGame }] : [];
-    else if (sql.includes('to_regclass')) rows = [{modes:state.schedules,prices:state.schedules&&!state.partialSchedules,asOf:'2026-10-25T00:00:00.000000Z'}];
-    else if (sql.includes('FROM zzsh_supply.listing_publication p')) rows = state.previous?[state.previous]:[];
-    else if (sql.includes('FROM zzsh_supply.pricing_mode_schedule m')) rows = [{id:'mode-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',pricingModel:state.defaultMode,
-      priceScheduleId:'schedule-1',priceVersionId:state.defaultMode==='FIXED_FEE'?'fixed-price':'fixture_price',priceMode:state.defaultMode==='FIXED_FEE'?'PERCENT':'SPREAD',priceStatus:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:state.defaultMode==='FIXED_FEE'?rates:null,haffRule:fixedRule}];
-    else if (sql.includes('FROM zzsh_supply.pricing_policy_schedule s')) rows = sql.includes("s.pricing_model='FIXED_FEE'")
-      ? [{id:'schedule-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixed-price',mode:'PERCENT',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',haffRule:fixedRule,rates}]
-      : [{id:'spread-1',generation:'1',effectiveAt:'2026-10-01T00:00:00.000000Z',priceVersionId:'fixture_price',mode:'SPREAD',status:'SEALED',roundingPolicy:'HALF_UP_CENT_V1',rates:null,haffRule:compatRule('47')}];
     else if (sql.includes('commission_rate')) rows = state.ruleExists ? [release] : [];
     else if (sql.includes('FROM zzsh_supply.billable_item')) rows = sql.includes("i.unit<>'HAFF_BASE'") ? items.filter(row => row.unit !== "HAFF_BASE") : items;
     else if (sql.includes('FROM zzsh_supply.term_option')) rows = sql.includes('daily_consumption=$2')
@@ -127,83 +115,8 @@ function fixture() {
       conditions: { safeBoxCode: input.attributes.safe_box_code!, vitLevel: input.attributes.vit_level!, bearLevel: input.attributes.bear_level!, termOptionCode: input.termOptionCode!, pricingOptionCode: input.pricingOptionCode ?? undefined, rentalPricing: input.attributes.rentalPricing ?? undefined }, termOption: term,
       lines: input.inventory.filter(row => row.quantity !== null).map(row => { const item = items.find(i => i.itemId === row.itemId)!; return { itemId: item.itemId, quantity: row.quantity!, unit: item.unit, pricingKind: item.pricingKind!, customerTier: "STANDARD", ...(item.unitQuantity === null ? {} : { unitQuantity: item.unitQuantity }), ...(item.buyerUnitAmount === null ? {} : { buyerUnitAmount: item.buyerUnitAmount }), ...(item.ownerUnitAmount === null ? {} : { ownerUnitAmount: item.ownerUnitAmount }) }; }) };
   }
-  return { state, release, items, entitlements, term, extraTerms, queries, values, run, formalInput, fixedRule, rates, counts: () => ({ authCalls, connections, releases, poolReads }) };
+  return { state, release, items, entitlements, term, extraTerms, queries, values, run, formalInput, counts: () => ({ authCalls, connections, releases, poolReads }) };
 }
-
-test('fixed-fee preview applies the selected rate and coverage fee to the same gross',async()=>{
-  for(const [mode,ratio,haff,rate,fee,net] of [['ordinary',undefined,'47000000','0.1','10.00','82.00'],['custom','44','44000000','0.12','12.00','80.00'],['fast','53','53000000','0.15','15.00','77.00']] as const){
-    const f=fixture(),input=body();f.state.schedules=true;input.attributes.rentalPricing={rentalMode:mode,...(ratio?{ownerRatioB:ratio}:{})};
-    input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};
-    input.inventory=[{itemId:'haff',quantity:haff},{itemId:'ammo',quantity:'0'},{itemId:'card',quantity:'0'}];
-    for(const item of f.items)item.ownerUnitAmount=null;
-    const response=await f.run(input),p=response.body as OwnerIncomePreview;
-    assert.equal(response.statusCode,200);assert.equal(p.state,'READY');assert.equal(p.totalExpectedIncome!.amount,'100.00');
-    assert.equal(p.normalEndEstimate.ownerGross!.amount,'100.00');assert.equal(p.normalEndEstimate.platformFee!.base!.amount,'100.00');
-    assert.equal(p.normalEndEstimate.platformFee!.rate,rate);assert.equal(p.normalEndEstimate.platformFee!.amount!.amount,fee);
-    assert.equal(p.normalEndEstimate.serviceFee.amount!.amount,'8.00');assert.equal(p.normalEndEstimate.ownerNet!.amount,net);
-    assert.equal(p.binding!.priceVersionId,'fixed-price');assert(f.values.some(v=>v[1]==='fixed-price'));
-    assert.deepEqual(p.ratioRanges,{ordinary:{min:'47',max:'47'},custom:{min:'44',max:'46'},fast:{min:'53',max:'99'}});
-  }
-});
-
-test('fixed-fee preview rounds the whole-order service fee once',async()=>{
-  const f=fixture(),input=body();f.state.schedules=true;
-  input.inventory=[{itemId:'haff',quantity:'14100'},{itemId:'ammo',quantity:'1'},{itemId:'card',quantity:'0'}];
-  input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};
-  for(const item of f.items)item.ownerUnitAmount=null;
-  f.items[1]!.unitQuantity='1';f.items[1]!.buyerUnitAmount='0.02';
-  const result=await f.run(input),estimate=result.body.normalEndEstimate;
-  assert.equal(result.body.totalExpectedIncome.amount,'0.05');assert.equal(estimate.platformFee.amount.amount,'0.01');
-  assert.equal(estimate.serviceFee.amount.amount,'0.00');assert.equal(estimate.ownerNet.amount,'0.04');
-});
-
-test('fixed-fee preview refuses a stored rate above the insured policy cap',async()=>{
-  const f=fixture(),input=body();f.state.schedules=true;f.rates.ordinary='0.95';
-  input.attributes.full_payout_declaration={schema:'full-payout-declaration-v1',selected:true};
-  input.inventory=[{itemId:'haff',quantity:'47000000'},{itemId:'ammo',quantity:'0'},{itemId:'card',quantity:'0'}];
-  for(const item of f.items)item.ownerUnitAmount=null;
-  const result=await f.run(input);
-  assert.equal(result.statusCode,409);
-  assert.equal(result.body.error.code,'CONFLICT');
-  assert.match(result.body.error.message,/固定手续费率无法核实/);
-  assert.equal(result.body.normalEndEstimate,undefined);
-});
-
-test('an existing spread listing keeps its accepted mode when the default switches',async()=>{
-  for(const withPolicy of [false,true]){
-    const f=fixture(),input=body();f.state.schedules=true;input.accountId='fixture_account';
-    const built=computeDeltaQuote(f.formalInput(input));assert(built.quotable);
-    const quote={...built.quote,ruleReleaseId:'fixture_release'};
-    const payload=normalizeContentPayload({schemaVersion:2,accountId:'fixture_account',gameId:'fixture_game',
-      ruleRefs:{releaseId:'fixture_release',priceVersionId:'fixture_price',termVersionId:'fixture_term',agreementVersionId:'agreement',agreementDigest:'d'.repeat(64)},
-      declaration:{title:'Fixture',description:null,attributes:input.attributes,termOptionCode:'daily-10m',pricingOptionCode:'',
-        inventory:input.inventory.map(row=>({itemId:row.itemId,quantity:row.quantity!})),skins:[],entitlements:[],mediaBindings:[]},quoteValues:quote as never,
-      ...(withPolicy?{pricingPolicy:{schema:'pricing-policy-v1' as const,pricingModel:'SPREAD' as const,scheduleId:'spread-1',generation:'1',effectiveAt:'2026-10-01T00:00:00Z',priceVersionId:'fixture_price'}}:{})});
-    f.state.previous={schemaVersion:2,contentHash:computeContentHash(payload),payload};
-    const result=await f.run(input);assert.equal(result.statusCode,200);assert.equal(result.body.state,'READY');
-    assert.deepEqual(result.body.totalExpectedIncome,quote.ownerTotal);assert.equal(result.body.binding.priceVersionId,'fixture_price');
-    assert.equal(result.body.normalEndEstimate.platformFee,undefined);
-    const query=new URLSearchParams({inventory:JSON.stringify(input.inventory.filter(row=>row.itemId!=='haff')),
-      releaseId:'fixture_release',catalogRevision:'1',accountId:'fixture_account'});
-    const resource=await f.run({}, {method:'GET'},query,'/games/fixture_game/resource-income-preview');
-    assert.equal(resource.body.ownerTotal.amount,'17.00');assert.equal(resource.body.binding.priceVersionId,'fixture_price');
-    query.delete('accountId');
-    const defaultResource=await f.run({}, {method:'GET'},query,'/games/fixture_game/resource-income-preview');
-    assert.equal(defaultResource.body.ownerTotal.amount,'31.00');assert.equal(defaultResource.body.pricingPolicy.pricingModel,'FIXED_FEE');
-    query.set('accountId','fixture_account');f.state.accountOwner='another_owner';
-    await assert.rejects(f.run({}, {method:'GET'},query,'/games/fixture_game/resource-income-preview'),(e:{status?:number})=>e.status===404);
-    f.state.accountOwner='fixture_owner';f.state.accountGame='another_game';
-    await assert.rejects(f.run({}, {method:'GET'},query,'/games/fixture_game/resource-income-preview'),(e:{status?:number})=>e.status===404);
-  }
-});
-
-test('fixed-fee preview does not invent a mode or use a partially installed schedule',async()=>{
-  const f=fixture(),input=body();f.state.schedules=true;input.attributes.rentalPricing=null;
-  for(const item of f.items)item.ownerUnitAmount=null;
-  let result=await f.run(input);assert.equal(result.statusCode,200);assert.equal(result.body.totalExpectedIncome,null);
-  assert(result.body.missingFields.includes('attributes.rentalPricing'));assert.equal(result.body.normalEndEstimate.ownerNet,null);
-  f.state.partialSchedules=true;result=await f.run(input);assert.equal(result.body.state,'UNAVAILABLE');assert.equal(result.body.totalExpectedIncome,null);
-});
 
 test("owner preview exposes exact ratio choices without requiring a selected custom ratio", async () => {
   const f = fixture(), input = body();
@@ -332,14 +245,6 @@ test("old fixed-resource GET keeps its body contract but now uses READ-only iden
   const result = await f.run({}, { method: "GET" }, query, "/games/fixture_game/resource-income-preview");
   assert.equal(result.statusCode, 200); assert.equal(result.body.ownerTotal.amount, "17.00"); assert.equal(result.body.informationalOnly, true); assert.equal(result.body.schema, undefined);
   assert(f.queries.includes("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")); assert(f.queries.every(sql => !forbiddenSql.test(sql)));
-});
-
-test('fixed-fee resource-only preview labels gross before fees without inventing a rental mode',async()=>{
-  const f=fixture();f.state.schedules=true;for(const item of f.items)item.ownerUnitAmount=null;
-  const query=new URLSearchParams({inventory:JSON.stringify(body().inventory.filter(row=>row.itemId!=='haff')),releaseId:'fixture_release',catalogRevision:'1'});
-  const result=await f.run({}, {method:'GET'},query,'/games/fixture_game/resource-income-preview');
-  assert.equal(result.body.ownerTotal.amount,'31.00');assert.equal(result.body.incomeBasis,'OWNER_RESOURCE_INCOME_BEFORE_FEES');
-  assert.equal(result.body.pricingPolicy.pricingModel,'FIXED_FEE');assert.equal(result.body.informationalOnly,true);
 });
 
 

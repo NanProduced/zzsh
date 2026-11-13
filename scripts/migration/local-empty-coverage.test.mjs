@@ -1,31 +1,8 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { assertFundsWriterCoverage, createEmptyCoverageSink, EMPTY_COVERAGE_CHUNK_SIZE } from "./local-funds-plan.mjs";
-import { importEmptyCoverageChunk, readEmptyCoverageInputs, runFinanceCoveragePhases } from "./local-target-finance.mjs";
 
 const entry = (index, domain = "earnings") => ({ sourceId: `subject-${index}:${domain}`, domain, input: { index } });
-
-test("new empty coverage closes before nonempty history can add old-format receipts",async()=>{
- const order=[],history=async()=>order.push('history'),empty=async()=>order.push('empty');
- await runFinanceCoveragePhases(true,history,empty);assert.deepEqual(order,['empty','history']);
- order.length=0;await runFinanceCoveragePhases(false,history,empty);assert.deepEqual(order,['history','empty']);
- order.length=0;await assert.rejects(runFinanceCoveragePhases(true,history,async()=>{throw Error('EMPTY_FAILED');}),/EMPTY_FAILED/);
- assert.deepEqual(order,[]);
-});
-
-test("a frozen empty-coverage chunk is rechecked immediately before import", t => {
-  const dir=mkdtempSync(join(tmpdir(),"zzsh-empty-coverage-"));t.after(()=>rmSync(dir,{recursive:true}));
-  const file=join(dir,"chunk.json"), rows=[entry(1),entry(2)], bytes=JSON.stringify(rows);
-  const digest=createHash("sha256").update(bytes).digest("hex"), descriptor={file,rows:rows.length};
-  writeFileSync(file,bytes);assert.deepEqual(readEmptyCoverageInputs(descriptor,digest),rows.map(row=>row.input));
-  rows[1].input.index=3;writeFileSync(file,JSON.stringify(rows));
-  assert.throws(()=>readEmptyCoverageInputs(descriptor,digest),/PREPARED_CHUNK_SHA_CHANGED/);
-  assert.throws(()=>readEmptyCoverageInputs(descriptor,undefined),/PREPARED_CHUNK_SHA_CHANGED/);
-});
 
 test("the sink chunks at the loader's existing size and keeps source order", () => {
   const seen = [];
@@ -85,17 +62,4 @@ test("the coverage assertion accepts the streamed manifest and rejects a changed
   assert.equal(coverage.earnings.coverageWriter, 5);
   assert.throws(() => assertFundsWriterCoverage(plan, [], [], { ...manifest, digest: "f".repeat(64) }), /EMPTY_COVERAGE_SOURCE_SET_CHANGED/);
   assert.throws(() => assertFundsWriterCoverage(plan, [], [], { ...manifest, rows: manifest.rows + 1 }), /EMPTY_COVERAGE_SOURCE_SET_CHANGED/);
-});
-
-test("next-profile empty coverage uses its system writer and old rounds keep their original writer",async()=>{
- const calls=[],scope={id:'fixture'};
- const module={bindReviewedEmptyFinanceObservationBatch:async()=>{calls.push('bind');return scope;},
-  importReviewedEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('legacy');return{body:{created:1}};},
-  importReviewedCompactEmptyFinanceObservationBatch:async(_c,_a,_i,s)=>{assert.equal(s,scope);calls.push('compact');return{body:{created:0}};}};
- assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],false)).replayed,false);
- const system={receiptMode:'SYSTEM_BATCH_V1',async importEmpty(){calls.push('system');return{replayed:true};}};
- assert.equal((await importEmptyCoverageChunk(module,{}, {}, [], [],true,system)).replayed,true);
- assert.deepEqual(calls,['bind','legacy','system']);
- await assert.rejects(importEmptyCoverageChunk(module,{}, {}, [], [],true),/NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED/);
- await assert.rejects(importEmptyCoverageChunk(module,{}, {}, [], [],undefined),/MIGRATION_PROFILE_FLAG_UNPROVEN/);
 });

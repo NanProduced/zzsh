@@ -26,7 +26,6 @@ function batchVersionRows(ids: readonly string[]) {
 }
 const fixtureClient = { query: async (sql: string) => {
         if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
-    if (sql.includes("legacy_supply_map m ON m.account_id=$1") && sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
     assert.match(sql, /^\s*SELECT/, "occupancy projection remains read-only");
     return { rows: sql.includes('"game_service_operation"') ? [{ id: "fixture-service", gameCode: "delta", gameEnabled: true, enabled: true }] : [] };
 } } as never;
@@ -84,11 +83,12 @@ function rentalDetailFixture() {
         else if (sql.includes("FROM zzsh_supply.listing_version WHERE account_id=$1 ORDER BY sequence DESC")) rows = [{ id: "version-1", sequence: "2" }, { id: "version-old", sequence: "1" }];
         else if (sql.includes("SELECT u.suspended")) rows = [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }];
         else if (sql.includes('"game_service_operation"')) rows = [{ id: "service-1", gameCode: "delta", gameEnabled: true, enabled: true }];
-        else if (sql.includes("FROM zzsh_supply.game g WHERE id=")) rows = [{ id: account.game_id, enabled: true }];
+        else if (sql.includes("FROM zzsh_supply.game WHERE id=")) rows = [{ id: account.game_id, enabled: true }];
         else if (sql.includes("FROM zzsh_supply.inventory_line")) rows = [{ itemId: "haff", quantity: "12345678" }];
         else if (sql.includes('a.public_storage_key AS "publicStorageKey"')) rows = media;
         else if (sql.includes("FROM zzsh_supply.review_decision")) rows = [{ reason: "PRIVATE_REVIEW_RECORD" }];
         else if (sql.includes("FROM zzsh_iam.audit_event")) rows = [{ id: "restriction-event", reason: "PRIVATE_AUDIT_RECORD", actorName: "PRIVATE_ACTOR", restricted: true, versionId: "version-old" }];
+        else if (sql.includes("FROM zzsh_supply.duplicate_hint")) rows = [{ reason: "PRIVATE_DUPLICATE_HINT" }];
         else if (sql.startsWith("SELECT name FROM")) rows = [{ name: "Synthetic owner" }];
         return { rows, rowCount: rows.length };
     }, release() {} } as unknown as PoolClient;
@@ -133,7 +133,7 @@ test("rental account detail reuses listingDetail while denying management fields
     assert.equal(data.supervision.restrictionHistory.state, "DENIED");
     for (const key of ["previousDeclaration", "previousPresentation"]) assert.equal(data[key], null);
     for (const key of ["changes", "previousVersion", "originalRestrictionVersion"]) assert.equal(data.supervision[key], null);
-    assert.deepEqual(data.decisions, []); assert.equal(Object.hasOwn(data, "duplicateHints"), false); assert.deepEqual(data.supervision.restrictionHistory.items, []);
+    assert.deepEqual(data.decisions, []); assert.deepEqual(data.duplicateHints, []); assert.deepEqual(data.supervision.restrictionHistory.items, []);
     assert.equal(data.account.restriction_reason, null);
     assert.equal(data.account.current_version_id, "version-1");
     assert.equal(data.supervision.facts.lifecycle, "ACTIVE");
@@ -176,8 +176,7 @@ test("reviewers retain management records and independent directory, order and q
     assert.equal(data.supervision.restrictionHistory.state, "KNOWN");
     assert.equal(data.account.restriction_reason, "PRIVATE_RESTRICTION");
     assert.equal(data.decisions[0].reason, "PRIVATE_REVIEW_RECORD");
-    assert.equal(Object.hasOwn(data, "duplicateHints"), false);
-    assert.equal(f.queries.some(q => q.sql.includes("FROM zzsh_supply.duplicate_hint")), false);
+    assert.equal(data.duplicateHints[0].reason, "PRIVATE_DUPLICATE_HINT");
     assert.equal(data.version.declaration.attributes.info_source, "PRIVATE_ATTRIBUTION");
     assert.equal(data.version.declaration.mediaBindings.length, 3);
     assert.equal(data.version.quote.ownerTotal.amount, "7.00");
@@ -235,18 +234,17 @@ test("only the v3 single-account GET accepts rental reading and keeps active ide
     const read = async (path: string, query = "queryVersion=3", method = "GET") => {
         let body: any, status = 0;
         const response = { status(value: number) { status = value; return this; }, setHeader() { return this; }, json(value: unknown) { body = value; } };
-        const handled = await handlePublishingRoute({ method, headers: { origin: options.adminOrigin, "idempotency-key": "rental-read-cannot-write" }, body: {} } as never, response as never, options as never, "req-rental-read", path, new URLSearchParams(query), true);
-        return { status, body, handled };
+        await handlePublishingRoute({ method, headers: { origin: options.adminOrigin, "idempotency-key": "rental-read-cannot-write" }, body: {} } as never, response as never, options as never, "req-rental-read", path, new URLSearchParams(query), true);
+        return { status, body };
     };
     const detail = await read("/listing-reviews/account-1");
     assert.equal(detail.status, 200); assert.equal(detail.body.supervision.managementAccess, "DENIED");
     assert.ok(authenticatedChecks >= 2, "both authorization boundaries still assert the admin session");
     assert.ok(f.queries.some(q => q.sql === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"));
     assert.equal(f.queries.some(q => /FOR UPDATE|\b(?:INSERT|UPDATE|DELETE)\b/.test(q.sql)), false);
-    for (const [path, query, method] of [["/listing-reviews", "queryVersion=3", "GET"], ["/listing-reviews/account-1", "", "GET"], ["/listing-reviews/account-1/restriction", "queryVersion=3", "POST"], ["/listing-reviews/account-1/decide", "queryVersion=3", "POST"]]) {
+    for (const [path, query, method] of [["/listing-reviews", "queryVersion=3", "GET"], ["/listing-reviews/account-1", "", "GET"], ["/listing-reviews/account-1/restriction", "queryVersion=3", "POST"], ["/listing-reviews/account-1/decide", "queryVersion=3", "POST"], ["/listing-reviews/account-1/duplicates", "queryVersion=3", "POST"]]) {
         await assert.rejects(read(path!, query!, method!), (error: any) => error.status === 403, path);
     }
-    assert.equal((await read("/listing-reviews/account-1/duplicates", "queryVersion=3", "POST")).handled, false, "retired duplicate endpoint is not handled");
     f.state.scope = []; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 403 && error.code === "NO_GAME_SCOPE");
     f.state.scope = ["another-game"]; await assert.rejects(read("/listing-reviews/account-1"), (error: any) => error.status === 404);
     f.state.scope = [f.account.game_id]; await assert.rejects(read("/listing-reviews/missing-account"), (error: any) => error.status === 404);
@@ -648,7 +646,6 @@ test("account route lets the owner read history and stops another user first", a
     const historicalSql: string[] = [];
     const client = { query: async (sql: string) => {
         if (sql.includes("to_regclass('zzsh_supply.legacy_listing_capture_fact')")) return { rows: [{ ready: false }], rowCount: 1 };
-        if (sql.includes("legacy_supply_map m ON m.account_id=$1") && sql.includes("AS retired")) return { rows: [{ retired: false }], rowCount: 1 };
         if (sql.includes("source_status::int")) {
             historicalSql.push(sql);
             return { rows: [{ source_status: 4, legacy_id: "1", owner_user_id: "owner-1", snapshot: historicalSnapshot }] };
@@ -701,7 +698,7 @@ function summaryHarness(viewerPermissions: string[], options: { policy?: unknown
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
         if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(id => options.version ? { ...options.version, id, account_id: id.replace(/^version-/, "") } : summaryVersion(id)) };
         if (text.includes("source_status::int")) return { rows: options.historical ? [options.historical] : [] };
-        if (text.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
         if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
         if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         if (text.includes("p.funding_policy AS policy,p.status AS status")) {
@@ -868,7 +865,7 @@ test("list summary reports only authoritative facts and keeps every missing fact
     assert.equal(sql.filter(s => s.includes("account_guarantee_proof")).length, 1);
     assert.equal(sql.filter(s => s.includes("p.funding_policy AS policy,p.status AS status")).length, 1);
     assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision")).length, 0, "list does not load agreement or review history");
-    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game g WHERE id=$1")).length, 1, "the page shares one game read");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game WHERE id=$1")).length, 1, "the page shares one game read");
 });
 
 test("list summary uses the real public version, never the current draft v3", async t => {
@@ -1078,7 +1075,7 @@ test("the supervision page reads its accounts, versions, publication probe and l
         if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) };
         if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) return { rows: [{ id: "version-moved" }] };
         if (text.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")) return { rows: [{ account_id: "a-1" }] };
-        if (text.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
         if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
         if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         return { rows: [], rowCount: 0 };
@@ -1089,14 +1086,12 @@ test("the supervision page reads its accounts, versions, publication probe and l
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.rental_account WHERE id = ANY")).length, 1, "the accounts are one batch");
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id = ANY")).length, 1, "the current versions are one batch");
     assert.equal(sql.filter(s => s.includes("SELECT DISTINCT account_id FROM zzsh_supply.listing_publication")).length, 1, "the publication probe is one batch");
-    assert.equal(sql.filter(s => s.includes('m.account_id AS "accountId"') && s.includes("legacy_supply_map")).length, 1, "the legacy source rows are one batch");
-    assert.equal(sql.filter(s => /SELECT DISTINCT m\.account_id\s+FROM/.test(s)).length, 1, "retired legacy eligibility is one batch");
-    assert.equal(sql.filter(s => s.includes("AS retired")).length, 0, "no per-account retired eligibility reads");
+    assert.equal(sql.filter(s => s.includes("legacy_supply_map")).length, 1, "the legacy source rows are one batch");
     assert.equal(sql.filter(s => s.includes("legacy_order_read_snapshot") && !s.startsWith("SELECT a.id,")).length, 1, "the old account numbers are one batch; the same page SELECT also projects shared occupancy predicates");
     assert.equal(sql.filter(s => s.includes("source_status::int")).length, 1, "the historical reads are one batch");
     assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.listing_version WHERE id=$1")).length, 0, "the list keeps the batched version and does not re-read a moved current");
     assert.equal(sql.filter(s => s.includes("agreement_version") || s.includes("review_decision") || s.includes("draftSkin")).length, 0, "complete detail text stays off the list");
-    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game g WHERE id=$1")).length, 1, "the page shares one game read");
+    assert.equal(sql.filter(s => s.includes("FROM zzsh_supply.game WHERE id=$1")).length, 1, "the page shares one game read");
 });
 
 test("saved unquoted draft stock is one page read and keeps 0, unknown and undeclared apart", async t => {
@@ -1114,7 +1109,7 @@ test("saved unquoted draft stock is one page read and keeps 0, unknown and undec
             const wanted = (values?.[0] ?? []) as string[];
             return { rows: wanted.flatMap(id => stock.has(id) ? [{ versionId: id, itemId: "haff-a", quantity: stock.get(id), unit: "HAFF_BASE", code: "haff", name: "哈夫币" }] : []) };
         }
-        if (text.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
         if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
         if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         return { rows: [], rowCount: 0 };
@@ -1139,7 +1134,7 @@ test("the batch read keeps the first-read version tuple when current moves twice
         if (text.includes("FROM zzsh_supply.rental_account WHERE id = ANY")) return { rows: [...batchAccounts((values?.[0] ?? []) as string[]).values()] };
         if (text.includes("FROM zzsh_supply.listing_version WHERE id = ANY")) { versionReads++; return { rows: ((values?.[0] ?? []) as string[]).map(summaryVersion) }; }
         if (text.includes("FROM zzsh_supply.listing_version WHERE id=$1")) { movedReads++; return { rows: [{ id: "version-moved" }] }; }
-        if (text.includes("FROM zzsh_supply.game g WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
+        if (text.includes("FROM zzsh_supply.game WHERE id=$1")) return { rows: [{ id: "fixture-game", code: "delta", name: "三角洲", enabled: true, current_release_id: "release-1", catalog_revision: "9" }] };
         if (text.includes("game_service_operation")) return { rows: [{ id: "svc", gameId: "fixture-game", gameCode: "delta", gameEnabled: true, enabled: true, serviceCode: "ACCOUNT_RENTAL", revision: "1" }] };
         if (text.includes("u.suspended")) return { rows: [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }] };
         return { rows: [], rowCount: 0 };

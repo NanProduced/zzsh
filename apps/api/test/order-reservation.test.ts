@@ -1,5 +1,4 @@
 import { admitTestDatabase, assertEmptyIsolatedBusinessData, assertFreshRegressionRun, fixtureAgreementAcceptance } from "./database-test-support";
-import { syntheticPublicationCreditGate } from "./funding-authority-fixtures";
 import { lockPublishingAccount, type SupplyGate } from "../src/supply/publishing";
 import { createLocalMediaStorage } from "../src/supply/media";
 import sharp from "sharp";
@@ -588,10 +587,9 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       } : {}),
       // Fixture: no further obligations beyond the composed supply/order checks.
       userObligationReader: async () => "NONE" as const,
-      testSupplyGateReader: async (client: PoolClient, account: { id: string }): Promise<SupplyGate> => {
+      testSupplyGateReader: async (_client: PoolClient, account: { id: string }): Promise<SupplyGate> => {
         if (probeWatched.has(account.id)) await probe.run?.(account.id);
-        const gate: SupplyGate = publicationGates.get(account.id) ?? { publisherBail: "SATISFIED", occupancy: "FREE", reference: "fixture:order-bail" };
-        return syntheticPublicationCreditGate(client, account.id, gate);
+        return publicationGates.get(account.id) ?? { publisherBail: "SATISFIED", occupancy: "FREE", reference: "fixture:order-bail" };
       },
     };
     app = await createApp({
@@ -1187,8 +1185,6 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     await withTransaction(runtimePool, async (client) => {
       const released = await gateProbe(client, { id: accGateTruth.accountId } as never);
       assert.equal(released.occupancy, "FREE", "cancelling the order derives FREE again");
-      const account = (await client.query(`SELECT lifecycle FROM zzsh_supply.rental_account WHERE id=$1`, [accGateTruth.accountId])).rows[0];
-      assert.equal(account?.lifecycle, "ACTIVE", "renter cancellation alone does not delist the account");
     });
 
     // ---------- S2/V01: 两人同时抢同一账号 ----------
@@ -1279,7 +1275,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     assert.equal(snapshotDetail.body?.order?.quote?.termSeconds, String(6 * 86400));
     assert.equal(snapshotDetail.body?.order?.status, "PENDING_PAYMENT", "later rule activation must not rewrite or cancel the pending order");
 
-    // ---------- 已发布账号不可编辑；下架会关闭待付款单 ----------
+    // ---------- S5/V16+V16b+V14: 编辑/暂停/恢复与占用的关系 ----------
     const accEditRace = await publishApproved(owner2, "编辑竞态账号", "2500");
     const editGate = singleArrivalGate();
     probeWatched.add(accEditRace.accountId);
@@ -1300,9 +1296,10 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     const accDraftFirst = await publishApproved(owner2, "先草稿账号", "2500");
     const draftFirstRevision = (await request(base, `/api/v1/supply/accounts/${accDraftFirst.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
     const draftFirst = await request(base, `/api/v1/supply/accounts/${accDraftFirst.accountId}/drafts`, { expectedRevision: draftFirstRevision }, owner2, USER_ORIGIN, "POST", orderKey());
-    assert.equal(draftFirst.response.status, 409, "published records cannot acquire a new editable draft");
-    const unmodifiedCreate = await createOrder(renter1, accDraftFirst);
-    assert.equal(unmodifiedCreate.response.status, 200, "a rejected edit must not disable the original listing");
+    assert.equal(draftFirst.response.status, 200, JSON.stringify(draftFirst.body));
+    const staleVersionCreate = await createOrder(renter1, accDraftFirst);
+    assert.equal(staleVersionCreate.response.status, 409);
+    assert.equal(staleVersionCreate.body?.error?.code, "VERSION_CHANGED", "a newer draft invalidates the confirmed version token");
 
     const accPauseRace = await publishApproved(owner2, "暂停竞态账号", "2500");
     const pauseGate = singleArrivalGate();
@@ -1314,35 +1311,40 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
       probeWatched.delete(accPauseRace.accountId);
       pauseGate.open();
       const revision = (await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
-      return request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}/delist`, { expectedRevision: revision }, owner2, USER_ORIGIN, "POST", orderKey());
+      return request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}/pause`, { expectedRevision: revision, reason: "号主暂停" }, owner2, USER_ORIGIN, "POST", orderKey());
     })();
     const [pauseCreateResult, pauseResult] = await Promise.all([pauseRaceCreate, pauseRaceResult]);
     probeWatched.clear();
     assert.equal(pauseCreateResult.response.status, 200, JSON.stringify(pauseCreateResult.body));
-    assert.equal(pauseResult.response.status, 200, "delisting closes the pending order after creation commits");
+    assert.equal(pauseResult.response.status, 200, "pause does not check occupancy and must succeed after the create commits");
     const pauseRaceOrderId = pauseCreateResult.body?.order?.id as string;
     const pauseOrderDetail = await request(base, `/api/v1/orders/${pauseRaceOrderId}`, undefined, renter1, USER_ORIGIN);
-    assert.equal(pauseOrderDetail.body?.order?.status, "CANCELLED");
-    assert.equal(pauseOrderDetail.body?.order?.cancelReason, "OWNER_DELISTED");
+    assert.equal(pauseOrderDetail.body?.order?.status, "PENDING_PAYMENT", "pause must not change the existing order");
+    // api-v1-contract.md: an occupied/paused account leaves the rentable list but an approved
+    // public detail stays readable and reports the non-createable state instead of 404.
     const pausedPublic = await request(base, `/api/v1/supply/listings/${accPauseRace.accountId}`, undefined, cookieJar(), API_ORIGIN);
-    assert.equal(pausedPublic.response.status, 404);
+    assert.equal(pausedPublic.response.status, 200, JSON.stringify(pausedPublic.body));
+    assert.equal(pausedPublic.body?.availability?.state, "OFFLINE");
+    assert.equal(pausedPublic.body?.canCreateOrder, false);
     const resumeOccupiedRevision = (await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
     const resumeOccupied = await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}/resume`, { expectedRevision: resumeOccupiedRevision }, owner2, USER_ORIGIN, "POST", orderKey());
-    assert.equal(resumeOccupied.response.status, 404, "the retired resume endpoint cannot reactivate a delisted account");
+    assert.equal(resumeOccupied.response.status, 409, "resume requires the occupancy gate to be FREE");
 
     const accPauseFirst = await publishApproved(owner2, "先暂停账号", "2500");
     const pauseFirstRevision = (await request(base, `/api/v1/supply/accounts/${accPauseFirst.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
-    const pauseFirst = await request(base, `/api/v1/supply/accounts/${accPauseFirst.accountId}/delist`, { expectedRevision: pauseFirstRevision }, owner2, USER_ORIGIN, "POST", orderKey());
+    const pauseFirst = await request(base, `/api/v1/supply/accounts/${accPauseFirst.accountId}/pause`, { expectedRevision: pauseFirstRevision, reason: "先暂停" }, owner2, USER_ORIGIN, "POST", orderKey());
     assert.equal(pauseFirst.response.status, 200, JSON.stringify(pauseFirst.body));
     const pausedCreate = await createOrder(renter1, accPauseFirst);
-    assert.equal(pausedCreate.response.status, 404, "delisted accounts are not orderable");
+    assert.equal(pausedCreate.response.status, 404, "paused accounts are not orderable");
 
-    // The renter cannot cancel the same order again or reactivate the account.
+    // 取消后占用释放，恢复/草稿按既有门禁重新评估（V14）
     const cancelPauseRace = await request(base, `/api/v1/orders/${pauseRaceOrderId}/cancel`, { reason: "租客反悔" }, renter1, USER_ORIGIN, "POST", orderKey());
-    assert.equal(cancelPauseRace.response.status, 409, JSON.stringify(cancelPauseRace.body));
+    assert.equal(cancelPauseRace.response.status, 200, JSON.stringify(cancelPauseRace.body));
+    assert.equal(cancelPauseRace.body?.order?.status, "CANCELLED");
+    assert.equal(cancelPauseRace.body?.order?.cancelReason, "USER");
     const resumeAfterCancelRevision = (await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}`, undefined, owner2, USER_ORIGIN)).body?.account.revision;
     const resumeAfterCancel = await request(base, `/api/v1/supply/accounts/${accPauseRace.accountId}/resume`, { expectedRevision: resumeAfterCancelRevision }, owner2, USER_ORIGIN, "POST", orderKey());
-    assert.equal(resumeAfterCancel.response.status, 404, "the same account cannot be reactivated");
+    assert.equal(resumeAfterCancel.response.status, 200, "occupancy release re-enables the existing gates");
 
     // ---------- S6/V05+V06+V12+V18+V21: 取消、超时、清扫边界 ----------
     const accSweep = await publishApproved(owner2, "清扫账号", "2500");
@@ -1635,7 +1637,7 @@ test(PRICING_COMPAT ? "PC1 legacy V01–V21 order regression (no payment/IM work
     assert.equal(replayFirst.response.status, 200);
     const replayOrderId = replayFirst.body?.order?.id as string;
     const pausedReplayRevision = (await request(base, `/api/v1/supply/accounts/${accReplay.accountId}`, undefined, owner1, USER_ORIGIN)).body?.account.revision;
-    const pausedReplay = await request(base, `/api/v1/supply/accounts/${accReplay.accountId}/delist`, { expectedRevision: pausedReplayRevision }, owner1, USER_ORIGIN, "POST", orderKey());
+    const pausedReplay = await request(base, `/api/v1/supply/accounts/${accReplay.accountId}/pause`, { expectedRevision: pausedReplayRevision, reason: "重放测试暂停" }, owner1, USER_ORIGIN, "POST", orderKey());
     assert.equal(pausedReplay.response.status, 200);
     await makeRuleSet("4");
     await runtimePool.query(`UPDATE zzsh_iam.user_identity_state SET identity_status = 'UNVERIFIED' WHERE user_id = (SELECT renter_user_id FROM zzsh_order.rental_order WHERE id = $1)`, [replayOrderId]);

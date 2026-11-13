@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePopulationMode, selectSourceScenarios, summarizePopulationScope } from "./local-source-scenarios.mjs";
-import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, preflightBoundSourceBatches, readBoundSourceBatches, readSystemMigrationAudits, matchesSystemMigrationAudit, matchesSystemDisplayReceipt, matchesSystemContinuationReceipt, matchesSystemLiabilityEvidence, matchesSystemCompletedCommissionEvidence, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
+import { parseSourceCaptureLine, sourceJsonLine, readLfLines, readSourceRows, readBoundSourceRows, readVerifiedSourceRows, verifyDisplayCaptureInputs, sourceAccountPlan, assertCapturedSourceOrigin, assertDisplayCaptureCoverage, assertDisplayCaptureRow, assertLegacyIdentityColumns, assertLegacyListedPricingColumns, assertLegacySkinDictionaryColumns, inspectLegacyListedPricingCapture, inspectLegacySkinDictionaryCapture, planLegacyIdentitySource, matchesLegacyIdentitySource } from "./local-source-adapter.mjs";
 import { deriveAdditionalSkinAmbiguities, hasNonExactSkinSourceToken, useDynamicSkinDictionaryRules } from "./local-target-holdings.mjs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -10,99 +10,6 @@ import { mkdtempSync, writeFileSync, rmSync, unlinkSync, rmdirSync } from "node:
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { Readable } from "node:stream";
-
-test("system migration readback binds one exact actor, source and payload",async()=>{
-  const manifestSha256="a".repeat(64),run="b".repeat(64),actorId="legacy-account-migration:"+run;
-  const expected={objectId:"account_1",action:"supply.legacy.account_created",actorId,manifestSha256,
-    sourceSystem:"legacy_mysql_restore",sourceEntity:"la_rental_accounts",legacyId:"1",sourceDigest:"c".repeat(64),payloadDigest:"d".repeat(64)};
-  const row={object_id:expected.objectId,action:expected.action,actor_type:"system",actor_id:actorId,session_id:null,source_manifest:manifestSha256,
-    details:{sourceDatasetSha256:manifestSha256,migrationRunDigest:run,sourceSystem:expected.sourceSystem,sourceEntity:expected.sourceEntity,
-      legacyId:expected.legacyId,sourceDigest:expected.sourceDigest,payloadDigest:expected.payloadDigest}};
-  const groups=await readSystemMigrationAudits(async(_sql,args)=>{assert.equal(args[0],"rental_account");assert.deepEqual(args[2],["account_1"]);return {rows:[row]};},"accounts",["account_1"]);
-  assert.equal(matchesSystemMigrationAudit(groups.get("account_1"),expected),true);
-  for(const bad of [{...row,actor_type:"admin"},{...row,session_id:"fake"},{...row,source_manifest:"e".repeat(64)},
-    {...row,details:{...row.details,payloadDigest:"e".repeat(64)}}])assert.equal(matchesSystemMigrationAudit([bad],expected),false);
-  assert.equal(matchesSystemMigrationAudit([{...row,details:{...row.details,initialAvatar:{presetId:"avatar-night",version:"1",created:true}}}],
-    {...expected,initialAvatarPresetId:"avatar-night"}),true);
-  assert.equal(matchesSystemMigrationAudit([row],{...expected,initialAvatarPresetId:"avatar-night"}),false);
-  assert.equal(matchesSystemMigrationAudit([row,row],expected),false);
-  await assert.rejects(readSystemMigrationAudits(async()=>({rows:[]}),"other",["account_1"]),/SYSTEM_MIGRATION_AUDIT_QUERY_INVALID/);
-});
-test('system display readback requires its exact original receipt',()=>{
- const expected={actorId:'legacy-account-migration:'+'a'.repeat(64),accountId:'account-1',displayDigest:'b'.repeat(64),fingerprint:'c'.repeat(64),canonicalize:JSON.stringify};
- const row={scope_key:JSON.stringify(['system',expected.actorId,'supply.legacy.display_snapshot_recorded',expected.accountId]),key:'legacy-display-v1:'+expected.accountId,
-  request_fingerprint:expected.fingerprint,response_status:200,publish_required:false,response_body:{accountId:expected.accountId,displayDigest:expected.displayDigest,schemaVersion:1}};
- assert.equal(matchesSystemDisplayReceipt([row],expected),true);
- for(const rows of [[],[row,row],[{...row,request_fingerprint:'d'.repeat(64)}],[{...row,publish_required:true}],[{...row,response_body:{...row.response_body,displayDigest:'e'.repeat(64)}}]])
-  assert.equal(matchesSystemDisplayReceipt(rows,expected),false);
-});
-test('system continuation readback rejects missing, duplicated or changed receipts',()=>{
- const expected={actorId:'legacy-order-migration:'+'a'.repeat(64),orderId:'legacy_order_1',key:'b'.repeat(64),fingerprint:'c'.repeat(64),
-  evidenceId:'evidence-1',admission:'PARAMETER_COMPLETE',canonicalize:JSON.stringify};
- const row={scope_key:JSON.stringify(['system',expected.actorId,'order.legacy.continuation.import',expected.orderId]),key:expected.key,
-  request_fingerprint:expected.fingerprint,response_status:200,publish_required:false,response_body:{evidenceId:expected.evidenceId,admission:expected.admission,isolated:[]}};
- assert.equal(matchesSystemContinuationReceipt([row],expected),true);
- for(const rows of [[],[row,row],[{...row,request_fingerprint:'d'.repeat(64)}],[{...row,publish_required:true}],[{...row,response_body:{...row.response_body,isolated:[{}]}}]])
-  assert.equal(matchesSystemContinuationReceipt(rows,expected),false);
-});
-test('system liability readback preserves original refund evidence and unknown channel result',()=>{
- const actorId='legacy-order-migration:'+'a'.repeat(64),manifestSha256='b'.repeat(64),bindingDigest='c'.repeat(64),fingerprint='d'.repeat(64),dutyId='duty-1';
- const input={orderId:'order-1',parentSourceDigest:'e'.repeat(64),classification:'DETAINED',evidenceRef:'synthetic',settlementRecord:{canonical:'{"is_settle":"2"}',digest:'f'.repeat(64)}};
- const details={sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId:'1',sourceDigest:input.parentSourceDigest,sourceDatasetSha256:manifestSha256,
-  migrationRunDigest:'a'.repeat(64),bindingDigest,payloadDigest:createHash('sha256').update(JSON.stringify(input)).digest('hex'),classification:input.classification,
-  sourceStatus:'2',parentSourceDigest:input.parentSourceDigest,evidenceRef:input.evidenceRef,settlementRecord:input.settlementRecord,refundRecord:null,dutyId,channelState:'UNKNOWN'};
- const audit={object_id:input.orderId,action:'order.legacy.liability.import',actor_type:'system',actor_id:actorId,session_id:null,source_manifest:manifestSha256,details};
- const receipt={scope_key:JSON.stringify(['system',actorId,'order.legacy.liability.import',input.orderId]),key:createHash('sha256').update(input.orderId).digest('hex'),
-  request_fingerprint:fingerprint,response_status:200,publish_required:false,response_body:{classification:input.classification,dutyId,channelState:'UNKNOWN'}};
- const expected={actorId,manifestSha256,legacyId:'1',bindingDigest,input,dutyId,fingerprint,canonicalize:JSON.stringify};
- assert.equal(matchesSystemLiabilityEvidence([audit],[receipt],expected),true);
- for(const [a,r] of [[[],[receipt]],[[audit],[]],[[audit,audit],[receipt]],[[{...audit,details:{...details,channelState:'SUCCESS'}}],[receipt]],[[audit],[{...receipt,publish_required:true}]]])
-  assert.equal(matchesSystemLiabilityEvidence(a,r,expected),false);
-});
-test('completed commission readback distinguishes two economic keys on one order',()=>{
- const hash=value=>createHash('sha256').update(value).digest('hex'),actorId='legacy-order-migration:'+'a'.repeat(64),manifestSha256='b'.repeat(64),bindingDigest='c'.repeat(64),fingerprint='d'.repeat(64);
- const input={orderId:'order-1',sourceDigest:'e'.repeat(64),commission:{id:'1'},sourceRecord:{digest:'f'.repeat(64)},finalAmountEvidenceDigest:'1'.repeat(64),time:{at:'2026-01-01T00:00:00.000000Z'},cutoff:'2026-01-02T00:00:00.000000Z'};
- const effect={dutyId:'duty-1',beneficiaryUserId:'user-1',amountCents:'100',maturityAt:'2026-01-08T00:00:00.000000Z',maturedByCutoff:false};
- const admissionId='legacy_admission_'+hash(effect.dutyId).slice(0,40),admissionCanonical=JSON.stringify({schema:'legacy-completed-commission-admission.v1',...input,beneficiaryUserId:effect.beneficiaryUserId,amountCents:effect.amountCents,maturityAt:effect.maturityAt}),admissionDigest=hash(admissionCanonical);
- const details={sourceSystem:'legacy_mysql_restore',sourceEntity:'la_order',legacyId:'9',sourceDigest:input.sourceDigest,sourceDatasetSha256:manifestSha256,migrationRunDigest:'a'.repeat(64),bindingDigest,
-  payloadDigest:hash(JSON.stringify(input)),sourceRecordId:input.commission.id,sourceRecordDigest:input.sourceRecord.digest,parentSourceDigest:input.sourceDigest,admissionId,admissionDigest,
-  finalAmountEvidenceDigest:input.finalAmountEvidenceDigest,time:input.time,cutoff:input.cutoff,maturityAt:effect.maturityAt,maturedByCutoff:false};
- const audit={object_id:input.orderId,action:'order.legacy.commission.completed-import',actor_type:'system',actor_id:actorId,session_id:null,source_manifest:manifestSha256,details};
- const receipt={scope_key:JSON.stringify(['system',actorId,'order.legacy.commission.completed-import',input.orderId]),key:hash(input.commission.id),request_fingerprint:fingerprint,response_status:200,publish_required:false,
-  response_body:{admission:'IMPORTED',dutyId:effect.dutyId,maturityAt:effect.maturityAt}};
- const admission={id:admissionId,duty_id:effect.dutyId,admission_digest:admissionDigest,admission_canonical:admissionCanonical,source_record_digest:input.sourceRecord.digest,
-  reviewed_by:{kind:'SYSTEM_ORDER_MIGRATION',id:actorId,sourceDatasetSha256:manifestSha256}};
- const expected={actorId,manifestSha256,legacyId:'9',bindingDigest,input,effect,admission,fingerprint,canonicalize:JSON.stringify};
- assert.equal(matchesSystemCompletedCommissionEvidence([audit,{...audit,details:{...details,sourceRecordId:'2'}}],[receipt,{...receipt,key:hash('2')}],expected),true);
- assert.equal(matchesSystemCompletedCommissionEvidence([audit,audit],[receipt],expected),false);
- assert.equal(matchesSystemCompletedCommissionEvidence([audit],[{...receipt,response_body:{...receipt.response_body,maturityAt:'2026-01-09'}}],expected),false);
- assert.equal(matchesSystemCompletedCommissionEvidence([audit],[receipt],{...expected,admission:{...admission,source_record_digest:'0'.repeat(64)}}),false);
-});
-
-test("source batches admit only preflight-matched rows and withhold the last batch until full verification", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "zzsh-source-batch-")), file = join(dir, "users.jsonl");
-  const rows = Array.from({ length: 5 }, (_, id) => ({ id: String(id + 1), label: `合成${id}` }));
-  const bytes = Buffer.from(rows.map(row => JSON.stringify(row)).join("\n") + "\n");
-  const entry = { rows: rows.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-  try {
-    writeFileSync(file, bytes);
-    const proof = await preflightBoundSourceBatches(file, entry, 2), recovered = [];
-    for await (const row of readBoundSourceBatches(file, entry, proof)) recovered.push(row);
-    assert.deepEqual(recovered, rows); assert.equal(proof.hashes.length, 3);
-    await assert.rejects(async () => { for await (const _ of readBoundSourceBatches(file, entry, { ...proof })) {} }, /SOURCE_BATCH_PROOF_INVALID/);
-
-    const changed = rows.map(row => ({ ...row })); changed[2].label = "改变";
-    writeFileSync(file, changed.map(row => JSON.stringify(row)).join("\n") + "\n");
-    const stream = readBoundSourceBatches(file, entry, proof);
-    assert.deepEqual((await stream.next()).value, rows[0]); assert.deepEqual((await stream.next()).value, rows[1]);
-    await assert.rejects(stream.next(), /SOURCE_BATCH_CHANGED/);
-
-    writeFileSync(file, Buffer.concat([bytes, Buffer.from("\n")]));
-    const changedBytes = readBoundSourceBatches(file, entry, proof);
-    for (let index = 0; index < 4; index++) assert.deepEqual((await changedBytes.next()).value, rows[index]);
-    await assert.rejects(changedBytes.next(), /SOURCE_STREAM_CHANGED/);
-  } finally { unlinkSync(file); rmdirSync(dir); }
-});
 
 test('new source captures bind the restored server and pre/post read-only proof without changing old receipts',()=>{
   const sha='a'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='b'.repeat(64);

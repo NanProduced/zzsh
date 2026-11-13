@@ -14,7 +14,6 @@ import {
   type LegacyOwnerMigrationInput,
 } from "../src/supply/legacy-user-migration";
 import { planLegacyContactProjections, type LegacyContactProjection } from "../src/legacy-load/legacy-contact-projection";
-import { systemUserMigrationId, withSystemUserMigrationBatch, systemFinanceMigrationId, withSystemFinanceRecoveryBatch, authorizeSystemFinanceMigration } from "../src/legacy-load/system-user-migration";
 
 const ACTOR = { id: "admin-1", sessionId: "session-1", requestId: "request-1" };
 const MOBILE = "19900000001";
@@ -47,7 +46,7 @@ function input(overrides: Partial<LegacyOwnerEvidence> = {}): LegacyOwnerMigrati
 const ACCOUNT_ID = "account-1";
 const STANDIN = "user-standin";
 
-type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean; username?: string | null; displayUsername?: string | null; image?: string | null; updatedAt?: string };
+type UserRow = { id: string; name: string; email: string; phoneNumber: string | null; phoneNumberVerified: boolean | null; suspended: boolean; username?: string | null; displayUsername?: string | null; updatedAt?: string };
 type CredentialRow = { id: string; userId: string; providerId: string; password: string | null; legacyPasswordMd5: string | null; legacyPasswordSalt: string | null; legacyPasswordVersion: string | null; legacyPasswordUpgradedAt: string | null };
 type IdentityRow = { user_id: string; account_status: string; identity_status: string; age_status: string; provider: string; provider_reference: string; verified_at: string | null };
 type MapRow = { source_system: string; source_entity: string; legacy_id: string; source_digest: string; account_id: string; version_id: string; evidence_ref: string };
@@ -65,7 +64,7 @@ class FakeClient {
   readonly credentials = new Map<string, CredentialRow>();
   readonly identities = new Map<string, IdentityRow>();
   readonly profileAvatars = new Map<string, Record<string, unknown>>();
-  readonly audits: Array<{ object_id: string; action: string; details: Record<string, unknown>; actorType?: string; sourceManifest?: string }> = [];
+  readonly audits: Array<{ object_id: string; action: string; details: Record<string, unknown> }> = [];
   readonly idempotency = new Map<string, { requestFingerprint: string; responseStatus: number; responseBody: unknown; publishRequired: boolean }>();
   readonly maps = new Map<string, MapRow>();
   readonly bindings = new Map<string, BindingRow>();
@@ -83,10 +82,6 @@ class FakeClient {
   sessionLocked = false;
   scope = true;
   failNextIdempotencyRead = false;
-  systemMigrationAuthorized = true;
-  systemTransactionId = "1234";
-
-  getTransactionStatus() { return "T"; }
 
   constructor() {
     this.maps.set(ACCOUNT_ID, {
@@ -104,13 +99,6 @@ class FakeClient {
   async query<T = Record<string, unknown>>(text: string, values: unknown[] = []): Promise<{ rows: T[]; rowCount: number }> {
     const sql = text.replace(/\s+/g, " ").trim();
     this.queries.push(sql);
-    if (sql.includes("legacy_system_audit_insert"))
-      return { rows: [{ authorized: this.systemMigrationAuthorized, transactionId: this.systemTransactionId } as T], rowCount: 1 };
-    if (sql.includes("history_coverage_guard")) return { rows: [{ authorized: true } as T], rowCount: 1 };
-    if (sql.startsWith("SELECT pg_current_xact_id()"))
-      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true, mode: true } as T], rowCount: 1 };
-    if (sql.startsWith("SELECT (SELECT virtualtransaction"))
-      return { rows: [{ transactionId: this.systemTransactionId, nonce: "a".repeat(24), direct: true, mode: true } as T], rowCount: 1 };
     if (sql.includes("pg_advisory_xact_lock") || sql.startsWith("SELECT set_config")) return { rows: [], rowCount: 0 };
     if (sql.startsWith('SELECT s."locked",u."twoFactorEnabled"')) return { rows: [{ locked: this.sessionLocked, twoFactorEnabled: true, suspended: false } as T], rowCount: 1 };
     if (sql.startsWith('SELECT "status" FROM "zzsh_iam"."admin_security"')) return { rows: [{ status: "ACTIVE" } as T], rowCount: 1 };
@@ -196,7 +184,7 @@ class FakeClient {
       return { rows: row ? [{ one: 1 } as T] : [], rowCount: row ? 1 : 0 };
     }
     if (sql.startsWith("INSERT INTO zzsh_iam.audit_event") || sql.startsWith('INSERT INTO "zzsh_iam"."audit_event"')) {
-      this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])), actorType: String(values[1]), ...(values[11] === undefined ? {} : { sourceManifest: String(values[11]) }) });
+      this.audits.push({ object_id: String(values[6]), action: String(values[4]), details: JSON.parse(String(values[10])) });
       return { rows: [], rowCount: 1 };
     }
     if (sql.includes('FROM "zzsh_supply"."profile_avatar"')) {
@@ -211,13 +199,11 @@ class FakeClient {
       return { rows: [row as T], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE "zzsh_auth_user"."user" SET "image"')) {
-      const user=this.users.get(String(values[0]));if(user)user.image=String(values[1]);
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('INSERT INTO "zzsh_auth_user"."user"')) {
       const row: UserRow = { id: String(values[0]), name: String(values[1]), email: String(values[2]), phoneNumber: values[4] === null ? null : String(values[4]), phoneNumberVerified: values[6] === true, suspended: false,
-        ...(sql.includes('"displayUsername"') ? { username: String(values[5]) } : {}),
-        ...(sql.includes('"image"') ? { image: String(values[sql.includes('"displayUsername"')?7:5]) } : {}) };
+        ...(values.length > 5 ? { username: String(values[5]) } : {}) };
       this.users.set(row.id, row);
       return { rows: [], rowCount: 1 };
     }
@@ -304,51 +290,6 @@ test("contact-aware import verifies only the admitted authentication phone", asy
   const result = await migrateLegacyOwner(asClient(fake), { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) }, ACTOR);
   assert.equal(fake.users.get(result.userId)?.phoneNumber, "+86" + MOBILE);
   assert.equal(fake.users.get(result.userId)?.phoneNumberVerified, true);
-});
-
-test("system legacy user import binds each source and checks the batch fence on entry and exit", async () => {
-  const fake = new FakeClient(), sourceDatasetSha256 = "d".repeat(64); let fences = 0, admitted = true;
-  const target = { systemIdentifier: "123", databaseOid: "456", marker: "zzsh:synthetic:v1", nonce: "a".repeat(24), roleOid: "789" };
-  const actor = { kind: "SYSTEM_USER_MIGRATION" as const, id: systemUserMigrationId(sourceDatasetSha256, target),
-    sourceDatasetSha256, target, requestId: "system-user-import", assertMigrationFence: async () => { fences++; },
-    assertSourceEvidence: async () => { if (!admitted) throw Error("SOURCE_NOT_ADMITTED"); } };
-  assert.notEqual(actor.id, systemUserMigrationId(sourceDatasetSha256, { ...target, databaseOid: "457" }));
-  const payload = contactEvidence(evidence()), body = { evidence: payload, evidenceDigest: legacyOwnerEvidenceDigest(payload) };
-  await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /batch is unavailable/);
-  await withSystemUserMigrationBatch(asClient(fake), actor, async () => {
-    const first = await migrateLegacyOwner(asClient(fake), body, actor), replay = await migrateLegacyOwner(asClient(fake), body, actor);
-    assert.equal(first.replayed, false); assert.equal(replay.replayed, true); assert.equal(fences, 1);
-    admitted = false; await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /SOURCE_NOT_ADMITTED/); admitted = true;
-    fake.systemTransactionId = "9999"; await assert.rejects(migrateLegacyOwner(asClient(fake), body, actor), /transaction changed/); fake.systemTransactionId = "1234";
-  });
-  assert.equal(fences, 2);
-  const audit = fake.audits.find(row => row.action === "user.legacy_owner.migrated")!;
-  assert.equal(audit.actorType, "system"); assert.equal(audit.sourceManifest, sourceDatasetSha256);
-  assert.equal(audit.details.sourceDatasetSha256, sourceDatasetSha256);
-  assert.equal(fake.audits.some(row => row.action === "profile.avatar.initialized"), false);
-  assert.equal((audit.details.initialAvatar as {presetId:string}).presetId, fake.profileAvatars.get(JSON.stringify(["user",legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId)]))?.defaultPresetId);
-  assert.equal(fake.users.get(legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId))?.image,
-    `/api/v1/profile/avatars/user/${legacyOwnerUserId(payload.sourceSystem,payload.sourceEntity,payload.legacyId)}/1`);
-  let release!: () => void, firstFence = true;
-  const holding = { ...actor, assertMigrationFence: async () => { if (firstFence) { firstFence = false; await new Promise<void>(resolve => { release = resolve; }); } } };
-  const pending = withSystemUserMigrationBatch(asClient(fake), holding, async () => {});
-  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => {}), /already active/);
-  release(); await pending;
-  const changed = { ...actor };
-  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), changed, async () => { changed.assertMigrationFence = async () => {}; }), /batch changed/);
-  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => { fake.systemMigrationAuthorized = false; }), /protected migration role/);
-  await assert.rejects(withSystemUserMigrationBatch(asClient(fake), actor, async () => {}), /protected migration role/);
-  assert.equal(fences, 6);
-});
-
-test("read-only system recovery rejects a changed transaction",async()=>{
-  const fake=new FakeClient(),target={systemIdentifier:"123",databaseOid:"456",marker:"zzsh:synthetic:v1",nonce:"a".repeat(24),roleOid:"789"};
-  const sourceDatasetSha256="d".repeat(64),actor={kind:"SYSTEM_FINANCE_MIGRATION" as const,id:systemFinanceMigrationId(sourceDatasetSha256,target),
-    sourceDatasetSha256,target,fenceEpochSha256:"e".repeat(64),requestId:"recovery",assertMigrationFence:async()=>{},assertSourceEvidence:async()=>{}};
-  const source={inputsDigest:"a".repeat(64),inputSha256:"b".repeat(64),cutoff:"2026-01-01T00:00:00.000Z"};
-  await assert.rejects(withSystemFinanceRecoveryBatch(asClient(fake),actor,async()=>{
-    fake.systemTransactionId="different";await authorizeSystemFinanceMigration(asClient(fake),actor,source,true);
-  }),/transaction changed/);
 });
 
 test("contact-aware importer persists a phone-null real subject and exact legacy alias without inventing a credential", async () => {

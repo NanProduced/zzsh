@@ -58,6 +58,7 @@ export function detail(account, reviewState, overrides = {}) {
     previousDeclaration: null,
     previousPresentation: undefined,
     decisions: [],
+    duplicateHints: [],
     blockers: [],
     available: true,
     ...overrides,

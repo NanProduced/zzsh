@@ -8,7 +8,6 @@ import { createListingDraft,saveListingDraft,quoteListing,acceptListingRules,sub
 import { parseListingQueryV2,LISTING_OPERATORS,type FilterConfig,type ListingFilters } from "../src/supply/listing-filter-contract";
 import { buildListingCandidates } from "../src/supply/listing-candidates";
 import type { Options } from "./supply-publishing-checks";
-import { syntheticPublicationCreditGate } from "./funding-authority-fixtures";
 
 export const queryFixtureKey={keyId:"query-a-fixture",secret:randomBytes(32).toString("hex")};
 export async function runListingQueryAChecks(o:Options) {
@@ -123,7 +122,7 @@ export async function runListingQueryAChecks(o:Options) {
       for(let i=batch*10;i<batch*10+10;i++) {
         const id="qa_account_"+String(i).padStart(4,"0");await client.query(`INSERT INTO zzsh_supply.rental_account(id,owner_user_id,game_id) VALUES($1,$2,$3)`,[id,owner,o.gameId]);
         const asset={...media,id:"qa_media_"+i,account_id:id,technical_state:"READY",technical_checked_at:new Date(),technical_failure_code:null};const columns=Object.keys(asset);await client.query(`INSERT INTO zzsh_supply.media_asset(${columns.map(c=>'"'+c+'"').join(',')}) VALUES(${columns.map((_,i)=>'$'+(i+1)).join(',')})`,columns.map(c=>asset[c]));
-        o.gates.set(id,{publisherBail:"NOT_REQUIRED",occupancy:"FREE",reference:"fixture:query-a"});const gate=async(c:import("pg").PoolClient)=>syntheticPublicationCreditGate(c,id,o.gates.get(id)!);
+        o.gates.set(id,{publisherBail:"NOT_REQUIRED",occupancy:"FREE",reference:"fixture:query-a"});const gate=async()=>o.gates.get(id)!;
         const a=await readPublishingAccount(client,id);await createListingDraft(client,a,a.revision,gate);
         const extra=i%3===0?null:(i>=695&&i<705?9007199254740992n+BigInt(i-695):BigInt(i%11)*1000000n).toString();
         const regions=[...regionPairs,{province:"河南省",city:"成都市"}];const region=regions[i%4]!;

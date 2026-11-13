@@ -1,3 +1,4 @@
+import { grantedSupportConnection } from "./support-connection-fixture.mjs";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -90,6 +91,8 @@ test("admin consultation image UNKNOWN keeps the original id for the retry", asy
   let failNext = true;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -155,6 +158,8 @@ test("a text UNKNOWN on one consultation survives a successful send on another",
   let failOnA = true;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: rows });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -223,6 +228,8 @@ test("admin consultation routes the normal send and Enter to the original messag
   let failNext = true;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -286,6 +293,8 @@ test("an in-flight text retry still settles the originating consultation after s
   let releaseRetry = null;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: rows });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -353,6 +362,8 @@ test("an unresolved text cannot be bypassed by clearing the draft and staging on
   let failFirstText = true;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -465,6 +476,8 @@ function revokeHarness(t) {
 function textSendFetch(textPosts, reply) {
   return async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -519,6 +532,8 @@ test("a text send in flight when only the send permission is revoked keeps its U
       if (seen > 1) return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500, headers: { "content-type": "application/json" } });
       return new Promise((resolve) => { reply.current = () => resolve(new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500, headers: { "content-type": "application/json" } })); });
     }
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });
@@ -597,6 +612,8 @@ test("a queued image batch stops dispatching the rest once the send permission i
   const reply = { current: null };
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input), browser.location.href);
+    const connection = grantedSupportConnection(url.pathname, init.method);
+    if (connection) return connection;
     if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
     if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [consultation] });
     if (url.pathname.endsWith("/im/message-access")) return response({ authorized: true });

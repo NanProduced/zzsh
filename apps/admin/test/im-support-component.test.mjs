@@ -1,3 +1,4 @@
+import { grantedSupportConnection } from "./support-connection-fixture.mjs";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -105,6 +106,8 @@ let resolvePendingSend;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input), browser.location.href);
   requests.push({ path: `${url.pathname}${url.search}`, method: init.method ?? "GET" });
+  const connection = grantedSupportConnection(url.pathname, init.method);
+  if (connection) return connection;
   if (url.pathname.endsWith("/im/token")) return response({ appKey: "test-app", accountId: "admin-a", token: "test-token", transport: "local-fake" });
   if (url.pathname.endsWith("/im/consultations")) return response({ consultations: [serviceConsultation] });
   if (/\/im\/consultations\/[^/]+\/read$/.test(url.pathname)) return response({ adminReadAt: "2026-09-17T00:02:00.000Z" });

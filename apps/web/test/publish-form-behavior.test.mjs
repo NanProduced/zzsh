@@ -134,9 +134,9 @@ function completeDeclaration(overrides = {}) {
   const base = declaration(overrides);
   return { ...base, attributes: { ...requiredAccountFacts, ...(overrides.attributes ?? {}) } };
 }
-function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revision = "5", versionId = "version_1", schemaVersion = 1, versionRevision = "1", lifecycle = "ACTIVE" } = {}) {
+function supplyOf(declarationValue, { quote = null, reviewState = "DRAFT", revision = "5", versionId = "version_1", schemaVersion = 1, versionRevision = "1" } = {}) {
   return {
-    account: { id: "account_1", game_id: "game_1", revision, current_version_id: versionId, lifecycle, owner_paused: false, staff_restricted: false, restriction_reason: null },
+    account: { id: "account_1", game_id: "game_1", revision, current_version_id: versionId, owner_paused: false, staff_restricted: false, restriction_reason: null },
     version: {
       id: versionId, schemaVersion, sequence: "1", revision: versionRevision, reviewState,
       releaseId: quote ? "release_1" : null, contentHash: quote ? "hash_1" : null,
@@ -841,8 +841,8 @@ test('display screenshot uploads the original selected file without re-encoding'
 
 test('pending media survives remount without storing File or upload tokens and cannot pretend to reupload',async()=>{const p=await probe({accountId:'account_1',mine:()=>supplyOf(declaration()),uploadMedia:()=>{throw new actualSupply.SupplyRequestError(503,{error:{code:'INTERNAL_ERROR',message:'upload unknown'}})}});try{await p.render();const input=p.host.querySelector('input[type=file]');Object.defineProperty(input,'files',{value:[new File(['valid-bytes-for-component-probe'],'show.png',{type:'image/png'})],configurable:true});await React.act(async()=>input.dispatchEvent(new p.window.Event('change',{bubbles:true})));await p.waitFor(()=>p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));const raw=p.storageDump().find(([key])=>key.startsWith('zzsh.supply-write'))[1];assert.doesNotMatch(raw,/uploadToken|valid-bytes-for-component-probe/);assert.equal(JSON.parse(raw).action,'media');await p.remount();await p.clickButton('重试当前步骤');assert.match(p.text(),/原图片文件没有保留/);assert.ok(p.storageDump().some(([key])=>key.startsWith('zzsh.supply-write')));}finally{await p.close();}});
 
-test('R03: publishing cannot resolve account actions by reading current account state',async()=>{
-  for(const action of ['pause','resume','withdraw','delist'])for(const phase of ['pending','accepted']){
+test('R03: publishing cannot resolve pause/resume/withdraw by reading current account state',async()=>{
+  for(const action of ['pause','resume','withdraw'])for(const phase of ['pending','accepted']){
     const record={version:1,userId:'user_A',gameId:'game_1',accountId:'account_1',action,key:'frozen-management-key',body:{expectedRevision:'1',...(action==='withdraw'?{versionId:'version_1'}:{})},phase,uncertain:true,createdAt:new Date().toISOString(),...(phase==='accepted'?{receipt:{accountId:'account_1',revision:'2'}}:{})};
     const slot='zzsh.supply-write.v1:user_A',raw=JSON.stringify(record);let reads=0;
     const p=await probe({accountId:'account_1',mine:()=>{reads++;return supplyOf(declaration());},storageSeed:[[slot,raw]]});
@@ -1046,6 +1046,7 @@ test("unquoted summary distinguishes missing pricing from a zero income", async 
   const p=await probe();
   try {
     await p.render();
+    await previewTick();
     const rail=p.host.querySelector('#publish-quote');
     assert.equal(rail.dataset.quoted,'false');
     assert.equal(rail.querySelector('[aria-label="预计收入合计"]'),null);
@@ -1416,19 +1417,6 @@ test("the fast entry converts an ordinary draft to a fast declaration before sav
   }
 });
 
-test("fixed-fee v3 keeps the fast rental selection and saves its selected ratio", async () => {
-  const attrs = { ...declaration().attributes, safe_box_code: "box-a", vit_level: 4, bear_level: 4, rentalPricing: { rentalMode: "ordinary" } };
-  const p = await probe({ mode: "fast", accountId: "account_1", options: { ...optionsV2, pricingSchema: "haff-ratio-v3" },
-    mine: () => supplyOf(declaration({ attributes: attrs })) });
-  try {
-    await p.render();
-    assert.doesNotMatch(p.text(), /极速入口当前不可用/);
-    await p.type('input[aria-label="兑换比例"]', "48");
-    await p.clickButton("保存草稿");
-    assert.deepEqual(p.calls.filter(call => call.op === "saveDraft").at(-1).body.attributes.rentalPricing, { rentalMode: "fast", ownerRatioB: "48" });
-  } finally { await p.close(); }
-});
-
 test("a disabled fast mode and a v1 rule both refuse to pretend fast pricing", async () => {
   const disabledFast = await probe({
     mode: "fast", accountId: "account_1", options: optionsV2NoFast,
@@ -1593,27 +1581,14 @@ test("notice moves focus to the first step and returns to its trigger when reope
   } finally { await p.close(); }
 });
 
-test("a published account cannot be edited or re-published in place", async () => {
+test("editing a published account explains that new orders pause", async () => {
   const p = await probe({
     accountId: "account_1", editRequested: true,
     mine: () => supplyOf(declaration(), { quote: ownerQuote, reviewState: "PUBLISHED" }),
   });
   try {
     await p.render();
-    assert.match(p.text(), /已上架或历史账号不能修改|上架后不可修改/);
-    assert.doesNotMatch(p.text(), /开始编辑后.*暂停接单/);
-    assert.equal([...p.host.querySelectorAll("button")].some(button => ["开始修改", "编辑资料"].includes(button.textContent.trim())), false);
-    assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
-  } finally { await p.close(); }
-});
-
-test("an archived account with an old draft cannot offer editing or re-publication", async () => {
-  const p = await probe({ accountId: "account_1", editRequested: true,
-    mine: () => supplyOf(declaration(), { reviewState: "DRAFT", lifecycle: "ARCHIVED" }) });
-  try {
-    await p.render();
-    assert.match(p.text(), /此账号仅保留记录；如需出租，请重新填写上架资料/);
-    assert.equal([...p.host.querySelectorAll("button")].some(button => ["继续填写草稿", "确认上架"].includes(button.textContent.trim())), false);
+    assert.match(p.text(), /修改期间.*暂停接单|开始编辑后.*暂停接单/);
     assert.equal(p.calls.some(call => ["createDraft", "saveDraft", "quote", "confirm"].includes(call.op)), false);
   } finally { await p.close(); }
 });
@@ -1755,7 +1730,7 @@ test('v2 recommendation verifies every selected skin across catalog pages, reche
   });
   try {
     await p.render(); await p.clickButton('查看推荐押金');
-    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前账号资料）')), true);
+    assert.equal(await p.waitFor(() => p.text().includes('推荐 312.34 元（依据当前版本资料）')), true);
     assert.equal(reads.length, 2, 'selected facts outside the visible picker page are read as metadata');
     await p.clickButton('采用推荐');
     assert.equal(await p.waitFor(() => p.host.querySelector('#publish-deposit').value === '312.34'), true);
@@ -2950,7 +2925,7 @@ test('the publish group map is visible and provides a real focus-return target w
   } finally { await p.close(); }
 });
 
-test("an unquoted draft can be priced before checking its guarantee, but an unresolved quoted guarantee blocks publication", async () => {
+test("publish button runs full flow and system blockers stop publication cleanly", async () => {
   const declared = completeDeclaration({
     inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: "60" }],
     termOptionCode: "legacy_daily_10m",
@@ -2965,41 +2940,9 @@ test("an unquoted draft can be priced before checking its guarantee, but an unre
   try {
     await p.render();
     assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').textContent, '确认上架');
-    assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').disabled, false, 'an unpriced guarantee cannot prevent the quote it needs');
-    await p.click('.publish-agreement-acceptance input');
-    await p.clickButton('确认上架');
-    assert.ok(await p.waitFor(() => p.calls.some(call => call.op === 'quote')));
-    assert.equal(p.calls.some(call => call.op === 'confirm'), false, 'an unresolved guarantee after quoting cannot accept or publish');
-    assert.equal(p.host.querySelector('.publish-confirm button.button.primary').disabled, true);
-    assert.match(p.host.querySelector('[data-blocker-group="system"]')?.textContent ?? '', /暂时无法确认保证金状态/);
-  } finally { await p.close(); }
-
-  const incomplete = await probe({
-    accountId: "account_1", mine: () => ({ ...supplyOf(declared), blockers }),
-    saveDraft: body => ({ ...supplyOf(body), blockers }),
-    quote: () => ({ ...supplyOf(declared, { quote: ownerQuote }), blockers: undefined }),
-  });
-  try {
-    await incomplete.render();
-    await incomplete.click('.publish-agreement-acceptance input');
-    await incomplete.clickButton('确认上架');
-    assert.ok(await incomplete.waitFor(() => incomplete.calls.some(call => call.op === 'quote')));
-    assert.equal(incomplete.calls.some(call => call.op === 'confirm'), false, 'a missing blocker list cannot authorize publication');
-  } finally { await incomplete.close(); }
-});
-
-test("an unavailable pricing policy preserves unknown draft quantities and prevents quoting", async () => {
-  const declared = completeDeclaration({ inventory: [{ itemId: "item_haff", quantity: "60000000" }, { itemId: "item_round", quantity: null }] });
-  const unknownCatalog = { ...catalog, blockers: [{ code: "PRICING_POLICY_UNAVAILABLE" }], items: catalog.items.map(item => ({ ...item, priced: null })) };
-  const p = await probe({ accountId: "account_1", mine: () => supplyOf(declared), catalogValue: unknownCatalog });
-  try {
-    await p.render();
-    await p.clickButton('保存草稿');
-    const saved = p.calls.find(call => call.op === 'saveDraft');
-    assert.ok(saved);
-    assert.equal(saved.body.inventory.find(item => item.itemId === 'item_round')?.quantity, null);
-    assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').disabled, true);
-    assert.equal(p.calls.some(call => call.op === 'quote' || call.op === 'confirm'), false);
+    assert.equal(p.host.querySelector('.publish-rail-footer button.button.primary').disabled, true, 'system blocker blocks publication up front');
+    assert.match(p.host.querySelector('[data-blocker-group="system"]')?.textContent ?? '', /系统问题，请联系客服/);
+    assert.equal(p.host.querySelector('[data-blocker-group="user"]'), null, 'QUOTE_REQUIRED never shows under user blockers');
   } finally { await p.close(); }
 });
 

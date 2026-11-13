@@ -31,12 +31,4 @@ test('fresh display import refuses an omitted captured fact before invoking its 
  await assert.rejects(applyDisplayDomain(context(),directory,write()),/DISPLAY_CAPTURE_FACTS_REQUIRED/);assert.equal(writes,0);
  rows[1].snapshot.sourceAccountFullPayoutSelected=true;const ctx=context();await applyDisplayDomain(ctx,directory,write());
  assert.equal(writes,2);assert.equal(ctx.state.displayReconciliation.targetRows,2);
- let systemWrites=0;const next=context();next.isNextMigration=true;next.systemDisplay=async entries=>{systemWrites+=entries.length;assert.deepEqual(entries.map(entry=>entry.legacyId),['1','2']);return entries.map(()=>({replayed:false}));};
- next.runBatches=async(_name,items,run)=>{const batch=[];for await(const item of items)batch.push(item);return run(batch);};
- await applyDisplayDomain(next,directory,write());assert.equal(systemWrites,2);assert.equal(writes,2);assert.equal(next.state.additiveInputs.display.receiptMode,'SYSTEM_ACCOUNT_V1');
- const changed=context();changed.isNextMigration=true;changed.systemDisplay=next.systemDisplay;changed.runBatches=async(_name,items)=>{
-  writeFileSync(files[0],JSON.stringify({...rows[0],baseSourceDigest:'f'.repeat(64)})+'\n'+JSON.stringify(rows[1])+'\n');
-  for await(const _ of items)systemWrites++;
- };
- await assert.rejects(applyDisplayDomain(changed,directory,write()),/SOURCE_(?:BATCH|STREAM)_CHANGED/);assert.equal(systemWrites,2);
 });

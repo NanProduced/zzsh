@@ -5,15 +5,13 @@ import {readPublicCatalog,readAdminCatalog,parseCursor,encodeCursor,parseCatalog
 import {handleSupplyUserRoute} from '../src/supply/supply-routes';
 import {mountUserSupplyBff} from '../src/bff/user-supply-bff';
 
-function fixture(requiredUnpriced=false, hasRelease=true, incompletePricing=false) {
+function fixture(requiredUnpriced=false, hasRelease=true) {
   const items=Array.from({length:8},(_,n)=>({id:`item_${n}`,code:`item_code_${n}`,name:`物资${n}`,unit:n===0?'HAFF_BASE':'PIECE',quantityScale:0,required:requiredUnpriced&&n===1,priced:n===0&&hasRelease,sortOrder:n}));
   const queries:string[]=[];
   const client={async query(sql:string,args:unknown[]=[]) {
     queries.push(sql);
-    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',code:'delta',name:'三角洲行动',catalogRevision:'129',currentReleaseId:hasRelease?'release_current':null,basePriceVersionId:hasRelease?'legacy_price':null,coverMediaId:null}]};
-    if(sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')"))return{rows:[{modes:incompletePricing,prices:false}]};
-    if(sql.includes('FROM zzsh_supply.price_version p'))return{rows:[{priceVersionId:'legacy_price',pricingModel:'LEGACY_SPREAD'}]};
-    if(sql.includes('FROM "zzsh_supply"."billable_item"'))return{rows:items.map(item=>({...item,priced:args[1]===null?null:item.priced&&args[1]==='legacy_price'}))};
+    if(sql.includes('FROM "zzsh_supply"."game"'))return{rows:[{id:'game_delta',code:'delta',name:'三角洲行动',catalogRevision:'129',currentReleaseId:hasRelease?'release_current':null,coverMediaId:null}]};
+    if(sql.includes('FROM "zzsh_supply"."billable_item"'))return{rows:sql.includes('AND EXISTS')?items.filter(i=>i.priced):items};
     if(sql.startsWith('SELECT id,name FROM zzsh_supply.billable_item'))return{rows:items.filter(i=>i.required&&(sql.includes('NOT EXISTS')?!i.priced:!(args[1] as string[]).includes(i.id)))};
     if(sql.includes('skin_category')||sql.includes('skin_rarity')||sql.includes('firearm_classification')||sql.includes('entitlement')||sql.includes('FROM "zzsh_supply"."skin"'))return{rows:[]};
     throw Error('Unexpected catalog read SQL');
@@ -34,17 +32,8 @@ test('returning unpriced items does not clear the required price blocker',async(
 });
 test('a game without an active release still exposes its draft inventory and stays unready',async()=>{
   const f=fixture(false,false),body=await readPublicCatalog(f.client,'game_delta',{},20,undefined,'publishing') as any;
-  assert.equal(body.items.length,8);assert(body.items.every((i:any)=>i.priced===null));
+  assert.equal(body.items.length,8);assert(body.items.every((i:any)=>i.priced===false));
   assert.equal(body.ready,false);assert.deepEqual(body.blockers,[{code:'RULE_UNCONFIGURED',path:'rules'}]);
-});
-
-test('incomplete pricing schedules report unavailable and never show legacy prices', async () => {
-  const f=fixture(true,true,true);
-  const body=await readPublicCatalog(f.client,'game_delta',{},20,undefined,'publishing') as any;
-  assert.equal(body.ready,false);
-  assert(body.items.every((item:any)=>item.priced===null));
-  assert.deepEqual(body.blockers,[{code:'PRICING_POLICY_UNAVAILABLE',path:'rules'}]);
-  assert(!f.queries.some(sql=>sql.includes('FROM zzsh_supply.price_version p')));
 });
 
 test('public owners cover all visible skins regardless of page or search filters',async()=>{

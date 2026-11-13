@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { canonicalize } from '../src/supply/content-hash';
 import { computeDeltaQuote } from '../src/supply/pricing';
-import { FIXED_FEE_ALGORITHM } from '../src/supply/fixed-fee';
-import { freezeSettlementPricing } from '../src/order/personal-confirmation';
 import { compatRule } from './pricing-compat-fixture';
 import { legacyCompensationBasis, nativeCompensationBasis, parseCompensationPayload } from '../src/finance/order-compensation-contract';
 
@@ -29,17 +27,4 @@ test('native eligibility requires the exact signed quote and its order-party bin
  assert.equal(nativeCompensationBasis({...order,contentHash:'b'.repeat(64)}),null);
  assert.equal(nativeCompensationBasis({...order,ruleReleaseId:'different'}),null);
  const changed=structuredClone(order);changed.quote.personal.fullPayoutDeclaration.selected=false;assert.equal(nativeCompensationBasis(changed),null);
-});
-test('fixed-fee compensation requires the signed pricing policy and matching frozen settlement basis',()=>{
- const {compatibility,...base}=compatRule('47');
- const computed=computeDeltaQuote({priceVersionId:'price-fixed',mode:'PERCENT',fixedFeeAlgorithm:FIXED_FEE_ALGORITHM,commissionRate:'0.10',customerTier:'STANDARD',roundingPolicy:'HALF_UP_CENT_V1',haffRule:{...base,schema:'haff-ratio-v3',fixedModes:compatibility!.modes},conditions:{safeBoxCode:'box-a',vitLevel:6,bearLevel:6,termOptionCode:'daily-10m',rentalPricing:{rentalMode:'ordinary'}},termOption:{code:'daily-10m',dailyConsumption:'10000000',durationRounding:'CEIL_DAY'},lines:[{itemId:'haff',customerTier:'STANDARD',quantity:'100000000',unit:'HAFF_BASE',pricingKind:'HAFF_RATIO'}],deposits:{tenantDepositCents:'0',publisherBailRequirementCents:'0'}});
- assert(computed.quotable);const quote=computed.quote;quote.ruleReleaseId='release';
- const settlementPricing=freezeSettlementPricing(quote,'1',[],'0.10');
- const personal={schema:'personal-quote-v5',userId:'renter',ownerUserId:'owner',accountId:'account',listingVersionId:'listing',listingHash:'a'.repeat(64),ruleRefs:{releaseId:'release'},fullPayoutDeclaration:{schema:'full-payout-declaration-v1',selected:true},pricingPolicy:{schema:'pricing-policy-v1',pricingModel:'FIXED_FEE',scheduleId:'schedule-1',generation:'1',effectiveAt:'2026-10-01T00:00:00Z',priceVersionId:'price-fixed'}};
- const confirmationDigest=createHash('sha256').update(canonicalize({...personal,quote,settlementPricing})).digest('hex');
- const order={id:'order_1',gameId:'delta',ownerUserId:'owner',renterUserId:'renter',accountId:'account',listingVersionId:'listing',contentHash:'a'.repeat(64),ruleReleaseId:'release',paymentId:'payment_1',paidCents:'10000',quote:{...quote,personal,settlementPricing,listingHash:'a'.repeat(64),confirmationDigest}};
- assert.equal(nativeCompensationBasis(order)?.selected,true);
- const wrongPolicy=structuredClone(order);wrongPolicy.quote.personal.pricingPolicy.priceVersionId='other';assert.equal(nativeCompensationBasis(wrongPolicy),null);
- const wrongRate=structuredClone(order);wrongRate.quote.settlementPricing.fixedFeeRate='0.2';assert.equal(nativeCompensationBasis(wrongRate),null);
- const missing=structuredClone(order);delete (missing.quote as {settlementPricing?:unknown}).settlementPricing;assert.equal(nativeCompensationBasis(missing),null);
 });

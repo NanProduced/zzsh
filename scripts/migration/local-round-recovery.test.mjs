@@ -6,106 +6,15 @@ import { win32 as path } from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { assertSameDirectoryResumeSafe, isRoundReceiptPath, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation } from "./local-load-checkpoint.mjs";
-import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertCoreSystemMigrationBinding, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
+import { acquireMigrationSessionFence, advisoryLockSql, assertCaptureTargetProfile, assertLiveTarget, assertMigrationFenceHeld, assertNextMigrationWriteReady, captureMaintenanceLockEpoch, NEXT_MIGRATION_PROFILE, maintenanceConnection, normalizeRegisteredTarget, releaseMigrationSessionFence, sameMigrationProfile, targetConnection, targetIdentityQuery } from "./local-target-registry.mjs";
 import { assertRoundPopulationBinding, assertFullExecutionAdmitted } from "./full-source-scope.mjs";
-import { assertSelectedScopeForWrite, legacyListedProofVersion, legacyListedTargetMatches, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
+import { assertSelectedScopeForWrite, planSelectedBusinessScope, selectedScopeDigest, selectedScopeFilter } from "./selected-business-scope.mjs";
 import { summarizePopulationScope } from "./local-source-scenarios.mjs";
 import { LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, readLfLines } from "./local-source-adapter.mjs";
 import { verifySelectedPopulationFiles } from "./verify-full-source-population.mjs";
 import { BUSINESS_REFERENCE_TABLES, RENTAL_REFERENCE_TABLES } from "./business-reference-readiness.mjs";
 import { assertNextSourceTools } from "./local-round-dependencies.mjs";
-import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, openingSourcePreflightMatches, compactEmptyCoverageReadbackMatches, systemFinanceHistoryReadbackMatches, systemCoreAttributionMatches, systemInvitationAttributionMatches, systemDisplayAttributionMatches, systemContinuationAttributionMatches, systemLiabilityAttributionMatches, systemCompletedCommissionAttributionMatches, systemOpeningAttributionMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
-
-test('system opening completion requires the original source and every financial receipt',()=>{
- const source={status:'SOURCE_FINANCIAL_FACTS_VERIFIED',openingSha256:'a'.repeat(64)},checkpoint={binding:{systemFinanceId:'legacy-finance-migration:'+'b'.repeat(64)},
-  openingSourcePreflight:source,additiveInputs:{opening:{receiptMode:'SYSTEM_OPENING_V1',candidateCount:2,fenceEpochs:['c'.repeat(64)]}},
-  phases:{storedOpening:{complete:true,quarantined:0,nextIndex:2}}};
- const readback={openingSourceReadback:source,openings:{expected:2,matched:2,systemAttribution:{status:'VERIFIED',sourceReconstructed:true,expected:2,matched:2}}};
- assert.equal(systemOpeningAttributionMatches(checkpoint,readback),true);
- for(const change of [r=>{r.openingSourceReadback.openingSha256='0'.repeat(64);},r=>{r.openings.systemAttribution.matched=1;},r=>{r.openings.systemAttribution.sourceReconstructed=false;}]){
-  const r=structuredClone(readback);change(r);assert.equal(systemOpeningAttributionMatches(checkpoint,r),false);
- }
- for(const change of [c=>{c.additiveInputs.opening.fenceEpochs=[];},c=>{c.phases.storedOpening.quarantined=1;},c=>{c.binding.systemFinanceId='wrong';}]){
-  const c=structuredClone(checkpoint);change(c);assert.equal(systemOpeningAttributionMatches(c,readback),false);
- }
-});
-
-test('NEXT completion requires the exact independently checked stored-balance sources',()=>{
- const input={dataset:{sha256:'a'.repeat(64)},source:{sha256:'b'.repeat(64)},funds:{sha256:'c'.repeat(64)},openings:{sha256:'d'.repeat(64)}};
- const expected={source:{files:{users:{sha256:'e'.repeat(64)},orders:{sha256:'1'.repeat(64)},distributionOrders:{sha256:'2'.repeat(64)}}},funds:{files:{earnings:{sha256:'3'.repeat(64)},withdraws:{sha256:'4'.repeat(64)}}},openings:{sha256:'f'.repeat(64),stats:{subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750'}}};
- const proof={status:'SOURCE_FINANCIAL_FACTS_VERIFIED',datasetManifestSha256:input.dataset.sha256,sourceReceiptSha256:input.source.sha256,fundsReceiptSha256:input.funds.sha256,openingManifestSha256:input.openings.sha256,
-  openingSha256:expected.openings.sha256,sourceUsersSha256:expected.source.files.users.sha256,sourceOrdersSha256:expected.source.files.orders.sha256,sourceDistributionsSha256:expected.source.files.distributionOrders.sha256,
-  fundsEarningsSha256:expected.funds.files.earnings.sha256,fundsWithdrawalsSha256:expected.funds.files.withdraws.sha256,subjects:2,candidate:1,reviewRequired:1,candidateAvailableCents:'750',sourceConnections:0,targetConnections:0,targetWrites:0};
- assert.equal(openingSourcePreflightMatches(input,expected,proof),true);
- for(const change of [{sourceUsersSha256:'0'.repeat(64)},{fundsEarningsSha256:'0'.repeat(64)},{candidateAvailableCents:'0'},{targetWrites:1},{subjects:1},{openingSha256:undefined}])
-  assert.equal(openingSourcePreflightMatches(input,expected,{...proof,...change}),false);
- assert.equal(openingSourcePreflightMatches({...input,funds:{}},expected,{...proof,fundsReceiptSha256:undefined}),false);
-});
-
-test("readback checks every core system identity against the registered target",()=>{
-  const target={migrationProfile:NEXT_MIGRATION_PROFILE,instance:{systemIdentifier:"123"},oid:"42",marker:"zzsh:test:v1",nonce:"a".repeat(24),migrationRoleOid:"91"};
-  const identities={systemUserMigrationId:(sha,t)=>"u:"+sha+":"+t.databaseOid,systemAccountMigrationId:(sha,t)=>"a:"+sha+":"+t.databaseOid,
-    systemOrderMigrationId:(sha,t)=>"o:"+sha+":"+t.databaseOid,systemInvitationMigrationId:(sha,t)=>"i:"+sha+":"+t.databaseOid},datasetSha256="b".repeat(64);
-  const binding={datasetSha256,systemUserId:"u:"+datasetSha256+":42",systemAccountId:"a:"+datasetSha256+":42",systemOrderId:"o:"+datasetSha256+":42"};
-  assert.equal(assertCoreSystemMigrationBinding(target,{},identities),false);
-  assert.equal(assertCoreSystemMigrationBinding(target,binding,identities),true);
-  assert.equal(assertCoreSystemMigrationBinding(target,{...binding,systemInvitationId:"i:"+datasetSha256+":42"},identities),true);
-  assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemInvitationId:"i:wrong"},identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
-  assert.throws(()=>assertCoreSystemMigrationBinding(target,{datasetSha256,systemFinanceId:'finance'},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
-  assert.throws(()=>assertCoreSystemMigrationBinding(target,{...binding,systemOrderId:undefined},identities),/SYSTEM_MIGRATION_BINDING_INCOMPLETE/);
-  assert.throws(()=>assertCoreSystemMigrationBinding({...target,oid:"43"},binding,identities),/SYSTEM_MIGRATION_BINDING_CHANGED/);
-});
-
-test("new system-source receipts require complete independent attribution readback",()=>{
- const checkpoint={binding:{systemUserId:"legacy-user-migration:"+"a".repeat(64),systemAccountId:"legacy-account-migration:"+"b".repeat(64),
-  systemOrderId:"legacy-order-migration:"+"c".repeat(64)}};
- const proof={status:"VERIFIED",users:{expected:2,matched:2},accounts:{expected:1,matched:1},orders:{expected:1,matched:1}};
- const readback={systemMigrationAttribution:proof,domains:{users:{expected:2},accounts:{expected:1},orders:{expected:1}}};
- assert.equal(systemCoreAttributionMatches({},{}),true);assert.equal(systemCoreAttributionMatches(checkpoint,readback),true);
- assert.equal(systemCoreAttributionMatches({binding:{systemFinanceId:'legacy-finance-migration:'+'d'.repeat(64)}},readback),false);
- assert.equal(systemCoreAttributionMatches({...checkpoint,binding:{...checkpoint.binding,systemOrderId:undefined}},readback),false);
- assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:{...proof,orders:{expected:1,matched:0}}}),false);
- assert.equal(systemCoreAttributionMatches(checkpoint,{...readback,systemMigrationAttribution:undefined}),false);
-});
-
-test('system invitation completion requires every imported and closed packet receipt',()=>{
- const checkpoint={binding:{systemInvitationId:'legacy-invitation-migration:'+'d'.repeat(64)},phases:{invitationFacts:{complete:true,quarantined:0,nextIndex:2},invitationCounts:{complete:true,quarantined:0,nextIndex:2}}};
- const readback={invitationFacts:{childProofAudits:2,systemAttribution:{status:'VERIFIED',expectedPackets:2,importMatched:2,expectedCounts:2,countsMatched:2}}};
- assert.equal(systemInvitationAttributionMatches(checkpoint,readback),true);
- for(const proof of [{...readback.invitationFacts.systemAttribution,status:'MISMATCH'},{...readback.invitationFacts.systemAttribution,countsMatched:1},{...readback.invitationFacts.systemAttribution,importMatched:1}])
-  assert.equal(systemInvitationAttributionMatches(checkpoint,{invitationFacts:{...readback.invitationFacts,systemAttribution:proof}}),false);
- assert.equal(systemInvitationAttributionMatches({...checkpoint,phases:{...checkpoint.phases,invitationCounts:{...checkpoint.phases.invitationCounts,complete:false}}},readback),false);
-});
-test('system display completion requires source, original receipt and audit readback',()=>{
- const checkpoint={binding:{systemAccountId:'legacy-account-migration:'+'a'.repeat(64)},additiveInputs:{display:{receiptMode:'SYSTEM_ACCOUNT_V1',rows:2}},phases:{accountDisplay:{complete:true,quarantined:0,nextIndex:2}}};
- const readback={display:{expected:2,matched:2,systemAttribution:{status:'VERIFIED',expected:2,matched:2}}};
- assert.equal(systemDisplayAttributionMatches(checkpoint,readback),true);
- assert.equal(systemDisplayAttributionMatches(checkpoint,{display:{...readback.display,systemAttribution:{...readback.display.systemAttribution,matched:1}}}),false);
- assert.equal(systemDisplayAttributionMatches({...checkpoint,additiveInputs:{display:{rows:2}}},readback),false);
-});
-test('system continuation completion requires rederived source and every original receipt',()=>{
- const checkpoint={binding:{systemOrderId:'legacy-order-migration:'+'a'.repeat(64)},generatedPhases:{continuationEvidence:{receiptMode:'SYSTEM_ORDER_V1',rows:2}},phases:{continuationEvidence:{complete:true,quarantined:0,nextIndex:2}}};
- const proof={status:'VERIFIED',expected:2,matched:2,sourceReconstructed:true},readback={continuationEvidence:{expected:2,matched:2,total:2,systemAttribution:proof}};
- assert.equal(systemContinuationAttributionMatches(checkpoint,readback),true);
- assert.equal(systemContinuationAttributionMatches(checkpoint,{continuationEvidence:{...readback.continuationEvidence,systemAttribution:{...proof,sourceReconstructed:false}}}),false);
- assert.equal(systemContinuationAttributionMatches(checkpoint,{continuationEvidence:{...readback.continuationEvidence,systemAttribution:{...proof,matched:1}}}),false);
- assert.equal(systemContinuationAttributionMatches({...checkpoint,generatedPhases:{continuationEvidence:{rows:2}}},readback),false);
-});
-test('system liability completion requires every source, audit and receipt to reconcile',()=>{
- const checkpoint={binding:{systemOrderId:'legacy-order-migration:'+'a'.repeat(64)},generatedPhases:{liabilityDuties:{receiptMode:'SYSTEM_ORDER_V1',rows:2}},phases:{liabilityDuties:{complete:true,quarantined:0,nextIndex:2}}};
- const proof={status:'VERIFIED',expected:2,matched:2},readback={liabilityDuties:{expected:2,matched:2,sourceReconstructed:true,systemAttribution:proof}};
- assert.equal(systemLiabilityAttributionMatches(checkpoint,readback),true);
- assert.equal(systemLiabilityAttributionMatches(checkpoint,{liabilityDuties:{...readback.liabilityDuties,sourceReconstructed:false}}),false);
- assert.equal(systemLiabilityAttributionMatches(checkpoint,{liabilityDuties:{...readback.liabilityDuties,systemAttribution:{...proof,matched:1}}}),false);
- assert.equal(systemLiabilityAttributionMatches({...checkpoint,generatedPhases:{liabilityDuties:{rows:2}}},readback),false);
-});
-test('system completed commission gate requires each original economic key and source',()=>{
- const checkpoint={binding:{systemOrderId:'legacy-order-migration:'+'a'.repeat(64)},generatedPhases:{completedCommissions:{receiptMode:'SYSTEM_ORDER_V1',rows:2}},phases:{completedCommissions:{complete:true,quarantined:0,nextIndex:2}}};
- const proof={status:'VERIFIED',expected:2,matched:2},readback={completedCommissions:{expected:2,matched:2,sourceReconstructed:true,systemAttribution:proof}};
- assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,readback),true);
- assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,{completedCommissions:{...readback.completedCommissions,systemAttribution:{...proof,matched:1}}}),false);
- assert.equal(systemCompletedCommissionAttributionMatches(checkpoint,{completedCommissions:{...readback.completedCommissions,sourceReconstructed:false}}),false);
-});
+import { assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure } from "./local-round-contract.mjs";
 
 test('new rounds require a restored source and both supplements bound to the same dump and capture',()=>{
   const hash='a'.repeat(64),receiptSha='b'.repeat(64),dumpSha='c'.repeat(64),uuid='12345678-1234-1234-1234-123456789abc',id='d'.repeat(64),cutoff='2026-11-03T07:01:00Z';
@@ -146,27 +55,6 @@ test('new-round growth recovery cannot change the source binding or target profi
   assert.throws(()=>assertResumeLineage({input:changed,previousInput,previousInputSha256:hash,previousReceipt}),/ROUND_RESUME_LINEAGE_MISMATCH:target/);
 });
 
-test('next-round readback must prove every compact empty coverage batch receipt',()=>{
- const phase={schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:800,chunks:[{},{}]};
- const readback={emptyFinancialCoverage:{sourceRebuilt:true,expected:800,readable:800,actual:800,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}}};
- assert.equal(compactEmptyCoverageReadbackMatches(phase,readback),true);
- assert.equal(compactEmptyCoverageReadbackMatches({...phase,receiptMode:'SYSTEM_BATCH_V1'},
-  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{...readback.emptyFinancialCoverage.batchProof,mode:'SYSTEM_BATCH_V1'}}}),true);
- for(const changed of [{...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:undefined}},
-  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,batchProof:{mode:'BATCH_V2',expected:2,matched:1}}},
-  {...readback,emptyFinancialCoverage:{...readback.emptyFinancialCoverage,readable:799}}])assert.equal(compactEmptyCoverageReadbackMatches(phase,changed),false);
- assert.equal(compactEmptyCoverageReadbackMatches({...phase,receiptMode:undefined},readback),false);
-});
-
-test('next-round system history requires rebuilt source and all original batch evidence',()=>{
- const phase={receiptMode:'SYSTEM_BATCH_V1',rows:501},financialHistory={sourceRebuilt:true,walletEffectsFromObservation:false,arrivalVerified:false,coverageEvidence:{expected:501,matched:501,batches:{expected:2,matched:2}}};
- assert.equal(systemFinanceHistoryReadbackMatches(phase,{financialHistory}),true);
- for(const changed of [{...financialHistory,sourceRebuilt:false},{...financialHistory,coverageEvidence:{...financialHistory.coverageEvidence,matched:500}},
-  {...financialHistory,coverageEvidence:{...financialHistory.coverageEvidence,batches:{expected:2,matched:1}}},{...financialHistory,arrivalVerified:true}])
-  assert.equal(systemFinanceHistoryReadbackMatches(phase,{financialHistory:changed}),false);
- assert.equal(systemFinanceHistoryReadbackMatches({...phase,receiptMode:undefined},{financialHistory}),false);
-});
-
 const sha = bytes => createHash("sha256").update(bytes).digest("hex");
 const script = name => readFileSync(new URL(name, import.meta.url), "utf8")
   .replace(/^import .*;$/gm, "").replaceAll("import.meta.url", "moduleUrl").replaceAll('await import("./local-target-finance.mjs")', "await financialFixture()");
@@ -179,31 +67,19 @@ const ds = path.join(restricted, "dataset"), out = path.join(restricted, "load")
 const credentials = path.join(restricted, "resource", "credentials.json"), registry = path.join(path.dirname(credentials), "resource.json");
 const checkpoint = path.join(out, "checkpoint.json"), users = [{ sourceId: "101", input: { id: 1, evidence: { status: { realNameBound: false } } } }, { sourceId: "102", input: { id: 2, evidence: { status: { realNameBound: false } } } }];
 
-async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag, accountFixture = false, orderFixture = false } = {}) {
+async function load({ failure, strict = true, reservation = {}, previous, recover = false, exitAfterUsers = false, populationMode, selectedScope, undeclaredPopulation = false, invalidPopulationDigest = false, instance = null, migrationProfile, pendingReset = null, identityProfiles = true, verifiedFirst = false, unicodeFirst = false, profileSecret = "fixture-independent-profile", selectedFixture = false, selectedSourceMismatch = false, refundPolicy = true, fenceFixture = false, continuationRows = null, continuationDomains, additiveFlag } = {}) {
   if(migrationProfile===NEXT_MIGRATION_PROFILE && populationMode===undefined){
     populationMode='SELECTED_BUSINESS_SCOPE';selectedScope=planSelectedBusinessScope({accounts:[],orders:[],pays:[]});selectedFixture=true;
   }
   const files = new Map(), directories = new Set(), commands = [], events = [], logs = [], saves = [], scopeChecks = [];
   const userRows = structuredClone(users);
-  if (migrationProfile === NEXT_MIGRATION_PROFILE) for (const row of userRows) {
-    row.userId = "synthetic-user-" + row.sourceId; row.sourceDigest = "a".repeat(64);
-    Object.assign(row.input.evidence, { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: row.sourceId, sourceDigest: row.sourceDigest });
-  }
   if (unicodeFirst) userRows[0].input.note = "合成\u2028昵称\u2029保留";
   if (verifiedFirst) Object.assign(userRows[0], { userId: "synthetic-user-101", sourceDigest: "a".repeat(64), trustedIdentityNumber: "99000019900101123X",
-    legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { sourceSystem: "legacy_mysql_restore", sourceEntity: "la_user", legacyId: "101", sourceDigest: "a".repeat(64), status: { realNameBound: true } } } });
-  if (migrationProfile === NEXT_MIGRATION_PROFILE) for (const row of userRows) row.input.evidenceDigest = "b".repeat(64);
-  if (failure === "missing-identity-profile") delete userRows[0].legacyIdentityProfile;
-  if (failure === "duplicate-identity-user") userRows[1] = structuredClone(userRows[0]);
+    legacyIdentityProfile: { realName: "合成姓名", idCardNo: "99000019900101123X" }, input: { id: 1, evidence: { status: { realNameBound: true } } } });
   const put = (file, value) => files.set(file, JSON.stringify(value));
   const get = file => { assert(files.has(file), file); return files.get(file); };
   const fileEntries = {};
-  const accountRows = accountFixture ? [{sourceId:"10",sourceDigest:"c".repeat(64),evidenceRef:"synthetic:account",ownerLegacyId:"101",
-    ownerUserId:"synthetic-user-101",ownerSourceDigest:"a".repeat(64),gameCode:"delta",sourceStatus:"3",sourceDeleted:false,
-    sourceUpdatedAt:"2026-01-01T00:00:00.000Z",snapshot:{schema:"synthetic"}}] : failure === "account-batch-changed" ? [{sourceId:"10"}] : [];
-  const orderRows = orderFixture ? [{sourceId:"100",sourceDigest:"d".repeat(64),source:{legacyId:"100",digest:"d".repeat(64),row:{}},
-    account:{legacyId:"10"},owner:{},renter:{},gameCode:"delta"}] : [];
-  for (const [name, rows] of Object.entries({ users: userRows, accounts: accountRows, orders: orderRows, ...(continuationRows ? {continuations:continuationRows} : {}) })) {
+  for (const [name, rows] of Object.entries({ users: userRows, accounts: [], orders: [], ...(continuationRows ? {continuations:continuationRows} : {}) })) {
     const file = name + ".jsonl", body = rows.map(row => JSON.stringify(row) + "\n").join("");
     files.set(path.join(ds, file), body);
     fileEntries[name] = { file, sha256: sha(body), rows:rows.length };
@@ -211,7 +87,7 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const manifest = path.join(ds, "manifest.json"), fundsReceipt = path.join(funds, "receipt.json");
   const population = populationMode ? { schema: "zzsh.local-population-scope.v1", mode: populationMode } : null;
   const continuationFixture=continuationDomains===undefined && migrationProfile===NEXT_MIGRATION_PROFILE ? {source:0,parameterComplete:0,isolated:0,unsupportedStatuses:{'2':0,'6':0,'7':0},preparedEvidence:{policy:'PRESERVE_SOURCE_ADMISSION_V1',commissionPolicy:'ACTIVE_OR_SETTLED_SOURCE_V1',readyComplete:0,readyIsolated:0,readyUnprepared:0,unreadyEmitted:0,unreadyUnprepared:0}} : continuationDomains;
-  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: accountFixture || orderFixture ? {"1":"delta"} : {}, files: fileEntries,
+  put(manifest, { status: "FULL_SOURCE_DATASET_PREPARED_TARGET_NOT_RUN", gameBindings: {}, files: fileEntries,
     ...(continuationFixture?{domains:{continuations:continuationFixture}}:{}),
     ...(identityProfiles && refundPolicy ? { refundRelationshipPolicy: LEGACY_REFUND_RELATIONSHIP_POLICY } : {}),
     ...(selectedFixture ? { source: path.join(restricted, "fixture-source"), sourceReceiptSha256: "a".repeat(64) } : {}),
@@ -232,23 +108,19 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   files.set("test-secret", "fixture");
   files.set("test-profile-secret", profileSecret);
   const proc = { version: "v24.20.0", env: { DB_PASSWORD_FILE: "test-secret", USER_IDENTITY_SUBJECT_HMAC_KEY_FILE: "test-secret", USER_LEGACY_IDENTITY_PROFILE_KEY_FILE: "test-profile-secret" }, argv: ["node", "script",
-    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...((failure?.startsWith("empty-coverage")||failure?.startsWith("system-finance")||failure?.startsWith("system-invitation")) ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
+    recover ? "--recover" : "--execute", ...(strict ? ["--strict-round-batch"] : []), ...(additiveFlag?[additiveFlag]:[]), ...(failure?.startsWith("empty-coverage") ? ["--refund-attempts", funds, "--refund-attempts-sha", sha(get(fundsReceipt))] : ["--core-only"]), "--dataset", ds, "--dataset-sha", sha(get(manifest)),
     "--credentials", credentials, "--out", out, "--oid", epoch.oid, "--nonce", epoch.nonce, "--actor-id", "test-user", "--session-id", "test-session",
     "--schema-binding", JSON.stringify(schema), "--execution-window", JSON.stringify(window), "--funds-source", funds, "--funds-source-sha", sha(get(fundsReceipt)),
   ] };
-  let commitAck = false, diskFailed = false, userLockComplete = false;
+  let commitAck = false, diskFailed = false;
   const client = Object.assign(new EventEmitter(), {
     async query(sql) {
       if (sql.startsWith("SELECT current_database()")) return { rows: [{ ...epoch, database: registration.database, owner: "zzsh", marker: registration.marker, role: migration.name, role_oid: migration.oid, is_super: "false", can_create_db: "false", can_create_role: "false", can_inherit: "false", can_bypass_rls: "false", system_identifier: instance?.systemIdentifier ?? null }] };
       if (sql.startsWith("SELECT hash")) return { rows: schema.map(hash => ({ hash })) };
       if (sql.startsWith("SELECT EXISTS")) return { rows: [{ occupied: false }] };
-      if (sql.startsWith("SELECT id,enabled FROM zzsh_supply.game")) return {rows:[{id:"synthetic-delta",enabled:true}]};
       commands.push(sql);
-      if (sql.includes('ORDER BY id COLLATE')) userLockComplete = true;
       if (sql.startsWith("SELECT subject_digest,source FROM zzsh_iam.user_identity_subject")) return { rows: [] };
       if (sql === "COMMIT" && failure === "empty-coverage-unknown" && events.some(e => e.domain === "financeEmptyCoverage" && e.event === "INTENT")) throw Object.assign(Error("original coverage commit error"), {code:"ECONNRESET"});
-      if (sql === "COMMIT" && failure === "system-finance-history-unknown" && events.some(e => e.domain === "financeHistory" && e.event === "INTENT")) throw Object.assign(Error("original history commit error"), {code:"ECONNRESET"});
-      if (sql === "COMMIT" && failure === "system-invitation-unknown" && events.some(e => e.domain === "invitationFacts" && e.event === "INTENT")) throw Object.assign(Error("original invitation commit error"), {code:"ECONNRESET"});
       if (sql === "COMMIT" && failure === "lost-commit") {
         const error = Object.assign(Error("original commit error"), { code: "ECONNRESET" });
         this.emit("error", error);
@@ -267,109 +139,34 @@ async function load({ failure, strict = true, reservation = {}, previous, recove
   const modules = {
     "supply/content-hash": { canonicalize: JSON.stringify },
     "auth/identity-subject": { deriveIdentitySubjectKey() { return Buffer.alloc(32, 9); }, identitySubjectDigest() { return "b".repeat(64); },
-      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); },
-      recordLegacyIdentitySubjects: failure === "identity-build-old" ? undefined : () => { commands.push("SYNTHETIC_IDENTITY_SUBJECT_BATCH"); if (failure === "subject-batch-rejected") throw Object.assign(Error("subject batch rejected"), { status: 409 }); } },
+      recordLegacyIdentitySubject() { commands.push("SYNTHETIC_IDENTITY_SUBJECT"); } },
     "auth/legacy-identity-profile": { legacyIdentityProfileKey(value) { return createHash("sha256").update(value).digest(); },
       recordLegacyIdentityProfile() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); },
       recordLegacyIdentityProfiles() { commands.push("SYNTHETIC_IDENTITY_PROFILE"); if (failure === "profile-rejected") throw Object.assign(Error("profile rejected"), { status: 503 }); } },
-    "auth/admin-auth-session": { assertAdminCommandAuthorizedInTransaction() { commands.push("BATCH_ACTOR_LOCK"); if (failure === "batch-actor-lost") throw Object.assign(Error("actor unavailable"), { status: 403 }); } },
     "database/business-migrations": { assertBusinessMigrationPrefix() {} },
     "order/legacy-continuation-calc": { admitLegacyEvidence: source => ({admission:source.admission,reasons:source.reasons}) },
     "finance/personal-finance-maintenance": { authorizeFinanceMaintenance() {} },
-    "finance/legacy-invitation-facts": {invitationFactHash:value=>sha(JSON.stringify(value)),prepareLegacyInvitationFacts(input,digest){if(sha(JSON.stringify(input))!==digest)throw Error('INVITATION_PACKET_CHANGED');return {key:'synthetic-invitation-key',bodyDigest:digest};}},
-    "finance/legacy-invitation-facts-maintenance": {
-      bindSystemInvitationReceiptBaseline:failure==='system-invitation-build-old'?undefined:async(_c,acting,input,phase)=>{const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase,key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:p.bodyDigest});commands.push('SYSTEM_INVITATION_BASELINE');return{fixture:true};},
-      async importSystemLegacyInvitationFacts(_c,acting,input,baseline){assert.equal(baseline.fixture,true);const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase:'IMPORT',key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:failure==='system-invitation-drift'?'0'.repeat(64):p.bodyDigest});commands.push('SYSTEM_INVITATION_IMPORT');return{replayed:false};},
-      async closeSystemLegacyInvitationCounts(_c,acting,input,baseline){assert.equal(baseline.fixture,true);const p=modules['finance/legacy-invitation-facts'].prepareLegacyInvitationFacts(input,sha(JSON.stringify(input)));await acting.assertSourceEvidence({phase:'COUNTS',key:p.key,sourceDigest:sha(JSON.stringify(input.source)),bodyDigest:p.bodyDigest});commands.push('SYSTEM_INVITATION_COUNTS');return{replayed:false};},recoverSystemLegacyInvitationFacts(){}},
-    "finance/personal-finance-observation-maintenance": { COMPACT_EMPTY_COVERAGE_VERSION:failure==='compact-build-old'?undefined:'BATCH_V2',
-      importReviewedCompactEmptyFinanceObservationBatch(){},recoverReviewedCompactEmptyFinanceObservationBatch(){},compactEmptyFinanceBatchProof(){},
-      systemCompactEmptyFinanceBatchProof:failure==='system-finance-build-old'?undefined:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
-      async bindSystemEmptyReceiptBaseline(_client,acting,inputs){await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_BASELINE');return {fixture:true};},
-      async importSystemCompactEmptyFinanceObservationBatch(_client,acting,inputs,baseline){assert.equal(baseline.fixture,true);await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemCompactEmptyFinanceBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_IMPORT');return {body:{created:inputs.length}};},
-      recoverSystemCompactEmptyFinanceObservationBatch(){},
-      systemFinanceHistoryBatchProof:inputs=>({body:{inputsDigest:sha(JSON.stringify(inputs)),inputSha256:'a'.repeat(64),cutoff:'2026-01-01T00:00:00.000Z'}}),
-      async bindSystemHistoryReceiptBaseline(_client,acting,inputs){await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemFinanceHistoryBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_BASELINE');return {fixture:true};},
-      async importSystemFinanceHistoryBatch(_client,acting,inputs,baseline){assert.equal(baseline.fixture,true);await acting.assertSourceEvidence(modules['finance/personal-finance-observation-maintenance'].systemFinanceHistoryBatchProof(inputs).body);commands.push('SYSTEM_FINANCE_HISTORY');return {body:{created:inputs.length}};},recoverSystemFinanceHistoryBatch(){} },
-    "legacy-load/system-user-migration": { systemUserMigrationId(source, target) { return "synthetic-system-" + sha(JSON.stringify([source,target])); },
-      async withSystemUserMigrationBatch(c, acting, body) { commands.push("SYSTEM_USER_BATCH"); if (failure === "batch-actor-lost") throw Object.assign(Error("system actor unavailable"), {status:403});
-        await acting.assertMigrationFence(c); const result = await body(); await acting.assertMigrationFence(c); return result; },
-      systemAccountMigrationId(source,target) { return "synthetic-account-system-" + sha(JSON.stringify([source,target])); },
-      async withSystemAccountMigrationBatch(c,acting,body) { commands.push("SYSTEM_ACCOUNT_BATCH");await acting.assertMigrationFence(c);
-        const result=await body();await acting.assertMigrationFence(c);return result; },
-      systemOrderMigrationId(source,target) { return "synthetic-order-system-" + sha(JSON.stringify([source,target])); },
-      async withSystemOrderMigrationBatch(c,acting,body) { commands.push("SYSTEM_ORDER_BATCH");await acting.assertMigrationFence(c);
-        const result=await body();await acting.assertMigrationFence(c);return result; },
-      systemFinanceMigrationId(source,target) { return "synthetic-finance-system-" + sha(JSON.stringify([source,target])); },
-      async withSystemFinanceMigrationBatch(c,acting,body) { commands.push("SYSTEM_FINANCE_BATCH");await acting.assertMigrationFence(c);
-        const result=await body();await acting.assertMigrationFence(c);return result; },
-      systemInvitationMigrationId(source,target) { return "synthetic-invitation-system-" + sha(JSON.stringify([source,target])); },
-      async withSystemInvitationMigrationBatch(c,acting,body) { commands.push("SYSTEM_INVITATION_BATCH");await acting.assertMigrationFence(c);
-        const result=await body();await acting.assertMigrationFence(c);return result; } },
-    "legacy-load/legacy-account-seam": { legacyAccountId(_system,_entity,id) { return "synthetic-account-"+id; },
-      async createLegacyOwnerRentalAccount(_c,input,acting) {const accountId="synthetic-account-"+input.legacyId;
-        await acting.assertSourceEvidence({operation:"CREATE",accountId,sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,
-          legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest:failure==="account-source-mismatch" ? "0".repeat(64) : sha(JSON.stringify(input))});
-        commands.push("SYNTHETIC_ACCOUNT_CREATE");return {accountId,replayed:false};} },
-    "supply/legacy-observation": {normalizeLegacyObservationInput(input){return input;},
-      async recordLegacyObservation(_c,accountId,input,acting) {await acting.assertSourceEvidence({operation:"OBSERVATION",accountId,
-        sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,payloadDigest:sha(JSON.stringify(input))});
-        commands.push("SYNTHETIC_ACCOUNT_OBSERVATION");return "synthetic-version";} },
-    "supply/legacy-listing-read": {legacyReadSourceAllowed(status,deleted){return status===3&&!deleted;},
-      legacyReadSnapshotMigrationDigest(input){const {observationVersionId,...source}=input;return sha(JSON.stringify(source));},
-      async recordLegacyReadSnapshot(_c,accountId,input,acting) {await acting.assertSourceEvidence({operation:"SNAPSHOT",accountId,
-        sourceSystem:input.sourceSystem,sourceEntity:input.sourceEntity,legacyId:input.legacyId,sourceDigest:input.sourceDigest,
-        payloadDigest:modules["supply/legacy-listing-read"].legacyReadSnapshotMigrationDigest(input)});commands.push("SYNTHETIC_ACCOUNT_SNAPSHOT");} },
-    "order/legacy-order-read": {normalizeLegacyOrderReadInput(input){return {id:"synthetic-order-"+input.source.legacyId,bindingDigest:sha(JSON.stringify(input))};},
-      async importLegacyOrderRead(_c,input,acting){const normalized=modules["order/legacy-order-read"].normalizeLegacyOrderReadInput(input);
-        await acting.assertSourceEvidence({orderId:normalized.id,legacyId:input.source.legacyId,sourceDigest:input.source.digest,
-          bindingDigest:failure==="order-source-mismatch" ? "0".repeat(64) : normalized.bindingDigest});
-        commands.push("SYNTHETIC_ORDER_IMPORT");return {orderId:normalized.id,replayed:false};} },
-    "order/legacy-continuation-evidence": {async importLegacyContinuationEvidence(){throw Error('UNEXPECTED_CONTINUATION_IMPORT');},async importLegacyCompletedCommission(){throw Error('UNEXPECTED_COMMISSION_IMPORT');}},
-    "order/legacy-liability-intake": {async importLegacyHistoricalLiability(){throw Error('UNEXPECTED_LIABILITY_IMPORT');}},
-    "supply/legacy-user-migration": { legacyOwnerUserId(_system, _entity, id) { return "synthetic-user-" + id; }, async migrateLegacyOwner(_client, row, acting) {
-      if (migrationProfile === NEXT_MIGRATION_PROFILE) { assert.equal(acting.kind,"SYSTEM_USER_MIGRATION");
-        await acting.assertSourceEvidence({sourceSystem:row.evidence.sourceSystem,sourceEntity:row.evidence.sourceEntity,legacyId:row.evidence.legacyId,sourceDigest:row.evidence.sourceDigest,evidenceDigest:row.evidenceDigest}); commands.push("SYNTHETIC_MIGRATE_USER"); }
+    "supply/legacy-user-migration": { migrateLegacyOwner(_client, row) {
       if (row.id === 2 && ["rejected", "lost-rollback"].includes(failure)) throw Object.assign(Error("original rejection"), { status: 409 });
       if (unicodeFirst && row.id === 1) { assert.equal(row.note, "合成\u2028昵称\u2029保留"); commands.push("UNICODE_SOURCE_PRESERVED"); }
-      return { replayed: false, ...(row.evidence.legacyId ? { userId: "synthetic-user-" + row.evidence.legacyId } : {}) };
+      return { replayed: false };
     } },
   };
   const context = {
-    ...path, createHash, createHmac, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc,
-    Date: failure === "window-expired-after-prelock" ? class extends Date { static now() { return userLockComplete ? Date.parse(window.expiresAt) + 1 : Date.now(); } } : Date, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
+    ...path, createHash, createHmac, isStrictRoundReservation, matchesLoadReservation, strictRoundReservation, process: proc, moduleUrl: "fixture", fileURLToPath: () => "C:\\project\\scripts\\migration\\load-local-dataset.mjs",
     acquireMigrationSessionFence: fenceFixture ? async () => { commands.push('SESSION_FENCE'); } : acquireMigrationSessionFence,
     assertMigrationFenceHeld: fenceFixture ? async () => { commands.push('FENCE'); if (failure === 'fence-lost') throw Error('TARGET_FENCE_EPOCH_LOST'); } : assertMigrationFenceHeld,
     releaseMigrationSessionFence: fenceFixture ? async () => { commands.push('UNFENCE'); } : releaseMigrationSessionFence,
     advisoryLockSql, assertLiveTarget, assertNextMigrationWriteReady: fenceFixture ? () => {} : assertNextMigrationWriteReady,
     captureMaintenanceLockEpoch: fenceFixture ? async () => { commands.push('FENCE_EPOCH'); return { fixture: true }; } : captureMaintenanceLockEpoch,
-    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, legacyListedProofVersion, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets,
-    requiresInvitationCountClosure: failure?.startsWith('system-finance')||failure?.startsWith('system-invitation') ? () => false : requiresInvitationCountClosure,
+    NEXT_MIGRATION_PROFILE, maintenanceConnection, targetConnection, targetIdentityQuery, assertFullExecutionAdmitted, assertSelectedScopeForWrite, assertNextBusinessPopulation, expectedContinuationImports, verifyNextContinuationRows, LEGACY_REFUND_RELATIONSHIP_POLICY, preflightInvitationFile, readBoundInvitationPackets, requiresInvitationCountClosure,
     readBoundSelectedSourceReceipt: (_source, _digest) => ({}),
     verifySelectedPopulationFiles: async args => { scopeChecks.push(args); if (selectedSourceMismatch) throw Error("SELECTED_SCOPE_SOURCE_ORDER_DISPOSITION_MISMATCH"); return { status: "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN", targetWrites: 0 }; },
     // The loader reads its registry through this sandbox filesystem, not the real disk.
-    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },
-    financialFixture: () => ({ applyFinancialDomains: ctx => failure?.startsWith('system-invitation-')
-      ? (async()=>{const input={source:{id:'original'},policy:null},packet={sourceId:'invitation-1',input,bodyDigest:sha(JSON.stringify(input))};
-        await ctx.runItems('invitationFacts',[packet],row=>ctx.systemInvitation.import(row),1);
-        await ctx.runItems('invitationCounts',[packet],row=>ctx.systemInvitation.closeCounts(row),1);})()
-      : ['system-finance-success','system-finance-mixed','system-finance-history-only','system-finance-history-unknown'].includes(failure)
-      ? (async()=>{if(!['system-finance-history-only','system-finance-history-unknown'].includes(failure))await ctx.runItems("financeEmptyCoverage",[{sourceId:"chunk-1"},{sourceId:"chunk-2"}],()=>ctx.systemFinance.importEmpty([{synthetic:true}]),2);
-        if(failure!=='system-finance-success')await ctx.runBatches('financeHistory',[{sourceId:'history-1'},{sourceId:'history-2'}],async rows=>{const outcome=await ctx.systemFinance.importHistory(rows);return rows.map(()=>({replayed:outcome.replayed}));},500);})()
-      : ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
+    loadRegisteredTarget: credentialPath => { const file = path.join(path.dirname(credentialPath), "resource.json"); return normalizeRegisteredTarget(JSON.parse(get(file)), file); },    financialFixture: () => ({ applyFinancialDomains: ctx => ctx.runItems("financeEmptyCoverage", failure === "empty-coverage" ? [{ sourceId: "empty-original" }] : Array.from({length:5},(_,i)=>({sourceId:`chunk-${i}`})), row => { if(failure === "empty-coverage" || (failure === "empty-coverage-batch" && row.sourceId === "chunk-1")) throw Object.assign(Error("coverage rejected"), { status: 409 }); return {replayed:false}; }, failure === "empty-coverage" ? 1 : 5) }),
     console: { log: message => logs.push(JSON.parse(message)), error: message => logs.push(JSON.parse(message)) },
     createReadStream: file => Readable.from([Buffer.from(get(file))]),
     async *readRows(file) { for await (const line of readLfLines(context.createReadStream(file))) if (line.trim()) yield JSON.parse(line); },
-    async preflightBoundSourceBatches(file, entry, size) {
-      const domain = path.basename(file, ".jsonl"); assert(["users", "accounts", "orders"].includes(domain));
-      assert.equal(entry.rows, get(file).split("\n").filter(Boolean).length); assert.equal(size, 100);
-      commands.push(({users:"USER",accounts:"ACCOUNT",orders:"ORDER"})[domain] + "_SOURCE_PREFLIGHT"); return {};
-    },
-    async *readBoundSourceBatches(file) {
-      const domain = path.basename(file, ".jsonl");
-      commands.push(({users:"USER",accounts:"ACCOUNT",orders:"ORDER"})[domain] + "_SOURCE_BOUND_READ");
-      if (domain === "accounts" && failure === "account-batch-changed") throw Error("SOURCE_BATCH_CHANGED");
-      yield* context.readRows(file);
-    },
     existsSync: file => files.has(file) || directories.has(file), mkdirSync: file => directories.add(file), readFileSync: (file, encoding) => encoding ? get(file) : Buffer.from(get(file)),
     writeFileSync: (file, value) => files.set(file, value), appendFileSync: (_file, value) => events.push(JSON.parse(value)),
     writeLoadCheckpoint(file, value) {
@@ -400,36 +197,6 @@ test("next-profile dataset execution stops before connecting until all domain ad
  assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
 });
 
-test('NEXT strict identity import refuses an old build before connection',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'identity-build-old'});
- assert.match(result.error?.message??'',/NEXT_IDENTITY_SUBJECT_BATCH_BUILD_REQUIRED/);
- assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
- const legacy=await load({verifiedFirst:true,failure:'identity-build-old'});assert.ifError(legacy.error);
- assert(legacy.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));assert(!legacy.commands.includes('SYNTHETIC_IDENTITY_SUBJECT_BATCH'));
- const nonStrict=await load({strict:false,instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'identity-build-old'});
- assert.match(nonStrict.error?.message??'',/NEXT_MIGRATION_ADMISSION_INCOMPLETE/);assert(!nonStrict.commands.includes('LOCK'));
-});
-
-test('NEXT source batches require the strict checkpoint even after admission opens', async () => {
- const result = await load({ strict:false, fenceFixture:true, instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE });
- assert.match(result.error?.message??'',/NEXT_USER_STRICT_BATCH_REQUIRED/); assert(!result.commands.includes('LOCK')); assert(!result.commands.includes('BEGIN'));
-});
-
-test('NEXT refuses an old finance build before acquiring the target lock or writing',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'compact-build-old'});
- assert.match(result.error?.message??'',/NEXT_COMPACT_COVERAGE_BUILD_REQUIRED/);
- assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));assert(!result.commands.includes('COMMIT'));
-});
-
-test('NEXT system finance build is checked before connecting',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'system-finance-build-old'});
- assert.match(result.error?.message??'',/NEXT_SYSTEM_FINANCE_ADAPTER_REQUIRED/);assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));
-});
-test('NEXT system invitation build is checked before connecting',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,failure:'system-invitation-build-old'});
- assert.match(result.error?.message??'',/NEXT_SYSTEM_INVITATION_ADAPTER_REQUIRED/);assert(!result.commands.includes('LOCK'));assert(!result.commands.includes('BEGIN'));
-});
-
 test('NEXT refuses the wrong population or incomplete continuation evidence before target writes',async()=>{
  const instance={host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile=NEXT_MIGRATION_PROFILE;
  const refused=await load({instance,migrationProfile,populationMode:'SCENARIO_SELECTION'});
@@ -457,110 +224,14 @@ test('next-profile core batches acquire the transaction fence before writes and 
   const options = { instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:'LOCAL_MIGRATION_NEXT_V1', fenceFixture:true, verifiedFirst:true };
   const applied = await load(options); assert.ifError(applied.error);
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
-  assert(applied.commands.indexOf('USER_SOURCE_PREFLIGHT') < applied.commands.indexOf('BEGIN'));
-  assert(applied.commands.indexOf('USER_SOURCE_BOUND_READ') < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
-  for (const domain of ['ACCOUNT', 'ORDER']) {
-    const preflight = applied.commands.indexOf(`${domain}_SOURCE_PREFLIGHT`);
-    assert(preflight >= 0 && preflight < applied.commands.indexOf(`${domain}_SOURCE_BOUND_READ`));
-  }
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
-  assert(applied.commands.indexOf('SYSTEM_USER_BATCH') < applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')));
-  assert(applied.commands.findIndex(sql=>sql.includes('ORDER BY id COLLATE')) < applied.commands.indexOf('SYNTHETIC_MIGRATE_USER'));
-  assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('SYNTHETIC_IDENTITY_SUBJECT_BATCH'));
-  assert(!applied.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
+  assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('SYNTHETIC_IDENTITY_SUBJECT'));
   assert(applied.commands.indexOf('FENCE') < applied.commands.indexOf('COMMIT'));
   assert(applied.commands.indexOf('UNFENCE') > applied.commands.indexOf('COMMIT'));
   const rejected = await load({ ...options, failure:'fence-lost' });
   assert.equal(rejected.state.status, 'FAILED_ROLLED_BACK'); assert(rejected.commands.includes('ROLLBACK'));
   assert(!rejected.commands.includes('COMMIT')); assert(!rejected.commands.includes('SYNTHETIC_IDENTITY_SUBJECT'));
-});
-
-test('NEXT refuses a changed account batch before writing it', async () => {
-  const result = await load({ instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},
-    migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, failure:'account-batch-changed' });
-  assert.ifError(result.error); assert.equal(result.exit, 1);
-  assert.match(result.state.error.message, /SOURCE_BATCH_CHANGED/);
-  assert.equal(result.state.phases.accounts.nextIndex, 0);
-  assert.equal(result.commands.filter(command => command === 'COMMIT').length, 1);
-  assert(!result.commands.includes('ORDER_SOURCE_PREFLIGHT'));
-});
-
-test('NEXT account batch binds the source and system actor before all three account writes', async () => {
-  const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true,accountFixture:true};
-  const applied=await load(options);assert.ifError(applied.error);assert.equal(applied.exit,undefined);
-  assert.match(applied.state.binding.systemAccountId,/^synthetic-account-system-/);
-  assert(applied.commands.indexOf('SYSTEM_ACCOUNT_BATCH')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_CREATE'));
-  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_CREATE')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_OBSERVATION'));
-  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_OBSERVATION')<applied.commands.indexOf('SYNTHETIC_ACCOUNT_SNAPSHOT'));
-  assert.equal(applied.state.phases.accounts.nextIndex,1);
-  const rejected=await load({...options,failure:'account-source-mismatch'});assert.equal(rejected.exit,1);
-  assert.match(rejected.state.error.message,/LEGACY_SYSTEM_ACCOUNT_SOURCE_NOT_ADMITTED/);
-  assert.equal(rejected.state.phases.accounts.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ACCOUNT_CREATE'));
-});
-
-test('NEXT order batch binds the complete source and target before import', async () => {
-  const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true,accountFixture:true,orderFixture:true};
-  const applied=await load(options);assert.ifError(applied.error);assert.equal(applied.exit,undefined);
-  assert.match(applied.state.binding.systemOrderId,/^synthetic-order-system-/);
-  assert(applied.commands.indexOf('SYNTHETIC_ACCOUNT_SNAPSHOT')<applied.commands.indexOf('SYSTEM_ORDER_BATCH'));
-  assert(applied.commands.indexOf('SYSTEM_ORDER_BATCH')<applied.commands.indexOf('SYNTHETIC_ORDER_IMPORT'));
-  assert.equal(applied.state.phases.orders.nextIndex,1);
-  const rejected=await load({...options,failure:'order-source-mismatch'});assert.equal(rejected.exit,1);
-  assert.match(rejected.state.error.message,/LEGACY_SYSTEM_ORDER_SOURCE_NOT_ADMITTED/);
-  assert.equal(rejected.state.phases.orders.nextIndex,0);assert(!rejected.commands.includes('SYNTHETIC_ORDER_IMPORT'));
-});
-
-test('NEXT empty finance chunks reuse one fenced baseline and their original source',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,
-  fenceFixture:true,failure:'system-finance-success'});
- assert.ifError(result.error);assert.equal(result.exit,undefined);assert.match(result.state.binding.systemFinanceId,/^synthetic-finance-system-/);
- assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_BASELINE').length,1);
- assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_IMPORT').length,2);
- assert.equal(result.state.phases.financeEmptyCoverage.nextIndex,2);
-});
-test('NEXT non-empty history reuses the fenced baseline, including when no empty chunk exists',async()=>{
- for(const failure of ['system-finance-mixed','system-finance-history-only']){
-  const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true,failure});
-  assert.ifError(result.error);assert.equal(result.exit,undefined);assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_BASELINE').length,1);
-  assert.equal(result.commands.filter(command=>command==='SYSTEM_FINANCE_HISTORY').length,1);assert.equal(result.state.phases.financeHistory.nextIndex,2);
- }
-});
-test('NEXT history lost commit retains the original batch keys and never claims success',async()=>{
- const result=await load({instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true,failure:'system-finance-history-unknown'});
- assert.equal(result.exit,1);assert.equal(result.state.status,'COMMIT_UNKNOWN');assert.equal(result.state.phases.financeHistory.nextIndex,0);
- assert.deepEqual(result.state.pending.sourceIds,['history-1','history-2']);assert.equal(result.events.some(e=>e.domain==='financeHistory'&&e.event==='COMMIT_ACK'),false);
-});
-test('NEXT invitation import and count closure share a fenced system source',async()=>{
- const options={instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},migrationProfile:NEXT_MIGRATION_PROFILE,fenceFixture:true};
- const result=await load({...options,failure:'system-invitation-success'});
- assert.ifError(result.error);assert.equal(result.exit,undefined);assert.match(result.state.binding.systemInvitationId,/^synthetic-invitation-system-/);
- assert.equal(result.commands.filter(command=>command==='SYSTEM_INVITATION_BASELINE').length,1);
- assert(result.commands.indexOf('SYSTEM_INVITATION_IMPORT')<result.commands.indexOf('SYSTEM_INVITATION_COUNTS'));
- assert.equal(result.state.phases.invitationFacts.nextIndex,1);assert.equal(result.state.phases.invitationCounts.nextIndex,1);
- const drift=await load({...options,failure:'system-invitation-drift'});assert.equal(drift.exit,1);assert.equal(drift.state.phases.invitationFacts.nextIndex,0);
- assert(!drift.commands.includes('SYSTEM_INVITATION_IMPORT'));assert(!drift.commands.includes('SYSTEM_INVITATION_COUNTS'));
- const unknown=await load({...options,failure:'system-invitation-unknown'});assert.equal(unknown.exit,1);assert.equal(unknown.state.status,'COMMIT_UNKNOWN');
- assert.deepEqual(unknown.state.pending.sourceIds,['invitation-1']);assert(!unknown.events.some(e=>e.domain==='invitationFacts'&&e.event==='COMMIT_ACK'));
-});
-
-test('NEXT system-user unknown commit retains its original source and target binding during read-only recovery', async () => {
-  const options = { instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'}, migrationProfile:NEXT_MIGRATION_PROFILE, fenceFixture:true, verifiedFirst:true };
-  const failed = await load({ ...options, failure:'lost-commit', exitAfterUsers:true });
-  assert.equal(failed.state.status, 'COMMIT_UNKNOWN'); assert.match(failed.state.binding.systemUserId, /^synthetic-system-/);
-  assert.match(failed.state.binding.systemAccountId, /^synthetic-account-system-/);
-  assert.match(failed.state.binding.systemOrderId, /^synthetic-order-system-/);
-  assert.match(failed.state.binding.systemFinanceId, /^synthetic-finance-system-/);
-  const recovered = await load({ ...options, previous:failed, recover:true });
-  assert.ifError(recovered.error); assert.equal(recovered.exit, undefined);
-  const receipt = JSON.parse([...recovered.files].find(([file]) => file.startsWith(path.join(out, 'recovery-')))[1]);
-  assert.equal(receipt.binding.systemUserId, failed.state.binding.systemUserId); assert.equal(receipt.knowledge, 'EXACT_PENDING_KEYS_REQUIRE_INSPECTION');
-  assert.equal(receipt.binding.systemAccountId, failed.state.binding.systemAccountId);
-  assert.equal(receipt.binding.systemOrderId, failed.state.binding.systemOrderId);
-  assert.equal(receipt.binding.systemFinanceId, failed.state.binding.systemFinanceId);
-  assert(!recovered.commands.includes('SYNTHETIC_MIGRATE_USER')); assert(!recovered.commands.includes('COMMIT'));
 });
 
 test("a retained successful payment conflicting with the order flag stops before any connection or target write",async()=>{
@@ -613,46 +284,12 @@ test("strict loader preserves Unicode separators in prepared JSONL", async () =>
   assert.ifError(result.error);assert.equal(result.exit,undefined);assert.ok(result.commands.includes("UNICODE_SOURCE_PRESERVED"));
 });
 
-test("NEXT lost actor authorization rolls back before locking users", async () => {
-  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true, verifiedFirst:true, failure:'batch-actor-lost' });
-  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYSTEM_USER_BATCH"));
-  assert(result.commands.includes("ROLLBACK")); assert(!result.commands.some(sql=>sql.includes('ORDER BY id COLLATE')));
-  assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
-});
-
-test("NEXT window expiry during user lock rolls back before migration writes", async () => {
-  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true, verifiedFirst:true, failure:'window-expired-after-prelock' });
-  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYSTEM_USER_BATCH"));
-  assert(result.commands.some(sql=>sql.includes('ORDER BY id COLLATE'))); assert(result.commands.includes("ROLLBACK"));
-  assert(!result.commands.includes("SYNTHETIC_MIGRATE_USER")); assert(!result.commands.includes("COMMIT"));
-});
-
-test("NEXT missing identity evidence or duplicate subject stops the batch", async () => {
-  const options = { instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true, verifiedFirst:true };
-  for (const failure of ["missing-identity-profile", "duplicate-identity-user"]) {
-    const result = await load({ ...options, failure });
-    assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("ROLLBACK"));
-    assert(!result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH")); assert(!result.commands.includes("COMMIT"));
-  }
-});
-
-test("NEXT subject batch failure rolls back before the profile or commit", async () => {
-  const result = await load({ instance: { host:'127.0.0.1', port:55435, systemIdentifier:'12345' }, migrationProfile:NEXT_MIGRATION_PROFILE,
-    fenceFixture:true, verifiedFirst:true, failure:'subject-batch-rejected' });
-  assert.equal(result.state.status, "FAILED_ROLLED_BACK"); assert(result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH"));
-  assert(result.commands.includes("ROLLBACK")); assert(!result.commands.includes("SYNTHETIC_IDENTITY_PROFILE")); assert(!result.commands.includes("COMMIT"));
-});
-
 test("new user import commits the identity subject and encrypted profile together", async () => {
   const result = await load({ verifiedFirst: true });
   assert.ifError(result.error); assert.equal(result.exit, undefined);
   const begin = result.commands.indexOf("BEGIN"), subject = result.commands.indexOf("SYNTHETIC_IDENTITY_SUBJECT"),
     profile = result.commands.indexOf("SYNTHETIC_IDENTITY_PROFILE"), commit = result.commands.indexOf("COMMIT");
   assert.ok(begin < subject && subject < profile && profile < commit);
-  assert(!result.commands.includes("SYNTHETIC_IDENTITY_SUBJECT_BATCH"));
   assert.equal(JSON.stringify(result.logs).includes("合成姓名"), false);
 });
 
@@ -828,9 +465,7 @@ test("unknown coverage commit keeps all five original chunk keys and stops", asy
   assert.equal(r.state.phases.financeEmptyCoverage.nextIndex,0);
 });
 
-async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift, sourceToolDrift = false, instance = null, registryProfile = null, v2Capture = false, sameOutputStopped = false, sameOutputStages = [{ name: "core-and-funds", status: "INTENT" }], sameOutputArtifacts = [], identityProfiles = true, legalInput = true, selectedPopulation = false, selectedSourceMismatch = false, refundMismatch = false, refundPolicy = true, openingStats = {}, displayCoverage = true, packedPreflight = false, distributionInvalid = false, inspectPreflight = false, inlineGrowth = false, inlineLogInvalid = false, inspectAsNext = false } = {}) {
-  const simulateNextResume = resumeCase === 'next-legacy-unproven';
-  if (simulateNextResume) { instance={host:'127.0.0.1',port:55435,systemIdentifier:'12345'};registryProfile=NEXT_MIGRATION_PROFILE;v2Capture=true;selectedPopulation=true; }
+async function round({ reservationStatus = strictRoundReservation, action = "execute", drift, strict = true, bootstrapDrift, missingBootstrap = false, withGrowth = false, artifactFault, separateBossBinding = false, resumeCase, dependencyDrift, sourceToolDrift = false, instance = null, registryProfile = null, v2Capture = false, sameOutputStopped = false, sameOutputStages = [{ name: "core-and-funds", status: "INTENT" }], sameOutputArtifacts = [], identityProfiles = true, legalInput = true, selectedPopulation = false, selectedSourceMismatch = false, refundMismatch = false, refundPolicy = true, openingStats = {}, displayCoverage = true, packedPreflight = false, distributionInvalid = false, inspectPreflight = false, inlineGrowth = false, inlineLogInvalid = false } = {}) {
   const files = new Map(), directories = [], spawns = [], logs = [], reads = [], liveCommands = [], logOpens = [], scopeChecks = [];
   const targetSchema = reservationStatus === "ROUND06_BOOTSTRAP_RESERVED" ? ["1", "2", "3", "4", "5"].map(x => x.repeat(64)) : schema;
   const cohort = resumeCase === "bad-package" || selectedPopulation ? 1 : 0;
@@ -923,12 +558,6 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     ...(withGrowth || resumeCase ? { growth: { policyId, policyEffectiveAt: effectiveAt, approvedBy: "Root", approvalRef: "ROOT-FIXTURE-GROWTH", attempt: 1, ...(packedPreflight ? {packageLayout:'PACKED_V2'} : {}), ...(inlineGrowth ? {approvalLayout:'INLINE_INTENT_V1'} : {}) } } : {}),
     ...(missingBootstrap ? {} : { bootstrapEvidence: evidence }),
   };
-  if (simulateNextResume || inspectAsNext) {
-    inputBody.target.migrationProfile=NEXT_MIGRATION_PROFILE;
-    inputBody.sourceBinding=put(path.join(restricted,'source-binding.json'),{});
-    const workflowInput=put(path.join(restricted,'workflow-input.json'),{});
-    inputBody.sourceWorkflow=put(path.join(restricted,'source-workflow.json'),{input:workflowInput});
-  }
   if (["ROUND06_BOOTSTRAP_RESERVED","ROUND07_BOOTSTRAP_RESERVED"].includes(reservationStatus) && dependencyDrift !== "missing") inputBody.dependencyBinding = {
     buildManifest: put(path.join(restricted, "dependency-build.json"), {}), sourceManifest: put(path.join(restricted, "dependency-source.json"), {}), sourceSnapshot: "C:\\fixture",
     proof: put(path.join(restricted, "dependency-proof.json"), { status: "ROUND_DEPENDENCY_CLOSURE_VERIFIED", entrypoints: 32, closureFiles: [["fixture", "a".repeat(64)]], closureSha256: "c".repeat(64) }) };
@@ -948,7 +577,6 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
       strictBatch: strict, schemaHashes: schema, executionWindow: oldWindow, status: resumeCase === "unknown" ? "COMMIT_UNKNOWN" : "LOCAL_DATASET_SKIN_HOLDINGS_COMMITTED_REVIEW_REQUIRED",
       pending: resumeCase === "unknown" ? { stage: "COMMIT_UNKNOWN" } : null, poolClosed: true, unlock: true, maintenanceClosed: true, rollbackConfirmed: true,
       phases: Object.fromEntries(phaseNames.map(name => [name, { complete: name !== (resumeCase === "missing-phase" ? "storedOpening" : ""), quarantined: 0, nextIndex: ["users", "accounts", "orders", "accountDisplay", "storedOpening", "skinHoldings"].includes(name) ? cohort : 0 }])), skinHoldingsPreparation: { ready: cohort, isolated: 0 } };
-    if (simulateNextResume) oldCheckpoint.sourceScopeVerification={legacyListed:{scope:'ALL_CAPTURED_GAMES',sourceCount:1}};
     oldCheckpointPath = path.join(oldOut, "loader", "checkpoint.json");
     const oldCheckpointRef = put(oldCheckpointPath, oldCheckpoint); oldCheckpointBytes = Buffer.from(files.get(oldCheckpointPath));
     inputBody.resume = { schema: "zzsh.local-round-growth-resume.v1", previousInput: oldInput, previousReceipt: oldReceipt, checkpoint: oldCheckpointRef };
@@ -993,7 +621,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     assertSameDirectoryResumeSafe,
     inspectRoundResumeOutput: directory => directory === oldOut && oldReceiptRef ? { sequence: 1, previousReceipt: oldReceiptRef } : directory === out && sameOutputReceipt ? { sequence: 1, previousReceipt: sameOutputReceipt, stageNames: sameOutputStages.map(stage => stage.name) } : null,
     reserveRoundResumeOutput: directory => { const attempt = path.join(directory, "round-attempt-000001"); directories.push(attempt); return attempt; },
-    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, compactEmptyCoverageReadbackMatches, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage, legacyListedProofVersion, legacyListedTargetMatches,
+    assertRoundBootstrap, assertRoundLegalBootstrap, assertRoundIdentityKeyBinding, assertRoundOpeningPartition, assertRoundPreparationTools, assertRoundSourceOrigin, assessRoundEvidence: inspectPreflight ? () => ({ status: 'COMPLETE', dataset: 'PASS', growth: 'PASS', issues: [] }) : assessRoundEvidence, assertGrowthPlanEvidence, assertGrowthPackages, assertResumeLineage, verifyResumeSchema, assessResumeStages, assertNoWriteRetryLineage, assertRoundPopulationBinding, assertFullExecutionAdmitted, assertNextBusinessPopulation, expectedContinuationImports, LEGACY_REFUND_RELATIONSHIP_POLICY, assertDisplayCaptureCoverage,
     verifyDisplayCaptureInputs:async()=>({status:'SOURCE_DISPLAY_CAPTURE_VERIFIED_TARGET_NOT_RUN',displayRows:cohort,sourceConnections:0,targetConnections:0,targetWrites:0}),
     digestInlineGrowthLog:async()=>inlineLogInvalid?'0'.repeat(64):'f'.repeat(64),
     requiresInvitationCountClosure, process: proc, moduleUrl: "file:///C:/project/scripts/migration/run-local-round.mjs",
@@ -1022,7 +650,7 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     fileURLToPath: url => path.normalize(String(url).slice("file:///".length)),
     createRequire: () => Object.assign(() => ({ canonicalize:JSON.stringify, parseDistributionPolicyChange:value=>value, Client: class { async connect() { liveCommands.push("connect"); } async query(sql) {
       liveCommands.push(sql); if (sql.startsWith("SELECT current_database")) return { rows: [{ database: "zzsh_test_regression", ...epoch,
-        ...(resumeCase === "schema-target-drift" ? { oid: "43" } : {}), ...(simulateNextResume?{system_identifier:instance.systemIdentifier}:{}), owner: "zzsh", marker, role: "fixture_m", role_oid: "91", read_only: "on", rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false }] };
+        ...(resumeCase === "schema-target-drift" ? { oid: "43" } : {}), owner: "zzsh", marker, role: "fixture_m", role_oid: "91", read_only: "on", rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false }] };
       if (sql.startsWith("SELECT hash")) return { rows: (resumeCase.startsWith("schema-drift") ? ["3".repeat(64)] : schema).map(hash => ({ hash })) };
       if (sql === "ROLLBACK" && resumeCase.endsWith("rollback-fail")) throw Error("fixture rollback failure");
       return { command: sql }; } async end() { liveCommands.push("end"); if (resumeCase === "schema-close-fail") throw Error("fixture close failure"); } } }), {cache:{}}),
@@ -1039,9 +667,8 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
         const scriptName = args[0], outputPath = args[args.indexOf("--out") + 1];
         if (scriptName.endsWith("readback-local-dataset.mjs")) {
           if (!(resumeCase === "final-readback-fail" && outputPath.endsWith("readback-final.json"))) {
-            put(outputPath, { schema: "zzsh.local-dataset-readback.v1", resource: { ...epoch, database: "zzsh_test_regression", ...(simulateNextResume?{instance,migrationProfile:NEXT_MIGRATION_PROFILE}:{}) }, sourceDatasetSha256: dataset.sha256,
+            put(outputPath, { schema: "zzsh.local-dataset-readback.v1", resource: { ...epoch, database: "zzsh_test_regression" }, sourceDatasetSha256: dataset.sha256,
               status: "CORE_SOURCE_TARGET_EXACT_READBACK_PASSED", differenceCount: 0, targetWrites: 0, rollbackConfirmed: true, lockReleased: true, connectionsClosed: true,
-              ...(simulateNextResume?{targetFence:'HELD_UNTIL_ROLLBACK'}:{}),
               domains: { users: { expected: cohort }, accounts: { expected: cohort }, orders: { expected: cohort } },
               display: { expected: cohort, matched: cohort }, openings: { expected: cohort, matched: cohort }, holdings: { expected: cohort, matched: cohort }, paths: { expected: cohort, matched: cohort } });
             if (resumeCase === "checkpoint-drift") files.set(oldCheckpointPath, Buffer.from("{}"));
@@ -1082,14 +709,6 @@ async function round({ reservationStatus = strictRoundReservation, action = "exe
     fsyncSync(fd) { if (fd === 9 && resumeCase === "reservation-fsync-fail") throw Error("fixture marker fsync failure"); },
     closeSync() {}, writeLoadCheckpoint: put, console: { log: value => logs.push(JSON.parse(value)) },
   };
-  if (simulateNextResume || inspectAsNext) {
-    context.assertRoundBootstrap=()=>({});context.assertRoundSourceOrigin=()=>{};
-  }
-  if (simulateNextResume) {
-    // Exercise the later gate as if a future release had opened the separate NEXT write-admission gate.
-    context.assertNextMigrationWriteReady=()=>{};context.expectedContinuationImports=()=>0;
-    context.assertResumeLineage=()=>({status:'ORIGINAL_COMPLETE_CHECKPOINT_BOUND'});
-  }
   let error;
   try { await new AsyncFunction(...Object.keys(context), script("run-local-round.mjs"))(...Object.values(context)); }
   catch (cause) { if (cause !== "EXIT") error = cause; }
@@ -1248,14 +867,6 @@ test("next target cannot be disguised as an old input profile or reservation",as
   assert.throws(()=>assertRoundBootstrap({target,bootstrapEvidence:{}},null,{runtime:{resource,actualResource:resource}}),/ROUND_BOOTSTRAP_TARGET_OR_EVIDENCE_MISMATCH:runtime-profile/);
 });
 
-test("next-round bootstrap never accepts old activated-admin receipts as first-deployment evidence",()=>{
-  const target={oid:'123',nonce:'a'.repeat(24),instance:{host:'127.0.0.1',port:55435,systemIdentifier:'12345'},
-    migrationProfile:'LOCAL_MIGRATION_NEXT_V1',bootstrapReservation:'ROUND07_BOOTSTRAP_RESERVED'};
-  const resource={...target,database:'zzsh_test_regression'};
-  assert.throws(()=>assertRoundBootstrap({target,bootstrapEvidence:{}},{id:'old_boss',sessionId:'old_session'},
-    {runtime:{resource,actualResource:resource},readback:{admins:{allActive:true,twoFactor:true}}}),/ROUND_NEXT_INITIALIZATION_CONTRACT_NOT_READY/);
-});
-
 test("receipt inspection rejects a new capture disguised as the old profile",async()=>{
   const result=await round({action:'inspect-receipt',inspectPreflight:true,v2Capture:true});
   assert.ifError(result.error);assert.equal(result.logs[0].status,'INCOMPLETE');assert.ok(result.logs[0].issues.includes('ROUND_SOURCE_RESTORE_PROOF_UNCONFIRMED'));
@@ -1333,9 +944,6 @@ test("fresh selected rounds independently check the source before credentials or
   assert.equal(good.logs[0].population.sourceVerification.status, "SELECTED_SCOPE_SOURCE_AND_INPUT_VERIFIED_TARGET_NOT_RUN");
   assert.equal(good.logs[0].population.sourceVerification.orders.retained, 1);
   assert.equal(good.logs[0].externalReadiness.status, "NOT_ASSESSED_BY_ROUND");
-  assert.equal(good.logs[0].externalReadiness.legacyListed.status, "SOURCE_REVIEW_REQUIRED");
-  assert.equal(good.logs[0].externalReadiness.legacyListed.readyWithoutSnapshot, 1);
-  assert.equal(good.logs[0].externalReadiness.legacyListed.targetStatus, "NOT_ASSESSED");
   const unresolved = await round({ action: "validate", selectedPopulation: true, refundMismatch: true });
   assert.ifError(unresolved.error);
   assert.equal(unresolved.logs[0].externalReadiness.refundRelationships.status, "REVIEW_REQUIRED");
@@ -1467,17 +1075,10 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   for (const name of ['prepare','manifest','apply','readback']) Object.assign(data.growth[name], { instance, migrationProfile });
   data.checkpoint.targetFenceReleased = true; data.checkpoint.protectionRecorded = true;
   data.readback.targetFence = 'HELD_UNTIL_ROLLBACK';
-  data.checkpoint.generatedPhases={financeEmptyCoverage:{schema:'zzsh.empty-coverage-chunks.v1',receiptMode:'BATCH_V2',rows:2,chunks:[{},{}]}};
-  data.readback.emptyFinancialCoverage={sourceRebuilt:true,expected:2,readable:2,actual:2,chunks:2,batchProof:{mode:'BATCH_V2',expected:2,matched:2}};
   Object.assign(data.receipt.stages.find(stage=>stage.name==='paths').metrics,{targetFence:'HELD_ACROSS_BATCHES',targetFenceReleased:true});
   for (const name of ['prepare','readback']) Object.assign(data.growth[name], { readOnlyFence:'HELD_UNTIL_ROLLBACK', readOnlyMaintenanceUnlock:true, readOnlyMaintenanceClosed:true });
   Object.assign(data.growth.apply, { targetFence:'HELD_ACROSS_BATCHES', targetFenceReleased:true });
-  const result = assessRoundEvidence(data);
-  assert(result.issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const historical=assessRoundEvidence({...data,requireCurrentLegacyListed:false});
-  assert.equal(historical.status,'COMPLETE',historical.issues.join(','));
-  const missingBatchProof=structuredClone(data);delete missingBatchProof.readback.emptyFinancialCoverage.batchProof;
-  assert(assessRoundEvidence({...missingBatchProof,requireCurrentLegacyListed:false}).issues.includes('ROUND_COMPACT_EMPTY_COVERAGE_READBACK_UNCONFIRMED'));
+  const result = assessRoundEvidence(data); assert.equal(result.status, 'COMPLETE', result.issues.join(','));
   for (const domain of ['liabilityDuties','completedCommissions']) {
     const isolated=structuredClone(data);isolated.checkpoint.quarantine.push({domain,sourceId:'source-1',code:'REVIEW_REQUIRED'});
     assert(assessRoundEvidence(isolated).issues.includes('ROUND_LEGACY_FINANCE_ASSEMBLY_REQUIRES_REVIEW'));
@@ -1508,49 +1109,6 @@ test('next-profile completion requires checkpoint fence release and fenced readb
   }
   const noPathFence=structuredClone(data);delete noPathFence.receipt.stages.find(stage=>stage.name==='paths').metrics.targetFenceReleased;
   assert(assessRoundEvidence(noPathFence).issues.includes('ROUND_PATH_FENCE_UNCONFIRMED'));
-  const listed=structuredClone(data),empty=sha(''),one=sha('listed-1');
-  listed.input.source={sha256:'a'.repeat(64)};
-  Object.assign(listed.expected.dataset,{sourceReceiptSha256:listed.input.source.sha256,gameBindings:{'1':'delta'}});
-  listed.expected.dataset.files.accounts={sha256:'b'.repeat(64)};
-  listed.expected.source={files:{accounts:{sha256:'c'.repeat(64)},games:{sha256:'d'.repeat(64)}}};
-  const source={schema:'zzsh.legacy-listed-source-scope.v2',scope:'ALL_CAPTURED_GAMES',status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN',
-    sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,
-    sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,
-    binding:{sourceReceiptSha256:listed.input.source.sha256,sourceAccountsSha256:'c'.repeat(64),sourceGamesSha256:'d'.repeat(64),
-      datasetAccountsSha256:'b'.repeat(64),gameBindingsSha256:sha(JSON.stringify(listed.expected.dataset.gameBindings)),gameBindingStatus:'VERIFIED'},
-    delta:{sourceCount:1,readyWithSnapshot:1,readyWithoutSnapshot:0,isolated:0,sourceIdsSha256:one,readyMappedIdsSha256:one,readyWithSnapshotIdsSha256:one,
-      readyWithoutSnapshotIdsSha256:empty,isolatedIdsSha256:empty,status:'SOURCE_PARTITION_VERIFIED_TARGET_NOT_RUN'},
-    otherGames:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty},
-    unknownGame:{sourceCount:0,sourceIdsSha256:empty,readyWithoutSnapshot:0,readyWithoutSnapshotIdsSha256:empty,isolated:0,isolatedIdsSha256:empty}};
-  listed.checkpoint.sourceScopeVerification.legacyListed=source;
-  listed.readback.legacyListedSource=source;listed.readback.legacyListedSourceOrigin='CHECKPOINT_BOUND_V2';
-  listed.readback.legacyListedTarget={status:'MAPPED_HISTORICAL_NOT_PUBLISHED',scope:'MAPPED_DELTA_ACCOUNT_FACTS_ONLY',marketAndDirectOrder:'NOT_ASSESSED',
-    sourceProofSha256:sha(JSON.stringify(source)),expectedMapped:1,verifiedMapped:1,missingTarget:0,missingSnapshot:0,published:0,
-    expectedMappedIdsSha256:one,verifiedMappedIdsSha256:one,missingTargetIdsSha256:empty,missingSnapshotIdsSha256:empty,publishedIdsSha256:empty};
-  assert(!assessRoundEvidence(listed).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const old=structuredClone(listed);old.checkpoint.sourceScopeVerification.legacyListed={scope:'ALL_CAPTURED_GAMES',sourceCount:1};
-  old.readback.legacyListedSourceOrigin='RECOMPUTED_FROM_BOUND_SOURCE';
-  assert(!assessRoundEvidence(old).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const oldest=structuredClone(old);delete oldest.checkpoint.sourceScopeVerification.legacyListed;
-  assert(!assessRoundEvidence(oldest).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const noFresh=structuredClone(old);delete noFresh.readback.legacyListedSource;
-  assert(assessRoundEvidence(noFresh).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const changedHistorical=structuredClone(listed);changedHistorical.readback.legacyListedTarget.verifiedMappedIdsSha256='0'.repeat(64);
-  assert(assessRoundEvidence({...changedHistorical,requireCurrentLegacyListed:false}).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  const other=structuredClone(listed),otherSource=other.readback.legacyListedSource;
-  Object.assign(otherSource,{sourceCount:2,isolated:1,status:'SOURCE_REVIEW_REQUIRED',sourceIdsSha256:sha('listed-1\nother-1'),isolatedIdsSha256:sha('other-1')});
-  Object.assign(otherSource.otherGames,{sourceCount:1,sourceIdsSha256:sha('other-1'),isolated:1,isolatedIdsSha256:sha('other-1')});
-  other.checkpoint.sourceScopeVerification.legacyListed=otherSource;other.readback.legacyListedTarget.sourceProofSha256=sha(JSON.stringify(otherSource));
-  other.expected.dataset.domains.accounts.source=3;other.expected.dataset.domains.accounts.isolated=1;
-  const otherResult=assessRoundEvidence(other);
-  assert(!otherResult.issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  assert(otherResult.issues.includes('ROUND_LEGACY_LISTED_SOURCE_REVIEW_REQUIRED'));
-  for(const change of [d=>{delete d.readback.legacyListedTarget;},d=>{d.readback.legacyListedTarget.published=1;},
-    d=>{d.readback.legacyListedTarget.verifiedMappedIdsSha256='0'.repeat(64);},d=>{d.expected.source.files.accounts.sha256='0'.repeat(64);},
-    d=>{d.checkpoint.sourceScopeVerification.legacyListed.status='SOURCE_REVIEW_REQUIRED';}]){
-    const changed=structuredClone(listed);change(changed);
-    assert(assessRoundEvidence(changed).issues.includes('ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED'));
-  }
   for (const [issue, change] of [['ROUND_GROWTH_PREPARE_UNCONFIRMED',d=>{delete d.growth.prepare.readOnlyFence;}],
     ['ROUND_GROWTH_APPLY_UNCONFIRMED',d=>{d.growth.apply.targetFenceReleased=false;}],
     ['ROUND_GROWTH_READBACK_UNCONFIRMED',d=>{d.growth.readback.readOnlyMaintenanceClosed=false;}]]) {
@@ -1746,14 +1304,6 @@ test("receipt inspection is offline, read-only, and reports cross-target bootstr
   assert.ok(!r.reads.includes(credentials));
 });
 
-test('historical NEXT receipt inspection retains its result while current listing status stays unassessed',async()=>{
-  const r=await round({action:'inspect-receipt',inspectAsNext:true,inspectPreflight:true,v2Capture:true,identityProfiles:false,legalInput:false});
-  assert.ifError(r.error);assert.equal(r.logs[0].status,'COMPLETE');
-  assert.equal(r.logs[0].assessmentScope,'HISTORICAL_DATASET_AND_GROWTH');
-  assert.deepEqual(r.logs[0].currentLegacyListed,{status:'NOT_ASSESSED',reason:'HISTORICAL_RECEIPT_ONLY'});
-  assert.deepEqual(r.spawns,[]);assert.deepEqual(r.liveCommands,[]);assert.deepEqual(r.directories,[]);
-});
-
 test("receipt inspection marks the dataset incomplete when the distribution source preflight no longer verifies", async () => {
   const options = { action: "inspect-receipt", reservationStatus: "ROUND06_BOOTSTRAP_RESERVED", instance: { host: "127.0.0.1", port: 55433, systemIdentifier: "123" }, withGrowth: true, packedPreflight: true, inspectPreflight: true };
   const verified = await round(options);
@@ -1847,15 +1397,6 @@ test("growth-only continuation rejects unproven lineage and unknown commits befo
     assert.equal(r.oldCheckpointUnchanged, true);
     assert.deepEqual(r.directories, []); assert.deepEqual(r.spawns, []); assert.deepEqual(r.liveCommands, []);
   }
-});
-
-test('a legacy NEXT growth continuation cannot reach growth without a fresh v2 listing readback',async()=>{
-  const r=await round({action:'resume-growth',resumeCase:'next-legacy-unproven'});
-  assert.ifError(r.error);assert.equal(r.exit,1);assert.equal(r.oldCheckpointUnchanged,true);
-  const receipt=JSON.parse(r.receipt);
-  assert.equal(receipt.failure.stage,'readback');assert.match(receipt.failure.message,/ROUND_LEGACY_LISTED_READBACK_UNCONFIRMED/);
-  assert.equal(r.spawns.some(args=>args[0].endsWith('run-local-growth.mjs')),false);
-  assert.equal(receipt.externalReadiness.legacyListed.targetStatus,'NOT_ASSESSED');
 });
 
 test("growth-only continuation does not write growth when live schema or initial readback is unproven", async () => {

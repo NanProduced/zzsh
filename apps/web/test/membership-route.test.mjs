@@ -6,6 +6,8 @@ process.env.ZZSH_API_ORIGIN="http://127.0.0.1:3102";
 process.env.ZZSH_WEB_ORIGIN="http://127.0.0.1:3100";
 const { GET, POST } = await import("../src/app/api/account/rental-membership/route.ts");
 const walletRoute=await import("../src/app/api/account/wallet/[[...path]]/route.ts");
+const growthRoute = await import("../src/app/api/account/membership-growth/route.ts");
+const growthConsumptionRoute = await import("../src/app/api/account/membership-growth/consumption/route.ts");
 
 function request(init = {}) {
   return new Request("http://127.0.0.1:3100/api/account/rental-membership", init);
@@ -96,3 +98,102 @@ test("membership route projects the independent public policy and drops private 
     }
   } finally { globalThis.fetch = previous; }
 });
+
+test("membership growth BFF forwards cookie, origin, and request-id", async () => {
+  const originalFetch = globalThis.fetch;
+  let seenUrl, seenInit;
+  try {
+    globalThis.fetch = async (url, init) => {
+      seenUrl = String(url);
+      seenInit = init;
+      return new Response(JSON.stringify({ growth: { schema: "membership-growth-v1", knowledge: "KNOWN" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const req = new Request("http://127.0.0.1:3100/api/account/membership-growth", {
+      method: "GET",
+      headers: { cookie: "zzsh_user.session_token=valid_token", origin: "http://127.0.0.1:3100", "x-request-id": "req-1" },
+    });
+    const res = await growthRoute.GET(req);
+    assert.equal(res.status, 200);
+    assert.equal(seenUrl, "http://127.0.0.1:3102/api/v1/users/me/membership-growth");
+    assert.equal(seenInit.headers.get("cookie"), "zzsh_user.session_token=valid_token");
+    assert.equal(seenInit.headers.get("x-request-id"), "req-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("membership growth BFF passes through unconfigured or unknown state untouched", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const unconfiguredPayload = {
+      growth: {
+        schema: "membership-growth-v1",
+        knowledge: "KNOWN",
+        benefitsState: "NOT_CONFIGURED",
+        effectiveTier: "SILVER",
+        benefits: [{ label: "成长权益", value: "尚未发布" }],
+        comparison: [],
+      },
+    };
+    globalThis.fetch = async () => new Response(JSON.stringify(unconfiguredPayload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    const req = new Request("http://127.0.0.1:3100/api/account/membership-growth", {
+      method: "GET",
+      headers: { cookie: "zzsh_user.session_token=valid_token" },
+    });
+    const res = await growthRoute.GET(req);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.growth.benefitsState, "NOT_CONFIGURED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("growth BFF forwards scope/cursor and only user-realm cookies", async () => {
+  const old = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, init) => {
+      assert.equal(String(url), "http://127.0.0.1:3102/api/v1/users/me/membership-growth/consumption?scope=LIFETIME&limit=20&cursor=opaque");
+      assert.equal(init.method, "GET");
+      assert.equal(init.headers.get("cookie"), "zzsh_user.session_token=fixture_user");
+      return Response.json({ knowledge: "KNOWN", items: [] });
+    };
+    const req = new Request("http://127.0.0.1:3100/api/account/membership-growth/consumption?scope=LIFETIME&limit=20&cursor=opaque", {
+      headers: { cookie: "zzsh_user.session_token=fixture_user; zzsh_admin.session_token=fixture_admin" },
+    });
+    const r = await growthConsumptionRoute.GET(req);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("cache-control"), "no-store");
+  } finally {
+    globalThis.fetch = old;
+  }
+});
+
+test("growth BFF refuses bearer, wrong origin, foreign subject and malformed paging without upstream calls", async () => {
+  const old = globalThis.fetch;
+  let calls = 0;
+  try {
+    globalThis.fetch = async () => { calls++; throw Error("must not reach upstream"); };
+    for (const [q, h, status] of [
+      ["", { authorization: "Bearer fixture" }, 403],
+      ["?userId=foreign", {}, 400],
+      ["?limit=51", {}, 400],
+      ["?cursor=", {}, 400],
+      ["?scope=ALL", {}, 400],
+    ]) {
+      const req = new Request("http://127.0.0.1:3100/api/account/membership-growth/consumption" + q, { headers: h });
+      assert.equal((await growthConsumptionRoute.GET(req)).status, status);
+    }
+    assert.equal(growthConsumptionRoute.POST().status, 404);
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = old;
+  }
+});
+

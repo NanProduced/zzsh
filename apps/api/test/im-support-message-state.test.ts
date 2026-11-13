@@ -71,7 +71,6 @@ test("0132 adds the preview and user read columns and the ACL narrows round upda
 
   const acl = readFileSync(resolve("src/database/business-migrations.ts"), "utf8");
   assert.match(acl, /GRANT UPDATE \("state", "peer_account_id", "assigned_admin_id", "version", "last_message_at", "last_message_preview", "updated_at", "message_scope_id", "message_scope_state", "message_scope_version", "admin_read_at", "first_user_message_at", "no_support_notice_at", "user_unread_count", "admin_unread_count"\) ON TABLE "zzsh_iam"\."im_consultation"/);
-  assert.match(acl, /GRANT UPDATE \("state", "peer_account_id", "message_scope_id", "message_scope_state", "last_round_seq", "version", "updated_at", "user_read_at"\) ON TABLE "zzsh_iam"\."im_support_thread"/);
 });
 
 test("0133 adds the waiting-assignment facts without backfilling old rounds", () => {

@@ -117,7 +117,6 @@ function earningProbe() {
       if (sql === 'ROLLBACK') return rows();
       if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY') return rows();
       if (sql === 'COMMIT') { state = tx; if (control.lostCommit) { control.lostCommit = false; throw Object.assign(new Error('commit acknowledgement lost'), { code: 'ECONNRESET' }); } return rows(); }
-      if (sql.includes('distribution_accrual_task_schema_v1')) return rows([{absent:true,ready:false}]);
       if (sql.startsWith('SELECT d.oid')) return rows([{ oid: receipt.resourceOid, name: receipt.database, role: receipt.runtimeRole, marker: receipt.marker, complete: true }]);
       if (sql.startsWith('SELECT pg_advisory') || sql === 'SET CONSTRAINTS ALL IMMEDIATE') return rows();
       if (sql.startsWith('SELECT p.id,p.order_id,p.payment_confirmation_id,p.early')) return rows(control.hasPosting ? [{ ...posting, game_id: 'delta' }] : []);

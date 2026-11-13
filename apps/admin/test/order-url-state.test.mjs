@@ -159,6 +159,11 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
   assert.equal(queries.at(-1).origin, "LEGACY", "线索查询保留已选来源");
   assert.equal(queries.at(-1).range, "all", "按线索查询会解除隐式默认日期");
 
+  await act(async () => buttonLabeled(node, "下一页").click());
+  await until(() => queries.at(-1)?.page === "2" && urls.at(-1).includes("page=2"));
+  assert.equal(new URL(urls.at(-1), "http://localhost").searchParams.get("qValue"), "私密线索");
+  assert.ok(queries.every(query => !JSON.stringify(query).includes("私密线索")));
+
   // 刷新/重开：按地址栏恢复状态、来源，线索需重输且如实提示
   await mount({ status: "CANCELLED", origin: "LEGACY" });
   await until(() => node.textContent.includes("查找线索需重新输入"));
@@ -175,19 +180,25 @@ test("订单列表把状态/时间/页码写入地址栏，查找线索不落 UR
 });
 
 test("订单页默认20条，旧合法 size=3 仍按地址栏恢复", async (t) => {
-  const { root, node, AdminOrderChainView } = await setup(t);
+  const { browser, root, node, AdminOrderChainView } = await setup(t);
   const urls = [];
+  const queries = [];
   globalThis.fetch = async (url) => {
     const value = String(url);
     if (value.includes("/orders?")) { urls.push(value); return response(page(undefined, { total: 45 })); }
     return response({ order });
   };
   const mount = async (initialQuery) => act(async () => {
-    root.render(createElement(AdminOrderChainView, { snapshot, objectOnly: false, initialQuery, onOpenPath: () => undefined, onQueryChange: () => {}, refreshNonce: 0 }));
+    root.render(createElement(AdminOrderChainView, { snapshot, objectOnly: false, initialQuery, onOpenPath: () => undefined, onQueryChange: (query) => queries.push(query), refreshNonce: 0 }));
   });
   await mount(undefined);
   await until(() => node.textContent.includes(order.displayNo));
   assert.equal(new URL(urls.at(-1), "http://localhost").searchParams.get("pageSize"), "20");
+  await chooseOption(browser, selectNamed(node, "每页容量"), "3 条/页");
+  await until(() => queries.at(-1)?.size === "3");
+  assert.match(selectNamed(node, "每页容量").textContent, /3/);
+  await mount({ range: "all" });
+  await until(() => new URL(urls.at(-1), "http://localhost").searchParams.get("pageSize") === "20");
   await mount({ size: "3" });
   await until(() => new URL(urls.at(-1), "http://localhost").searchParams.get("pageSize") === "3");
   assert.equal(new URL(urls.at(-1), "http://localhost").searchParams.get("page"), "1");

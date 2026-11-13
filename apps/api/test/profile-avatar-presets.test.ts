@@ -11,7 +11,7 @@ import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import sharp from "sharp";
 import { createLocalMediaStorage, decodeImage, MediaStorageError, type MediaStorage } from "../src/supply/media";
 import { createOssMediaStorage } from "../src/supply/media-oss";
-import { PROFILE_AVATAR_PRESETS, deterministicPresetId, loadPresetBytes } from "../src/profile/profile-avatar-presets";
+import { PROFILE_AVATAR_PRESETS, deterministicPresetId, loadPresetBytes, presetContentPath } from "../src/profile/profile-avatar-presets";
 
 type Event = Record<string, unknown>;
 const cliPath = resolve("src/profile/profile-avatar-presets-cli.ts");
@@ -110,9 +110,22 @@ test("avatar presets: unsupported arguments stop before storage resolution", asy
 test("avatar presets: four shipped assets match the registry and manifest without EXIF", async () => {
   const manifest = JSON.parse(readFileSync(resolve("assets/profile-avatars/manifest.json"), "utf8"));
   assert.equal(manifest.presets.length, 4);
-  for (const preset of PROFILE_AVATAR_PRESETS) {
-    const row = manifest.presets.find((x: { presetId: string }) => x.presetId === preset.presetId), bytes = await loadPresetBytes(preset), metadata = await sharp(bytes).metadata();
-    assert(row); assert.equal(row.contentHash, preset.contentHash); assert.equal(row.byteSize, bytes.length);
+  assert.equal(PROFILE_AVATAR_PRESETS.length, 4);
+  for (const [index, preset] of PROFILE_AVATAR_PRESETS.entries()) {
+    const row = manifest.presets[index];
+    assert(row);
+    assert.equal(row.presetId, preset.presetId);
+    assert.equal(row.version, preset.version);
+    assert.equal(row.file, preset.assetFile);
+    assert.equal(row.mime, preset.mime);
+    assert.equal(row.width, preset.width);
+    assert.equal(row.height, preset.height);
+    assert.equal(row.contentHash, preset.contentHash);
+    const bytes = await loadPresetBytes(preset);
+    assert.equal(row.byteSize, preset.byteSize);
+    assert.equal(bytes.length, preset.byteSize);
+    assert.equal(presetContentPath(preset), `/api/v1/profile/avatars/presets/${preset.presetId}/1/content`);
+    const metadata = await sharp(bytes).metadata();
     assert.equal(createHash("sha256").update(bytes).digest("hex"), preset.contentHash);
     assert.equal(row.originalSha256, preset.originalSha256); assert.match(row.originalSha256, /^[a-f0-9]{64}$/);
     assert.equal(metadata.format, "webp"); assert.equal(metadata.width, 256); assert.equal(metadata.height, 256);

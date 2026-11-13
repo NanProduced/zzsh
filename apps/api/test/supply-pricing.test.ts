@@ -2,165 +2,13 @@ import { divideToScale, multiplyDecimal, parseNonNegativeDecimal } from "../src/
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { compatRule } from "./pricing-compat-fixture";
-import { CUSTOMER_TIERS, parseDeltaPriceLines, resolveDeltaHaffContext, resolveDeltaHaffDisplayRange, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
+import { CUSTOMER_TIERS, parseDeltaPriceLines, resolveDeltaHaffDisplayRange, validateDeltaHaffRule, type CustomerTier, type RentalPricingSelection } from "../src/supply/delta-rental";
 import { computeDepositRecommendation, type FundingPolicy } from "../src/supply/funding-policy";
 import type { QuoteInput } from "../src/supply/pricing";
 import { createCatalogEntry, updateCatalogEntry } from "../src/supply/catalog";
-import { activateRelease, sealVersion, updatePriceDraft } from "../src/supply/rules";
+import { updatePriceDraft } from "../src/supply/rules";
 import { DELTA_LEGACY_RESOURCES } from "../src/supply/legacy-observation";
 import { readResourceIncomePreview } from "../src/supply/publishing";
-import { calculateFixedFee, FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio, fixedFeeRateForMode, parseFixedFeeRates } from "../src/supply/fixed-fee";
-import { applyTotalDiscountToQuote } from "../src/auth/membership-total-discount";
-import { fullPayoutServiceFeeCents } from "../src/supply/full-payout-fee";
-import { normalizeQuote } from "../src/supply/content-hash";
-import { projectTenantPriceQuote } from "../src/supply/tenant-price-projection";
-
-function fixedHaffRule(ratio = "47") {
-  const { compatibility, ...base } = compatRule(ratio);
-  return { ...base, schema: "haff-ratio-v3", fixedModes: compatibility!.modes };
-}
-
-test("fixed-fee quotes preserve one resource price and allocate the whole-order fee before membership", () => {
-  const input: QuoteInput = { priceVersionId: "fixed-price", mode: "PERCENT", fixedFeeAlgorithm: FIXED_FEE_ALGORITHM,
-    commissionRate: "0.10", customerTier: "STANDARD", roundingPolicy: "HALF_UP_CENT_V1", haffRule: fixedHaffRule("2000"),
-    conditions: { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m", rentalPricing: { rentalMode: "ordinary" } },
-    lines: [{ itemId: "zzz_haff", quantity: "1000000", unit: "HAFF_BASE", pricingKind: "HAFF_RATIO", customerTier: "STANDARD" },
-      { itemId: "aaa_item", quantity: "1", unit: "PIECE", pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "0.05", customerTier: "STANDARD" }],
-    termOption: { code: "daily-10m", dailyConsumption: "10000000", durationRounding: "CEIL_DAY" } };
-  const quote = quoteOf(computeQuote(input));
-  assert.equal(quote.schemaVersion, 4);
-  assert.equal(quote.pricingInputs.fixedFeeAlgorithm, FIXED_FEE_ALGORITHM);
-  assert.equal(quote.pricingInputs.fixedFeeGrossCents, "10");
-  assert.equal(quote.resourceTotal.amount, "0.10");
-  assert.equal(quote.ownerTotal.amount, "0.09");
-  assert.equal(quote.platformFullProfit.amount, "0.01");
-  const item = quote.lines.find((line) => line.itemId === "aaa_item")!;
-  assert.equal(item.ownerAmount.amount, "0.04");
-  assert.equal(item.buyerUnitAmount.amount, item.ownerUnitAmount.amount);
-  const discounted = applyTotalDiscountToQuote(quote, "0.90");
-  assert.ok(discounted);
-  assert.equal(discounted.quote.resourceTotal.amount, "0.09");
-  assert.equal(discounted.quote.ownerTotal.amount, "0.09");
-  assert.equal(discounted.quote.lines.find((line) => line.itemId === "aaa_item")!.buyerUnitAmount.amount, "0.05000000");
-  assert.equal(discounted.quote.lines.find((line) => line.itemId === "aaa_item")!.buyerAmount.amount, "0.04");
-  assert.equal(applyTotalDiscountToQuote(quote, "0.89"), null);
-  const tenant = projectTenantPriceQuote(discounted.quote, quote);
-  assert.equal(tenant.resourceTotal.amount, "0.09");
-  assert.equal(tenant.baseRenterHaffRatioWanPerYuan, "2000");
-  assert.equal(tenant.rentalMode, "ordinary");
-  assert.equal(JSON.stringify(tenant).includes("ownerAmount"), false);
-  const changedBasis = structuredClone(discounted.quote);
-  changedBasis.pricingInputs.fixedFeeGrossCents = "11";
-  assert.throws(() => normalizeQuote(changedBasis));
-  const changedRate = structuredClone(discounted.quote);
-  changedRate.pricingInputs.commissionRate = "0.20";
-  assert.throws(() => normalizeQuote(changedRate));
-  const changedAllocation = structuredClone(quote);
-  const first = changedAllocation.lines.find((line) => line.itemId === "aaa_item")!;
-  const second = changedAllocation.lines.find((line) => line.itemId === "zzz_haff")!;
-  first.ownerAmount.amount = "0.05"; first.platformAmount.amount = "0.00";
-  second.ownerAmount.amount = "0.04"; second.platformAmount.amount = "0.01";
-  assert.throws(() => normalizeQuote(changedAllocation));
-  assert.equal(computeQuote({ ...input, fixedFeeAlgorithm: undefined }).quotable, false);
-  assert.equal(computeQuote({ ...input, commissionRate: undefined }).quotable, false);
-});
-
-test("fixed-fee rental modes use one undiscounted haff ratio while preserving legacy schema rules", () => {
-  const rule = validateDeltaHaffRule(fixedHaffRule(), "PERCENT");
-  const conditions = { safeBoxCode: "box-a", vitLevel: 6, bearLevel: 6, termOptionCode: "daily-10m" };
-  for (const [rentalMode, ownerRatioB, expected] of [["ordinary", undefined, "47"], ["custom", "45", "45"], ["fast", "53", "53"]] as const) {
-    const result = resolveDeltaHaffContext({ mode: "PERCENT", haffRule: rule, hasHaffLines: true, customerTier: "STANDARD",
-      conditions: { ...conditions, rentalPricing: { rentalMode, ...(ownerRatioB ? { ownerRatioB } : {}) } } });
-    assert.deepEqual(result.reasonCodes, []);
-    assert.equal(result.buyerDenominator?.value, BigInt(expected));
-    assert.deepEqual(result.ownerDenominator, result.buyerDenominator);
-    assert.equal(result.compatibility?.rentalMode, rentalMode);
-  }
-  assert.deepEqual(resolveDeltaHaffDisplayRange({ mode: "PERCENT", haffRule: rule, conditions, rentalMode: "custom" }), { min: "44", max: "46" });
-  assert.deepEqual(resolveDeltaHaffDisplayRange({ mode: "PERCENT", haffRule: rule, conditions, rentalMode: "fast" }), { min: "53", max: "99" });
-  assert.throws(() => validateDeltaHaffRule(fixedHaffRule(), "SPREAD"));
-  assert.throws(() => validateDeltaHaffRule(compatRule("47"), "PERCENT"));
-  const nonstandard = resolveDeltaHaffContext({ mode: "PERCENT", haffRule: rule, hasHaffLines: true, customerTier: "VIP",
-    conditions: { ...conditions, rentalPricing: { rentalMode: "ordinary" } } });
-  assert.ok(nonstandard.reasonCodes.length > 0);
-});
-
-test("fixed fee rejects a discount deeper than the applicable fee rate", () => {
-  assert.equal(fixedFeeAllowsPayableRatio("0.08", "0.90"), false);
-  assert.equal(fixedFeeAllowsPayableRatio("0.08", "0.95"), true);
-  assert.equal(fixedFeeAllowsPayableRatio("0.08", "0.92"), true);
-  assert.equal(fixedFeeAllowsPayableRatio("0.08", "0.91999999"), false);
-  assert.equal(fixedFeeAllowsPayableRatio("0", "1"), true);
-  for (const ratio of ["", "0", "1.01", "0.123456789"]) assert.throws(() => fixedFeeAllowsPayableRatio("0.08", ratio));
-  assert.throws(() => fixedFeeAllowsPayableRatio("1", "0.95"));
-});
-
-test("the 92% fee cap leaves enough for separately rounded 8% full payout", () => {
-  const atCap = { ordinary: "0.92", custom: "0.92", fast: "0.92" };
-  assert.deepEqual(parseFixedFeeRates(atCap), atCap);
-  for (const mode of ["ordinary", "custom", "fast"] as const)
-    assert.throws(() => parseFixedFeeRates({ ...atCap, [mode]: "0.92000001" }));
-  for (let gross = 0n; gross <= 25n; gross++) {
-    const fee = calculateFixedFee([{ itemId: "haff", grossCents: gross }], atCap.ordinary).feeCents;
-    assert.equal(fee + fullPayoutServiceFeeCents(gross), gross);
-  }
-});
-
-test("sealing an older draft refuses a fixed fee beyond the full-payout cap", async () => {
-  const client = { query: async (sql: string) => {
-    assert.match(sql, /^SELECT .* FOR UPDATE$/);
-    return { rows: [{ id: "p", game_id: "g", status: "DRAFT", revision: "1",
-      fixed_fee_rates: { ordinary: "0.95", custom: "0.08", fast: "0.12" } }] };
-  } } as never;
-  await assert.rejects(sealVersion(client, "fixture-boss", true, "price_version", "p", "1"), /不能超过 92%/);
-});
-
-test("fixed-fee policy requires three explicit rates and selects by rental mode", () => {
-  const rates = parseFixedFeeRates({ ordinary: "0.1000", custom: "0.08", fast: "0.12" });
-  assert.deepEqual(rates, { ordinary: "0.1", custom: "0.08", fast: "0.12" });
-  assert.equal(fixedFeeRateForMode(rates, "ordinary"), "0.1");
-  assert.equal(fixedFeeRateForMode(rates, "custom"), "0.08");
-  assert.equal(fixedFeeRateForMode(rates, "fast"), "0.12");
-  for (const value of [null, {}, { ordinary: "0.1", custom: "0.08" }, { ...rates, fast: null }, { ...rates, fast: "1" }, { ...rates, extra: "0" }]) {
-    assert.throws(() => parseFixedFeeRates(value));
-  }
-  assert.throws(() => fixedFeeRateForMode(rates, "unknown" as never));
-});
-
-test("fixed-fee drafts cannot be activated through the legacy immediate release path", async () => {
-  const client = { query: async () => assert.fail("An immediate release must be rejected before querying the database") };
-  await assert.rejects(() => activateRelease(client as never, "admin", true, "game", "price", "term", "agreement", "0"), /须绑定公告和未来生效时间/);
-});
-
-test("fixed fee rounds once for the combined resource amount and allocates cents deterministically", () => {
-  const parts = [{ itemId: "haff", grossCents: 5n }, { itemId: "item", grossCents: 5n }];
-  const result = calculateFixedFee(parts, "0.10");
-  assert.equal(result.grossCents, 10n);
-  assert.equal(result.feeCents, 1n);
-  assert.deepEqual(result.lines, [
-    { itemId: "haff", grossCents: 5n, feeCents: 1n, ownerCents: 4n },
-    { itemId: "item", grossCents: 5n, feeCents: 0n, ownerCents: 5n },
-  ]);
-  const reversed = calculateFixedFee([...parts].reverse(), "0.10");
-  assert.deepEqual([...reversed.lines].reverse(), result.lines);
-  assert.deepEqual(parts, [{ itemId: "haff", grossCents: 5n }, { itemId: "item", grossCents: 5n }]);
-});
-
-test("fixed fee preserves whole-order and line conservation, rejects missing or invalid inputs", () => {
-  const result = calculateFixedFee([{ itemId: "haff", grossCents: 6000n }, { itemId: "item", grossCents: 4000n }], "0.10");
-  assert.equal(result.grossCents, 10000n);
-  assert.equal(result.feeCents, 1000n);
-  assert.equal(result.lines.reduce((sum, line) => sum + line.feeCents, 0n), result.feeCents);
-  assert.equal(result.lines.reduce((sum, line) => sum + line.ownerCents, 0n), 9000n);
-  assert.equal(calculateFixedFee([{ itemId: "empty", grossCents: 0n }], "0.10").feeCents, 0n);
-  assert.equal(calculateFixedFee([{ itemId: "haff", grossCents: 10000n }], "0").feeCents, 0n);
-  assert.equal(calculateFixedFee([{ itemId: "large", grossCents: 9007199254740993n }], "0.125").feeCents, 1125899906842624n);
-  for (const itemId of ["", " a", "物资", "item/1"]) assert.throws(() => calculateFixedFee([{ itemId, grossCents: 1n }], "0.1"));
-  for (const rate of ["", "-0.1", "1", "1.1", "0.123456789", "NaN"]) assert.throws(() => calculateFixedFee([], rate));
-  assert.throws(() => calculateFixedFee([], 0.1 as unknown as string));
-  assert.throws(() => calculateFixedFee([{ itemId: "haff", grossCents: -1n }], "0.10"));
-  assert.throws(() => calculateFixedFee([{ itemId: "same", grossCents: 1n }, { itemId: "same", grossCents: 1n }], "0.10"));
-});
 
 test("price line parser distinguishes omitted tier from null and invalid values", () => {
   const line = {itemId:"round",pricingKind:"FIXED_UNIT",unitQuantity:"60",buyerUnitAmount:"10",ownerUnitAmount:"4"};
@@ -311,7 +159,7 @@ test("turtle quantity2 quotes buyer20 owner12 in all four tiers; invalid/missing
 test("resource preview keeps dynamic turtle stock unknown/zero distinct and rejects out-of-range direct API inventory", async () => {
   const expected = { catalogRevision: "1", releaseId: "fixture_release" };
   const item = { itemId: TURTLE_FIXTURE.id, code: TURTLE_FIXTURE.code, name: "45格乌龟包", unit: "PIECE", enabled: true, pricingKind: "FIXED_UNIT", unitQuantity: "1", buyerUnitAmount: "10.00", ownerUnitAmount: "6.00" };
-  const previewClient = (priced = true) => ({ query: async (sql: string) => ({ rows: sql.includes('AS "evaluatedAt"') ? [{evaluatedAt:"2026-11-13T00:00:00.000000Z"}] : sql.includes("to_regclass('zzsh_supply.pricing_mode_schedule')") ? [{modes:false,prices:false}] : sql.includes("FROM zzsh_supply.game")
+  const previewClient = (priced = true) => ({ query: async (sql: string) => ({ rows: sql.includes("FROM zzsh_supply.game")
     ? [{ releaseId: expected.releaseId, catalogRevision: expected.catalogRevision, priceVersionId: "fixture_price", generation: "1", mode: "SPREAD", roundingPolicy: "HALF_UP_CENT_V1" }]
     : [{ ...item, ...(priced ? {} : { ownerUnitAmount: null }) }] }) }) as never;
   const known = await readResourceIncomePreview(previewClient(), TURTLE_FIXTURE.gameId, [{ itemId: item.itemId, quantity: "2" }], expected);

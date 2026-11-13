@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { createFakeRealNameProvider, FAKE_REAL_NAME_SCENARIOS, identityAllowsProtectedTrade } from "../src/auth/user-identity";
 import type { PoolClient } from "pg";
-import { assertIdentitySubjectCapacity, identitySubjectDigest, recordLegacyIdentitySubject, recordLegacyIdentitySubjects, recordVerifiedIdentitySubject } from "../src/auth/identity-subject";
+import { assertIdentitySubjectCapacity, identitySubjectDigest, recordLegacyIdentitySubject, recordVerifiedIdentitySubject } from "../src/auth/identity-subject";
 
 test("fake real-name provider has deterministic safe outcomes", async () => {
   const input = { userId: "user_fixture", fullName: "Fixture User", documentNumber: "fixture-document" };
@@ -97,26 +97,4 @@ test("trusted legacy subject registration preserves duplicate originals without 
   state = { identityStatus: "UNVERIFIED", provider: "legacy_mysql_restore" };
   await assert.rejects(recordLegacyIdentitySubject(client, "legacy-user", document, key),
     (error: unknown) => (error as { code?: string }).code === "CONFLICT");
-});
-
-
-test("legacy subject batch keeps same-document users distinct and refuses native overwrite", async () => {
-  const key = Buffer.alloc(32, 19), documentNumber = "SYNTH-DOC-SHARED", ids = ["fixture_a", "fixture_b"];
-  const entries = ids.map((userId, index) => ({ userId, sourceRef: "la_user:" + (index + 1), documentNumber }));
-  const calls: Array<{ sql: string; values: unknown[] }> = []; let native = false, transaction = true;
-  const client = { getTransactionStatus: () => transaction ? "T" : "I", query: async (sql: string, values: unknown[]) => {
-    calls.push({ sql, values });
-    if (sql.includes('FROM zzsh_auth_user."user"')) return { rows: ids.map(id => ({ id })), rowCount: ids.length };
-    if (sql.includes("FROM zzsh_iam.user_identity_state")) return { rows: ids.map((user_id, index) => ({ user_id, provider: "legacy_mysql_restore", provider_reference: "la_user:" + (index + 1), identity_status: "VERIFIED" })) };
-    if (sql.includes("FROM zzsh_iam.user_identity_subject")) return { rows: native ? [{ user_id: ids[0], subject_digest: identitySubjectDigest(documentNumber,key), source: "NATIVE_VERIFICATION" }] : [] };
-    return { rows: [], rowCount: ids.length };
-  } } as unknown as PoolClient;
-  await recordLegacyIdentitySubjects(client, entries, key);
-  assert.equal(calls.length, 5); assert.equal((calls[1]!.values[0] as string[]).length, 1);
-  assert.equal(JSON.stringify(calls.map(call => call.values)).includes(documentNumber), false);
-  calls.length = 0; native = true;
-  await assert.rejects(recordLegacyIdentitySubjects(client, entries, key), (error: unknown) => (error as { status?: number }).status === 409);
-  assert(!calls.some(call => call.sql.startsWith("INSERT")));
-  calls.length = 0; await assert.rejects(recordLegacyIdentitySubjects(client, [entries[0]!,entries[0]!], key)); assert.equal(calls.length, 0);
-  transaction = false; await assert.rejects(recordLegacyIdentitySubjects(client, entries, key));
 });
