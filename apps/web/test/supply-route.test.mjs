@@ -71,6 +71,22 @@ test('supply BFF rejects admin routes, traversal, wrong method and cross-origin 
     assert.equal((await GET(input(['listings'],{headers:{authorization:'Bearer forbidden'}}),ctx(['listings']))).status,403);assert.equal(calls,0);
   }finally{globalThis.fetch=old;}
 });
+test('supply BFF keeps delisting and upload completion while rejecting retired pause and resume',async()=>{
+  const old=globalThis.fetch,seen=[];
+  globalThis.fetch=async(url,options)=>{seen.push({path:new URL(url).pathname,key:options.headers.get('idempotency-key')});return Response.json({ok:true});};
+  try{
+    for(const path of [['accounts','a','delist'],['media','uploads','up','complete']]){
+      const response=await POST(input(path,{method:'POST',headers:{'content-type':'application/json','idempotency-key':'key_123456'},body:'{}'}),ctx(path));
+      assert.equal(response.status,200);
+    }
+    assert.deepEqual(seen,[{path:'/api/bff/user/supply/accounts/a/delist',key:'key_123456'},{path:'/api/bff/user/supply/media/uploads/up/complete',key:'key_123456'}]);
+    for(const action of ['pause','resume']){
+      const path=['accounts','a',action];
+      assert.equal((await POST(input(path,{method:'POST',headers:{'content-type':'application/json'},body:'{}'}),ctx(path))).status,404);
+    }
+    assert.equal(seen.length,2);
+  }finally{globalThis.fetch=old;}
+});
 test('supply JSON preserves idempotency and field errors; binary uploads use a separate bound',async()=>{
   const old=globalThis.fetch;let seen;globalThis.fetch=async(_url,options)=>{seen=options;return Response.json({error:{code:'INVALID_ARGUMENT',message:'数量错误',requestId:'req_x',details:[{path:'inventory',code:'INVALID_FIELD'}]}},{status:400});};
   try{let p=['accounts','a','draft'];const r=await PUT(input(p,{method:'PUT',headers:{'content-type':'application/json','idempotency-key':'key_123456'},body:'{}'}),ctx(p));assert.equal(seen.headers.get('idempotency-key'),'key_123456');assert.equal((await r.json()).error.details[0].path,'inventory');
