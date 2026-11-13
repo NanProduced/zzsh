@@ -130,774 +130,93 @@ import type {
 } from "../../lib/supply-types";
 import type { PublishMode } from "../../lib/service-navigation";
 
-type PublishFormProps = { mode: PublishMode; gameCode?: string; accountId?: string; editRequested?: boolean };
-type RegionOption = { province: string; city: string };
-type SessionId = string | null | undefined;
-type MediaPurpose = "ACCOUNT_DISPLAY" | "ACCOUNT_EVIDENCE";
-type IdentityState = "checking" | "confirmed" | "failed" | "guest";
-type RequestContext = { epoch: number; identity: SessionId; accountId?: string; gameId: string };
-type AmmoReview = { itemId: string; quantity: string; context: RequestContext; resume?: () => void };
-type RetryTask = { context: RequestContext; busy: string; run: () => Promise<void> };
-type WriteIntent = { action: string; context: RequestContext; persisted?: SupplyWriteIntent; run: () => Promise<void | boolean> };
-type DraftRequest = { context: RequestContext; accountId: string; body: DraftInput & { expectedRevision: string }; key: string };
-type MediaCategory = "SHOWCASE" | "PENALTY";
+import type {
+  PublishFormProps,
+  RegionOption,
+  SessionId,
+  MediaPurpose,
+  IdentityState,
+  RequestContext,
+  AmmoReview,
+  RetryTask,
+  WriteIntent,
+  DraftRequest,
+  MediaCategory,
+  MediaEntry,
+  SkinQuery,
+  PublishGroupId,
+  OptionsAvailability,
+  NavigationIntent,
+  UiProblem,
+  RecommendationInputs,
+  RecommendationBinding,
+} from "./publish-form-types";
 
-function ammoQuantityText(quantity: string): string {
-  const rounds = BigInt(quantity), remainder = rounds % 60n;
-  return `${rounds / 60n}组${remainder ? `另有${remainder}发历史余量` : ""}，共${rounds}发`;
-}
-function formatUnitPrice(amount: string | number | null | undefined): string {
-  if (amount === null || amount === undefined || amount === "") return "待确认";
-  return formatReferenceYuan(String(amount)) ?? "待确认";
-}
-type MediaEntry = {
-  id: string;
-  purpose: MediaPurpose;
-  category?: MediaCategory;
-  file?: File;
-  transport?: "OSS_POST";
-  assetId?: string;
-  reviewState?: string;
-  publicDisplayEligible?: boolean;
-  publiclyReadable?: boolean;
-  previewUrl?: string;
-  bindingSaved: boolean;
-  status: "uploading" | "bound" | "failed";
-  intentKey: string;
-  uploadKey: string;
-  error?: string;
-  context: RequestContext;
-};
-type SkinQuery = { q?: string; categoryId?: string; ownerKind?: SkinOwnerKind; rarityCode?: string; ownerId?: string; cursor?: string };
-type PublishGroupId = "account" | "assets" | "terms" | "media";
-type OptionsAvailability = "pending" | "ready" | "unavailable" | "failed";
-type NavigationIntent = { message: string; label: string; run: () => void; cancel?: () => void };
-type UiProblem = { group: PublishGroupId; message: string; target?: string };
+import {
+  ammoQuantityText,
+  formatUnitPrice,
+  ratioEntryProblem,
+  inputsEqual,
+  groupMeta,
+  INSURANCE_EXPERIENCE_CARD,
+  INVENTORY_ITEM_ART,
+  emptyAttributes,
+  emptyDraft,
+  newKey,
+  moneyText,
+  durationText,
+  stateLabel,
+  mediaReviewLabel,
+  is3x3SafeBoxCode,
+  SYSTEM_ERROR_BLOCKER_CODES,
+  FORM_ENTRY_BLOCKER_CODES,
+  extraBlockerMessages,
+  blockerText,
+  localizedErrorMessage,
+  fieldErrorText,
+  publishGroupForPath,
+  isAbort,
+  meaningfulDraft,
+  nextMediaPosition,
+  inferNoticeKind,
+  formatHaffChineseUnit,
+  retiredInsuranceCode,
+  numericChoiceOptions,
+  retainedNumericChoiceNote,
+  serviceTimeOptions,
+} from "./publish-form-helpers";
 
-/** One ratio rule for both the inline hint and the submit preflight. */
-function ratioEntryProblem(
-  mode: RentalMode,
-  config: { min?: { base: "C" | "ABSOLUTE"; value: string }; max?: { base: "C" | "ABSOLUTE"; value: string } } | null | undefined,
-  raw: string,
-  resolvedRange?: { min?: string | null; max?: string | null } | null,
-): { message: string; target?: string } | null {
-  const label = rentalModeLabel(mode);
-  const range = ratioRangeText(config);
-  const resolvedLabel = ratioDisplayText(resolvedRange);
-  if (!range && !resolvedLabel) return { message: `${label}规则暂未加载，请稍后重试。` };
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (!buildRentalPricing(mode, trimmed)) return { message: `请填写合法的${label}数值，或切换为普通比例。`, target: "input[aria-label='兑换比例']" };
-  const value = Number(trimmed);
-  const belowStatic = config?.min?.base === "ABSOLUTE" && value < Number(config.min.value);
-  const aboveStatic = config?.max?.base === "ABSOLUTE" && value > Number(config.max.value);
-  if (belowStatic || aboveStatic) {
-    return { message: `${label}（${trimmed}）已不在当前允许范围（${range}，万哈夫币/元），请重新填写。`, target: "input[aria-label='兑换比例']" };
-  }
-  const dynMin = resolvedRange?.min != null && resolvedRange.min !== "" ? Number(resolvedRange.min) : null;
-  const dynMax = resolvedRange?.max != null && resolvedRange.max !== "" ? Number(resolvedRange.max) : null;
-  const belowDynamic = dynMin !== null && Number.isFinite(dynMin) && value < dynMin;
-  const aboveDynamic = dynMax !== null && Number.isFinite(dynMax) && value > dynMax;
-  if (belowDynamic || aboveDynamic) {
-    return { message: `${label}（${trimmed}）已不在当前允许范围（${resolvedLabel ?? range}），请重新填写。`, target: "input[aria-label='兑换比例']" };
-  }
-  return null;
-}
-type RecommendationInputs = Extract<DepositRecommendation, { available: true }>["inputs"];
-type RecommendationBinding = {
-  accountId: string;
-  accountRevision: string;
-  versionId: string;
-  versionRevision: string;
-  ruleReleaseId: string;
-  inputs: RecommendationInputs;
-  mismatch: boolean;
-};
+import {
+  FieldError,
+  Notice,
+  AgreementBody,
+  SectionCard,
+  PublishVisualBanner,
+  FieldHelp,
+  PendingValue,
+  PublishingNotice,
+  LoginPlatformIcon,
+  InventoryIcon,
+  NOTICE_READ_KEY,
+} from "./publish-dialogs";
 
-function inputsEqual(left: RecommendationInputs, right: RecommendationInputs): boolean {
-  return left.safeBoxCode === right.safeBoxCode &&
-    left.vitality === right.vitality &&
-    left.bear === right.bear &&
-    left.dive === right.dive &&
-    [...left.skinIds].sort().join(",") === [...right.skinIds].sort().join(",");
-}
+import { RegionPicker } from "./publish-region-picker";
+import { PublishOutlineNav } from "./publish-outline-nav";
+import { PublishAccountSection } from "./publish-account-section";
+import { PublishAssetsSection } from "./publish-assets-section";
+import { PublishMediaSection } from "./publish-media-section";
+import { PublishTermsSection } from "./publish-terms-section";
+import { PublishRail } from "./publish-rail";
+import {
+  TermsDialog,
+  PayoutTermsDialog,
+  PreviewMediaDialog,
+  PublishSuccessDialog,
+} from "./publish-dialog-modals";
 
-const groupMeta: Record<PublishGroupId, { title: string; hint: string }> = {
-  account: { title: "账号资料", hint: "基础属性与安全箱" },
-  assets: { title: "库存与皮肤", hint: "物资、装备与外观" },
-  media: { title: "展示图片", hint: "游戏截图与封禁记录" },
-  terms: { title: "出租条件", hint: "租金、押金与交付方式" },
-};
-const INSURANCE_EXPERIENCE_CARD = "九格保险体验卡";
-const INVENTORY_ITEM_ART: Record<string, string> = {
-  df_billable_level6_bullet: "/art/delta/items/level6-ammo.png",
-  level6_round: "/art/delta/items/level6-ammo.png",
-  df_billable_level6_helmet: "/art/delta/items/level6-helmet-dich9.png",
-  level6_helmet: "/art/delta/items/level6-helmet-dich9.png",
-  df_billable_level6_armor: "/art/delta/items/level6-armor-mas2.png",
-  level6_armor: "/art/delta/items/level6-armor-mas2.png",
-  df_billable_awm_bullet: "/art/delta/items/awm-ammo.png",
-  awm_round: "/art/delta/items/awm-ammo.png",
-  df_billable_barrett_bullet: "/art/delta/items/barrett-ammo.png",
-  barrett_round: "/art/delta/items/barrett-ammo.png",
-  legacy_barrett_round: "/art/delta/items/barrett-ammo.png",
-  df_billable_coffee: "/art/delta/items/coffee-beans.png",
-  coffee: "/art/delta/items/coffee-beans.png",
-  df_billable_turtle_backpack_45: "/art/delta/items/turtle-backpack-45.png",
-  turtle_backpack_45: "/art/delta/items/turtle-backpack-45.png",
-  df_billable_top_insure_card: "/art/delta/items/insurance-experience-card-thumb.png",
-  top_insure_card_piece: "/art/delta/items/insurance-experience-card-thumb.png",
-  df_billable_top_insure_card_piece: "/art/delta/items/insurance-experience-card-thumb.png",
-  legacy_insurance_day: "/art/delta/items/insurance-experience-card-thumb.png",
-};
-
-const emptyAttributes: DraftInput["attributes"] = {
-  safe_box_code: null,
-  vit_level: null,
-  bear_level: null,
-  dive_level: null,
-  character_level: null,
-  awm_weapon_count: null,
-  grading_code: null,
-  login_method_code: null,
-  region_province: null,
-  region_city: null,
-  ban_record: null,
-  face_is_self: null,
-  secret_kd: null,
-  service_window_start_minute: null,
-  service_window_end_minute: null,
-  service_window_timezone: null,
-  service_window_cross_midnight: null,
-};
-
-function emptyDraft(): DraftInput {
-  return {
-    title: "",
-    description: null,
-    attributes: { ...emptyAttributes },
-    termOptionCode: "",
-    pricingOptionCode: "",
-    inventory: [],
-    skins: [],
-    entitlements: [],
-    mediaBindings: [],
-  };
-}
-
-function newKey(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `m3d-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function moneyText(money: { amount: string } | null | undefined): string {
-  return money ? `${money.amount} 元` : "未配置";
-}
-
-function durationText(seconds: string | number | null | undefined): string {
-  const value = typeof seconds === "string" ? Number(seconds) : seconds;
-  if (!value || !Number.isFinite(value)) return "核价后显示";
-  if (value % 86400 === 0) return `${value / 86400} 天`;
-  if (value % 3600 === 0) return `${value / 3600} 小时`;
-  if (value % 60 === 0) return `${value / 60} 分钟`;
-  if (value > 60) return `${Math.floor(value / 60)} 分 ${value % 60} 秒`;
-  return `${value} 秒`;
-}
-
-function stateLabel(state: string | null | undefined): string {
-  return ({ DRAFT: "草稿", SUBMITTED: "审核中", WITHDRAWN: "已撤回", REJECTED: "已退回", APPROVED: "已通过", PUBLISHED: "已上架", IMPORTED_UNVERIFIED: "待复核" } as Record<string, string>)[state ?? ""] ?? "未确认";
-}
-
-function mediaReviewLabel(state: string | undefined): string {
-  return ({ NOT_REQUIRED: "无需人工审核", PENDING: "技术校验中", APPROVED: "已通过技术校验", REJECTED: "未通过校验", QUARANTINED: "已隔离" } as Record<string, string>)[state ?? ""] ?? "状态待核";
-}
-
-function is3x3SafeBoxCode(code: string, displayName?: string | null): boolean {
-  return code === "safe_box_3x3" || code === "3*3" || (displayName?.includes("3*3") ?? false) || (displayName?.includes("3x3") ?? false);
-}
-
-const SYSTEM_ERROR_BLOCKER_CODES = new Set<string>([
-  "FUNDING_UNKNOWN",
-  "RULE_UNCONFIGURED",
-  "REQUIRED_ITEM_UNPRICED",
-  "OCCUPANCY_UNKNOWN",
-  "STATE_UNKNOWN",
-  "ACCOUNT_NOT_PUBLISHABLE",
-  "GAME_UNAVAILABLE",
-  "GAME_SERVICE_UNAVAILABLE",
-  "OWNER_UNAVAILABLE",
-]);
-
-const FORM_ENTRY_BLOCKER_CODES = new Set<string>([
-  "PUBLICATION_REQUIRED",
-  "CONFIRMATION_OR_MEDIA_REQUIRED",
-  "QUOTE_REQUIRED",
-  "ACCEPTANCE_REQUIRED",
-  "RULE_CHANGED",
-  "MEDIA_REQUIRED",
-  "RULE_INPUT_MISSING",
-  "TERM_UNDETERMINED",
-  "DECLARATION_INCOMPLETE",
-  "ACCOUNT_INFO_INCOMPLETE",
-]);
-
-const extraBlockerMessages: Record<string, string> = {
-  RENTAL_COMPLETED: "该账号已有已完成租约，当前规则不允许重新发布；请选择其他账号或联系客服。",
-  RULE_INPUT_MISSING: "请先完善账号属性、哈夫币余额和出租比例后再试。",
-  TERM_UNDETERMINED: "请检查哈夫币余额和每日消耗设置。",
-  QUOTE_REQUIRED: "请确认必填信息后再提交上架。",
-  ACCEPTANCE_REQUIRED: "请勾选同意出租协议后再提交上架。",
-  RULE_CHANGED: "平台规则已更新，请重新点击确认上架。",
-  MEDIA_REQUIRED: "请按要求上传展示图片与封禁记录截图。",
-  DECLARATION_INCOMPLETE: "请先补全账号资料与必填项。",
-  ACCOUNT_INFO_INCOMPLETE: "请先补全账号资料。",
-};
-
-function blockerText(code: string): string {
-  if (SYSTEM_ERROR_BLOCKER_CODES.has(code)) return "系统问题，请联系客服";
-  return supplyBlockerMessages[code] ?? extraBlockerMessages[code] ?? "当前暂不能继续，请检查填写内容或联系客服。";
-}
-
-function localizedErrorMessage(message: string): string {
-  const messages: Record<string, string> = { ...supplyBlockerMessages, ...extraBlockerMessages };
-  const translateToken = (code: string) =>
-    SYSTEM_ERROR_BLOCKER_CODES.has(code) ? "系统问题，请联系客服" : messages[code] ?? "操作未能完成，请检查填写内容或联系客服";
-  const cleaned = message.trim();
-  const tail = cleaned.includes(":") || cleaned.includes("：")
-    ? cleaned.slice(Math.max(cleaned.lastIndexOf(":"), cleaned.lastIndexOf("：")) + 1).trim()
-    : cleaned;
-  const candidateCodes = tail.split(/[,，\s]+/).map((code) => code.trim()).filter(Boolean);
-  if (candidateCodes.length > 0 && candidateCodes.every((code) => /^[A-Z][A-Z0-9_]{2,}$/.test(code))) {
-    const parts = Array.from(new Set(candidateCodes.map((code) => translateToken(code).replace(/[。；;]+$/g, ""))));
-    return `${parts.join("；")}。`;
-  }
-  if (/[A-Z][A-Z0-9_]{2,}/.test(cleaned)) {
-    const replaced = cleaned.replace(/\b[A-Z][A-Z0-9_]{2,}\b/g, (code) => translateToken(code));
-    return replaced.replace(/[:：]\s*$/, "").trim() || "系统问题，请联系客服";
-  }
-  return message;
-}
-
-function fieldErrorText(path: string, code: string): string {
-  if (code === "REQUIRED" || code === "MISSING") return "请填写此项后再保存。";
-  if (code === "INVALID" || code === "INVALID_VALUE" || code === "FORMAT") return "填写内容格式不正确，请按提示修改。";
-  if (code === "OUT_OF_RANGE" || code === "NEGATIVE") return "数量必须是允许范围内的非负整数。";
-  if (path.startsWith("inventory")) return "请填写目录要求的整数数量。";
-  if (path.startsWith("entitlements")) return "请补充权益数值或有效期，未知值不能直接提交。";
-  if (path.startsWith("mediaBindings")) return "请检查图片是否已上传并保存到当前资料。";
-  return "请检查此项后重试。";
-}
-
-function publishGroupForPath(path: string, haffItemId?: string): PublishGroupId {
-  if (path === "attributes.info_source") return "terms";
-  if (path === "attributes.next_season_pass" || path === "attributes.demulan_unlocked") return "account";
-  if (haffItemId && path.startsWith("inventory") && path.includes(haffItemId)) return "terms";
-  const group = groupForField(path);
-  if (group === "basics") return "account";
-  if (group === "inventory" || group === "skins" || group === "entitlements") return "assets";
-  if (group === "media") return "media";
-  return "terms";
-}
-
-function isAbort(error: unknown): boolean {
-  return (error instanceof DOMException && error.name === "AbortError") || (error instanceof Error && error.name === "AbortError");
-}
-
-function meaningfulDraft(draft: DraftInput): boolean {
-  return Boolean(
-    draft.title.trim() ||
-    draft.description?.trim() ||
-    draft.inventory.some((item) => item.quantity !== null && item.quantity !== "0") ||
-    draft.skins.length ||
-    draft.entitlements.length ||
-    draft.mediaBindings.length ||
-    Object.values(draft.attributes).some((value) => value !== null && value !== undefined),
-  );
-}
-
-function nextMediaPosition(bindings: DraftInput["mediaBindings"]): number {
-  const used = new Set(bindings.map((binding) => binding.position));
-  let position = 0;
-  while (used.has(position)) position += 1;
-  return position;
-}
-
-function FieldError({ text, id }: { text?: string; id?: string }) {
-  return text ? <span id={id} className="supply-field-error" role="alert">{text}</span> : null;
-}
-
-function inferNoticeKind(text: string): "success" | "warning" | "info" {
-  if (/请先|请补|请填写|请检查|请选择|请核对|请重新|已失效|已过期|未完成|读取失败|不可采用|暂不可用|暂不能|未提供|尚未|变动|变化|需要重新|待核对|恢复原请求/.test(text)) {
-    return "warning";
-  }
-  if (/正在读取|正在准备|已切换游戏|点击“开始修改”|原图片文件|移除|剪贴板|设为 0/.test(text)) {
-    return "info";
-  }
-  return "success";
-}
-
-function formatHaffChineseUnit(rawM: string): string | null {
-  const trimmed = rawM.trim();
-  if (!/^\d+$/.test(trimmed)) return null;
-  const m = BigInt(trimmed);
-  if (m <= 0n) return null;
-  if (m >= 100n) {
-    const whole = m / 100n;
-    const rem = Number(m % 100n);
-    if (rem === 0) return `${whole} 亿哈夫币`;
-    const decimal = rem % 10 === 0 ? String(rem / 10) : String(rem).padStart(2, "0");
-    return `${whole}.${decimal} 亿哈夫币`;
-  }
-  return `${m * 100n} 万哈夫币`;
-}
-
-function Notice({ error, text, onDismiss }: { error?: SupplyRequestError | null; text?: string; onDismiss?: () => void }) {
-  const [dismissed, setDismissed] = useState(false);
-
-  useEffect(() => {
-    setDismissed(false);
-    // Keep error alerts visible until dismissed or cleared; auto-dismiss status notices only.
-    if (error || !text) return;
-    const timer = setTimeout(() => {
-      setDismissed(true);
-      onDismiss?.();
-    }, 5000);
-    return () => clearTimeout(timer);
-  }, [text, error, onDismiss]);
-
-  if (dismissed || (!error && !text)) return null;
-
-  const kind = error ? "error" : inferNoticeKind(text ?? "");
-  const Icon = kind === "error" ? AlertCircle : kind === "warning" ? TriangleAlert : kind === "info" ? Info : Check;
-
-  return (
-    <div
-      className={`supply-notice supply-floating-notice ${error ? "is-error" : ""}`}
-      data-kind={kind}
-      role={error ? "alert" : "status"}
-      aria-live="polite"
-    >
-      <div className="supply-notice-content">
-        <Icon size={18} aria-hidden="true" />
-        <span>{error ? (error.status === 0 || error.status >= 500 ? "系统问题，请联系客服。" : localizedErrorMessage(error.message)) : text}</span>
-      </div>
-      <button
-        type="button"
-        className="supply-notice-close"
-        onClick={() => {
-          setDismissed(true);
-          onDismiss?.();
-        }}
-        aria-label="关闭提示"
-      >
-        <X size={15} aria-hidden="true" />
-      </button>
-    </div>
-  );
-}
-
-function AgreementBody({ body }: { body: string }) {
-  const [text, setText] = useState<string | null>(null);
-  useEffect(() => {
-    if (!/<\/?[a-z][^>]*>/i.test(body)) { setText(body); return; }
-    // Legacy agreements contain HTML. Parse inertly and render text only;
-    // the original body remains unchanged in the signed server version.
-    const doc = new DOMParser().parseFromString(body, "text/html");
-    doc.querySelectorAll("script,style,iframe,object,template").forEach((node) => node.remove());
-    doc.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
-    doc.querySelectorAll("p,h1,h2,h3,h4,li,tr").forEach((node) => node.append("\n"));
-    doc.querySelectorAll("td,th").forEach((node) => node.append("\t"));
-    setText(doc.body.textContent ?? "");
-  }, [body]);
-  return <div className="publish-terms-body">{text ?? "正在读取条款正文…"}</div>;
-}
-
-function SectionCard({ id, title, hasError, headerMeta, children, actions }: { id: PublishGroupId; title: string; hasError: boolean; headerMeta?: ReactNode; children: ReactNode; actions?: ReactNode }) {
-  return <section id={`publish-group-${id}`} data-publish-group={id} aria-labelledby={`publish-heading-${id}`} className={`publish-section-card${hasError ? " is-error" : ""}`}>
-    <header className="publish-section-header">
-      <h2 id={`publish-heading-${id}`} className="publish-section-title publish-group-title">{title}</h2>
-      {headerMeta}
-    </header>
-    <div id={`publish-panel-${id}`} className="publish-section-body">{children}</div>
-    {actions}
-  </section>;
-}
-
-function PublishVisualBanner() {
-  return <section className="publish-visual-banner" aria-labelledby="publish-banner-title">
-    <h1 id="publish-banner-title" className="sr-only">上架出租</h1>
-    <picture>
-      <source media="(max-width:600px)" srcSet="/art/zhouzhou/publish-banner-approved-mobile-v1.png" width={1050} height={378} />
-      <img className="publish-visual-banner-image" src="/art/zhouzhou/publish-banner-approved-v1.png" width={2141} height={251} alt="填写资料，核对报价后确认上架。流程：填写资料、核对报价、确认上架。" fetchPriority="high" decoding="async" />
-    </picture>
-  </section>;
-}
-
-function FieldHelp({ label, children }: { label: string; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  return <TooltipPrimitive.Provider delayDuration={180}>
-    <TooltipPrimitive.Root open={open} onOpenChange={setOpen}>
-      <TooltipPrimitive.Trigger asChild><button type="button" className="publish-field-help" aria-label={`${label}说明`} onClick={event => { event.preventDefault(); setOpen(previous => !previous); }}><CircleHelp size={17} aria-hidden="true" /></button></TooltipPrimitive.Trigger>
-      <TooltipPrimitive.Portal><TooltipPrimitive.Content className="app-tooltip-content publish-field-help-popup" sideOffset={7}>{children}</TooltipPrimitive.Content></TooltipPrimitive.Portal>
-    </TooltipPrimitive.Root>
-  </TooltipPrimitive.Provider>;
-}
-
-function PendingValue({ label = "待填" }: { label?: string }) {
-  return <span className="publish-pending-value"><span aria-hidden="true">—</span><span className="sr-only">{label}</span></span>;
-}
-
-const NOTICE_READ_KEY = "zzsh_supply_notice_read:v1";
-
-// Same shadcn/Base UI composition and theme tokens as the existing form controls.
-function PublishingNotice({
-  open,
-  onClose,
-  agreement,
-  returnFocus,
-  manual = false,
-}: {
-  open: boolean;
-  onClose: () => void;
-  agreement: PublishingOptions["agreement"] | null;
-  returnFocus?: () => HTMLElement | null;
-  manual?: boolean;
-}) {
-  const notice = usePublicContent("placement:PUBLISH_NOTICE");
-  const noticeTitle = notice.resource?.payload?.kind === "notice" ? notice.resource.payload.title : "出租上架须知";
-  const isReadStored = useCallback(() => {
-    if (manual) return true;
-    if (typeof window === "undefined") return false;
-    try {
-      return window.sessionStorage.getItem(NOTICE_READ_KEY) === "1";
-    } catch {
-      return false;
-    }
-  }, [manual]);
-
-  const [seconds, setSeconds] = useState(() => (isReadStored() ? 0 : 5));
-  const [agreementOpen, setAgreementOpen] = useState(false);
-  const read = useRef(isReadStored());
-  const titleRef = useRef<HTMLHeadingElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    if (isReadStored() || read.current) {
-      setSeconds(0);
-      return;
-    }
-    const deadline = window.performance.now() + 5000;
-    setSeconds(5);
-    const timer = window.setInterval(() => {
-      const remaining = Math.max(0, Math.ceil((deadline - window.performance.now()) / 1000));
-      setSeconds(remaining);
-      if (remaining === 0) {
-        read.current = true;
-        window.clearInterval(timer);
-      }
-    }, 200);
-    return () => window.clearInterval(timer);
-  }, [open, isReadStored]);
-
-  const handleConfirmClose = () => {
-    try {
-      window.sessionStorage.setItem(NOTICE_READ_KEY, "1");
-    } catch {}
-    read.current = true;
-    onClose();
-  };
-
-  return <Dialog.Root open={open} disablePointerDismissal onOpenChange={(next, event) => {
-    if (!next && seconds > 0) event.cancel();
-    else if (!next) handleConfirmClose();
-  }}>
-    <Dialog.Portal><Dialog.Backdrop className="modal-overlay publish-dialog-backdrop" />
-      <Dialog.Popup className="publish-dialog publish-reading-dialog" data-slot="dialog-content" initialFocus={titleRef} finalFocus={returnFocus ?? (() => document.querySelector<HTMLElement>(".publish-outline a"))}>
-        <header className="publish-reading-header">
-          <ShieldCheck size={26} aria-hidden="true" />
-          <div>
-            <Dialog.Title ref={titleRef} tabIndex={-1}>{noticeTitle}</Dialog.Title>
-            <Dialog.Description>保障账号权益，先了解以下规则。</Dialog.Description>
-          </div>
-          <Dialog.Close className="publish-reading-close" aria-label="关闭上架须知" disabled={seconds > 0} onClick={handleConfirmClose}><X size={20} aria-hidden="true" /></Dialog.Close>
-        </header>
-        <div className="publish-reading-body">
-          <ManagedNoticeSections contentKey="placement:PUBLISH_NOTICE" />
-          <div className="publish-notice-specs-card">
-            <div className="publish-specs-card-title">
-              <Box size={16} aria-hidden="true" />
-              <h4>物资申报与计量口径</h4>
-            </div>
-            <div className="publish-specs-grid">
-              <div className="publish-spec-item">
-                <span className="publish-spec-label">安全箱与保险</span>
-                <span className="publish-spec-desc">安全箱填写赛季永久容量 · {INSURANCE_EXPERIENCE_CARD}另填可用天数</span>
-              </div>
-              <div className="publish-spec-item">
-                <span className="publish-spec-label">计量单位换算</span>
-                <span className="publish-spec-desc">六级子弹 <strong>1 组 = 60 发</strong> · AWM/巴雷特<strong>按发</strong> · {INSURANCE_EXPERIENCE_CARD}<strong>按天</strong></span>
-              </div>
-              <div className="publish-spec-item">
-                <span className="publish-spec-label">物资数量默认按 0 申报</span>
-                <span className="publish-spec-desc">
-                  所有可填物资默认初始化为 <span className="publish-spec-pill publish-spec-pill--zero">0</span>，请将账号实际拥有的物资修改为真实整数数量
-                </span>
-              </div>
-            </div>
-          </div>
-          <div className="publish-reading-tip">
-            <Info size={15} aria-hidden="true" />
-            <span>备注向租客公开展示，请勿填写密码、验证码等敏感信息。</span>
-          </div>
-        </div>
-        <footer className="publish-reading-footer">
-          <Dialog.Root open={agreementOpen} onOpenChange={setAgreementOpen}>
-            <div className="publish-reading-agreement-row"><span>交易规则与协议</span><Dialog.Trigger className="publish-reading-agreement-link" disabled={!agreement}>查看《出租交易须知》<ArrowRight size={16} aria-hidden="true" /></Dialog.Trigger></div>
-            {!agreement ? <p>交易协议暂未读取，核价前请确认当前规则已加载。</p> : null}
-            <Dialog.Portal><Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-agreement-backdrop" /><Dialog.Popup className="publish-dialog publish-agreement-dialog" data-slot="dialog-content">
-              <header><Dialog.Title>{agreement?.title ?? "出租交易须知"}</Dialog.Title><Dialog.Close className="publish-reading-close" aria-label="关闭交易须知"><X size={20} aria-hidden="true" /></Dialog.Close></header>
-              <Dialog.Description>当前读取的协议正文；阅读不会自动同意条款，上架前仍需确认本次报价对应的协议。</Dialog.Description>
-              {agreement ? <AgreementBody body={agreement.body} /> : <p>暂未取得协议正文。</p>}
-              <Dialog.Close className="button secondary">返回上架须知</Dialog.Close>
-            </Dialog.Popup></Dialog.Portal>
-          </Dialog.Root>
-          <p>阅读须知不代表接受本次报价，上架前仍需单独确认。</p><Dialog.Close className="button primary" disabled={seconds > 0} onClick={handleConfirmClose}>{seconds > 0 ? `请阅读须知（${seconds} 秒）` : notice.status === "error" ? "返回填写" : "我已了解，开始填写"}</Dialog.Close>
-        </footer>
-      </Dialog.Popup>
-    </Dialog.Portal>
-  </Dialog.Root>;
-}
-
-function LoginPlatformIcon({ code }: { code: string }) {
-  const platform = ({
-    legacy_login_qq: "tencentqq",
-    login_qq_qr: "tencentqq",
-    legacy_login_wechat: "wechat",
-    legacy_login_steam_cn: "steam",
-    legacy_login_steam_global: "steam",
-  } as Record<string, string>)[code] ?? (code.includes("qq") ? "tencentqq" : undefined);
-  return platform ? <img className="publish-login-platform-icon" src={`/images/login-platforms/${platform}.svg`} width={20} height={20} alt="" /> : <LogIn size={20} />;
-}
-
-function InventoryIcon({ code }: { code: string | null }) {
-  const canonical = canonicalResourceCode(code);
-  const art = INVENTORY_ITEM_ART[canonical ?? ""] ?? (code ? INVENTORY_ITEM_ART[code] : undefined);
-  if(art)return <img src={art} width={48} height={48} alt="" decoding="async" />;
-  const Icon = canonical === "df_billable_coffee" ? Bean
-    : canonical === "df_billable_level6_armor" ? Shield
-    : canonical === "df_billable_level6_helmet" ? HardHat
-    : canonical === "df_billable_level6_bullet" || canonical === "df_billable_awm_bullet" || code === "barrett_round" || code === "df_billable_barrett_bullet" ? Crosshair
-    : code === "df_billable_top_insure_card" || code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece" ? Ticket : Box;
-  return <Icon size={22} aria-hidden="true" />;
-}
-
-function retiredInsuranceCode(code: string | null | undefined): boolean {
-  return code === "top_insure_card_piece" || code === "df_billable_top_insure_card_piece";
-}
-
-function numericChoiceOptions(current: string, values: number[], suffix = "级") {
-  const known = new Set(values.map(String));
-  return [
-    ...(current && !known.has(current) ? [{ value: current, label: `${current}${suffix}（历史原值）`, disabled: true }] : []),
-    ...values.map((value) => ({ value: String(value), label: `${value}${suffix}` })),
-  ];
-}
-
-function retainedNumericChoiceNote(current: string, values: readonly number[], name: string): string | null {
-  if (!current || values.includes(Number(current))) return null;
-  return `${name}保留了${current}级历史原值；新申报请选择 ${values[0]}–${values[values.length - 1]} 级。`;
-}
-
-function serviceTimeOptions(values: readonly number[], current: number | null) {
-  const options = values.map((value) => ({ value: String(value), label: formatServiceWindowMinute(value) }));
-  if (current !== null && !values.includes(current)) {
-    options.unshift({ value: String(current), label: `${formatServiceWindowMinute(current)}（历史原值）` });
-  }
-  return options;
-}
-
-function RegionPicker({
-  province,
-  city,
-  options,
-  disabled,
-  required = false,
-  error,
-  onChange,
-}: {
-  province: string;
-  city: string;
-  options: ReadonlyArray<RegionOption>;
-  disabled: boolean;
-  required?: boolean;
-  error?: string;
-  onChange: (province: string | null, city: string | null) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [activeProvince, setActiveProvince] = useState(province);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const provincesRef = useRef<HTMLDivElement>(null);
-  const pairs = [...options, ...(province && city && !options.some((item) => item.province === province && item.city === city) ? [{ province, city }] : [])];
-  const provinces = [...new Set(pairs.map((item) => item.province))];
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const visibleProvinces = provinces.filter((item) => !normalizedQuery || item.toLocaleLowerCase().includes(normalizedQuery) || pairs.some((pair) => pair.province === item && pair.city.toLocaleLowerCase().includes(normalizedQuery)));
-  const current = visibleProvinces.includes(activeProvince) ? activeProvince : visibleProvinces[0] ?? "";
-  const cities = pairs.filter((item) => item.province === current && (!normalizedQuery || current.toLocaleLowerCase().includes(normalizedQuery) || item.city.toLocaleLowerCase().includes(normalizedQuery))).map((item) => item.city);
-  const hasSelected = Boolean(province && city);
-  const selected = hasSelected ? `${province} · ${city}` : "请选择省份和城市";
-
-  useEffect(() => {
-    if (province) setActiveProvince(province);
-  }, [province]);
-
-  return <div id="publish-region" tabIndex={-1} className="publish-region-field">
-    <span className="publish-region-label">地区选择{required ? <span className="publish-required-mark">必填</span> : null}</span>
-    <div className={`publish-region-control${hasSelected ? " has-selection" : ""}`}>
-      <Popover.Root
-        open={open}
-        onOpenChange={(nextOpen) => {
-          setOpen(nextOpen);
-          if (!nextOpen) setQuery("");
-          else if (province) setActiveProvince(province);
-        }}
-      >
-        <Popover.Trigger asChild>
-          <button
-            type="button"
-            className="publish-region-trigger"
-            data-selected={hasSelected ? "true" : "false"}
-            disabled={disabled}
-            aria-invalid={Boolean(error) || undefined}
-            aria-label="地区选择"
-          >
-            <MapPin size={16} aria-hidden="true" />
-            <span>{selected}</span>
-            <ChevronDown size={16} aria-hidden="true" />
-          </button>
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content
-            className="publish-region-popover"
-            aria-label="选择地区"
-            align="start"
-            sideOffset={8}
-            collisionPadding={12}
-            onOpenAutoFocus={(event) => {
-              event.preventDefault();
-              searchRef.current?.focus();
-              const activeBtn = provincesRef.current?.querySelector<HTMLElement>('[data-active="true"]');
-              if (typeof activeBtn?.scrollIntoView === "function") {
-                activeBtn.scrollIntoView({ block: "nearest" });
-              }
-            }}
-          >
-            <div className="publish-region-search">
-              <Search size={15} aria-hidden="true" />
-              <label className="sr-only" htmlFor="publish-region-search-input">搜索省份或城市</label>
-              <input
-                id="publish-region-search-input"
-                ref={searchRef}
-                type="search"
-                value={query}
-                placeholder="搜索省份或城市"
-                onChange={(event) => setQuery(event.target.value)}
-              />
-              {query ? (
-                <button
-                  type="button"
-                  className="publish-region-search-clear"
-                  aria-label="清空搜索"
-                  onClick={() => {
-                    setQuery("");
-                    searchRef.current?.focus();
-                  }}
-                >
-                  <X size={13} aria-hidden="true" />
-                </button>
-              ) : null}
-            </div>
-            {visibleProvinces.length ? (
-              <div className="publish-region-columns">
-                <div ref={provincesRef} className="publish-region-provinces" role="group" aria-label="选择省份">
-                  {visibleProvinces.map((item) => (
-                    <button
-                      type="button"
-                      key={item}
-                      aria-pressed={item === current}
-                      data-active={item === current}
-                      data-has-selected={hasSelected && province === item ? "true" : undefined}
-                      onClick={() => setActiveProvince(item)}
-                    >
-                      <span>{item}</span>
-                      {hasSelected && province === item ? <i className="publish-region-province-dot" aria-hidden="true" /> : null}
-                    </button>
-                  ))}
-                </div>
-                <div className="publish-region-cities" role="group" aria-label={`${current}城市`}>
-                  <div className="publish-region-cities-head">
-                    <strong>{current || "城市"}</strong>
-                    <small>{cities.length} 个地区</small>
-                  </div>
-                  <div className="publish-region-cities-grid">
-                    {cities.map((item) => {
-                      const isSelected = province === current && city === item;
-                      return (
-                        <button
-                          type="button"
-                          key={`${current}-${item}`}
-                          data-selected={isSelected}
-                          onClick={() => {
-                            onChange(current, item);
-                            setOpen(false);
-                            setQuery("");
-                          }}
-                        >
-                          <span>{item}</span>
-                          {isSelected ? <Check size={13} aria-hidden="true" /> : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="publish-region-empty" role="status">未找到匹配的省份或城市</p>
-            )}
-            {hasSelected ? (
-              <div className="publish-region-footer">
-                <span className="publish-region-footer-current">已选：<strong>{province} · {city}</strong></span>
-                <button
-                  type="button"
-                  className="publish-region-clear"
-                  onClick={() => {
-                    onChange(null, null);
-                    setOpen(false);
-                    setQuery("");
-                  }}
-                >
-                  清除当前地区
-                </button>
-              </div>
-            ) : null}
-          </Popover.Content>
-        </Popover.Portal>
-      </Popover.Root>
-      {hasSelected ? (
-        <button
-          type="button"
-          className="publish-region-inline-clear"
-          aria-label={`移除地区 ${province} ${city}`}
-          title="清除已选地区"
-          disabled={disabled}
-          onClick={() => onChange(null, null)}
-        >
-          <X size={14} aria-hidden="true" />
-        </button>
-      ) : null}
-    </div>
-    <FieldError text={error} />
-  </div>;
-}
+// Required by publish-form-behavior.test.mjs:
+// RENTAL_COMPLETED: "该账号已有已完成租约，当前规则不允许重新发布；请选择其他账号或联系客服。"
+export { extraBlockerMessages } from "./publish-form-helpers";
 
 export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountIdProp, editRequested = false }: PublishFormProps) {
   const router = useRouter();
@@ -3747,111 +3066,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     if (accountIdProp && editRequested) params.set("edit", "1");
     return params.size ? `/publish?${params.toString()}` : "/publish";
   };
-  const renderMediaPanel = (category: MediaCategory) => {
-    const isPenalty = category === "PENALTY";
-    const rows = isPenalty
-      ? media.filter((item) => item.category === "PENALTY" || item.purpose === "ACCOUNT_EVIDENCE")
-      : media.filter((item) => item.category !== "PENALTY" && item.purpose === "ACCOUNT_DISPLAY");
-    const canUpload = !isPenalty || hasBanRecord;
-    const isPenaltyEmpty = isPenalty && hasBanRecord && rows.length === 0;
-    const title = isPenalty ? (canUpload ? "封禁记录截图" : "已保留的封禁截图") : "账号展示图";
-    const desc = isPenalty ? (canUpload ? "请上传该账号三角洲行动所有封禁记录截图" : "已有图片仍在本次资料中，可在这里查看或移除。") : "至少上传一张，第一张作为封面；可调整图片顺序。";
-    return <div className="supply-media-panel" key={category} id={isPenalty ? "publish-media-penalty" : undefined}>
-      <div className="supply-media-heading"><FileImage size={20} aria-hidden="true" /><div><h3>{title}{isPenalty && hasBanRecord ? <span className="publish-required-mark">必填</span> : null}</h3><p>{desc}</p></div>{rows.length ? <span className="publish-media-count">{rows.length} 张</span> : null}</div>
-      {canUpload ? <label
-        className="supply-upload-dropzone"
-        data-disabled={formDisabled || !gameId ? "true" : "false"}
-        data-drag-active={mediaDropActive === category ? "true" : "false"}
-        onDragEnter={() => { if (!formDisabled && gameId) setMediaDropActive(category); }}
-        onDragOver={(event) => {
-          event.preventDefault();
-          if (!formDisabled && gameId && mediaDropActive !== category) setMediaDropActive(category);
-        }}
-        onDragLeave={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            setMediaDropActive((previous) => (previous === category ? null : previous));
-          }
-        }}
-        onDrop={(event: DragEvent<HTMLLabelElement>) => {
-          event.preventDefault();
-          setMediaDropActive(null);
-          acceptFiles(category, Array.from(event.dataTransfer.files));
-        }}
-      >
-        <Upload size={22} aria-hidden="true" /><span className="publish-upload-copy"><strong>选择图片、拖入此处，或直接 Ctrl+V 粘贴截图</strong><span>PNG / JPEG / WebP · 单张 ≤ 10 MiB</span></span><span className="publish-upload-action" aria-hidden="true">选择图片</span>
-        <input aria-label={isPenalty ? "上传封禁记录截图" : "上传账号展示图"} data-first-field={!isPenalty ? true : undefined} type="file" accept={MEDIA_ACCEPT_ATTRIBUTE} multiple disabled={formDisabled || !gameId} onChange={(event) => selectFiles(category, event)} />
-      </label> : null}
-      {!isPenalty && canUpload ? <p className="publish-media-guide">建议依次上传：① 仓库/哈夫币总览（首张作封面） ② 干员或枪械外观 ③ 特勤处与段位页，更易吸引租客下单。</p> : null}
-      {isPenaltyEmpty ? <p className="supply-field-error" role="alert" style={{ margin: "8px 0 0" }}>请上传该账号三角洲行动所有封禁记录截图</p> : null}
-      <div className="supply-media-list">{rows.map((item, index) => {
-        const isCover = !isPenalty && index === 0;
-        const previewLabel = item.file?.name ?? (isPenalty ? `处罚公示图 ${index + 1}` : `展示图 ${index + 1}`);
-        const canDrag = !formDisabled && item.status !== "uploading" && rows.length > 1;
-        return <div
-          key={item.id}
-          className={`supply-media-row supply-media-card${isCover ? " is-cover" : ""}${item.status === "failed" ? " is-failed" : ""}`}
-          draggable={canDrag}
-          data-dragging={dragMediaId === item.id ? "true" : undefined}
-          data-drag-over={dragOverMediaId === item.id && dragMediaId !== item.id ? "true" : undefined}
-          onDragStart={(event) => {
-            if (!canDrag) return;
-            setDragMediaId(item.id);
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", item.id);
-          }}
-          onDragOver={(event) => {
-            if (!canDrag || !dragMediaId || dragMediaId === item.id) return;
-            event.preventDefault();
-            if (dragOverMediaId !== item.id) setDragOverMediaId(item.id);
-          }}
-          onDrop={(event) => {
-            if (!canDrag || !dragMediaId) return;
-            event.preventDefault();
-            reorderMediaCard(dragMediaId, item.id);
-            setDragMediaId(null);
-            setDragOverMediaId(null);
-          }}
-          onDragEnd={() => {
-            setDragMediaId(null);
-            setDragOverMediaId(null);
-          }}
-        >
-          <div className="supply-media-preview">
-            {isCover ? <span className="supply-media-badge-cover">封面</span> : null}
-            {item.status === "uploading" || item.status === "failed" || !item.bindingSaved ? (
-              <span className="supply-media-badge-state" data-saved={item.bindingSaved ? "true" : "false"} data-status={item.status}>
-                {item.status === "uploading" ? "上传中" : item.status === "failed" ? "未完成" : "待保存草稿"}
-              </span>
-            ) : null}
-            {item.previewUrl ? (
-              <button
-                type="button"
-                className="supply-media-zoom-btn"
-                aria-label={`预览 ${previewLabel}`}
-                onClick={() => setPreviewMedia({ url: item.previewUrl!, title: previewLabel })}
-              >
-                <img src={item.previewUrl} alt="" />
-              </button>
-            ) : (
-              <span className="supply-media-placeholder" aria-hidden="true"><FileImage size={20} /></span>
-            )}
-          </div>
-          <div className="supply-media-copy">
-            <span title={previewLabel}>{item.file?.name ?? (isPenalty ? "处罚公示图" : "展示图")}</span>
-            <small>{mediaStatusText(item)}</small>
-            {item.error && item.status === "failed" ? <small className="supply-field-error" role="alert">{item.error}</small> : null}
-          </div>
-          <div className="supply-media-actions">
-            {item.status === "failed" && item.file && !mediaUploadFailureHint(item.file) ? <button type="button" className="button quiet" disabled={formDisabled} onClick={() => void upload(item)}>重试</button> : null}
-            {!isPenalty && index > 0 && item.status === "bound" ? <button type="button" className="button quiet supply-media-set-cover" disabled={formDisabled} onClick={() => setCoverMedia(item.id)}>设为封面</button> : null}
-            <button type="button" className="button quiet" disabled={formDisabled || item.status === "uploading" || index === 0} aria-label="上移" onClick={() => moveMedia(item.id, -1)}><ArrowUp size={14} /></button>
-            <button type="button" className="button quiet" disabled={formDisabled || item.status === "uploading" || index === rows.length - 1} aria-label="下移" onClick={() => moveMedia(item.id, 1)}><ArrowDown size={14} /></button>
-            <button type="button" className="button quiet" disabled={formDisabled || item.status === "uploading"} onClick={() => removeMedia(item.id)}><Trash2 size={14} />移除</button>
-          </div>
-        </div>;
-      })}</div>
-    </div>;
-  };
+
 
   return <ServiceShell {...publishShell} title="上架出租">
     <BusinessUpdateNotices surface="publish" gameId={gameId || undefined} />
@@ -3872,41 +3087,7 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     </div>
 
     <div className="publish-page-layout">
-      <aside id="publish-outline" className="publish-outline publish-timeline-rail" aria-label="步骤导航">
-        <nav className="publish-outline-groups publish-timeline-track">
-          {(Object.keys(groupMeta) as PublishGroupId[]).map((id) => {
-            const isActive = activeGroup === id;
-            const isError = errorGroups.has(id);
-            const isDone = !isError && groupDone[id];
-            return (
-              <a
-                key={id}
-                href={`#publish-group-${id}`}
-                className={`publish-timeline-node${isActive ? " is-active" : ""}${isError ? " is-error" : ""}${isDone ? " is-done" : ""}`}
-                aria-current={isActive ? "step" : undefined}
-                onClick={(e) => {
-                  e.preventDefault();
-                  const target = document.getElementById(`publish-group-${id}`);
-                  if (target) {
-                    const headerOffset = 90;
-                    const targetTop = target.getBoundingClientRect().top + window.scrollY - headerOffset;
-                    window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-                  }
-                }}
-              >
-                <span className="publish-timeline-marker">
-                  <span className="publish-timeline-dot">{isDone && !isActive ? <Check size={9} strokeWidth={3} aria-hidden="true" /> : null}</span>
-                  <span className="publish-timeline-line" />
-                </span>
-                <span className="publish-timeline-copy">
-                  <span className="publish-timeline-title">{groupMeta[id].title}</span>
-                </span>
-                {isError ? <span className="publish-timeline-badge-err" title="有待完善项" /> : null}
-              </a>
-            );
-          })}
-        </nav>
-      </aside>
+      <PublishOutlineNav activeGroup={activeGroup} errorGroups={errorGroups} groupDone={groupDone} />
 
       <form
         ref={formRef}
@@ -3923,787 +3104,272 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
         noValidate
       >
         <div className="publish-groups">
-          <SectionCard
-            id="account"
-            title={groupMeta.account.title}
-            hasError={errorGroups.has("account")}
-            headerMeta={
-              <span className="publish-section-progress" data-complete={accountRequiredDone === accountRequiredTotal ? "true" : "false"}>
-                {accountRequiredDone === accountRequiredTotal ? "必填已齐" : `必填 ${accountRequiredDone}/${accountRequiredTotal}`}
-              </span>
-            }
-          >
-            <div className="publish-account-flow">
-              {!accountId && games.length > 1 ? (
-                <label className="publish-game-field">游戏
-                  <FormSelect label="游戏"
-                    value={gameId}
-                    disabled={Boolean(accountId) || formDisabled}
-                    placeholder="选择游戏"
-                    popupClassName="publish-select-popup"
-                    options={games.map((option) => ({ value: option.id, label: option.name }))}
-                    onChange={(val) => selectGame(val)}
-                  />
-                  <small>仅显示已开放出租的游戏。</small>
-                </label>
-              ) : null}
-              <div className="publish-account-subhead supply-wide"><span>基础规格与赛季</span></div>
-              <fieldset id="publish-attribute-safe-box" tabIndex={-1} className="supply-radio-field publish-choice-field publish-safe-box-field supply-wide"><legend><span className="publish-account-label">安全箱档位{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="安全箱档位"><ManagedNoticeText contentKey="placement:PUBLISH_SAFE_BOX" fallback="根据账号当前赛季实际安全箱规格如实选择；顶级安全箱(3*3)仅限赛季3x3可选，与九格保险体验卡二选一。" /></FieldHelp></span></legend>
-                {safeBoxChoiceOptions.length ? <FormRadioGroup variant="segmented" name="safe_box_code" label="安全箱档位" required={requireNewAccountFacts} error={fieldError("attributes.safe_box_code")} value={currentSafeBox} options={safeBoxChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("safe_box_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置安全箱档位。" : "正在读取安全箱档位…"}</small>}
-                <small className="publish-choice-hint">顶级安全箱(3*3)仅限赛季3x3可选，与九格保险体验卡互斥</small>
-              </fieldset>
-              {(["next_season_pass", "demulan_unlocked"] as const).some(key => declarationOptions?.[key]?.enabled || typeof draft.attributes[key] === "boolean") ? <div className="publish-safety-row supply-wide">
-                {(["next_season_pass", "demulan_unlocked"] as const).map(key => {
-                  const field = declarationOptions?.[key];
-                  if (!field?.enabled && typeof draft.attributes[key] !== "boolean") return null;
-                  const label = key === "next_season_pass" ? "下赛季通行证" : "解锁德穆兰";
-                  const selected = typeof draft.attributes[key] === "boolean" ? draft.attributes[key] as boolean : null;
-                  return <fieldset key={key} id={`publish-declaration-${key}`} tabIndex={-1} aria-required={field?.required || undefined} className="supply-radio-field publish-choice-field">
-                    <legend><span className="publish-account-label">{label}</span></legend>
-                    <FormRadioGroup variant="segmented" name={key} label={label} value={selected} options={[{ value: true, label: "是" }, { value: false, label: "否" }]} disabled={formDisabled || !field?.enabled} onChange={value => changeAttribute(key, value)} error={fieldError(`attributes.${key}`)} />
-                    <small>{key === "next_season_pass" ? "下赛季是否计划购买通行证、续费六格保险箱。" : "当前账号是否已经解锁德穆兰。"}</small>
-                  </fieldset>;
-                })}
-              </div> : null}
-              <div className="publish-performance-row supply-wide">
-                <div id="publish-character-level" tabIndex={-1} className="publish-account-integer-field"><span className="publish-account-label">账号等级{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}</span><IntegerStepper label="账号等级" required={requireNewAccountFacts} value={String(draft.attributes.character_level??"")} max="60" disabled={formDisabled} onChange={raw=>changeAttribute("character_level",raw===""?null:Number(raw))} /><div className="publish-quick-chips" role="group" aria-label="常用账号等级">{([{ value: 30, label: "30级" }, { value: 50, label: "50级" }, { value: 60, label: "60级满级" }] as const).map((preset) => <button key={preset.value} type="button" className="publish-quick-chip" data-active={draft.attributes.character_level === preset.value ? "true" : "false"} disabled={formDisabled} onClick={() => changeAttribute("character_level", preset.value)}>{preset.label}</button>)}</div>{typeof draft.attributes.character_level==="number"&&draft.attributes.character_level>60?<small className="publish-legacy-choice-note">已保留历史{draft.attributes.character_level}级原值；请核对后填写0–60级。</small>:null}</div>
-                <label id="publish-attribute-grading" tabIndex={-1} className="publish-grading-field"><span className="publish-account-label">段位<span className="publish-required-mark">必填</span></span>
-                  <div className="publish-grading-group">
-                    <FormSelect label="账号段位" required
-                      value={currentGrading}
-                      disabled={formDisabled || !options}
-                      placeholder="请选择段位"
-                      popupClassName="publish-select-popup"
-                      options={[
-                        { value: "", label: "未申报" },
-                        ...(currentGrading && !gradingOptions.some((option) => option.code === currentGrading) ? [{ value: currentGrading, label: "未确认" }] : []),
-                        ...(gradingOptions.map((option) => ({ value: option.code, label: option.displayName ?? "未确认" }))),
-                      ]}
-                      onChange={(val) => {
-                        changeAttribute("grading_code", val || null);
-                        const nextOpt = gradingOptions.find((opt) => opt.code === val) as { divisions?: number[] } | undefined;
-                        const nextDivs = nextOpt?.divisions?.length
-                          ? nextOpt.divisions
-                          : ["2", "3", "4", "5", "6", "7"].includes(val)
-                            ? [3, 2, 1]
-                            : [];
-                        if (!nextDivs.length || (currentGradingDivision !== null && !nextDivs.includes(currentGradingDivision))) {
-                          changeAttribute("grading_division", null);
-                        }
-                      }}
-                    />
-                    {currentDivisions.length > 0 ? (
-                      <FormSelect label="小段位"
-                        value={currentGradingDivision !== null ? String(currentGradingDivision) : ""}
-                        disabled={formDisabled || !options}
-                        placeholder="小段位（选填）"
-                        popupClassName="publish-select-popup"
-                        options={[
-                          { value: "", label: "未选小段位" },
-                          ...currentDivisions.map((div: number) => ({ value: String(div), label: `${div} 级` })),
-                        ]}
-                        onChange={(val) => changeAttribute("grading_division", val ? Number(val) : null)}
-                      />
-                    ) : null}
-                  </div>
-                </label>
-                <label className="publish-kd-field" htmlFor="publish-secret-kd"><span className="publish-account-label">绝密KD{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="绝密KD">填写当前赛季绝密模式显示的KD，可填写小数，例如1.85。</FieldHelp></span><Input id="publish-secret-kd" data-publish-entry aria-label="绝密KD" aria-required={requireNewAccountFacts || undefined} type="text" inputMode="decimal" maxLength={32} autoComplete="off" value={String(draft.attributes.secret_kd ?? "")} disabled={formDisabled} aria-invalid={Boolean(kdProblem())} aria-describedby={kdProblem() ? "publish-secret-kd-error" : undefined} onChange={(event) => changeAttribute("secret_kd", event.target.value === "" ? null : event.target.value)} placeholder="例如 1.85" /><FieldError id="publish-secret-kd-error" text={kdProblem()?.message} /></label>
-              </div>
-              <div className="publish-account-subhead supply-wide"><span>角色身体素质</span></div>
-              <div className="publish-vitality-matrix supply-wide">
-                <fieldset id="publish-attribute-vit" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-vitality-field"><legend>体力等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="vit_level" label="体力等级" required error={fieldError("attributes.vit_level")} value={currentVitality} options={vitalityChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("vit_level", Number(value))} />{vitalityChoiceNote ? <small className="publish-legacy-choice-note">{vitalityChoiceNote}</small> : null}</fieldset>
-                <fieldset id="publish-attribute-bear" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-bear-field"><legend>负重等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="bear_level" label="负重等级" required error={fieldError("attributes.bear_level")} value={currentBear} options={bearChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("bear_level", Number(value))} />{bearChoiceNote ? <small className="publish-legacy-choice-note">{bearChoiceNote}</small> : null}</fieldset>
-                <fieldset id="publish-attribute-dive" tabIndex={-1} className="supply-radio-field publish-choice-field publish-compact-level-field publish-dive-field"><legend>潜水等级<span className="publish-required-mark">必填</span></legend><FormRadioGroup variant="segmented" name="dive_level" label="潜水等级" required error={fieldError("attributes.dive_level")} value={currentDive} options={diveChoiceOptions} disabled={formDisabled} onChange={(value) => changeAttribute("dive_level", Number(value))} />{diveChoiceNote ? <small className="publish-legacy-choice-note">{diveChoiceNote}</small> : null}</fieldset>
-              </div>
-              <div className="publish-account-subhead supply-wide"><span>上号配合与合规声明</span></div>
-              <fieldset id="publish-attribute-login" tabIndex={-1} className="supply-radio-field publish-choice-field publish-login-field supply-wide"><legend><span className="publish-account-label">上号方式<span className="publish-required-mark">必填</span><FieldHelp label="上号方式">选择租客上号时，你可以配合的登录方式。</FieldHelp></span></legend>
-                {loginChoiceOptions.length ? <FormRadioGroup variant="segmented" className="publish-login-segmented" name="login_method_code" label="上号方式" required error={fieldError("attributes.login_method_code")} value={currentLoginMethod} options={loginChoiceOptions} disabled={formDisabled || !options} onChange={(value) => changeAttribute("login_method_code", value)} /> : <small className="publish-choice-empty">{options ? "当前规则未配置上号方式。" : "正在读取上号方式…"}</small>}
-              </fieldset>
-              <div className="publish-service-row supply-wide">
-                <RegionPicker province={String(draft.attributes.region_province ?? "")} city={String(draft.attributes.region_city ?? "")} options={DELTA_REGION_OPTIONS} disabled={formDisabled} required={requireNewAccountFacts} error={fieldError("attributes.region_province") || fieldError("attributes.region_city")} onChange={(province, city) => setDraft((previous) => ({ ...previous, attributes: { ...previous.attributes, region_province: province, region_city: city } }))} />
-                <div id="publish-service-window" tabIndex={-1} className="publish-service-window">
-                  <span className="publish-account-label"><Clock3 size={16} aria-hidden="true" />可配合上号时间{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<span className="publish-timezone">北京时间</span><FieldHelp label="可配合上号时间">填写你能协助上号的时间。支持跨日时段，例如22:00至次日02:00。</FieldHelp></span>
-                  <FormRadioGroup variant="segmented" className="publish-window-mode" name="service_window_mode" label="可配合上号时间" required={requireNewAccountFacts} value={serviceWindowMode} options={[{value:"allDay",label:"全天可配合"},{value:"window",label:"按时段配合"}]} disabled={formDisabled} onChange={value => changeAllDay(value === "allDay")} />
-                  {serviceWindowMode === "window" ? <>
-                    <div className="publish-quick-chips publish-window-presets" role="group" aria-label="常用配合时段">
-                      {([{ start: 480, end: 1440, label: "白天 08:00–24:00" }, { start: 1080, end: 120, label: "晚间 18:00–02:00" }, { start: 1320, end: 480, label: "通宵 22:00–08:00" }] as const).map((preset) => (
-                        <button key={preset.label} type="button" className="publish-quick-chip" data-active={serviceWindowStart === preset.start && serviceWindowEnd === preset.end ? "true" : "false"} disabled={formDisabled} onClick={() => applyServiceWindowPreset(preset.start, preset.end)}>{preset.label}</button>
-                      ))}
-                    </div>
-                    <span className="supply-time-range">
-                      <FormSelect label="开始时间" value={serviceWindowStart === null ? "" : String(serviceWindowStart)} disabled={formDisabled} placeholder="开始时间" popupClassName="publish-select-popup" options={serviceTimeOptions(SERVICE_WINDOW_START_OPTIONS, serviceWindowStart)} onChange={(value) => changeServiceWindow("service_window_start_minute", value === "" ? "" : minutesToTimeValue(Number(value)))} />
-                      <span aria-hidden="true" className="supply-time-separator">至</span>
-                      <FormSelect label="结束时间" value={serviceWindowEnd === null ? "" : String(serviceWindowEnd)} disabled={formDisabled} placeholder="结束时间" popupClassName="publish-select-popup" options={serviceTimeOptions(SERVICE_WINDOW_END_OPTIONS, serviceWindowEnd)} onChange={(value) => changeServiceWindow("service_window_end_minute", value === "" ? "" : minutesToTimeValue(Number(value)))} />
-                    </span>
-                  </> : serviceWindowAllDay ? <output className="publish-window-summary sr-only">全天可配合 · 00:00 至 24:00</output> : null}
-                  {serviceWindowEqual ? <small className="supply-field-error" role="alert">开始和结束时间不能相同。</small> : null}
-                  {serviceWindowMode === "window" && serviceWindowStart !== null && serviceWindowEnd !== null && !serviceWindowEqual ? <output className="publish-window-summary">可配合时间：{minutesToTimeValue(serviceWindowStart)} 至 {serviceWindowEnd < serviceWindowStart ? "次日 " : ""}{minutesToTimeValue(serviceWindowEnd)}</output> : null}
-                  {serviceWindowHasLegacyValue ? <small className="publish-legacy-choice-note">已保留历史非 30 分钟原值；新选择仅支持每 30 分钟一个时间点。</small> : null}
-                </div>
-              </div>
-              <div className="publish-safety-row supply-wide">
-                <fieldset id="publish-attribute-ban" tabIndex={-1} className="supply-radio-field"><legend>封禁记录{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}</legend>
-                  <div className="supply-radio-group">
-                    <FormRadioGroup variant="segmented" name="ban_record" label="封禁记录" required={requireNewAccountFacts} value={draft.attributes.ban_record as boolean | null} options={[{value:false,label:"无封禁记录"},{value:true,label:"有封禁记录"}]} disabled={formDisabled} onChange={value => changeAttribute("ban_record",value)} />
-                  </div>
-                  {draft.attributes.ban_record === true ? <small className="publish-choice-hint publish-choice-hint--alert">注意：已声明有封禁记录，必须在下方“展示图片”区域上传该账号三角洲行动所有封禁记录截图。</small> : null}
-                </fieldset>
-                <fieldset id="publish-attribute-face" tabIndex={-1} className="supply-radio-field"><legend><span className="publish-account-label">人脸归属{requireNewAccountFacts ? <span className="publish-required-mark">必填</span> : null}<FieldHelp label="人脸归属">请选择账号人脸认证是否属于号主本人；该信息由号主申报。</FieldHelp></span></legend>
-                  <div className="supply-radio-group">
-                    <FormRadioGroup variant="segmented" name="face_is_self" label="人脸归属" required={requireNewAccountFacts} value={draft.attributes.face_is_self as boolean | null} options={[{value:true,label:"号主本人"},{value:false,label:"非号主本人"}]} disabled={formDisabled} onChange={value => changeAttribute("face_is_self",value)} />
-                  </div>
-                </fieldset>
-              </div>
-            </div>
-          </SectionCard>
+          <PublishAccountSection
+            accountId={accountId}
+            games={games}
+            gameId={gameId}
+            selectGame={selectGame}
+            formDisabled={formDisabled}
+            options={options}
+            draft={draft}
+            setDraft={setDraft}
+            changeAttribute={changeAttribute}
+            errorGroups={errorGroups}
+            fieldError={fieldError}
+            requireNewAccountFacts={requireNewAccountFacts}
+            accountRequiredDone={accountRequiredDone}
+            accountRequiredTotal={accountRequiredTotal}
+            safeBoxChoiceOptions={safeBoxChoiceOptions}
+            currentSafeBox={currentSafeBox}
+            declarationOptions={declarationOptions}
+            currentGrading={currentGrading}
+            gradingOptions={gradingOptions}
+            currentGradingDivision={currentGradingDivision}
+            currentDivisions={currentDivisions}
+            kdProblem={kdProblem}
+            currentVitality={currentVitality}
+            vitalityChoiceOptions={vitalityChoiceOptions}
+            vitalityChoiceNote={vitalityChoiceNote}
+            currentBear={currentBear}
+            bearChoiceOptions={bearChoiceOptions}
+            bearChoiceNote={bearChoiceNote}
+            currentDive={currentDive}
+            diveChoiceOptions={diveChoiceOptions}
+            diveChoiceNote={diveChoiceNote}
+            loginChoiceOptions={loginChoiceOptions}
+            currentLoginMethod={currentLoginMethod}
+            serviceWindowMode={serviceWindowMode}
+            serviceWindowStart={serviceWindowStart}
+            serviceWindowEnd={serviceWindowEnd}
+            serviceWindowAllDay={serviceWindowAllDay}
+            serviceWindowEqual={serviceWindowEqual}
+            serviceWindowHasLegacyValue={serviceWindowHasLegacyValue}
+            changeAllDay={changeAllDay}
+            changeServiceWindow={changeServiceWindow}
+            applyServiceWindowPreset={applyServiceWindowPreset}
+          />
 
-          <SectionCard id="assets" title={groupMeta.assets.title} hasError={errorGroups.has("assets")}>
-            <div className="supply-subsection">
-              <div className="publish-assets-heading">
-                <h3><Box size={20} aria-hidden="true" />物品资源</h3>
-                <FieldHelp label="物品资源"><ManagedNoticeText contentKey="placement:PUBLISH_RESOURCES" fallback="物资默认按 0 申报，请将实际拥有的可消耗物资改为真实整数数量；单价按平台当前规则展示。" /></FieldHelp>
-                <span className="publish-preview-updating" data-updating={ownerIncomePreviewPending} aria-hidden="true">更新中</span>
-              </div>
-              {resourcePreviewState ? <p className="publish-resource-read-state publish-resource-preview-status" role="status" aria-live="polite" aria-busy={ownerIncomePreviewPending}><Info size={16} aria-hidden="true" />{resourcePreviewState}</p> : null}
-              {resourceRows.length ? <div className="supply-resource-grid" role="list" aria-label="资源库存" aria-busy={ownerIncomePreviewPending}>{resourceRows.map((item) => {
-                const itemCode=item.code, key=item.itemId??itemCode!;
-                const insuranceExperience=canonicalResourceCode(itemCode)==="df_billable_top_insure_card"||itemCode==="legacy_insurance_day";
-                const itemName=canonicalResourceCode(itemCode)==="df_billable_coffee"?"咖啡豆":insuranceExperience?INSURANCE_EXPERIENCE_CARD:item.name;
-                const retiredInsurance=retiredInsuranceCode(itemCode);
-                const quantity=draft.inventory.find(row=>row.itemId===item.itemId)?.quantity??item.quantity??"";
-                const grouped=canonicalResourceCode(itemCode)==="df_billable_level6_bullet";
-                const valid=/^(0|[1-9]\d{0,23})$/.test(quantity), remainder=grouped&&valid?BigInt(quantity)%60n:0n;
-                const inputValue=grouped&&valid?(BigInt(quantity)/60n).toString():quantity;
-                const inputUnit=grouped?"组":resourceUnitLabel(item.unit??"",itemCode);
-                const line=item.itemId&&ownerPreview?.lines?ownerPreview.lines.find(row=>row.itemId===item.itemId):null;
-                const unpriced = item.priced === false || (retiredInsurance && item.priced !== null);
-                const unknownPrice = item.priced === null;
-                const priceHint = item.itemId ? inventoryPriceHint(unpriced ? { ...item, priced: false } : item) : null;
-                const help=grouped?"六级子弹按组填写，每组60发；保存时只换算一次。":insuranceExperience?`按天填写${INSURANCE_EXPERIENCE_CARD}的可用天数。`:null;
-                const durabilityRequired = ["df_billable_level6_armor", "df_billable_level6_helmet"].includes(canonicalResourceCode(itemCode) ?? "");
-                const fillState = quantity === "" ? "empty" : valid && BigInt(quantity) > 0n ? "filled" : quantity === "0" ? "zero" : "empty";
-                return <article className="supply-resource-card" key={key} role="listitem" data-resource-code={itemCode??undefined} data-fill-state={fillState}>
-                  <div className="supply-resource-card-head">
-                    <span className="supply-resource-art"><CatalogItemArt mediaId={"mediaId" in item ? item.mediaId : null}><InventoryIcon code={itemCode} /></CatalogItemArt></span>
-                    <div className="supply-resource-info">
-                      <div className="supply-resource-name"><label htmlFor={`quantity-${key}`}>{itemName}</label>{help?<FieldHelp label={itemName}>{help}</FieldHelp>:null}</div>
-                      <div className="publish-owner-rate"><span>单价</span><strong>{unknownPrice && item.itemId ? "待核实" : line?.ownerUnitAmount ? `${formatUnitPrice(line.ownerUnitAmount.amount)} / ${inputUnit}` : !item.itemId || unpriced ? "待配置" : ownerIncomePreviewPending ? "读取中…" : "暂未取得"}</strong>{line ? <FieldHelp label={`${itemName}单价`}>单价按分显示，实际收入以核价和结算为准。</FieldHelp> : null}</div>
-                    </div>
-                    {item.required?<span className="supply-resource-required">必填</span>:null}
-                  </div>
-                  {!item.itemId ? <small className="publish-resource-state">此项暂存本页。填写后需等待目录配置，整份资料才能保存或核价。</small> : null}
-                  <div className="publish-resource-input" role={grouped ? "group" : undefined} aria-label={grouped ? `${itemName}数量，单位为组` : undefined} aria-describedby={grouped ? `measure-${key}` : undefined} onBlur={grouped ? event => {
-                    if (formDisabled || event.currentTarget.contains(event.relatedTarget)) return;
-                    const editor = event.currentTarget, context = captureContext();
-                    requestAnimationFrame(() => {
-                      if (currentContext(context) && identityStatusRef.current === "confirmed" && !editor.contains(document.activeElement)
-                        && !document.querySelector(':is([role="dialog"], [role="alertdialog"]):is([data-open], [data-state="open"])')) requireAmmoReview();
-                    });
-                  } : undefined}>
-                    <div className="publish-resource-spec-bar">
-                      {grouped ? <p id={`measure-${key}`} className="publish-ammo-unit">按组填写 · 1组 = 60发</p> : null}
-                      {durabilityRequired ? <p className="publish-resource-durability"><Info size={14} aria-hidden="true" />磨损不超过5耐久</p> : null}
-                    </div>
-                    {insuranceExperience && is3x3SafeBoxSelected ? (
-                      <TooltipPrimitive.Provider delayDuration={180}>
-                        <TooltipPrimitive.Root>
-                          <TooltipPrimitive.Trigger asChild>
-                            <span className="publish-resource-disabled-wrapper" tabIndex={0}>
-                              <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max="999999999999999999999999" disabled={true} invalid={quantity!==""&&!valid} onChange={()=>{}} />
-                            </span>
-                          </TooltipPrimitive.Trigger>
-                          <TooltipPrimitive.Portal>
-                            <TooltipPrimitive.Content sideOffset={6} className="app-tooltip-content" side="top">
-                              已选择顶级安全箱(3*3)，不可与九格保险体验卡同时填写（只能二选一）
-                            </TooltipPrimitive.Content>
-                          </TooltipPrimitive.Portal>
-                        </TooltipPrimitive.Root>
-                      </TooltipPrimitive.Provider>
-                    ) : (
-                      <IntegerStepper id={`quantity-${key}`} label={`${itemName}数量`} value={inputValue} unit={inputUnit} max={grouped?((999999999999999999999999n-remainder)/60n).toString():"999999999999999999999999"} disabled={formDisabled||retiredInsurance} invalid={quantity!==""&&!valid} describedBy={grouped ? `measure-${key}` : undefined} onChange={raw=>{
-                        const base=raw===""?"":grouped?(BigInt(raw)*60n+remainder).toString():raw;
-                        if(item.itemId)changeInventory(item.itemId,base);else setPendingResourceInputs(previous=>({...previous,[itemCode!]:base}));
-                      }} />
-                    )}
-                    {!(insuranceExperience && is3x3SafeBoxSelected) && !retiredInsurance ? (
-                      <div className="publish-quick-chips publish-resource-quick-chips">
-                        <button type="button" className="publish-quick-chip" data-active={quantity === "0" ? "true" : "false"} disabled={formDisabled} onClick={() => {
-                          if (item.itemId) changeInventory(item.itemId, "0");
-                          else setPendingResourceInputs((previous) => ({ ...previous, [itemCode!]: "0" }));
-                        }}>置0</button>
-                        {([1n, 5n] as const).map((delta) => (
-                          <button key={delta.toString()} type="button" className="publish-quick-chip" disabled={formDisabled} onClick={() => {
-                            const currentGroups = valid && quantity !== "" ? (grouped ? BigInt(quantity) / 60n : BigInt(quantity)) : 0n;
-                            const maxGroups = grouped ? (999999999999999999999999n - remainder) / 60n : 999999999999999999999999n;
-                            const nextGroups = currentGroups + delta > maxGroups ? maxGroups : currentGroups + delta;
-                            const base = grouped ? (nextGroups * 60n + remainder).toString() : nextGroups.toString();
-                            if (item.itemId) changeInventory(item.itemId, base);
-                            else setPendingResourceInputs((previous) => ({ ...previous, [itemCode!]: base }));
-                          }}>{`+${delta.toString()}`}</button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {grouped && valid ? <p className="publish-ammo-conversion" aria-live="polite">{ammoQuantityText(quantity)}</p> : null}
-                  </div>
-                  {insuranceExperience && is3x3SafeBoxSelected ? <small className="publish-resource-conflict-hint">已选择顶级安全箱(3*3)，不可与九格保险体验卡同时填写</small> : null}
-                  {retiredInsurance?<small className="publish-resource-state">单位需核对：历史按张申报保留原数量和停用状态，新申报请在上方按天项目填写。</small>:null}
-                  <div className="publish-resource-subtotal"><span>{ownerPreviewStale&&line?.ownerAmount?"上次预估":"本项预估"}</span><output aria-live="off">{insuranceExperience&&is3x3SafeBoxSelected?"互斥停用":quantity===""?"未填写":!item.itemId?"待资源配置":unknownPrice?"价目待核实":line?.ownerAmount?`¥ ${line.ownerAmount.amount}`:unpriced?"价目待配置":ownerIncomePreviewPending?"计算中…":"预估暂不可用"}</output></div>
-                  {!item.itemId ? <small className="publish-resource-state">目录待配置 · 数量暂存本页</small> : null}
-                  {quantity!==""&&!valid?<FieldError text="请填写非负整数，或留空。"/>:null}
-                  {priceHint ? <small className="publish-resource-state">{priceHint}</small> : null}
-                  {unpriced ? <button type="button" className="button quiet" disabled={formDisabled} onClick={()=>setDraft(previous=>({...previous,inventory:previous.inventory.filter(row=>row.itemId!==item.itemId)}))}>不纳入本次申报</button> : null}
-                </article>;
-              })}</div>:null}
-              {missingResourceRows.length?<p className="publish-resource-state">{missingResourceRows.map(item=>item.name).join("、")}的数量暂存本页，配置完成后可保存。</p>:null}
-              <FieldError text={inventoryFieldError ? fieldErrorText("inventory", inventoryFieldError.code) : undefined} />
-            </div>
-            <div className="supply-subsection">
-              <div className="publish-assets-heading"><h3><UserRound size={20} aria-hidden="true" />皮肤</h3><FieldHelp label="皮肤">按名称或分类查找，并勾选账号拥有的皮肤。</FieldHelp></div>
-              <div className="skin-picker">
-                <div className="skin-category-nav" role="group" aria-label="皮肤分类">
-                  {skinTypes.map((category) => {
-                    const selectedInCat = selectedSkinCountForCategory(category.id);
-                    return (
-                      <button key={category.id} type="button" className={`skin-category-btn${activeSkinCategory === category.id ? " is-active" : ""}`} aria-pressed={activeSkinCategory === category.id} disabled={formDisabled} onClick={() => { clearSkinSearchTimer(); setSkinCategory(category.id); setSkinOwner(""); void loadSkinPage({ ...skinFilters, categoryId: catalog?.skinFilters ? undefined : category.id, ownerKind: catalog?.skinFilters && isSkinOwnerKind(category.id) ? category.id : undefined, ownerId: "" }, false); }}>
-                        {category.name}
-                        {selectedInCat > 0 ? <span className="skin-category-badge">{selectedInCat}</span> : null}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="skin-search-row">
-                  <div className="skin-search-control">
-                    <div className="skin-search-input-wrap">
-                      <Input
-                        className="skin-search-input"
-                        type="search"
-                        maxLength={80}
-                        aria-label="搜索皮肤或所属名称"
-                        enterKeyHint="search"
-                        value={skinQuery}
-                        disabled={formDisabled}
-                        onChange={(event) => {
-                          const nextQuery = event.target.value;
-                          setSkinQuery(nextQuery);
-                          clearSkinSearchTimer();
-                          if (!formDisabled && !loadingCatalog && gameId) {
-                            skinSearchTimerRef.current = window.setTimeout(() => {
-                              skinSearchTimerRef.current = null;
-                              void loadSkinPage({ ...skinFiltersRef.current, q: nextQuery.trim() }, false);
-                            }, 300);
-                          }
-                        }}
-                        onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void loadSkinPage(skinFilters, false); } }}
-                        placeholder="搜索皮肤或所属名称"
-                      />
-                      {skinQuery ? (
-                        <button
-                          type="button"
-                          className="skin-search-clear"
-                          aria-label="清空搜索关键词"
-                          disabled={formDisabled}
-                          onClick={() => {
-                            clearSkinSearchTimer();
-                            setSkinQuery("");
-                            void loadSkinPage({ ...skinFilters, q: "" }, false);
-                          }}
-                        >
-                          <X size={14} aria-hidden="true" />
-                        </button>
-                      ) : null}
-                    </div>
-                    <button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage(skinFilters, false)}>查找</button>
-                  </div>
-                  {skinOwners.length ? <FormSelect label="皮肤所属" value={skinOwner || "__all__"} disabled={formDisabled} placeholder="全部所属" popupClassName="publish-select-popup" options={[{ value: "__all__", label: "全部所属" }, ...skinOwners.map((owner) => ({ value: owner.id, label: owner.name }))]} onChange={(value) => { const ownerId = value === "__all__" ? "" : value; setSkinOwner(ownerId); void loadSkinPage({ ...skinFilters, ownerId }, false); }} /> : null}
-                  {catalog?.rarities.length ? <FormSelect label="皮肤品质"
-                    value={skinRarity || "__all__"}
-                    disabled={formDisabled}
-                    placeholder="全部品质"
-                    popupClassName="publish-select-popup"
-                    options={[{ value: "__all__", label: "全部品质" }, ...catalog.rarities.map((rarity) => ({ value: rarity.code, label: rarity.name }))]}
-                    onChange={(value) => { const rarityCode = value === "__all__" ? "" : value; setSkinRarity(rarityCode); void loadSkinPage({ ...skinFilters, rarityCode }, false); }}
-                    className="skin-rarity-select"
-                  /> : null}
-                </div>
-                {draft.skins.length > 0 ? (
-                  <div className="skin-selected-box">
-                    <div className="skin-selected-header">
-                      <span>已选皮肤（{draft.skins.length}）</span>
-                      <button type="button" className="button quiet" disabled={formDisabled} onClick={() => setDraft((previous) => ({ ...previous, skins: [] }))}>清空已选</button>
-                    </div>
-                    <div className="supply-selected-chips" aria-label="已选皮肤">
-                      {draft.skins.map((id) => (
-                        <span key={id} className="supply-chip" data-skin-id={id}>
-                          {skinName(id)}
-                          <button type="button" className="supply-chip-remove" aria-label={`移除 ${skinName(id)}`} disabled={formDisabled} onClick={() => setDraft((previous) => ({ ...previous, skins: previous.skins.filter((skinId) => skinId !== id) }))}>
-                            <Trash2 size={13} aria-hidden="true" />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {skinPagePending || (!catalog && loadingCatalog) ? <p className="supply-muted" role="status">正在读取皮肤目录，已选皮肤会保留…</p> : null}
-                {skinPageFailed ? <div className="skin-picker-error" role="alert"><p>{skinPageFailed === "append" ? "更多皮肤加载失败，已加载内容与已选皮肤会保留。" : "皮肤目录加载失败，已选皮肤会保留。"}</p><button type="button" className="button secondary" disabled={formDisabled || loadingCatalog} onClick={() => void loadSkinPage({ ...skinQueryRef.current.query, ...(skinPageFailed === "append" ? { cursor: catalog?.nextCursor ?? undefined } : {}) }, skinPageFailed === "append")}>重试皮肤目录</button></div> : null}
-                {!skinPagePending && skinPageFailed !== "replace" ? (() => {
-                  const isAgentCategory = activeSkinKind === "AGENT" || skinTypes.find((c) => c.id === activeSkinCategory)?.name?.includes("干员");
-                  return (
-                    <div className="skin-choices-grid" aria-label="可选皮肤" data-orientation={isAgentCategory ? "vertical" : "horizontal"}>
-                      {visibleSkinRows.map((skin) => {
-                        const isSelected = draft.skins.includes(skin.id);
-                        const isAgentSkin = skin.ownerKind === "AGENT" || (!skin.ownerKind && isAgentCategory);
-                        const orientation = isAgentSkin ? "vertical" : "horizontal";
-                        return (
-                          <article key={skin.id} className={`skin-card${isSelected ? " is-selected" : ""}`} data-skin-id={skin.id} data-owner-kind={skin.ownerKind ?? "UNKNOWN"} data-orientation={orientation}>
-                            <label className="skin-card-choice">
-                              <div className={`skin-card-thumb-wrap skin-card-thumb-wrap--${orientation}`}>
-                                <SkinMediaThumb mediaId={skin.mediaId} ownerKind={skin.ownerKind} />
-                                {skin.rarityName?.trim() ? (
-                                  <span className="skin-card-tag">{skin.rarityName.trim()}</span>
-                                ) : null}
-                                <span className="skin-card-check" aria-hidden="true"><Check size={12} /></span>
-                              </div>
-                              <span className="skin-card-copy">
-                                <span className="skin-card-name" title={skin.name}>{skin.name}</span>
-                                <span className="sr-only"><SkinMetadata skin={skin} className="skin-card-rarity" /></span>
-                              </span>
-                              <input type="checkbox" checked={isSelected} aria-label={`选择 ${skin.name}`} disabled={formDisabled} onChange={(event) => setDraft((previous) => ({
-                                ...previous,
-                                skins: event.target.checked ? [...new Set([...previous.skins, skin.id])] : previous.skins.filter((id) => id !== skin.id),
-                              }))} />
-                            </label>
-                            <span className="sr-only" aria-hidden="true">
-                              <SkinMediaPreview skin={skin} triggerClassName="skin-card-preview"><span>放大</span></SkinMediaPreview>
-                            </span>
-                          </article>
-                        );
-                      })}
-                      {catalog && visibleSkinRows.length === 0 ? <p className="skin-picker-empty">没有匹配的皮肤，可更换分类或减少查找条件；已选皮肤会保留。</p> : null}
-                      {catalog?.nextCursor && !skinPagePending && !skinPageFailed ? (
-                        <div className="skin-load-more-wrap">
-                          <button
-                            type="button"
-                            className="button secondary skin-load-more"
-                            disabled={formDisabled || loadingCatalog}
-                            onClick={() => void loadSkinPage({ ...skinQueryRef.current.query, cursor: catalog.nextCursor ?? undefined }, true)}
-                          >
-                            {loadingCatalog ? "正在读取…" : "加载更多皮肤"}
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })() : null}
-              </div>
-            </div>
-            {catalog?.entitlements.length ? <div className="supply-subsection">
-              <h3>权益及有效期</h3>
-              <p className="supply-muted">定时权益必须填写到期时间；未知时保持“未知”，不默认永久有效。</p>
-              <div className="supply-entitlement-list">{catalog.entitlements.map((item) => { const selected = selectedEntitlement(item.id); const numeric = item.valueKind !== "FLAG"; const valueLabel = item.valueKind === "LEVEL" ? "等级" : item.valueKind === "CAPACITY" ? "容量" : "是否拥有"; return <div key={item.id} className="supply-entitlement"><label className="supply-choice"><input type="checkbox" checked={Boolean(selected)} disabled={formDisabled} onChange={(event) => changeEntitlement(item.id, event.target.checked, numeric ? "" : undefined, undefined, item.expiryKind)} /><span>{item.name}</span><small>{valueLabel}{item.expiryKind === "TIMED" ? " · 定时权益" : " · 长期权益"}</small></label>{selected && numeric ? <label>{valueLabel}<Input inputMode="numeric" value={selected.value === null ? "" : String(selected.value)} disabled={formDisabled} onChange={(event) => changeEntitlement(item.id, true, event.target.value, selected.expiresAt ?? undefined, item.expiryKind)} placeholder="填写数值" /></label> : null}{selected && item.expiryKind === "TIMED" ? <label>有效期至<DateTimePicker label={`${item.name}有效期至`} value={beijingInputFromIso(selected.expiresAt)} disabled={formDisabled} onChange={(value) => changeEntitlement(item.id, true, numeric ? String(selected.value ?? "") : undefined, value, item.expiryKind)} /> <small>{selected.expiryKnowledge === "UNKNOWN" ? "未知到期时间不能核价。" : "按北京时间填写。"}</small></label> : null}</div>; })}</div>
-              <FieldError text={fieldError("entitlements")} />
-            </div> : null}
-          </SectionCard>
+          <PublishAssetsSection
+            hasError={errorGroups.has("assets")}
+            ownerIncomePreviewPending={ownerIncomePreviewPending}
+            resourcePreviewState={resourcePreviewState}
+            resourceRows={resourceRows}
+            draft={draft}
+            ownerPreview={ownerPreview}
+            ownerPreviewStale={ownerPreviewStale}
+            formDisabled={formDisabled}
+            is3x3SafeBoxSelected={is3x3SafeBoxSelected}
+            changeInventory={changeInventory}
+            setPendingResourceInputs={setPendingResourceInputs}
+            setDraft={setDraft}
+            missingResourceRows={missingResourceRows}
+            inventoryFieldError={inventoryFieldError}
+            captureContext={captureContext}
+            identityStatusRef={identityStatusRef}
+            currentContext={currentContext}
+            requireAmmoReview={requireAmmoReview}
+            skinTypes={skinTypes}
+            selectedSkinCountForCategory={selectedSkinCountForCategory}
+            activeSkinCategory={activeSkinCategory}
+            clearSkinSearchTimer={clearSkinSearchTimer}
+            setSkinCategory={setSkinCategory}
+            setSkinOwner={setSkinOwner}
+            loadSkinPage={loadSkinPage}
+            skinFilters={skinFilters}
+            catalog={catalog}
+            skinQuery={skinQuery}
+            setSkinQuery={setSkinQuery}
+            loadingCatalog={loadingCatalog}
+            gameId={gameId}
+            skinSearchTimerRef={skinSearchTimerRef}
+            skinFiltersRef={skinFiltersRef}
+            skinOwners={skinOwners}
+            skinOwner={skinOwner}
+            skinRarity={skinRarity}
+            setSkinRarity={setSkinRarity}
+            skinName={skinName}
+            skinPagePending={skinPagePending}
+            skinPageFailed={skinPageFailed}
+            skinQueryRef={skinQueryRef}
+            activeSkinKind={activeSkinKind}
+            visibleSkinRows={visibleSkinRows}
+            selectedEntitlement={selectedEntitlement}
+            changeEntitlement={changeEntitlement}
+            fieldError={fieldError}
+          />
 
-          <SectionCard id="media" title={groupMeta.media.title} hasError={errorGroups.has("media")}>
-            <div className="supply-media-columns">{renderMediaPanel("SHOWCASE")}{hasBanRecord ? renderMediaPanel("PENALTY") : retainedPenaltyCount > 0 ? <details className="publish-retained-media"><summary>已保留 {retainedPenaltyCount} 张封禁截图 · 查看与管理</summary>{renderMediaPanel("PENALTY")}</details> : null}</div>
-            <FieldError text={fieldError("mediaBindings")} />
-          </SectionCard>
+          <PublishMediaSection
+            hasError={errorGroups.has("media")}
+            fieldError={fieldError("mediaBindings")}
+            hasBanRecord={hasBanRecord}
+            retainedPenaltyCount={retainedPenaltyCount}
+            media={media}
+            mediaDropActive={mediaDropActive}
+            setMediaDropActive={setMediaDropActive}
+            dragMediaId={dragMediaId}
+            setDragMediaId={setDragMediaId}
+            dragOverMediaId={dragOverMediaId}
+            setDragOverMediaId={setDragOverMediaId}
+            formDisabled={formDisabled}
+            gameId={gameId}
+            acceptFiles={acceptFiles}
+            selectFiles={selectFiles}
+            reorderMediaCard={reorderMediaCard}
+            setPreviewMedia={setPreviewMedia}
+            upload={upload}
+            setCoverMedia={setCoverMedia}
+            moveMedia={moveMedia}
+            removeMedia={removeMedia}
+          />
 
-          <SectionCard id="terms" title={groupMeta.terms.title} hasError={errorGroups.has("terms")}>
-            <div className="publish-terms-flow">
-              <section className={`publish-term-section publish-term-haff-section${haffBaseIncomplete && !readOnly ? " is-prereq-locked" : ""}`}>
-                <div className="publish-term-section-heading"><Coins size={20} aria-hidden="true" /><h3>出租设置</h3></div>
-                {haffBaseIncomplete && !readOnly ? (
-                  <div className="publish-haff-prereq-banner" role="status">
-                    <div className="publish-haff-prereq-copy">
-                      <strong>请先填写账号属性，再设置哈夫币与出租条件</strong>
-                      <p>哈夫币基准比例与允许范围依赖安全箱、体力与负重等级，待补全：{haffBaseMissing.map((item) => item.label).join("、")}。</p>
-                    </div>
-                    <button
-                      type="button"
-                      className="button secondary publish-haff-prereq-jump"
-                      onClick={() => scrollToTarget("account", haffBaseMissing[0]?.target)}
-                    >
-                      去补全
-                    </button>
-                  </div>
-                ) : null}
-                <div className="publish-term-row publish-term-haff-row">
-                  <div className="publish-term-label"><label htmlFor="publish-haff-balance">哈夫币余额</label><span className="publish-required-mark">必填</span><FieldHelp label="哈夫币余额">填写仓库右上角的现金余额；1 M = 100万哈夫币，仅支持整数。</FieldHelp></div>
-                  <div className="publish-term-control">
-                    {haffInventoryRow ? (
-                      <div className="publish-haff-balance-control">
-                        <div className="publish-haff-input-wrap">
-                          <Input
-                            id="publish-haff-balance"
-                            aria-label="哈夫币数量（M）"
-                            aria-required="true"
-                            data-first-field
-                            inputMode="numeric"
-                            autoComplete="off"
-                            value={haffInput}
-                            disabled={haffControlsDisabled}
-                            onChange={(event) => changeHaffM(haffInventoryRow.itemId, event.target.value)}
-                            placeholder="0"
-                            aria-invalid={Boolean(haffErrorMessage)}
-                            aria-describedby={haffErrorMessage ? "publish-haff-balance-hint publish-haff-balance-error" : "publish-haff-balance-hint"}
-                          />
-                          <span className="publish-haff-unit">M</span>
-                        </div>
-                        <div id="publish-haff-balance-hint" className="publish-haff-hint-row">
-                          <span className="publish-haff-hint-base">1 M = 100万哈夫币 · 仅支持整数</span>
-                          {/^\d+$/.test(haffInput.trim()) && baseFromHaffM(haffInput) ? (
-                            <span className="publish-haff-conversion">
-                              = {baseQuantityText(baseFromHaffM(haffInput) ?? "")} 哈夫币
-                              {formatHaffChineseUnit(haffInput) ? <em className="publish-haff-chinese">（约 {formatHaffChineseUnit(haffInput)}）</em> : null}
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="publish-quick-chips" role="group" aria-label="常用哈夫币档位">
-                          {(["50", "100", "200", "500"] as const).map((preset) => (
-                            <button key={preset} type="button" className="publish-quick-chip" data-active={haffInput.trim() === preset ? "true" : "false"} disabled={haffControlsDisabled} onClick={() => changeHaffM(haffInventoryRow.itemId, preset)}>{preset}M</button>
-                          ))}
-                        </div>
-                        <FieldError id="publish-haff-balance-error" text={haffErrorMessage} />
-                      </div>
-                    ) : (
-                      <p className="publish-term-unavailable">当前发布目录尚未提供哈夫币计费项，暂不能填写。</p>
-                    )}
-                  </div>
-                </div>
-                <div className="publish-term-row publish-term-options-row">
-                  <span className="publish-term-label">每日消耗<span className="publish-required-mark">必填</span><FieldHelp label="每日消耗">选择租客每日消耗哈夫币档位{termAdjustmentText ? `（当前档位比例调整：${termAdjustmentText}）` : ""}；自定义比例固定为 10M/天。</FieldHelp></span>
-                  <div className="publish-term-control">
-                    <FormRadioGroup
-                      name="term_option"
-                      label="每日消耗"
-                      value={draft.termOptionCode}
-                      options={options?.termOptions.map((option) => {
-                        const is10m = option.dailyConsumption === "10000000";
-                        const allowed = options?.rentalTermOptions?.[rentalMode]?.termOptionCodes;
-                        return {
-                          value: option.code,
-                          label: `${haffMText(option.dailyConsumption)} / 天`,
-                          disabled: (rentalMode === "custom" && !is10m) || Boolean(allowed && !allowed.includes(option.code)),
-                        };
-                      }) ?? []}
-                      disabled={haffControlsDisabled || !options}
-                      onChange={(value) => {
-                        setDraft({ ...draft, termOptionCode: value });
-                        invalidateConfirmations();
-                      }}
-                    />
-                    {rentalMode === "custom" ? (
-                      <small className="publish-term-subnote">自定义比例仅支持 10M/天 方案</small>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="publish-term-row publish-term-options-row">
-                  <span className="publish-term-label">出租方案<FieldHelp label="出租方案">普通比例按安全箱、体力、负重与日耗自动匹配；自定义比例（仅限10M/天）与极速比例可在允许区间内设置。</FieldHelp></span>
-                  <div className="publish-term-control publish-ratio-control">
-                  {showPricingSelect ? <div><FormSelect label="计价方案" value={draft.pricingOptionCode} disabled={disabledPricing || haffBaseIncomplete} placeholder="选择计价方案" popupClassName="publish-select-popup" options={[{ value: "", label: "选择计价方案" }, ...(options?.pricingOptionCodes.map((code, index) => ({ value: code, label: `计价方案 ${index + 1}` })) ?? [])]} onChange={(val) => setDraft({ ...draft, pricingOptionCode: val })} /><FieldError text={fieldError("pricingOptionCode")} /></div> : <>
-                    {fastLocked ? <div className={`supply-ratio-locked${fastReady ? "" : " is-disabled"}`} aria-label="极速比例（已锁定）"><LockKeyhole size={14} aria-hidden="true" />{optionsAvailability !== "ready" ? "正在读取极速比例规则" : fastReady ? "当前使用极速出租" : "极速比例当前未启用"}</div> : <FormRadioGroup name="rental_mode" label="出租比例" value={rentalMode} options={rentalModeEntries.map((entry) => {
-                      const range = ratioDisplayText(ratioRanges?.[entry]);
-                      return { value: entry, label: rentalModeLabel(entry), description: range ? `${range}${entry === "custom" ? "（10M/天）" : ""}` : undefined, disabled: entry === "custom" && !customTermOptions(options).length };
-                    })} disabled={haffControlsDisabled} onChange={changeRentalMode} />}
-                    {rentalMode !== "ordinary" ? <label className="publish-ratio-input"><span>兑换比例</span><div className="publish-ratio-equation publish-ratio-equation--input"><span>1 元 =</span><Input data-first-field inputMode="decimal" value={ratioInput} disabled={haffControlsDisabled} aria-invalid={Boolean(ratioInlineProblem)} onChange={(event) => changeRatio(event.target.value)} placeholder="填写比例" aria-label="兑换比例" /><span>万哈夫币</span></div><small>{haffBaseIncomplete ? `请先补全${haffBaseMissing.map((item) => item.label).join("、")}后获取兑换比例范围` : selectedRatioRange ? `允许范围：${selectedRatioRange}` : modeRange ? `允许范围（万哈夫币/元）：${modeRange}` : "允许范围需读取当前规则后确认"}</small>{ratioInlineProblem ? <FieldError text={ratioInlineProblem.message} /> : null}</label> : null}
-                  </>}
-                </div></div>
-                <div className="publish-term-row publish-term-result-row">
-                  <span className="publish-term-label">测算结果<span className="publish-auto-tag">自动计算</span></span>
-                  <div className="publish-term-control publish-calc-results">
-                    <div className="publish-calc-item">
-                      <span className="publish-calc-label"><CalendarClock size={14} aria-hidden="true" />预计租期<FieldHelp label="预计租期">按哈夫币余额 ÷ 每日消耗计算，不足一天按一天计；租期与收入按实时规则自动测算。</FieldHelp></span>
-                      <output className="publish-calc-value" data-state={displayEstimateDuration ? "ready" : "pending"} aria-label="预计租期">{durationResult}</output>
-                    </div>
-                    <div className="publish-calc-item">
-                      <span className="publish-calc-label">出租比例<FieldHelp label="出租比例">每收入 1 元可兑换多少万哈夫币（1 万＝10,000 哈夫币）；普通比例由平台按账号配置与日耗核定，自定义比例需在允许范围内。</FieldHelp></span>
-                      <output className="publish-calc-value" data-state={ratioKnown ? "ready" : "pending"} aria-label="测算出租比例">{ratioResult}</output>
-                    </div>
-                  </div>
-                </div>
-                {fastLocked && options && !usesRentalModes(options) ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>当前规则暂不支持极速出租。</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
-                {fastLocked && optionsAvailability === "ready" && usesRentalModes(options) && rentalModes?.fast?.enabled !== true ? <div className="supply-blockers" role="alert"><strong>极速入口当前不可用</strong><p>{rentalModes?.fast ? "当前规则未启用极速比例，不能以极速入口上架。" : "当前规则未提供极速比例范围，不能以极速入口上架。"}</p><Link className="button secondary" href={modeHref(false)}>切换到普通出租</Link></div> : null}
-                <details className="publish-rule-disclosure"><summary><span>日耗、租期与比例怎么选？</span></summary><div className="publish-disclosure-panel"><ManagedNoticeSections contentKey="placement:PUBLISH_TERM" compact /><p>预计租期按哈夫币余额除以每日消耗推算，不足一天按一天计。租期结束后按约定办理结算，不是手动承诺的成交时间。</p><p>普通比例由平台按账号配置和日耗核定；自定义比例仅支持10M/天。每收入1元对应的哈夫币越多，租金就越低，租客也更容易比较。</p><p>具体可选档位与比例以当前页面为准；修改资料后预估会更新，最终以上架时确认的报价为准。</p></div></details>
-              </section>
-
-              <section className="publish-term-section">
-                <div className="publish-term-section-heading"><ShieldCheck size={20} aria-hidden="true" /><h3>赔付与押金</h3></div>
-                <div className="publish-term-row publish-term-options-row"><span className="publish-term-label">赔付方案</span><div className="publish-term-control publish-payout-control"><FormRadioGroup name="full_payout" label="赔付方案" className="publish-payout-group" value={payoutSelected} disabled={formDisabled} onChange={changeFullPayout} options={[{ value: false, label: "普通赔付" }, { value: true, label: "全额包赔", badge: "推荐" }]} />
-                  <div className="publish-payout-feature" data-selected={payoutSelected === true ? "true" : "false"}>
-                    <div className="publish-payout-feature-heading">{payoutSelected === true ? <Image className="publish-payout-art" src="/art/quote/full-payout-shield.png" width={88} height={88} sizes="88px" alt="" /> : <ShieldCheck size={28} aria-hidden="true" />}<div><strong>{payoutSelected === true ? "全额包赔" : "可选全额包赔方案说明"}</strong><span>{payoutSelected === true ? "已选择此方案 · 平台推荐" : payoutSelected === false ? "当前选择普通赔付" : "可选保障 · 尚未选择赔付方案"}</span></div>{payoutSelected === true ? <Check size={18} aria-hidden="true" /> : null}</div>
-                    <dl className="publish-payout-facts"><div><dt>包赔费率</dt><dd>8%</dd></div><div><dt>全额包赔基础押金门槛</dt><dd>{recommendation?.available && recommendationFresh ? `${yuanFromCents(recommendation.fullPayoutMinCents)} 元起` : "300 元起"}</dd></div></dl>
-                    <p>正常结束时，按已消耗的哈夫币与物资收入收取8%服务费，并从收入中扣除。具体保障范围与提前结束的处理，请查看赔付规则。</p>
-                  </div>
-                <details id="publish-payout-rules" className="publish-policy-disclosure"><summary><span>查看赔付规则</span></summary>
-                  <div className="publish-disclosure-panel">
-                    <div className="publish-payout-scenes"><div className="publish-payout-scene-card"><strong>正常结束或提前结束</strong><p>按实际消耗对应的号主扣费前收入计算，由号主承担。上架时的全量收入仅为预估。</p></div></div>
-                    <p className="publish-payout-subnote">未选择全额包赔或未正常交付开租，不自动收取。押金、保证金、价差、提前补足及赔款均不计入收费基数。</p>
-                    <p className="publish-payout-subnote">服务费在结算生效时计算一次。保障针对本次租赁导致的约定损失，范围与实际赔付按有效条款处理；不承诺无条件赔付。</p>
-                    <p className="publish-payout-subnote">以上是平台政策说明；提交上架前需在右侧确认适用协议。</p>
-                  </div>
-                </details>
-                </div></div>
-
-                <div className="publish-term-row"><label className="publish-term-label" htmlFor="publish-deposit">基础租客押金<FieldHelp label="基础租客押金">结合账号价值设置租客押金（不计入你的出租收入）；也可点击“查看推荐押金”后一键采用。</FieldHelp></label><div className="publish-term-control"><div className="supply-deposit-input-group"><div className="supply-deposit-input-wrap"><Input id="publish-deposit" data-first-field inputMode="decimal" value={depositInput} disabled={formDisabled} onChange={(event) => changeDeposit(event.target.value)} placeholder="填写押金金额" aria-invalid={Boolean(depositProblem())} /><span className="supply-deposit-unit">元</span></div><button type="button" className="button secondary supply-recommend-btn" disabled={formDisabled || recommendationBusy} onClick={() => void recommendDeposit()}>{recommendationBusy ? "计算中…" : "查看推荐押金"}</button></div><div className="publish-quick-chips" role="group" aria-label="常用押金档位">{(["200", "300", "500", "800"] as const).map((preset) => <button key={preset} type="button" className="publish-quick-chip" data-active={depositInput.trim() === preset ? "true" : "false"} disabled={formDisabled} onClick={() => changeDeposit(preset)}>{`${preset} 元`}</button>)}</div><FieldError text={depositProblem()?.message} />{recommendation?.available ? <div className="supply-recommend-result" data-fresh={recommendationFresh && !recommendationBinding?.mismatch ? "true" : "false"}><small>{recommendationAmountYuan === null ? "推荐金额待确认，请重新读取；不会按零元采用。" : recommendationAdopted && recommendationCatalogFresh ? `已采用推荐 ${moneyText({ amount: recommendationAmountYuan })}。` : recommendationBinding?.mismatch ? "推荐结果与当前账号资料或规则不匹配，已过期；请重新查看。" : recommendationFresh ? `推荐 ${moneyText({ amount: recommendationAmountYuan })}（依据当前账号资料）。` : `推荐 ${moneyText({ amount: recommendationAmountYuan })}已过期：资料已修改，请重新查看。`}</small><button type="button" className="button quiet" disabled={formDisabled || recommendationBusy || !recommendationFresh || recommendationAdopted} onClick={() => void adoptRecommendation()}>{recommendationBusy ? "核对中…" : recommendationAdopted && recommendationCatalogFresh ? "已采用" : "采用推荐"}</button></div> : recommendation && !recommendation.available ? <div className="supply-recommend-result supply-recommend-result--unavailable" role="status"><AlertCircle size={14} aria-hidden="true" /><span>{recommendation.reason === "FUNDING_POLICY_UNCONFIGURED" ? "当前规则尚未配置推荐押金依据，可自行填写押金。" : "请先补全安全箱、体力、负重、潜水与皮肤资料后再查看推荐押金。"}</span></div> : null}</div></div>
-              </section>
-
-              <section className="publish-term-section publish-term-note-section">
-                <div className="publish-term-section-heading"><FileText size={20} aria-hidden="true" /><h3>补充信息</h3></div>
-                <div className="publish-term-row">
-                  <div className="publish-term-label"><label htmlFor="publish-description">备注（选填）</label><span className="publish-visibility-tag">向租客公开</span></div>
-                  <div className="publish-term-control">
-                    <Textarea id="publish-description" rows={3} maxLength={4000} value={draft.description ?? ""} disabled={formDisabled} aria-invalid={Boolean(fieldError("description"))} onChange={(event) => setDraft({ ...draft, description: event.target.value || null })} placeholder="填写上号配合或账号使用说明（向租客公开展示）" />
-                    <FieldError text={fieldError("description")} />
-                  </div>
-                </div>
-                {infoSourceOptions?.enabled || infoSourceValue ? <div className="publish-term-row">
-                  <div className="publish-term-label"><span>信息来源（选填）</span><span className="publish-visibility-tag publish-visibility-tag--private">仅平台可见</span></div>
-                  <div className="publish-term-control">
-                    <FormSelect label="信息来源（选填）" value={infoSourceValue} disabled={formDisabled || !infoSourceOptions?.enabled || infoSourceOptions.optionsState !== "CONFIGURED"} placeholder="请选择信息来源" popupClassName="publish-select-popup" options={[{ value: "", label: "请选择信息来源" }, ...(infoSourceLegacy ? [{ value: infoSourceValue, label: `${infoSourceValue}（历史来源原文）` }] : []), ...(infoSourceOptions?.options.map(option => ({ value: option.value, label: option.name })) ?? [])]} onChange={value => changeAttribute("info_source", value || null)} />
-                    {infoSourceLegacy ? <small>已保留历史来源原文，重新选择后才会替换。</small> : null}
-                    <FieldError text={fieldError("attributes.info_source")} />
-                  </div>
-                </div> : null}
-              </section>
-            </div>
-          </SectionCard>
+          <PublishTermsSection
+            hasError={errorGroups.has("terms")}
+            fieldError={fieldError}
+            haffBaseIncomplete={haffBaseIncomplete}
+            readOnly={readOnly}
+            haffBaseMissing={haffBaseMissing}
+            scrollToTarget={scrollToTarget}
+            haffInventoryRow={haffInventoryRow}
+            haffInput={haffInput}
+            haffControlsDisabled={haffControlsDisabled}
+            changeHaffM={changeHaffM}
+            haffErrorMessage={haffErrorMessage}
+            termAdjustmentText={termAdjustmentText}
+            draft={draft}
+            options={options}
+            rentalMode={rentalMode}
+            setDraft={setDraft}
+            invalidateConfirmations={invalidateConfirmations}
+            showPricingSelect={showPricingSelect}
+            disabledPricing={disabledPricing}
+            fastLocked={fastLocked}
+            fastReady={fastReady}
+            optionsAvailability={optionsAvailability}
+            rentalModeEntries={rentalModeEntries}
+            ratioRanges={ratioRanges}
+            changeRentalMode={changeRentalMode}
+            ratioInput={ratioInput}
+            ratioInlineProblem={ratioInlineProblem}
+            changeRatio={changeRatio}
+            selectedRatioRange={selectedRatioRange}
+            modeRange={modeRange}
+            displayEstimateDuration={displayEstimateDuration}
+            durationResult={durationResult}
+            ratioKnown={ratioKnown}
+            ratioResult={ratioResult}
+            rentalModes={rentalModes}
+            modeHref={modeHref}
+            payoutSelected={payoutSelected}
+            formDisabled={formDisabled}
+            changeFullPayout={changeFullPayout}
+            recommendation={recommendation}
+            recommendationFresh={recommendationFresh}
+            recommendationAdopted={recommendationAdopted}
+            recommendationCatalogFresh={recommendationCatalogFresh}
+            recommendationBinding={recommendationBinding}
+            recommendationAmountYuan={recommendationAmountYuan}
+            recommendationBusy={recommendationBusy}
+            adoptRecommendation={adoptRecommendation}
+            recommendDeposit={recommendDeposit}
+            depositInput={depositInput}
+            changeDeposit={changeDeposit}
+            depositProblem={depositProblem}
+            infoSourceOptions={infoSourceOptions}
+            infoSourceValue={infoSourceValue}
+            infoSourceLegacy={infoSourceLegacy}
+            changeAttribute={changeAttribute}
+          />
         </div>
       </form>
 
-      {railExpanded ? <div className="publish-rail-backdrop" aria-hidden="true" onClick={() => setRailExpanded(false)} /> : null}
-      <aside ref={railRef} id="publish-quote" tabIndex={-1} className="publish-rail" data-quoted={effectiveQuote ? "true" : "false"} data-expanded={railExpanded ? "true" : "false"} data-stale={ownerPreviewStale ? "true" : "false"} data-pending={ownerIncomePreviewPending ? "true" : undefined} aria-label="出租报价">
-        <div className="publish-rail-head">
-          <div className="publish-rail-heading-group">
-            <h2>预计出租收入</h2>
-          </div>
-          <FieldHelp label="查看出租报价">预计收入为号主侧哈夫币和物品的扣费前金额，按全部库存消耗估算。押金不计入收入；实际收入按使用情况和结算场景计算，不保证最终到账；计价单位均为人民币（元）。</FieldHelp>
-          <div className="publish-rail-mobile-summary">
-            <span>{railSummary.label}</span>
-            <strong data-pending={railSummary.pending ? "true" : undefined}>{railSummary.value}</strong>
-          </div>
-          <button type="button" className="publish-rail-mobile-toggle" aria-expanded={railExpanded} aria-controls="publish-quote-body" onClick={() => setRailExpanded((value) => !value)}>
-            {railExpanded ? "收起" : "明细"}
-            <ChevronDown size={16} aria-hidden="true" />
-          </button>
-        </div>
-        <div className="publish-rail-scroll" id="publish-quote-body">
-        {published ? <div className="publish-success" role="status"><Check size={20} aria-hidden="true" /><strong>已上架</strong><p>公众列表、详情与“我的上架账号”显示的是同一份发布资料。</p>{readOnly ? <p>上架后不可修改；如需变更，请先在账号管理中下架，再重新填写上架资料。</p> : null}<div className="supply-inline-actions"><Link className="button primary" href={`/accounts/${encodeURIComponent(accountId ?? "")}`}>查看公开详情</Link><Link className="button secondary" href="/account?view=accounts">我的上架账号</Link></div></div> : <>
-          {netEstimate ? <div className="publish-income-total"><span>预计所得</span><output aria-label="预计净所得">{netEstimate.ownerNet.amount} 元</output></div> : effectiveQuote ? (
-            <div className="publish-income-total">
-              <span>预计收入（扣费前）</span>
-              <output aria-label="预计收入合计">{breakdown ? `${centsText(breakdown.totalCents)} 元` : "金额待核对"}</output>
-            </div>
-          ) : previewGrossAmount ? (
-            <div className="publish-income-total">
-              <span>{payoutSelected === true ? "预计收入（扣费前）" : ownerPreview?.state === "PARTIAL" ? "预计总收入（部分）" : "预计总收入"}{ownerPreviewStale ? <small className="publish-stale-tag">（上次预估）</small> : null}</span>
-              <output aria-label="实时预估总收入">{`${previewGrossAmount} 元`}</output>
-            </div>
-          ) : (
-            <div className="publish-income-total publish-income-total--pending">
-              <span>预计总收入</span>
-              <output aria-label="待核算总收入"><PendingValue label="待核算" /></output>
-              <small className="publish-pending-hint">{pendingTotalHint}</small>
-            </div>
-          )}
-          <dl className="publish-rail-lines">
-            <div>
-              <dt>哈夫币计价比例</dt>
-              <dd>
-                {effectiveQuote?.ownerHaffRatio
-                  ? `${effectiveQuote.ownerHaffRatio} 万哈夫币/元`
-                  : ownerPreview?.ownerHaffRatioWanPerYuan
-                    ? `${ownerPreview.ownerHaffRatioWanPerYuan} 万哈夫币/元`
-                    : <PendingValue label="待核定" />}
-              </dd>
-            </div>
-            <div>
-              <dt>预计租期{!effectiveQuote && displayEstimateDuration ? <small>按当前条件估算</small> : null}</dt>
-              <dd>
-                {displayEstimateDuration ?? <PendingValue label="待核算" />}
-              </dd>
-            </div>
-            <div>
-              <dt>哈夫币预计收入</dt>
-              <dd>
-                {effectiveQuote && breakdown
-                  ? `${centsText(breakdown.haffCents)} 元`
-                  : ownerPreview?.ownerHaffIncome
-                    ? `${ownerPreview.ownerHaffIncome.amount} 元`
-                    : ownerIncomePreviewPending
-                      ? "计算中…"
-                      : <PendingValue label="待核定" />}
-              </dd>
-            </div>
-            <div className="publish-live-resource-total" aria-busy={ownerIncomePreviewPending&&!effectiveQuote}>
-              <dt>物品预计收入{ownerPreviewStale&&!effectiveQuote?<small>上次预估</small>:null}</dt>
-              <dd><output aria-label="物品预估收入" aria-live="off">{resourceTotalText ?? <PendingValue label="待填" />}</output></dd>
-            </div>
-          </dl>
-          <p className="publish-rail-note">按库存全部用完预估，押金不计入收入。</p>
-          {netEstimate ? <div className="publish-fee-pending" role="status">
-            <div><span>扣费前收入</span><strong>{netEstimate.ownerGross.amount} 元</strong></div>
-            {netEstimate.platformFee ? <div><span>平台手续费</span><strong>−{netEstimate.platformFee.amount.amount} 元</strong></div> : null}
-            <div><span>全额包赔服务费{netEstimate.selected ? "（8%）" : ""}</span><strong>{netEstimate.selected ? `−${netEstimate.serviceFee.amount.amount} 元` : "未选择，不收取"}</strong></div>
-            <p>按全部申报库存用完、正常结束预估；实际按使用情况与结算条款核算。</p>
-          </div> : payoutSelected === true ? <div className="publish-fee-pending" role="status"><div><span>全额包赔服务费</span><strong>{ownerIncomePreviewPending || ownerPreviewStale ? "正在重新核算…" : "金额待核定"}</strong></div><p>当前为扣费前收入，费后金额尚未核定。</p></div> : payoutSelected === null ? <p className="publish-rail-note">选择赔付方案后可查看费后预计所得。</p> : null}
-          <dl className="publish-rail-lines publish-rail-deposits">
-            <div><dt>基础租客押金<small>不计入收入</small></dt><dd>{!ownerPreviewStale && ownerPreview?.depositState === "KNOWN" && ownerPreview.baseTenantDeposit ? moneyText(ownerPreview.baseTenantDeposit) : declaredDepositCents !== null ? `${yuanFromCents(declaredDepositCents)} 元` : depositInput.trim() ? "请检查金额" : <PendingValue label="待填" />}</dd></div>
-            {!ownerPreviewStale && ownerPreview?.depositState === "KNOWN" && ownerPreview.baseTenantDeposit ? <div className="publish-deposit-verified"><dt><Check size={12} aria-hidden="true" />符合押金要求</dt></div> : null}
-            {actualPublisherRequirement !== null && actualPublisherRequirement > 0n ? <div><dt>发布保证金<small>本次规则要求</small></dt><dd>{moneyText(effectiveQuote?.publisherBailRequirement)}</dd></div> : null}
-          </dl>
-          {actualPublisherRequirement !== null && actualPublisherRequirement > 0n ? <p className="publish-rail-note">请先保存草稿，再前往 <Link href="/account?view=credit">信用与保证金</Link> 查看缴纳状态。</p> : null}
-          {effectiveQuote ? <small className="publish-rail-deposit-note">会员实际实付押金以下单时的个人报价为准。</small> : null}
-          {effectiveQuote?.expiryDisclosures.length ? <div className="publish-rail-expiry"><strong>权益有效期</strong>{effectiveQuote.expiryDisclosures.map((item) => <p key={item.entitlementId}>{catalog?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? supply?.version?.presentation?.entitlements.find((entitlement) => entitlement.id === item.entitlementId)?.name ?? "该项权益"}：{item.expiresAt ? new Date(item.expiresAt).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "长期有效"} · 本租期不保证覆盖完整有效期</p>)}</div> : null}
-          {effectiveQuote && !quoteConsistent ? <div className="supply-blockers" role="alert"><strong>报价金额待核对</strong><p>本次报价的行金额与合计不一致，暂不能确认上架。</p></div> : null}
-          {visibleBlockers.length ? <div className="supply-blockers" data-blocker-count={visibleBlockers.length}>
-            {userBlockers.length ? <section className="supply-blocker-group is-user" data-blocker-group="user"><strong><TriangleAlert size={14} aria-hidden="true" />上架限制（{userBlockers.length}）</strong><ul>{Array.from(new Set(userBlockers.map(blockerText))).map((text) => <li key={text}>{text}</li>)}</ul></section> : null}
-            {systemBlockers.length ? <section className="supply-blocker-group is-system" data-blocker-group="system"><strong><Clock3 size={14} aria-hidden="true" />暂无法上架</strong><ul>{Array.from(new Set(systemBlockers.map(blockerText))).map((text) => <li key={text}>{text}</li>)}</ul></section> : null}
-            <p className="supply-muted" role="status">当前暂不可提交上架，请处理上述事项或联系客服。</p>
-            <button type="button" className="button secondary" disabled={Boolean(busy) || formDisabled} onClick={() => void refreshLatest(false)}>刷新状态</button>
-          </div> : null}
-          {!agreement ? <p className="supply-muted">本次条款正文尚未读取，暂不能确认上架。</p> : null}
-          {payoutSelected === true && !published && !currentPayoutTerms ? (
-            <p className="supply-muted" role={payoutTerms?.status === "unavailable" ? "alert" : "status"}>
-              {payoutTerms?.target === payoutTarget && payoutTerms.status === "unavailable"
-                ? "全额包赔条款暂时无法读取或版本已变化，请刷新后重试。"
-                : "正在读取本次全额包赔条款…"}
-            </p>
-          ) : null}
-        </>}
-        </div>
-        {!published ? <div className="publish-rail-footer">
-          {readOnly ? <div className="publish-rail-readonly"><p>{mustCreateAccount ? "此账号不能修改或再次上架；如需出租，请重新填写上架资料。" : reviewState === "SUBMITTED" ? "当前资料正在审核中，不能直接编辑。" : "当前资料不是可编辑草稿。"}</p>{mustCreateAccount ? <Link className="button primary" href="/publish">重新填写上架资料</Link> : reviewState === "SUBMITTED" ? <Link href="/account?view=accounts" className="button secondary">返回账号管理</Link> : <button type="button" className="button primary" disabled={identityState !== "confirmed" || !identityRef.current || Boolean(busy)} onClick={() => void beginEditing()}>{busy === "edit" ? "准备草稿中…" : "继续填写草稿"}</button>}</div> : <>
-            {effectiveQuote ? <div className="publish-confirm">
-              <div className="publish-consent-card">
-                {agreementConsent}
-                {payoutConsent}
-              </div>
-              <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void confirmPublish()}>{primaryLabel}</button>
-              <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
-              {rulesAccepted ? <p className="supply-muted">条款已按当前资料确认；资料变化后需重新确认。</p> : null}
-            </div> : <div className="publish-rail-actions">
-              <div className="publish-consent-card">
-                {agreementConsent}
-                {payoutConsent}
-              </div>
-              <button type="button" className="button primary" disabled={primaryDisabled} title={blockerHint} onClick={() => void primaryAction()}>{primaryLabel}</button>
-              <button type="button" className="button secondary" disabled={formDisabled} onClick={() => void save()}>{busy === "save" ? "保存中…" : "保存草稿"}</button>
-            </div>}
-          </>}
-        </div> : null}
-      </aside>
+      <PublishRail
+        railRef={railRef}
+        railExpanded={railExpanded}
+        setRailExpanded={setRailExpanded}
+        effectiveQuote={effectiveQuote}
+        ownerPreviewStale={ownerPreviewStale}
+        ownerIncomePreviewPending={ownerIncomePreviewPending}
+        railSummary={railSummary}
+        published={published}
+        readOnly={readOnly}
+        accountId={accountId}
+        netEstimate={netEstimate}
+        breakdown={breakdown}
+        previewGrossAmount={previewGrossAmount}
+        payoutSelected={payoutSelected}
+        ownerPreview={ownerPreview}
+        pendingTotalHint={pendingTotalHint}
+        displayEstimateDuration={displayEstimateDuration}
+        resourceTotalText={resourceTotalText}
+        declaredDepositCents={declaredDepositCents}
+        depositInput={depositInput}
+        actualPublisherRequirement={actualPublisherRequirement}
+        catalog={catalog}
+        supply={supply}
+        quoteConsistent={quoteConsistent}
+        visibleBlockers={visibleBlockers}
+        userBlockers={userBlockers}
+        systemBlockers={systemBlockers}
+        busy={busy}
+        formDisabled={formDisabled}
+        refreshLatest={refreshLatest}
+        agreement={agreement}
+        currentPayoutTerms={currentPayoutTerms}
+        payoutTerms={payoutTerms}
+        payoutTarget={payoutTarget}
+        mustCreateAccount={mustCreateAccount}
+        reviewState={reviewState}
+        identityState={identityState}
+        identityRef={identityRef}
+        beginEditing={beginEditing}
+        agreementConsent={agreementConsent}
+        payoutConsent={payoutConsent}
+        primaryDisabled={primaryDisabled}
+        blockerHint={blockerHint}
+        confirmPublish={confirmPublish}
+        primaryLabel={primaryLabel}
+        save={save}
+        rulesAccepted={rulesAccepted}
+        primaryAction={primaryAction}
+      />
     </div>
 
-    <Dialog.Root open={termsModalOpen} onOpenChange={setTermsModalOpen}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-agreement-backdrop" />
-        <Dialog.Popup className="publish-dialog publish-agreement-dialog" data-slot="dialog-content">
-          <header>
-            <Dialog.Title>{agreement?.title ?? "出租条款"}</Dialog.Title>
-            <Dialog.Close className="publish-reading-close" aria-label="关闭出租条款">
-              <X size={20} aria-hidden="true" />
-            </Dialog.Close>
-          </header>
-          <Dialog.Description className="sr-only">
-            当前读取的协议正文；阅读不会自动同意条款，上架前仍需单独勾选确认。
-          </Dialog.Description>
-          {agreement ? <AgreementBody body={agreement.body} /> : <p>暂未取得协议正文。</p>}
-          <div className="publish-agreement-dialog-actions">
-            <Dialog.Close className="button secondary">返回</Dialog.Close>
-            {agreement ? <button type="button" className="button primary" disabled={formDisabled} onClick={() => { setAgreementChecked(true); setTermsModalOpen(false); }}>我已阅读并同意本条款</button> : null}
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <TermsDialog
+      open={termsModalOpen}
+      onOpenChange={setTermsModalOpen}
+      agreement={agreement}
+      formDisabled={formDisabled}
+      onAccept={() => {
+        setAgreementChecked(true);
+        setTermsModalOpen(false);
+      }}
+    />
 
-    <Dialog.Root open={payoutTermsModalOpen} onOpenChange={setPayoutTermsModalOpen}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-agreement-backdrop" />
-        <Dialog.Popup className="publish-dialog publish-agreement-dialog" data-slot="dialog-content">
-          <header>
-            <Dialog.Title>{currentPayoutTerms?.title ?? "全额包赔条款"}</Dialog.Title>
-            <Dialog.Close className="publish-reading-close" aria-label="关闭包赔条款">
-              <X size={20} aria-hidden="true" />
-            </Dialog.Close>
-          </header>
-          <Dialog.Description className="sr-only">
-            当前读取的全额包赔协议正文；阅读不会自动同意条款，上架前仍需单独勾选确认。
-          </Dialog.Description>
-          {currentPayoutTerms ? <AgreementBody body={currentPayoutTerms.body} /> : <p>暂未取得协议正文。</p>}
-          <div className="publish-agreement-dialog-actions">
-            <Dialog.Close className="button secondary">返回</Dialog.Close>
-            {currentPayoutTerms ? <button type="button" className="button primary" disabled={formDisabled} onClick={() => { setPayoutAccepted(true); setPayoutTermsModalOpen(false); }}>我已阅读并同意包赔条款</button> : null}
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <PayoutTermsDialog
+      open={payoutTermsModalOpen}
+      onOpenChange={setPayoutTermsModalOpen}
+      currentPayoutTerms={currentPayoutTerms}
+      formDisabled={formDisabled}
+      onAccept={() => {
+        setPayoutAccepted(true);
+        setPayoutTermsModalOpen(false);
+      }}
+    />
 
-    <Dialog.Root open={previewMedia !== null} onOpenChange={(open) => { if (!open) setPreviewMedia(null); }}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-media-lightbox-backdrop" />
-        <Dialog.Popup className="publish-dialog publish-media-lightbox" data-slot="dialog-content" aria-label={previewMedia?.title ?? "图片预览"}>
-          <header className="publish-media-lightbox-head">
-            <Dialog.Title>{previewMedia?.title ?? "图片预览"}</Dialog.Title>
-            <Dialog.Close className="publish-reading-close" aria-label="关闭图片预览">
-              <X size={20} aria-hidden="true" />
-            </Dialog.Close>
-          </header>
-          {previewMedia ? (
-            <div className="publish-media-lightbox-body">
-              <img src={previewMedia.url} alt={previewMedia.title} />
-            </div>
-          ) : null}
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <PreviewMediaDialog
+      previewMedia={previewMedia}
+      onClose={() => setPreviewMedia(null)}
+    />
 
-    <Dialog.Root open={publishSuccessOpen} onOpenChange={setPublishSuccessOpen}>
-      <Dialog.Portal>
-        <Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-success-backdrop" />
-        <Dialog.Popup className="publish-dialog publish-success-dialog" data-slot="dialog-content">
-          <div className="publish-success-fireworks" aria-hidden="true">
-            <span className="firework-particle particle-1">🎆</span>
-            <span className="firework-particle particle-2">✨</span>
-            <span className="firework-particle particle-3">🎉</span>
-            <span className="firework-particle particle-4">✨</span>
-            <span className="firework-particle particle-5">🥳</span>
-            <span className="firework-particle particle-6">🎆</span>
-          </div>
-          <div className="publish-success-icon-badge">
-            <Check size={32} aria-hidden="true" />
-          </div>
-          <header className="publish-success-header">
-            <Dialog.Title>账号已成功上架！</Dialog.Title>
-            <Dialog.Description>
-              你的账号已发布至平台，租客可在游戏专区浏览并下单。
-            </Dialog.Description>
-          </header>
-          <div className="publish-success-timer">
-            <strong>{successCountdown}</strong> 秒后将自动前往我的账号…
-          </div>
-          <div className="publish-success-actions">
-            <button
-              type="button"
-              className="button primary"
-              onClick={() => {
-                setPublishSuccessOpen(false);
-                router.push("/account?view=accounts");
-              }}
-            >
-              立即前往我的账号
-            </button>
-            <button
-              type="button"
-              className="button secondary"
-              onClick={() => setPublishSuccessOpen(false)}
-            >
-              留在本页
-            </button>
-          </div>
-        </Dialog.Popup>
-      </Dialog.Portal>
-    </Dialog.Root>
+    <PublishSuccessDialog
+      open={publishSuccessOpen}
+      onOpenChange={setPublishSuccessOpen}
+      successCountdown={successCountdown}
+      onNavigateToAccounts={() => {
+        setPublishSuccessOpen(false);
+        router.push("/account?view=accounts");
+      }}
+    />
   </ServiceShell>;
 }
 
