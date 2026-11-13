@@ -8,12 +8,14 @@ import { ConfigurationError, type AppConfig } from "../config/config";
 import { conflict, invalid, notFound } from "../supply/supply-util";
 import { cancelExpiredReservation, lockOrderPartiesInOrder } from "./order";
 import { readVerifiedJoinpayFactScope, type FormalJoinpayPaymentFact } from "./joinpay-collection-source";
-import { assertNativePaymentDistributionStore } from "../finance/distribution-payment-store";
+import { assertFixedFeeTestPaymentDistributionStore, assertNativePaymentDistributionStore } from "../finance/distribution-payment-store";
 import { REGRESSION_DATABASE, REGRESSION_MARKER, REGRESSION_RUNTIME_USER } from "../config/test-resource";
 import { assertLocalSandboxOrderAdmission, localFinancialSandboxRegistration, type LocalFinancialSandbox } from "../finance/local-financial-sandbox-resource";
 import { canonicalize } from "../supply/content-hash";
 import { localSandboxPaymentAnchor } from "./local-sandbox-checkout-crypto";
 import { assertEcsTestDemoOrderAdmission, ecsTestDemoPaymentAnchor, readEcsTestDemoRegistration, type DemoFinanceResource } from "../finance/ecs-test-demo-resource";
+
+import { assertFixedFeeTestConfiguration, assertFixedFeeTestResource, fixedFeeTestResource } from "../finance/controlled-fixed-fee-resource";
 
 export type PaymentInput = Readonly<{
   orderId: string;
@@ -26,7 +28,7 @@ export type PaymentInput = Readonly<{
 }>;
 type ControlledPaymentFact = PaymentInput & { readonly source: "CONTROLLED"; readonly merchantScopeId: string };
 type VerifiedPaymentFact = ControlledPaymentFact | FormalJoinpayPaymentFact;
-type ControlledScope = { appId: string; database: string; runtimeUser: string; regressionOid?: number; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; payerUserId?: string; payerSessionId?: string; checkoutExpiresAt?: string };
+type ControlledScope = { appId: string; database: string; runtimeUser: string; regressionOid?: number; fixedFeeTest?: true; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; payerUserId?: string; payerSessionId?: string; checkoutExpiresAt?: string };
 const verifiedFacts = new WeakMap<object, ControlledScope>();
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const INPUT_KEYS = ["orderId", "merchantOrderNo", "providerTransactionId", "amountCents", "currency", "providerPaidAt", "requestId"];
@@ -41,6 +43,12 @@ export function createControlledPaymentSource(options: {
   resourceOid?: number;
 }): (input: PaymentInput) => ControlledPaymentFact {
   const { config, resourceSet, appId, merchantScopeId } = options;
+  if (resourceSet === "fixed_fee") {
+    assertFixedFeeTestConfiguration(config, options.allowedOrderIds);
+    if (!ID.test(appId) || merchantScopeId !== fixedFeeTestResource.merchantScopeId) throw new ConfigurationError("Invalid controlled payment scope");
+    return controlledPaymentIssuer({ appId, database: fixedFeeTestResource.name, runtimeUser: fixedFeeTestResource.role, fixedFeeTest: true },
+      merchantScopeId, new Set(options.allowedOrderIds));
+  }
   const regression = resourceSet === "regression";
   const resourceMatches = regression
     ? config.database.name === REGRESSION_DATABASE && config.database.user === REGRESSION_RUNTIME_USER
@@ -105,6 +113,18 @@ export async function assertControlledSettlementResource(client: PoolClient, fac
   const scope = fact && typeof fact === "object" ? verifiedFacts.get(fact) : undefined;
   if (scope?.sandbox && (fact as PaymentInput).orderId === orderId) { await assertLocalSandboxOrderAdmission(client, scope.sandbox, orderId); return; }
   if (scope?.demo && (fact as PaymentInput).orderId === orderId) { await assertEcsTestDemoOrderAdmission(client, scope.demo, orderId); return; }
+  if (scope?.fixedFeeTest && (fact as PaymentInput).orderId === orderId) {
+    await assertFixedFeeTestResource(client);
+    const payment = fact as ControlledPaymentFact;
+    const original = (await client.query(
+      "SELECT 1 FROM zzsh_order.payment_confirmation p JOIN zzsh_order.rental_order o ON o.id=p.order_id AND o.paid_confirmation_id=p.id" +
+      " WHERE o.id=$1 AND p.source='CONTROLLED' AND p.disposition='APPLIED' AND p.merchant_scope_id=$2" +
+      " AND p.provider_transaction_id=$3 AND p.merchant_order_no=$4 AND p.amount_cents=$5 AND p.currency=$6 AND p.provider_paid_at=$7::timestamptz",
+      [orderId,payment.merchantScopeId,payment.providerTransactionId,payment.merchantOrderNo,payment.amountCents,payment.currency,payment.providerPaidAt],
+    )).rows[0];
+    if (!original) throw invalid("Original fixed-fee controlled payment is unavailable");
+    return;
+  }
   if (!scope?.regressionOid || (fact as PaymentInput).orderId !== orderId || process.env.NODE_ENV === "production") throw invalid("Controlled settlement fact is not bound");
   await assertRegressionPaymentResource(client,scope);
 }
@@ -189,6 +209,10 @@ export async function confirmOrderPayment(
   const controlledScope = fact && verifiedFacts.get(fact);
   const scope = formalScope ?? controlledScope;
   if (!scope) throw invalid("Payment fact is not verified");
+  if (controlledScope?.fixedFeeTest) {
+    await assertFixedFeeTestResource(client);
+    assertFixedFeeTestPaymentDistributionStore(distribution, fact.orderId);
+  }
   if (controlledScope?.regressionOid !== undefined) await assertRegressionPaymentResource(client,controlledScope);
   if (controlledScope?.sandbox || controlledScope?.demo) {
     if (controlledScope.sandbox) await assertLocalSandboxOrderAdmission(client, controlledScope.sandbox, fact.orderId);

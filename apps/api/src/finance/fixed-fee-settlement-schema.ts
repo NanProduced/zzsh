@@ -11,6 +11,8 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
    AND position('PLATFORM_SERVICE_FEE' IN pg_get_constraintdef(c.oid))>0
    AND position('PLATFORM_MEMBER_DISCOUNT' IN pg_get_constraintdef(c.oid))>0)
   AND NOT EXISTS(SELECT 1 FROM (VALUES
+   ('zzsh_order.guard_supply_final_funding()','zzsh_order.rental_order','personal-quote-v5','credit_guarantee_waived_revision'),
+   ('zzsh_order.guard_fixed_fee_personal_order()','zzsh_order.rental_order','fixed fee order contract mismatch','assert_fixed_fee_personal_order_v5'),
    ('zzsh_order.guard_settlement_ledger_entry()','zzsh_order.settlement_ledger_entry','PLATFORM_SERVICE_FEE','PLATFORM_MEMBER_DISCOUNT'),
    ('zzsh_order.check_settlement_posting_batch()','zzsh_order.settlement_posting','settlement-version-v4','proposedPlatformServiceFee'),
    ('zzsh_order.derive_payment_referral_inputs(text)','zzsh_order.payment_distribution_basis','IN (''2''::jsonb,''4''::jsonb)','ELSIF (raw_amounts[i]=0 OR raw_amounts[i]<minimum) AND o.quote_snapshot->>''schemaVersion'' IS DISTINCT FROM ''4'''),
@@ -20,6 +22,8 @@ export async function fixedFeeSettlementSchemaReady(client:Pick<PoolClient,'quer
    WHERE p.oid=to_regprocedure(required.signature) AND p.proowner=c.relowner AND NOT p.prosecdef
     AND position(required.first_marker IN p.prosrc)>0 AND position(required.second_marker IN p.prosrc)>0))
   AND NOT EXISTS(SELECT 1 FROM (VALUES
+   ('zzsh_order.rental_order','supply_final_funding_guard','zzsh_order.guard_supply_final_funding()',false,7,NULL),
+   ('zzsh_order.rental_order','rental_order_fixed_fee_personal_guard','zzsh_order.guard_fixed_fee_personal_order()',false,23,NULL),
    ('zzsh_order.settlement_ledger_entry','settlement_ledger_entry_guard','zzsh_order.guard_settlement_ledger_entry()',false,7,'(new.posting_id IS NOT NULL)'),
    ('zzsh_order.settlement_posting','settlement_posting_batch_guard','zzsh_order.check_settlement_posting_batch()',true,5,NULL),
    ('zzsh_order.settlement_ledger_entry','settlement_ledger_batch_guard','zzsh_order.check_settlement_posting_batch()',true,5,NULL),

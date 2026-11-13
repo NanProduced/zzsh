@@ -4,6 +4,7 @@ import type { PoolClient } from "pg";
 import { SecurityApiError } from "../auth/security-core";
 import { ConfigurationError, type AppConfig } from "../config/config";
 import { API_V1_ERROR_CODES, validateIdempotencyKey } from "../contracts/api-v1";
+import { assertFixedFeeTestConfiguration, assertFixedFeeTestResource, fixedFeeTestResource } from "../finance/controlled-fixed-fee-resource";
 import type { PaymentDistributionStore } from "../finance/distribution-payment-store";
 import { conflict, fingerprintRequest, invalid, notFound, withIdempotency, type IdempotentResult } from "../supply/supply-util";
 import {
@@ -64,11 +65,19 @@ export function wireAmountForCents(amountCents: string): string {
 }
 
 // ---------- 合成请求能力：仅显式 test/fake 隔离资源，进程内对象，无环境开关 ----------
-const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; demoPurpose?: "COLLECTION" | "REFUND" }>();
+const requestCapabilities = new WeakMap<object, { database: string; runtimeUser: string; fixedFeeTest?: true; regression?: ControlledRegressionResource; orderIds?: ReadonlySet<string>; sandbox?: LocalFinancialSandbox; demo?: DemoFinanceResource; demoPurpose?: "COLLECTION" | "REFUND" }>();
 export type SyntheticRequestCapability = Readonly<{ evidenceLevel: "SYNTHETIC_PROTOCOL" | "CONTROLLED_TEST" }>;
 
 export function createSyntheticChannelRequestCapability(options: { config: AppConfig; resourceSet: string; evidenceLevel: SyntheticRequestCapability["evidenceLevel"]; regression?: ControlledRegressionBinding; allowedOrderIds?: readonly string[] }): SyntheticRequestCapability {
   const { config, resourceSet } = options;
+  if (resourceSet === "fixed_fee") {
+    assertFixedFeeTestConfiguration(config, options.allowedOrderIds ?? []);
+    if (options.evidenceLevel !== "CONTROLLED_TEST") throw new ConfigurationError("Fixed-fee resource only admits controlled channel operations");
+    const capability = Object.freeze({ evidenceLevel: "CONTROLLED_TEST" as const });
+    requestCapabilities.set(capability, { database: fixedFeeTestResource.name, runtimeUser: fixedFeeTestResource.role,
+      fixedFeeTest: true, orderIds: new Set(options.allowedOrderIds) });
+    return capability;
+  }
   const regression = resourceSet === "regression";
   const resource = regression && options.regression ? createControlledRegressionResource(config, options.regression, "CHANNEL_REQUEST") : undefined;
   if (config.profile !== "test" || config.provider !== "fake" || !config.testOperationsEnabled
@@ -166,6 +175,7 @@ export async function assertSyntheticChannelRequestCapability(client: PoolClient
   const scope = capability && typeof capability === "object" ? requestCapabilities.get(capability) : undefined;
   if (!scope) throw closed();
   if (scope.demo && purpose !== scope.demoPurpose) throw closed();
+  if (scope.fixedFeeTest) await assertFixedFeeTestResource(client);
   if (scope.regression) await assertControlledRegressionResource(client, scope.regression, "CHANNEL_REQUEST");
   if (scope.sandbox) await assertLocalFinancialSandboxResource(client, scope.sandbox);
   if (scope.demo) await assertEcsTestDemoResource(client, scope.demo);
