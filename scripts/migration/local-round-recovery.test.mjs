@@ -256,6 +256,13 @@ test('next-profile core batches acquire the transaction fence before writes and 
   assert(systemOnly.commands.includes('FENCE')); assert(systemOnly.commands.includes('COMMIT'));
   const oldProfile = await load({ withoutActor: true });
   assert.match(oldProfile.error?.message ?? '', /EXISTING_MAINTENANCE_ACTOR_REQUIRED/); assert(!oldProfile.commands.includes('LOCK'));
+  const unknown = await load({ ...options, withoutActor: true, failure: 'lost-commit' });
+  assert.ifError(unknown.error); assert.equal(unknown.state.status, 'COMMIT_UNKNOWN');
+  const recovery = await load({ ...options, withoutActor: true, previous: unknown, recover: true });
+  assert.ifError(recovery.error); assert.equal(recovery.state.binding.actorId, null);
+  assert.deepEqual(recovery.state.pending, unknown.state.pending); assert(!recovery.commands.includes('COMMIT'));
+  const differentActor = await load({ ...options, previous: unknown, recover: true });
+  assert.match(differentActor.error?.message ?? '', /CHECKPOINT_BINDING_CHANGED/); assert(!differentActor.commands.includes('LOCK'));
   assert(applied.commands.indexOf('FENCE_EPOCH') < applied.commands.indexOf('SESSION_FENCE'));
   assert(applied.commands.indexOf('SESSION_FENCE') < applied.commands.indexOf('BEGIN'));
   assert(applied.commands.indexOf('BEGIN') < applied.commands.indexOf('FENCE'));
