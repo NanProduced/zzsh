@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Plus, RefreshCw, Save, Send, Undo2 } from "lucide-react";
 import { RESOURCE_DEFINITIONS } from "@zzsh/content";
 import { canonicalize, extractPlate, plateDigest, validatePlateDocument, type PlateDocumentEnvelope } from "@zzsh/content/plate";
@@ -22,7 +22,7 @@ import { resourcePath, type ResourceDetail, type ResourcePage } from "./content-
 import { ContentSaveStatus, emptyPlateDocument } from "./content-plate";
 import "./legal-documents.css";
 
-const PlateEditor = lazy(() => import("../components/plate/plate-editor"));
+import PlateEditor from "../components/plate/plate-editor-loader";
 
 type DocType = "PLATFORM_TERMS" | "PLATFORM_PRIVACY" | "EARLY_SETTLEMENT";
 type LegalVersion = {

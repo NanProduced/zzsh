@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Check, CircleDot, Copy, History, Loader2, MessageSquareText, MoreHorizontal, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
 import { extractPlate, type PlateDocumentEnvelope, type PlateNode } from "@zzsh/content/plate";
 import { PlateDocument } from "@zzsh/ui/plate-document";
@@ -31,7 +31,7 @@ import type { PlateEditorHandle } from "../../components/plate/plate-editor";
 import type { PlateCommentAnchor } from "../../components/plate/shell/comment-toolbar-button";
 import type { PlateCommentTarget } from "../../components/plate/shell/page-block";
 
-const PlateEditor = lazy(() => import("../../components/plate/plate-editor"));
+import PlateEditor from "../../components/plate/plate-editor-loader";
 
 type LoadState = "loading" | "ready" | "error" | "forbidden" | "deleted" | "purged" | "missing";
 

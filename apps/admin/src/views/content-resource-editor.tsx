@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, FileClock, MoreHorizontal, Search, ShieldAlert, Trash2, TriangleAlert } from "lucide-react";
 import { canonicalize, extractPlate, validatePlateDocument, type PlateDocumentEnvelope, type PlateNode } from "@zzsh/content/plate";
 import { PlateDocument } from "@zzsh/ui/plate-document";
@@ -17,8 +17,7 @@ import { RESOURCE_CATEGORY_LABEL, contentTime, resourcePath, type ContentOperati
 import { adminMediaUrl, buildPlatePayload, readPlateDocument, resourcePreset, ContentSaveStatus, type ContentSavePhase, type PlateSeed } from "./content-plate";
 import type { ContentResource } from "@zzsh/content";
 import type { PlateEditorHandle } from "../components/plate/plate-editor";
-
-const PlateEditor = lazy(() => import("../components/plate/plate-editor"));
+import PlateEditor from "../components/plate/plate-editor-loader";
 
 type DocumentResource = Extract<ContentResource, { kind: "guide" | "notice" }>;
 export type ContentEditorProps = {

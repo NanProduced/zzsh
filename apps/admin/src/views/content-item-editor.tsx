@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ImagePlus, Send, Settings2, ShieldAlert, TriangleAlert } from "lucide-react";
 import { canonicalize, extractPlate, validatePlateDocument, type PlateDocumentEnvelope, type PlateNode } from "@zzsh/content/plate";
 import { PlateDocument } from "@zzsh/ui/plate-document";
@@ -7,7 +7,7 @@ import { ContentMediaField } from './content-resource-fields';
 import { contentTime } from './content-resources-model';
 import { adminMediaUrl, isPlateEnvelope, readPlateDocument, ContentSaveStatus, type ContentSavePhase, type PlateSeed } from './content-plate';
 
-const PlateEditor = lazy(() => import("../components/plate/plate-editor"));
+import PlateEditor from "../components/plate/plate-editor-loader";
 
 import {
   adminRequest,

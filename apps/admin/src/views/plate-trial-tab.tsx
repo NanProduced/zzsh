@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { extractPlate, plateDigest, validatePlateDocument, PRESETS, type PlateDocumentEnvelope, type PlatePreset } from "@zzsh/content/plate";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Skeleton } from "../components/ui/skeleton";
 
-const PlateEditor = lazy(() => import("../components/plate/plate-editor"));
+import PlateEditor from "../components/plate/plate-editor-loader";
 
 const empty = (preset: PlatePreset): PlateDocumentEnvelope => ({ format: "plate", schemaVersion: 1, preset, value: [{ type: "p", children: [{ text: "" }] }] });
 
