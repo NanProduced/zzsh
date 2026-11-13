@@ -715,7 +715,7 @@ export function SupplyCatalogView({
   }, [catalog, editor]);
 
   if (!canManage) {
-    return <section className="section-panel"><StatusMessage themeAware tone="warning" error="当前账号没有供给目录维护权限；Boss 也需按游戏对象范围操作。" /></section>;
+    return <section className="section-panel"><StatusMessage themeAware tone="warning" error="当前账号没有游戏目录维护权限；Boss 也需按游戏对象范围操作。" /></section>;
   }
 
   const gameItems = games.map((game) => ({ value: game.id, label: `${game.name}（${game.code}）` }));
@@ -787,7 +787,7 @@ export function SupplyCatalogView({
   };
 
   const createReason = !canManage
-    ? "当前身份没有目录维护权限。"
+    ? "当前身份没有游戏目录维护权限。"
     : storageBlocked ? "目录恢复记录未就绪，暂不能提交新修改。"
     : (tab === "skins" || tab === "skin-owners") && !contractReady
       ? "皮肤目录资料暂时无法确认，维护暂不可用；请稍后重试或联系管理员。"
@@ -836,7 +836,7 @@ export function SupplyCatalogView({
       <section className="section-panel">
         <div className="panel-heading">
           <div>
-            <h3>目录维护</h3>
+            <h3>游戏目录</h3>
             <p>维护发布与计价使用的物品、皮肤和账号属性。</p>
           </div>
         </div>
@@ -1072,7 +1072,7 @@ export function SupplyCatalogView({
                   <h4 className="text-xs font-semibold">{editor.kind === "skins" ? "皮肤图片" : "物品图片"}</h4>
                   {editor.values.mediaId ? <Button type="button" size="sm" variant="outline" onClick={unbindMedia}>解除绑定</Button> : null}
                 </div>
-                <p className="text-[11px] text-muted-foreground">目录页只绑定本平台已审核且允许公开的衍生图，不上传字节；上传在平台素材审核。</p>
+                <p className="text-[11px] text-muted-foreground">目录页只绑定本平台已审核且允许公开的衍生图，不上传字节；上传在素材审核。</p>
                 {editor.values.mediaId ? (
                   <div className="flex items-center gap-3">
                     <span className="relative">
@@ -1095,7 +1095,7 @@ export function SupplyCatalogView({
                     <StatusMessage themeAware error={mediaOptionsError} />
                     {mediaOptionsLoading && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">加载候选图片…</p> : null}
                     {!mediaOptionsLoading && !mediaOptionsError && mediaOptions.length === 0 ? (
-                      <p className="text-xs text-muted-foreground">没有可绑定图片；请先在平台素材审核上传并审核公开 {mediaPickerPurpose} 素材。</p>
+                      <p className="text-xs text-muted-foreground">没有可绑定图片；请先在素材审核上传并审核公开 {mediaPickerPurpose} 素材。</p>
                     ) : null}
                     {mediaOptions.length > 0 ? (
                       <>
@@ -1173,7 +1173,7 @@ function GameCreateForm({ draft, setDraft, onSubmit, loading, className }: { dra
       <Field label="描述（可选）"><Input value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} className="h-9 text-xs" /></Field>
       <div className="flex flex-wrap items-center gap-2 md:col-span-3">
         <Button type="submit" size="sm" disabled={loading}>{loading ? "创建中…" : "创建游戏"}</Button>
-        <span className="text-[11px] text-muted-foreground">创建后下一步：维护六类词条，再到规则与价目、平台素材审核。</span>
+        <span className="text-[11px] text-muted-foreground">创建后下一步：维护六类词条，再到规则与价目、素材审核。</span>
       </div>
     </form>
   );

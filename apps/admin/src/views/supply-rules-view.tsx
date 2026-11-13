@@ -399,7 +399,7 @@ export function SupplyRulesView({
       </section>
 
       {gamesLoaded && !gameId ? (
-        <section className="section-panel"><EmptyHint>当前仅支持管理三角洲行动的规则与价目，请先在「目录维护」中确认游戏。</EmptyHint></section>
+        <section className="section-panel"><EmptyHint>当前仅支持管理三角洲行动的规则与价目，请先在「游戏目录」中确认游戏。</EmptyHint></section>
       ) : null}
       {!rules && loading ? (
         <section className="section-panel space-y-3" aria-busy="true">

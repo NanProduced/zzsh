@@ -43,7 +43,7 @@ const pagesOf = (items) => items.filter((item) => !item.isTitle).map((item) => i
 const completeOrder = (...firstIds) => {
   const movable = movableNavGroupIds(all());
   const head = firstIds.filter((id) => movable.includes(id));
-  return ["workspace", ...head, ...movable.filter((id) => !head.includes(id)), "personal"];
+  return ["workspace", ...head, ...movable.filter((id) => !head.includes(id)), "system"];
 };
 
 test("没有保存过顺序时，侧栏与现在完全一致", () => {
@@ -53,14 +53,14 @@ test("没有保存过顺序时，侧栏与现在完全一致", () => {
   assert.deepEqual(idsOf(orderNavGroups(items, null)), [...NAV_GROUP_DEFAULT_ORDER]);
 });
 
-test("已保存顺序即时生效，工作区固定最前、个人固定最后", () => {
+test("已保存顺序即时生效，工作区固定最前、系统与安全固定最后", () => {
   const items = all();
   const saved = completeOrder("orders", "audit", "support");
   const ordered = orderNavGroups(items, saved);
   const ids = idsOf(ordered);
   assert.deepEqual(ids, saved);
   assert.equal(ids[0], "workspace");
-  assert.equal(ids.at(-1), "personal");
+  assert.equal(ids.at(-1), "system");
   assert.equal(new Set(pagesOf(ordered)).size, pagesOf(items).length, "排序不能丢菜单项");
 });
 
@@ -82,7 +82,7 @@ test("上线新分组：出现在默认位置附近，已排好的分组相对�
   const predecessor = NAV_GROUP_DEFAULT_ORDER[defaultIndex - 1];
   assert.ok(ids.indexOf("content") > ids.indexOf(predecessor), "新分组落在默认位置的前一个分组之后");
   assert.equal(ids[0], "workspace");
-  assert.equal(ids.at(-1), "personal");
+  assert.equal(ids.at(-1), "system");
 });
 
 test("失去分组权限后又恢复：隐藏期间不显示，恢复后回到原来排好的位置", () => {
@@ -92,13 +92,13 @@ test("失去分组权限后又恢复：隐藏期间不显示，恢复后回到�
   assert.equal(whileHidden.includes("support"), false);
   assert.deepEqual(whileHidden, saved.filter((id) => id !== "support"), "其余已保存分组相对顺序保持");
   assert.deepEqual(idsOf(orderNavGroups(all(), saved)), saved);
-  assert.equal(movableNavGroupIds(all()).includes("personal"), false);
+  assert.equal(movableNavGroupIds(all()).includes("system"), false);
   assert.equal(movableNavGroupIds(all()).includes("workspace"), false);
 });
 
 test("未知 ID、重复 ID 与损坏内容：静默忽略或回到默认顺序，不抛错", () => {
   const items = all();
-  const ordered = orderNavGroups(items, ["workspace", "unknown-group", "audit", "audit", "personal"]);
+  const ordered = orderNavGroups(items, ["workspace", "unknown-group", "audit", "audit", "system"]);
   assert.equal(idsOf(ordered).filter((id) => id === "audit").length, 1);
   assert.deepEqual(sanitizeNavGroupOrder(["unknown", "orders", "orders"]), ["orders"]);
   storage.setItem("zzsh.admin.navGroupOrder.v1:admin-bad", "{not-json");
@@ -110,27 +110,27 @@ test("未知 ID、重复 ID 与损坏内容：静默忽略或回到默认顺序�
 });
 
 test("恢复默认：删除该账号的 key 后立即回到默认顺序，不影响其他账号", () => {
-  writeNavGroupOrder("admin-a", ["workspace", "orders", "finance", "personal"]);
-  writeNavGroupOrder("admin-b", ["workspace", "audit", "support", "personal"]);
+  writeNavGroupOrder("admin-a", ["workspace", "orders", "finance", "system"]);
+  writeNavGroupOrder("admin-b", ["workspace", "audit", "support", "system"]);
   clearNavGroupOrder("admin-a");
   assert.deepEqual(readNavGroupOrder("admin-a"), [...NAV_GROUP_DEFAULT_ORDER]);
-  assert.deepEqual(readNavGroupOrder("admin-b"), ["workspace", "audit", "support", "personal"]);
+  assert.deepEqual(readNavGroupOrder("admin-b"), ["workspace", "audit", "support", "system"]);
   assert.deepEqual(orderNavGroups(all(), readNavGroupOrder("admin-a")), all());
 });
 
 test("上移/下移只与相邻的可见分组交换，边界不越界", () => {
   const full = [...NAV_GROUP_DEFAULT_ORDER];
-  const visible = ["support", "distribution", "system"];
-  const moved = moveVisibleNavGroup(full, visible, "distribution", -1);
-  assert.equal(moved.indexOf("support"), 2, "与相邻可见分组交换");
-  assert.equal(moved.indexOf("distribution"), 1);
-  assert.deepEqual(moveVisibleNavGroup(full, visible, "support", -1), full);
+  const visible = ["orders", "finance", "system"];
+  const moved = moveVisibleNavGroup(full, visible, "finance", -1);
+  assert.equal(moved.indexOf("orders"), 3, "与相邻可见分组交换");
+  assert.equal(moved.indexOf("finance"), 2);
+  assert.deepEqual(moveVisibleNavGroup(full, visible, "orders", -1), full);
   assert.deepEqual(moveVisibleNavGroup(full, visible, "system", 1), full);
-  assert.deepEqual(moveVisibleNavGroup(full, visible, "finance", -1), full, "不可见分组不能移动");
+  assert.deepEqual(moveVisibleNavGroup(full, visible, "audit", -1), full, "不可见分组不能移动");
 });
 
 test("排序后审批角标仍挂在审批中心上", () => {
-  const ordered = orderNavGroups(all(), ["workspace", "audit", "orders", "personal"]);
+  const ordered = orderNavGroups(all(), ["workspace", "audit", "orders", "system"]);
   const approval = ordered.find((item) => item.path === "/audit");
   assert.equal(approval.badge, 3);
   assert.equal(ordered.filter((item) => item.badge === 3).length, 1);
@@ -159,7 +159,7 @@ test("「会员与礼遇」并入「用户与会员」，不再有独立的「�
 
 test("存储不可用时降级为默认顺序，不抛错也不假装保存成功", () => {
   storage.failWrite = true;
-  assert.equal(writeNavGroupOrder("admin-a", ["workspace", "orders", "personal"]), false);
+  assert.equal(writeNavGroupOrder("admin-a", ["workspace", "orders", "system"]), false);
   assert.deepEqual(readNavGroupOrder("admin-a"), [...NAV_GROUP_DEFAULT_ORDER]);
   const bare = { getItem() { throw new Error("denied"); }, setItem() { throw new Error("denied"); }, removeItem() { throw new Error("denied"); } };
   globalThis.localStorage = bare;

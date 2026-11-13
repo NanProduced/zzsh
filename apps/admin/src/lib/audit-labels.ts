@@ -161,7 +161,7 @@ const OBJECT_TYPE_LABELS: Record<string, string> = {
   withdrawal_destination: "提现去向",
   favorite: "收藏",
   im_support_presence: "客服在线状态",
-  supply_account: "供给账号",
+  supply_account: "出租账号",
   account_image_watermark: "账号图片水印",
 };
 

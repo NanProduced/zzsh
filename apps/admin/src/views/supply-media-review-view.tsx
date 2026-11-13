@@ -654,7 +654,7 @@ export function SupplyMediaReviewView({
   if (!canRead) {
     return (
       <section className="section-panel">
-        <p className="text-sm text-muted-foreground">当前账号没有媒体审核读取权限；目录维护权限不等于可查看私有凭证。</p>
+        <p className="text-sm text-muted-foreground">当前账号没有媒体审核读取权限；游戏目录权限不等于可查看私有凭证。</p>
       </section>
     );
   }
@@ -695,7 +695,7 @@ export function SupplyMediaReviewView({
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border/60">
           <div className="space-y-1">
             <div className="flex items-center gap-2.5">
-              <h3 className="text-base font-semibold tracking-tight">平台素材审核</h3>
+              <h3 className="text-base font-semibold tracking-tight">素材审核</h3>
             </div>
             <p className="text-xs text-muted-foreground">审核决定与公开范围分开记录；公开需显式授权。</p>
           </div>

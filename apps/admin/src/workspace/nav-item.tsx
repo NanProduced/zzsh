@@ -18,7 +18,7 @@ export function WorkspaceNavItem({
   onNavigate: (path: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // 同一时刻只有一个入口点亮：带 query 的入口优先于同路径的普通入口（例如 /settings?section=security）。
+  // 同一时刻只有一个入口点亮：带 query 的入口优先于同路径的普通入口（例如 /supply/rules?section=pricing）。
   const activePath = activeNavPath(item.items?.length ? navItemPaths(item.items) : [item.path], location);
   const active = activePath !== null;
 

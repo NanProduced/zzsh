@@ -150,7 +150,7 @@ export function WorkspaceApp({
   }, []);
   const activeWriteLocked = isWriteLocked(active.id);
   const legalWorkbench = active.kind === "content-legal" || (active.kind === "content" && active.query.tab === "legal");
-  // 侧栏唯一活动入口按真实地址（含 query）判定：/settings?section=security 只点亮账号安全。
+  // 侧栏唯一活动入口按真实地址（含 query）判定；账号安全从左下角头像菜单进入，不再占侧栏入口。
   // 前进/后退后 tab 可能还没有本轮 query，故用 revision 触发重算。
   const [locationRevision, bumpLocationRevision] = useState(0);
   const locateInWindow = (revision: number): NavLocation => {

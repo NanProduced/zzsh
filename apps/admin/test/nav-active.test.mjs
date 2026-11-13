@@ -87,11 +87,11 @@ test("每条目标路由只有唯一活动入口，不再按前缀点亮父级",
 });
 
 test("带 query 的入口只在对应分区点亮，旧入口与分区入口互不双亮", () => {
-  assert.deepEqual(activeEntries("/settings", "?section=security"), ["/settings?section=security"]);
+  assert.deepEqual(activeEntries("/settings", "?section=security"), [], "账号安全入口在头像菜单，不再占用侧栏");
   assert.deepEqual(activeEntries("/settings", "?section=appearance"), []);
   assert.deepEqual(activeEntries("/settings", ""), []);
   assert.equal(navEntryIsActive("/settings?section=security", { pathname: "/settings", search: "?section=profile" }), false);
-  // 旧地址 /account 打开同一安全页；任一状态下都只有一个入口亮，且旧地址仍可用。
+  // 旧地址 /account 打开同一安全页；旧地址仍可用，但不点亮侧栏。
   assert.deepEqual(activeEntries("/account", ""), []);
   assert.equal(activeNavPath(["/account", "/settings?section=security"], { pathname: "/settings", search: "?section=security" }), "/settings?section=security");
 });
@@ -99,21 +99,56 @@ test("带 query 的入口只在对应分区点亮，旧入口与分区入口互�
 test("侧栏菜单保留全部既有入口与分组命名一致性", () => {
   const items = workspaceMenuItems(boss);
   const titles = items.filter((item) => item.isTitle).map((item) => item.label);
-  // 「会员与礼遇」已并入「用户与会员」，不再有只有一项的「会员运营」分组。
-  assert.deepEqual(titles, ["工作区", "客户服务", "分销", "系统与安全", "供给与目录", "供给与规则", "三角洲行动", "运营内容", "资金", "交易", "用户与会员", "审批与审计", "个人"]);
+  assert.deepEqual(titles, ["工作区", "客户服务", "交易", "资金", "用户与会员", "分销", "运营内容", "审批与审计", "规则与价目", "目录与素材", "系统与安全"]);
   for (const title of titles) {
     assert.equal(items.filter((item) => item.path).some((item) => item.label === title), false, `组名不得与组内入口同名：${title}`);
   }
   assert.equal(items.find((item) => item.path === "/approvals").label, "审批中心", "侧栏与页内审批命名一致");
   const paths = menuPaths(boss);
-  assert.equal(paths.length, 42, "运营内容的五个页面替代原内容管理入口");
+  assert.equal(paths.length, 41, "账号安全入口移到头像菜单后少一项；其余入口保留");
   assert.deepEqual(paths.filter((path) => path.startsWith("/content")), ["/content/help", "/content/updates", "/content/legal", "/content/pages", "/content/media"]);
   assert.equal(paths.includes("/users/restore"), false, "账号恢复入口已移除");
   assert.equal(paths.includes("/finance/period"), false, "期间核对从导航移除，旧链接仍可使用");
+  assert.equal(paths.includes("/settings?section=security"), false, "账号安全入口移到头像菜单");
   assert.equal(items.find((item) => item.path === "/finance").label, "资金与经营看板");
-  for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/policy","/supply/media","/settings?section=security","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
+  for (const path of ["/system","/distribution","/distribution/earnings","/distribution/participants","/distribution/policy","/supply/media","/support","/support/mine","/support/overview","/support/patrol","/support/settings","/avatar-reviews"]) {
     assert.ok(paths.includes(path), `保留既有入口 ${path}`);
   }
+  assert.deepEqual(paths.filter((path) => path.startsWith("/supply/rules")), [
+    "/supply/rules?section=overview", "/supply/rules?section=deposit", "/supply/rules?section=settlement", "/supply/rules?section=agreement",
+    "/supply/rules?section=pricing", "/supply/rules?section=items", "/supply/rules?section=skin",
+  ], "同一规则页面壳的 7 个分区不再拆到两个组");
+  assert.equal(items.find((item) => item.path === "/supply/reviews").label, "出租账号");
+  assert.equal(items.find((item) => item.path === "/supply/catalog").label, "游戏目录");
+  assert.equal(items.find((item) => item.path === "/supply/media").label, "素材审核");
+  assert.equal(items.find((item) => item.path === "/operation-log").label, "操作日志");
+  const groupOf = (path) => {
+    let group = "";
+    for (const item of items) {
+      if (item.isTitle) group = item.label;
+      if (item.path === path) return group;
+    }
+    return null;
+  };
+  assert.equal(groupOf("/orders"), "交易");
+  assert.equal(groupOf("/supply/reviews"), "交易");
+  assert.equal(groupOf("/operation-log"), "审批与审计");
+  assert.equal(groupOf("/supply/catalog"), "目录与素材");
+  assert.equal(groupOf("/supply/media"), "目录与素材");
+  assert.equal(groupOf("/supply/rules?section=pricing"), "规则与价目");
+  assert.equal(titles.includes("个人"), false, "个人分组已移除");
+  assert.equal(titles.includes("三角洲行动"), false, "游戏名不再作为一级分组");
+  assert.equal(titles.includes("供给与目录"), false);
+  assert.equal(titles.includes("供给与规则"), false);
+});
+
+test("侧栏每个入口使用不同且业务可区分的图标", () => {
+  const items = workspaceMenuItems(boss).filter((item) => item.path);
+  assert.equal(items.length, 41);
+  const names = items.map((item) => item.icon?.displayName ?? item.icon?.name ?? "NO_ICON");
+  assert.equal(names.filter((name) => name === "NO_ICON").length, 0, "每个入口都要有图标");
+  const duplicates = [...new Set(names.filter((name, index) => names.indexOf(name) !== index))];
+  assert.deepEqual(duplicates, [], `图标不得重复：${duplicates.join("、")}`);
 });
 
 test("权限裁剪后不误点亮无权限入口", () => {
@@ -129,12 +164,6 @@ test("侧栏入口名、页面标题与工作区标签名一致（同一对象�
   for (const item of workspaceMenuItems(boss)) {
     if (!item.path) continue;
     const [pathname = "", search = ""] = item.path.split("?");
-    if (item.path === "/settings?section=security") {
-      // 设置壳下的安全分区：壳名「设置」，页内分区名「登录与安全」由 settings-page 的 SECTIONS 给出。
-      assert.equal(tabFromLocation(pathname, `?${search}`).title, "设置", "/settings?section=security 使用设置壳标签");
-      assert.ok(["账号安全", "登录与安全"].includes(item.label), "侧栏安全入口名保持在既有命名集合内");
-      continue;
-    }
     if (pathname === "/supply/rules") {
       // 规则与价目壳下的分区：壳名「规则与价目」，分区名由侧栏入口给出。
       assert.equal(titleForPath(pathname), "规则与价目");

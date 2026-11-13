@@ -87,7 +87,7 @@ export function WorkspacePageContent({
   const fromSupply = tab.query.fromSupplyId && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(tab.query.fromSupplyId) && (snapshot.security.isBoss || snapshot.permissions.includes("supply.review.read") || snapshot.permissions.includes("supply.rental_account.read")) ? tab.query.fromSupplyId : null;
   const supplyReturnQuery = new URLSearchParams({ context: tab.query.fromSupplyContext ?? "situation", ...(tab.query.fromSupplyVersionId ? { versionId: tab.query.fromSupplyVersionId } : {}) });
   for (const key of ["fromOrderId", "fromUserId", "fromUserSection", "fromUserPublication", "fromUserRole", "fromUserStatus"]) if (tab.query[key]) supplyReturnQuery.set(key, tab.query[key]!);
-  const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${supplyReturnQuery}`)}>返回来源账号供给</Button></div> : null;
+  const supplyReturn = fromSupply ? <div className="wf-source-context"><Button variant="secondary" onClick={() => onOpenPath(`/supply/reviews/${encodeURIComponent(fromSupply)}?${supplyReturnQuery}`)}>返回来源出租账号</Button></div> : null;
   const withSupplyOrigin = (path: string, title?: string) => {
     if (!fromSupply) return onOpenPath(path,title);
     const [pathname,search=""] = path.split("?"), params = new URLSearchParams(search);

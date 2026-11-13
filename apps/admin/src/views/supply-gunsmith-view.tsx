@@ -459,7 +459,7 @@ export function SupplyGunsmithView({
           </div>
           <StatusMessage themeAware error={mediaError} />
           {mediaLoading && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">加载候选图片…</p> : null}
-          {!mediaLoading && !mediaError && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">没有可绑定图片；请先在平台素材审核上传并审核公开 FIREARM_MEDIA 素材。</p> : null}
+          {!mediaLoading && !mediaError && mediaOptions.length === 0 ? <p className="text-xs text-muted-foreground">没有可绑定图片；请先在素材审核上传并审核公开 FIREARM_MEDIA 素材。</p> : null}
           {mediaOptions.length > 0 ? (
             <>
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">

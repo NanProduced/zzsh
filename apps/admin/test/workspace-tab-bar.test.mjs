@@ -130,7 +130,7 @@ test("long detail names retain their differing final identifier and the full acc
   await mount(t, createElement(Harness, { initialTabs: [long], initialActive: long.id, calls: [] }));
   assert.equal(tabButton(long.id).querySelector(".workspace-tab-tail").textContent, "07210241");
   assert.equal(tabButton(long.id).textContent, long.title);
-  assert.equal(tabButton(long.id).getAttribute("aria-label"), "供给账号详情：" + long.title);
+  assert.equal(tabButton(long.id).getAttribute("aria-label"), "出租账号详情：" + long.title);
 });
 
 test("keyboard closing after context-menu focus uses focused tab instead of unrelated active tab", async t => {

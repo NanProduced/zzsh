@@ -101,10 +101,10 @@ export type WorkspaceTab = {
 
 const DETAIL_TAB_TYPES: Partial<Record<WorkspaceRouteKind, string>> = {
   "admin-object": "管理员", "role-object": "角色", "approval-object": "审批",
-  "user-object": "用户", "listing-object": "供给账号", "order-object": "订单",
+  "user-object": "用户", "listing-object": "出租账号", "order-object": "订单",
   "resource-object": "资源账号", "finance-document": "资金单据", "finance-user": "用户资金", "distribution-participant": "分销商",
 };
-const GENERIC_DETAIL_TITLES = new Set(["审批详情", "账号供给详情", "资源账号", "资金单据", "用户资金", "分销商详情", "文档详情"]);
+const GENERIC_DETAIL_TITLES = new Set(["审批详情", "出租账号详情", "资源账号", "资金单据", "用户资金", "分销商详情", "文档详情"]);
 
 export function tabPresentation(tab: WorkspaceTab, tabs: WorkspaceTab[]) {
   const type = DETAIL_TAB_TYPES[tab.kind];
@@ -155,11 +155,11 @@ const LIST_TABS: Record<string, Omit<WorkspaceTab, "query">> = {
   audit: { id: "audit", title: "账号与权限审计", path: "/audit", closable: true, kind: "audit" },
   "operation-log": { id: "operation-log", title: "操作日志", path: "/operation-log", closable: true, kind: "operation-log" },
   users: { id: "users", title: "用户管理", path: "/users", closable: true, kind: "users" },
-  catalog: { id: "catalog", title: "目录维护", path: "/supply/catalog", closable: true, kind: "catalog" },
+  catalog: { id: "catalog", title: "游戏目录", path: "/supply/catalog", closable: true, kind: "catalog" },
   gunsmith: { id: "gunsmith", title: "改枪码目录", path: "/supply/gunsmith", closable: true, kind: "gunsmith" },
   rules: { id: "rules", title: "规则与价目", path: "/supply/rules", closable: true, kind: "rules" },
-  "listing-review": { id: "listing-review", title: "账号供给", path: "/supply/reviews", closable: true, kind: "listing-review" },
-  "media-review": { id: "media-review", title: "平台素材审核", path: "/supply/media", closable: true, kind: "media-review" },
+  "listing-review": { id: "listing-review", title: "出租账号", path: "/supply/reviews", closable: true, kind: "listing-review" },
+  "media-review": { id: "media-review", title: "素材审核", path: "/supply/media", closable: true, kind: "media-review" },
   "avatar-review": { id: "avatar-review", title: "头像审核", path: "/avatar-reviews", closable: true, kind: "avatar-review" },
   orders: { id: "orders", title: "订单", path: "/orders", closable: true, kind: "orders" },
   content: { id: "content", title: "内容管理", path: "/content", closable: true, kind: "content" },
@@ -251,16 +251,16 @@ export function parseWorkspacePath(pathname: string): { kind: WorkspaceRouteKind
     let objectId = ""; try { objectId = decodeURIComponent(userObject[1] ?? ""); } catch { /* Invalid IDs follow the existing unknown-route path. */ }
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "user-object", objectType: "user", objectId, tabId: `user:${objectId}`, path, title: objectId };
   }
-  if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" };
+  if (path === "/supply/catalog") return { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "游戏目录" };
   if (path === "/supply/gunsmith") return { kind: "gunsmith", tabId: "gunsmith", path: "/supply/gunsmith", title: "改枪码目录" };
   if (path === "/supply/rules") return { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" };
-  if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "账号供给" };
+  if (path === "/supply/reviews") return { kind: "listing-review", tabId: "listing-review", path: "/supply/reviews", title: "出租账号" };
   const listingObject = path.match(/^\/supply\/(?:reviews|accounts)\/([^/]+)$/);
   if (listingObject) {
     let objectId = ""; try { objectId = decodeURIComponent(listingObject[1]!); } catch { /* Follow the existing unknown-route path. */ }
-    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path: `/supply/reviews/${encodeURIComponent(objectId)}`, title: "账号供给详情" };
+    if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(objectId)) return { kind: "listing-object", objectType: "supply", objectId, tabId: `supply:${objectId}`, path: `/supply/reviews/${encodeURIComponent(objectId)}`, title: "出租账号详情" };
   }
-  if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" };
+  if (path === "/supply/media") return { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "素材审核" };
   if (path === "/avatar-reviews") return { kind: "avatar-review", tabId: "avatar-review", path: "/avatar-reviews", title: "头像审核" };
   if (path === "/orders") return { kind: "orders", tabId: "orders", path, title: "订单" };
   const orderObject = path.match(/^\/orders\/([^/]+)$/);

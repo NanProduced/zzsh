@@ -70,8 +70,8 @@ test("internal document deep links reuse one workspace tab and keep leave protec
 test("detail presentation keeps module names plain and identifies unnamed objects without a visible type prefix", () => {
   const module = tabFromLocation("/supply/reviews");
   const detail = tabFromLocation("/supply/reviews/account-123");
-  assert.deepEqual(tabPresentation(module, [module, detail]), { type: undefined, label: "账号供给", description: "账号供给" });
-  assert.deepEqual(tabPresentation(detail, [module, detail]), { type: "供给账号", label: "account-123", description: "供给账号详情：account-123" });
+  assert.deepEqual(tabPresentation(module, [module, detail]), { type: undefined, label: "出租账号", description: "出租账号" });
+  assert.deepEqual(tabPresentation(detail, [module, detail]), { type: "出租账号", label: "account-123", description: "出租账号详情：account-123" });
   const named = { ...detail, title: "旧来源号 202607210241" };
   assert.equal(tabPresentation(named, [named]).label, named.title);
   assert.equal(tabPresentation({ ...detail, title: "   " }, []).label, "account-123");

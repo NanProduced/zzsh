@@ -3,13 +3,13 @@
  *
  * 规则按「路由最具体匹配」由深到浅，第一条命中即为唯一活动入口：
  * 1. 路径去掉尾斜杠后完全相等 → 更具体（同时带 query 的入口优先于只按路径匹配的入口）；
- * 2. 有 query 的入口：路径相等且声明的 query 键全部命中当前地址（`/settings?section=security` 只在安全分区点亮）；
+ * 2. 有 query 的入口：路径相等且声明的 query 键全部命中当前地址（`/supply/rules?section=pricing` 只在定价分区点亮）；
  * 3. 有 query 的入口：当前路径以它声明路径为前缀（详情页落在自己模块的入口上）；
  * 4. 无 query 的入口：路径相等（同深度时更长的声明路径更具体）；
  * 5. 无 query 的入口：当前路径以它声明路径为前缀（`/orders/:id` 点亮「订单」）。
  *
- * 旧 URL 与旧 query 入口全部保留：`/account` 与 `/settings?section=security` 都能打开安全页，
- * 但在任一状态下只有一个入口点亮，搜索与标签命名沿用同一套名称。
+ * 旧 URL 与旧 query 入口全部保留：`/account` 与 `/settings?section=security` 都能打开安全页；
+ * 账号安全入口在左下角头像菜单，搜索与标签命名沿用同一套名称。
  */
 
 function safeDecode(value: string): string {
