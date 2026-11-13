@@ -29,6 +29,15 @@ export default defineConfig({
     proxy: {
       "/api": { target: apiProxy, changeOrigin: false },
     },
+    fs: {
+      allow: [
+        import.meta.dirname,
+        path.resolve(import.meta.dirname, "../../packages"),
+        path.resolve(import.meta.dirname, "../../assets"),
+        path.resolve(import.meta.dirname, "../../node_modules"),
+      ],
+      deny: [".env", ".env.*", "*.{crt,pem}", "**/.git/**", "**/.secrets/**"],
+    },
   },
   preview: {
     proxy: {
