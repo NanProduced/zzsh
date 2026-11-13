@@ -5,6 +5,7 @@ import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES, ensureApiV1RequestId } from "../contracts/api-v1";
 import { withPublicListingSnapshot, type PublishingAccount } from "../supply/publishing";
 import { forbidden, invalid, notFound, sendJson, type SupplyNodeRequest, type SupplyNodeResponse } from "../supply/supply-util";
+import { parseLegalPlateDocument } from "../legal/legal-documents";
 import { projectTenantMoney, type TenantPriceQuote } from "../supply/tenant-price-projection";
 import { assertReadCreateAuthorization, type OrderUserContext } from "./order";
 import { confirmationInput, readPersonalPriceProjection, type PersonalConfirmationOptions } from "./personal-confirmation";
@@ -32,7 +33,8 @@ function termsProjection(value: unknown) {
   const termsDigest = string(terms.termsDigest);
   if (!/^[a-f0-9]{64}$/.test(termsDigest)) return unavailable();
   return { termsVersionId: string(terms.termsVersionId), termsDigest, disclosureVersion: string(terms.disclosureVersion),
-    policyRef: string(terms.policyRef), policyVersion: string(terms.policyVersion), title: string(terms.title), body: string(terms.body) };
+    policyRef: string(terms.policyRef), policyVersion: string(terms.policyVersion), title: string(terms.title), body: string(terms.body),
+    ...(terms.bodyDocument !== undefined ? { bodyDocument: parseLegalPlateDocument(terms.bodyDocument, "publish") } : {}) };
 }
 
 function membershipProjection(value: unknown) {

@@ -111,7 +111,7 @@ export function ContentView({
   const canPlatformPublish = hasPermission(snapshot, "content.platform.publish");
   const canPlatformUpdatePublish = canPlatformPublish || hasPermission(snapshot, "content.updates.publish");
   const canHelpRead = canPlatformRead || hasPermission(snapshot, "content.help.read");
-  const canLegalRead = canPlatformRead || canPlatformEdit || canPlatformPublish || hasPermission(snapshot, "content.fixed.submit") || hasPermission(snapshot, "content.fixed.publish");
+  const canLegalRead = hasPermission(snapshot, "supply.rules.edit") || canPlatformRead || canPlatformEdit || canPlatformPublish || hasPermission(snapshot, "content.fixed.submit") || hasPermission(snapshot, "content.fixed.publish");
   const canGameRead = hasPermission(snapshot, "content.read");
   const canGameEdit = hasPermission(snapshot, "content.edit");
   const canGamePublish = hasPermission(snapshot, "content.publish");
@@ -537,14 +537,23 @@ export function ContentView({
 
       {surface === "help" && tab === "rules" && canHelpRead ? <Button type="button" size="sm" variant="ghost" disabled={writeLocked} onClick={() => chooseTab("help")}>返回帮助中心</Button> : null}
       {tab === "rules" || tab === "pages" ? <ContentResourcesTab key={`${tab}:${snapshot.adminUserId}:${snapshot.session.id}:${canPlatformRead}:${canGameRead}`} group={tab} gameOnly={surface === "help" && tab === "rules"} snapshot={snapshot} games={games} refreshNonce={refreshNonce} onDirtyChange={reportDirty} onWriteLockChange={reportWriteLock} openResource={tab === "rules" ? workspaceTab?.query.resource : undefined} onOpenMedia={onOpenPath && canPlatformRead ? () => onOpenPath("/content/media") : undefined} /> : null}
-      {tab === "rules" && surface !== "help" ? <details className="section-panel text-sm"><summary className="cursor-pointer text-muted-foreground">业务规则维护入口</summary><div className="mt-3 space-y-3"><p className="text-muted-foreground leading-relaxed">出租协议、包赔条款、价目与租期在“规则与价目”维护。这里的服务说明不会改变本单报价和已确认条款。</p>{onOpenPath && hasPermission(snapshot, "supply.rules.edit") ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath("/supply/rules")}>打开规则与价目</Button> : <p className="text-muted-foreground">维护业务参数需要规则编辑权限。</p>}</div></details> : null}
+      {tab === "rules" && surface !== "help" ? <details className="section-panel text-sm"><summary className="cursor-pointer text-muted-foreground">业务规则维护入口</summary><div className="mt-3 space-y-3"><p className="text-muted-foreground leading-relaxed">出租协议和包赔条款在「协议条款」维护。价目、租期与版本生效在「规则与价目」管理。</p>{onOpenPath && hasPermission(snapshot, "supply.rules.edit") ? <Button type="button" size="sm" variant="secondary" onClick={() => onOpenPath("/supply/rules")}>打开规则与价目</Button> : <p className="text-muted-foreground">维护业务参数需要规则编辑权限。</p>}</div></details> : null}
 
       {tab === "help" ? <>
         {surface === "help" && canGameRead ? <div className="flex justify-end"><Button type="button" size="sm" variant="ghost" disabled={writeLocked} onClick={() => chooseTab("rules")}>游戏手册</Button></div> : null}
         <ContentHelpTree snapshot={snapshot} refreshNonce={refreshNonce} onDirtyChange={reportDirty} onWriteLockChange={reportWriteLock} />
       </> : null}
       {tab === "media" ? <><ContentMediaTab canEdit={canPlatformEdit} canPublish={canPlatformPublish} refreshNonce={refreshNonce} onWriteLockChange={reportWriteLock} onOpenPages={onOpenPath ? () => onOpenPath("/content/pages") : undefined} /><ContentStoragePanel /></> : null}
-      {tab === "legal" ? <LegalDocumentsPanel snapshot={snapshot} onDirtyChange={reportDirty} onWriteLockChange={reportWriteLock} refreshNonce={refreshNonce} onOpenPath={onOpenPath} /> : null}
+      {tab === "legal" ? <LegalDocumentsPanel snapshot={snapshot} onDirtyChange={reportDirty} onWriteLockChange={reportWriteLock}
+        refreshNonce={refreshNonce} onOpenPath={onOpenPath}
+        tradeKind={workspaceTab?.query.trade === "agreement" || workspaceTab?.query.trade === "full_payout_terms" ? workspaceTab.query.trade : undefined}
+        tradeGame={workspaceTab?.query.gameId} tradeVersion={workspaceTab?.query.version}
+        onTradeSection={kind => {
+          const query = { ...workspaceTab?.query };
+          delete query.trade; delete query.gameId; delete query.version;
+          if (kind) query.trade = kind;
+          onQueryChange?.(query);
+        }} /> : null}
       {tab === "plate-trial" ? <PlateTrialTab /> : null}
       <Dialog open={createOpen} onOpenChange={open => { if (!creating) setCreateOpen(open); }}><DialogContent><DialogTitle>新建{ITEM_NOUN[itemType]}</DialogTitle><DialogDescription>先创建草稿；保存并发布后进入平台动态。</DialogDescription><Field label={`新建${ITEM_NOUN[itemType]}标题（可留空后编辑）`}><Input value={createTitle} onChange={(event) => setCreateTitle(event.target.value)} maxLength={200} autoFocus disabled={!itemCanEdit || creating} /></Field><DialogFooter><Button type="button" variant="secondary" disabled={creating} onClick={() => setCreateOpen(false)}>取消</Button><Button type="button" loading={creating} disabled={!itemCanEdit || (itemScope === "game" && !gameId)} onClick={() => void createItem()}>创建草稿</Button></DialogFooter></DialogContent></Dialog>
       <Dialog open={tabIntent !== null} onOpenChange={open => { if (!open) setTabIntent(null); }}><DialogContent role="alertdialog"><DialogTitle>离开当前内容？</DialogTitle><DialogDescription>{itemTab ? "未保存修改将丢失，可以返回继续编辑。" : "未保存修改将丢失。结果待核对的请求会保留，回到对应内容后继续核对。"}</DialogDescription><DialogFooter><Button type="button" variant="secondary" autoFocus onClick={() => setTabIntent(null)}>继续编辑</Button><Button type="button" variant="danger" onClick={() => { if (writeLockedRef.current) return; const action = tabIntent; setTabIntent(null); reportDirty(false); action?.(); }}>离开当前内容</Button></DialogFooter></DialogContent></Dialog>

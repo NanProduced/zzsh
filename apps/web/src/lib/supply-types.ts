@@ -1,3 +1,4 @@
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
 // User-facing DTOs only. Pricing and authorization remain in the API.
 export type Money = { currency: "CNY"; unit: "yuan"; amount: string; scale: 2 };
 export type UnitAmount = {
@@ -364,7 +365,7 @@ export type PublishingOptions = {
       max?: { base: "C" | "ABSOLUTE"; value: string };
     }
   >;
-  agreement: { id: string; title: string; body: string; digest: string };
+  agreement: { id: string; title: string; body: string; digest: string; bodyDocument?: PlateDocumentEnvelope | null };
 };
 export type ResourceIncomePreview = {available:false;reason:string} | {
   available:true;informationalOnly:true;binding:{gameId:string;catalogRevision:string;releaseId:string;releaseGeneration:string;priceVersionId:string};
@@ -518,7 +519,7 @@ export type FullPayoutTerms = FullPayoutTermsAcceptance & {
   policyRef: string;
   policyVersion: string;
   title: string;
-  body: string;
+  body: string; bodyDocument?: PlateDocumentEnvelope;
 };
 export type SavedDeclaration = Omit<DraftInput, "mediaBindings"> & {
   mediaBindings: Array<{

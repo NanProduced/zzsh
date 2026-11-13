@@ -2,9 +2,10 @@ import { readNewListingPrice } from "./pricing-policy-schedule";
 import { assertPublishedPricingAnnouncement } from "./pricing-announcement";
 import { effectiveRuleRelease } from "./effective-rule-release";
 import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
-import { createHash } from "node:crypto";
+import { plateDigest } from "@zzsh/content/plate";
 import type { PoolClient } from "pg";
 
+import { legalDigest, parseLegalPlateDocument, plateProjection, readCurrentEarlySettlementDisclosure } from "../legal/legal-documents";
 import { SecurityApiError } from "../auth/security-core";
 import { API_V1_ERROR_CODES } from "../contracts/api-v1";
 import { assertGameScope, conflict, ensureOnlyFields, invalid, newSupplyId, notFound } from "./supply-util";
@@ -12,7 +13,7 @@ import { computeDeltaQuote, projectDeltaQuote, type HaffRatioRule, type PricingL
 import { assertDeltaResourceUnit, DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_RESOURCE_UNITS, DELTA_ROUNDING_POLICY, normalizeRentalPricing, parseDeltaPriceLines, validateDeltaHaffRule, validateDeltaRentalTerm, type DeltaHaffRule, type DeltaPriceLineInputBody } from "./delta-rental";
 import { computeContentHash, humanText, normalizeContentPayload, normalizeTime, withoutContentHash, type ContentDeclaration, type ContentPayloadInput } from "./content-hash";
 import { validateFundingPolicy, validateFundingPolicyDraft } from "./funding-policy";
-import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow } from "./full-payout-terms";
+import { fullPayoutDraftFields, readFullPayoutTerms, verifyFullPayoutTermsRow, verifyTradeTermsBody } from "./full-payout-terms";
 import { decimalToBigInt, parseNonNegativeDecimal } from "./decimal";
 import { FIXED_FEE_ALGORITHM, fixedFeeRateForMode, parseFixedFeeRates, type FixedFeeRates } from "./fixed-fee";
 
@@ -63,7 +64,7 @@ export async function listRules(
   if (game.rows.length === 0) throw notFound();
   const release = await client.query(
     `SELECT r."id", r."game_id" AS "gameId", r."price_version_id" AS "priceVersionId", r."term_version_id" AS "termVersionId",
-            r."agreement_version_id" AS "agreementVersionId", r."generation"::text AS "generation",
+            r."agreement_version_id" AS "agreementVersionId", to_jsonb(r)->>'early_settlement_version_id' AS "earlySettlementVersionId", r."generation"::text AS "generation",
             CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NULL THEN r."activated_by_admin_id" END AS "activatedByAdminId",
             CASE WHEN to_jsonb(r)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "activationSource", r."activated_at" AS "activatedAt",
             to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "evaluatedAt"
@@ -83,6 +84,7 @@ export async function listRules(
     to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOf"`)).rows[0];
   const plans = ruleScheduling?.available ? (await client.query(`SELECT id, generation::text,
     price_version_id AS "priceVersionId", term_version_id AS "termVersionId", agreement_version_id AS "agreementVersionId",
+    to_jsonb(rule_release)->>'early_settlement_version_id' AS "earlySettlementVersionId",
     to_char(effective_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "effectiveAt",
     announcement_version_id AS "announcementVersionId"
     FROM zzsh_supply.rule_release WHERE game_id=$1 AND effective_at>transaction_timestamp()
@@ -121,13 +123,17 @@ export async function listRules(
     [gameId],
   );
   const agreementVersions = await client.query(
-    `SELECT v."id", v."game_id" AS "gameId", v."title", v."body", v."digest", v."status", v."revision"::text AS "revision",
+    `SELECT v."id", v."game_id" AS "gameId", v."title", v."body", to_jsonb(v)->'body_document' AS "bodyDocument", v."digest", v."status", v."revision"::text AS "revision",
             v."created_at" AS "createdAt", v."sealed_at" AS "sealedAt",
             CASE WHEN to_jsonb(v)->>'system_initial_sha256' IS NOT NULL THEN 'SYSTEM_INITIAL' END AS "source"
        FROM "zzsh_supply"."agreement_version" v WHERE v."game_id" = $1
       ORDER BY (v."id" IS NOT DISTINCT FROM $2) DESC, v."created_at" DESC, v."id" DESC LIMIT 20`,
     [gameId, current?.agreementVersionId ?? null],
   );
+  const earlySettlement = await readCurrentEarlySettlementDisclosure(client).catch(error => {
+    if (error instanceof SecurityApiError) return null;
+    throw error;
+  });
   const items = await client.query(
     `SELECT "id", "code", "name", "unit", "quantity_scale" AS "quantityScale", "required", "enabled", "sort_order" AS "sortOrder"
        FROM "zzsh_supply"."billable_item" WHERE "game_id" = $1 AND "enabled" = true ORDER BY "sort_order", "code"`,
@@ -136,8 +142,10 @@ export async function listRules(
   return {
     game: game.rows[0],
     release: current ?? null,
+    currentFullPayoutTermsVersionId: priceVersions.rows.find(v => v.id === current?.priceVersionId)?.fullPayoutTermsVersionId ?? null,
     newListingPrice,
-    ruleScheduling: { ...ruleScheduling, generation, plans: plans.slice(0,100), truncated: plans.length>100 },
+    ruleScheduling: { ...ruleScheduling, generation, plans: plans.slice(0,100), truncated: plans.length>100,
+      earlySettlement: earlySettlement ? { versionId: earlySettlement.versionId, digest: earlySettlement.digest } : null },
     priceVersions: priceVersions.rows,
     priceLines: priceLines.rows,
     termVersions: termVersions.rows,
@@ -346,7 +354,8 @@ export async function sealVersion(
   }
   const terms=table === "price_version" && current.funding_policy !== null && current.funding_policy !== undefined
     ? await readFullPayoutTerms(client,String(current.game_id),validateFundingPolicy(current.funding_policy)) : undefined;
-  if (table === "full_payout_terms_version") verifyFullPayoutTermsRow(current);
+  if (table === "full_payout_terms_version") await verifyFullPayoutTermsRow(current);
+  if (table === "agreement_version") await verifyTradeTermsBody(String(current.body), current.digest, current.body_document);
   await client.query(
     `UPDATE "zzsh_supply"."${table}"
         SET "status" = 'SEALED', "sealed_at" = clock_timestamp(), "sealed_by_admin_id" = $1,
@@ -402,24 +411,41 @@ export async function updateTermDraft(
   await client.query(`UPDATE "zzsh_supply"."term_version" SET "revision" = "revision" + 1, "updated_at" = clock_timestamp() WHERE "id" = $1`, [versionId]);
 }
 
+function tradeTermsDocument(input: Record<string, unknown>, current?: Record<string, unknown>) {
+  if (input.bodyDocument !== undefined) {
+    if (input.body !== undefined) throw invalid("正文由 Plate 文档生成", "body");
+    const document = parseLegalPlateDocument(input.bodyDocument, "draft");
+    return { document, body: humanText(plateProjection(document)) };
+  }
+  if (input.body === undefined) return { document: undefined, body: undefined };
+  if (typeof input.body !== "string") throw invalid("正文格式无效", "body");
+  const body = humanText(input.body);
+  if (current?.body_document != null && body !== current.body) {
+    throw invalid("请用 Plate 编辑器更新此版本的正文", "bodyDocument");
+  }
+  return { document: undefined, body };
+}
+
 export async function createAgreementDraft(
   client: PoolClient,
   adminUserId: string,
   isBoss: boolean,
   gameId: string,
   title: string,
-  body: string,
+  body: string | undefined,
+  bodyDocument?: unknown,
 ): Promise<{ id: string }> {
   title = humanText(title);
-  body = humanText(body);
+  const text = tradeTermsDocument({ body, bodyDocument });
+  body = text.body;
   await assertGameScope(client, adminUserId, isBoss, gameId);
   if (title.length === 0 || title.length > 120) throw invalid("Title is invalid");
-  if (body.trim().length === 0 || Buffer.byteLength(body, "utf8") > 20_000) throw invalid("Agreement body is invalid");
+  if (!body?.trim() || Buffer.byteLength(body, "utf8") > 20_000) throw invalid("Agreement body is invalid");
   const id = newSupplyId("agreement");
   await client.query(
-    `INSERT INTO "zzsh_supply"."agreement_version" ("id", "game_id", "title", "body", "digest", "created_by_admin_id")
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [id, gameId, title, body, createHash("sha256").update(body, "utf8").digest("hex"), adminUserId],
+    `INSERT INTO "zzsh_supply"."agreement_version" ("id", "game_id", "title", "body", "digest", "created_by_admin_id"${text.document ? ', "body_document"' : ""})
+     VALUES ($1, $2, $3, $4, $5, $6${text.document ? ", $7::jsonb" : ""})`,
+    [id, gameId, title, body, text.document ? await plateDigest(text.document) : legalDigest(body), adminUserId, ...(text.document ? [JSON.stringify(text.document)] : [])],
   );
   return { id };
 }
@@ -434,32 +460,36 @@ export async function updateAgreementDraft(
   const current = await lockDraftishVersion(client, adminUserId, isBoss, "agreement_version", versionId);
   if (current.status !== "DRAFT") throw conflict("Sealed agreement versions cannot be edited");
   checkRevision(current, body.expectedRevision);
-  const title = body.title === undefined ? undefined : humanText(body.title as string);
-  const agreementBody = body.body === undefined ? undefined : humanText(body.body as string);
+  if (body.title !== undefined && typeof body.title !== "string") throw invalid("Title is invalid", "title");
+  const title = body.title === undefined ? undefined : humanText(body.title);
+  const { body: agreementBody, document } = tradeTermsDocument(body, current);
   if (title === undefined && agreementBody === undefined) throw invalid();
   if (title !== undefined && (typeof title !== "string" || title.length === 0 || title.length > 120)) throw invalid("Title is invalid");
   if (agreementBody !== undefined && (typeof agreementBody !== "string" || agreementBody.trim().length === 0 || Buffer.byteLength(agreementBody, "utf8") > 20_000)) {
     throw invalid("Agreement body is invalid");
   }
-  const digest = agreementBody === undefined ? undefined : createHash("sha256").update(agreementBody, "utf8").digest("hex");
+  const digest = document ? await plateDigest(document)
+    : agreementBody === undefined || current.body_document != null ? undefined : legalDigest(agreementBody);
   await client.query(
     `UPDATE "zzsh_supply"."agreement_version"
         SET "title" = COALESCE($1, "title"),
             "body" = COALESCE($2, "body"),
             "digest" = COALESCE($3, "digest"),
+            ${document ? '"body_document" = $5::jsonb,' : ""}
             "revision" = "revision" + 1,
             "updated_at" = clock_timestamp()
       WHERE "id" = $4`,
-    [title ?? null, agreementBody ?? null, digest ?? null, versionId],
+    [title ?? null, agreementBody ?? null, digest ?? null, versionId, ...(document ? [JSON.stringify(document)] : [])],
   );
 }
 
 export async function createFullPayoutTermsDraft(client: PoolClient, adminUserId: string, isBoss: boolean, gameId: string, body: Record<string, unknown>): Promise<{id: string}> {
   await assertGameScope(client, adminUserId, isBoss, gameId);
-  const v=fullPayoutDraftFields(body),id=newSupplyId("payout");
+  const text = tradeTermsDocument(body);
+  const v = fullPayoutDraftFields({ ...body, body: text.body }), id = newSupplyId("payout");
   await client.query(
-    `INSERT INTO zzsh_supply.full_payout_terms_version(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-    [id,gameId,v.policyRef,v.policyVersion,v.disclosureVersion,v.title,v.body,v.digest,adminUserId]);
+    `INSERT INTO zzsh_supply.full_payout_terms_version(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id${text.document ? ",body_document" : ""}) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9${text.document ? ",$10::jsonb" : ""})`,
+    [id,gameId,v.policyRef,v.policyVersion,v.disclosureVersion,v.title,v.body,text.document ? await plateDigest(text.document) : v.digest,adminUserId,...(text.document ? [JSON.stringify(text.document)] : [])]);
   return {id};
 }
 
@@ -467,11 +497,12 @@ export async function updateFullPayoutTermsDraft(client: PoolClient, adminUserId
   const current=await lockDraftishVersion(client,adminUserId,isBoss,"full_payout_terms_version",id);
   if(current.status!=="DRAFT")throw conflict("Sealed full-payout terms cannot be edited");
   checkRevision(current,body.expectedRevision);
-  ensureOnlyFields(body,["expectedRevision","title","body","disclosureVersion"]);
-  if(!["title","body","disclosureVersion"].some(k=>Object.hasOwn(body,k)))throw invalid();
+  ensureOnlyFields(body,["expectedRevision","title","body","bodyDocument","disclosureVersion"]);
+  if(!["title","body","bodyDocument","disclosureVersion"].some(k=>Object.hasOwn(body,k)))throw invalid();
+  const text = tradeTermsDocument(body, current);
   const v=fullPayoutDraftFields({policyRef:current.policy_ref,policyVersion:current.policy_version,
-    disclosureVersion:body.disclosureVersion===undefined?current.disclosure_version:body.disclosureVersion,title:body.title===undefined?current.title:body.title,body:body.body===undefined?current.body:body.body});
-  await client.query(`UPDATE zzsh_supply.full_payout_terms_version SET title=$1,body=$2,disclosure_version=$3,digest=$4,revision=revision+1,updated_at=clock_timestamp() WHERE id=$5`,[v.title,v.body,v.disclosureVersion,v.digest,id]);
+    disclosureVersion:body.disclosureVersion===undefined?current.disclosure_version:body.disclosureVersion,title:body.title===undefined?current.title:body.title,body:text.body ?? current.body});
+  await client.query(`UPDATE zzsh_supply.full_payout_terms_version SET title=$1,body=$2,disclosure_version=$3,digest=$4,${text.document ? "body_document=$6::jsonb," : ""}revision=revision+1,updated_at=clock_timestamp() WHERE id=$5`,[v.title,v.body,v.disclosureVersion,text.document ? await plateDigest(text.document) : current.body_document != null ? current.digest : v.digest,id,...(text.document ? [JSON.stringify(text.document)] : [])]);
 }
 
 export type ActivationResult = { releaseId: string; generation: string; effectiveAt: string; announcementVersionId: string };
@@ -566,7 +597,7 @@ export async function activateRelease(
   termVersionId: string,
   agreementVersionId: string,
   expectedGeneration: string,
-  schedule?: { effectiveAt: string; announcementVersionId: string },
+  schedule?: { effectiveAt: string; announcementVersionId: string; earlySettlement?: { versionId: string; digest: string } },
 ): Promise<ActivationResult> {
   if (!/^(0|[1-9]\d*)$/.test(expectedGeneration)) throw invalid("Expected generation is required");
   if (!isBoss) throw new SecurityApiError(403, API_V1_ERROR_CODES.FORBIDDEN, "Only a boss can activate a rule release");
@@ -582,8 +613,8 @@ export async function activateRelease(
   const locked = await client.query(`SELECT id FROM zzsh_supply.game WHERE id=$1 FOR UPDATE`, [gameId]);
   if (!locked.rows.length) throw notFound();
   // Read the joined versions after acquiring the lock, including when the lock had to wait.
-  const game = (await client.query<{ id: string; priceVersionId: string | null; termVersionId: string | null; agreementVersionId: string | null; fixedFee: boolean }>(
-    `SELECT g.id, r.price_version_id AS "priceVersionId", r.term_version_id AS "termVersionId", r.agreement_version_id AS "agreementVersionId",
+  const game = (await client.query<{ id: string; priceVersionId: string | null; termVersionId: string | null; agreementVersionId: string | null; earlySettlementVersionId: string | null; earlySettlementDigest: string | null; fixedFee: boolean }>(
+    `SELECT g.id, r.price_version_id AS "priceVersionId", r.term_version_id AS "termVersionId", r.agreement_version_id AS "agreementVersionId", r.early_settlement_version_id AS "earlySettlementVersionId", r.early_settlement_digest AS "earlySettlementDigest",
       to_jsonb(p)->>'fixed_fee_rates' IS NOT NULL AS "fixedFee"
       FROM "zzsh_supply"."game" g LEFT JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g", "$2::timestamptz")} AND r.game_id=g.id
       LEFT JOIN zzsh_supply.price_version p ON p.id=r.price_version_id AND p.game_id=g.id
@@ -622,7 +653,11 @@ export async function activateRelease(
   );
   const generation = nextGeneration.rows[0]!.generation;
   if (BigInt(generation) - 1n !== BigInt(expectedGeneration)) throw conflict("Rule release changed; reload before confirming activation");
-  if (priceVersionId === game.priceVersionId && termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
+  const earlySettlement = await readCurrentEarlySettlementDisclosure(client);
+  if (!earlySettlement) throw conflict("请先发布提前结算告知");
+  if (schedule.earlySettlement && (schedule.earlySettlement.versionId !== earlySettlement.versionId || schedule.earlySettlement.digest !== earlySettlement.digest))
+    throw conflict("提前结算告知已变更，请刷新规则后重新核对");
+  if (game.earlySettlementVersionId === earlySettlement.versionId && game.earlySettlementDigest === earlySettlement.digest && priceVersionId === game.priceVersionId && termVersionId === game.termVersionId && agreementVersionId === game.agreementVersionId)
     throw conflict("规则组合没有变化");
   if (priceMeta.fixedFeeRates == null) {
     await assertPriceVersionResources(client,gameId,priceVersionId,priceMeta.mode);
@@ -643,9 +678,9 @@ export async function activateRelease(
   const releaseId = newSupplyId("release");
   await client.query(
     `INSERT INTO zzsh_supply.rule_release(id, game_id, price_version_id, term_version_id, agreement_version_id,
-      generation, activated_by_admin_id, activated_at, effective_at, announcement_version_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::timestamptz,$8::timestamptz,$9)`,
-    [releaseId, gameId, priceVersionId, termVersionId, agreementVersionId, generation, adminUserId, effectiveAt, schedule.announcementVersionId],
+      generation, activated_by_admin_id, activated_at, effective_at, announcement_version_id, early_settlement_version_id, early_settlement_digest)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8::timestamptz,$8::timestamptz,$9,$10,$11)`,
+    [releaseId, gameId, priceVersionId, termVersionId, agreementVersionId, generation, adminUserId, effectiveAt, schedule.announcementVersionId, earlySettlement.versionId, earlySettlement.digest],
   );
   await assertRulePricingTimeline(client, gameId, effectiveAt);
   return { releaseId, generation, effectiveAt, announcementVersionId: schedule.announcementVersionId };

@@ -775,14 +775,15 @@ test("F2: an unknown payment retries the original key and never double-charges",
   });
 });
 
+const publishingOptions = { releaseId: "release_1", agreement: { id: "ag_1", title: "三角洲出租协议", body: "协议正文（TEST_ONLY）", digest: "d".repeat(64) } };
 const confirmation = {
+  agreement: publishingOptions.agreement,
+  agreementAcceptance: { versionId: publishingOptions.agreement.id, digest: publishingOptions.agreement.digest },
   quote: { lines: [haffLine, pieceLine], resourceTotal: money("170.00"), tenantDeposit: money("300.00"), tenantPayableTotal: money("470.00") },
   baseTenantDeposit: money("300.00"), customerTier: "STANDARD", depositWaived: false,
   compensationDisclosure: { selected: true, disclosureVersion: "dual-line-disclosure-v1" },
   confirmationId: "c1", listingHash: "h".repeat(64), expiresAt: new Date(Date.now() + 300_000).toISOString(), confirmationToken: "token_1",
 };
-const publishingOptions = { releaseId: "release_1", agreement: { id: "ag_1", title: "三角洲出租协议", body: "协议正文（TEST_ONLY）", digest: "d".repeat(64) } };
-
 function loadPanelForSession(sessionObject, optionsResponder, extraSupplyApi) {
   return loadComponent("apps/web/src/components/order/rental-confirm-panel.tsx", sessionObject, {
     "@/lib/listing-view": { formatMoneyLabel: (value) => (value && typeof value.amount === "string" ? `¥${value.amount}` : null) },
@@ -883,7 +884,15 @@ const fullPayoutTerms = {
 };
 const payoutConfirmation = { ...confirmation, compensationDisclosure: { selected: true, disclosureVersion: "disclosure_1", terms: fullPayoutTerms } };
 const payoutAcceptance = { termsVersionId: "terms_1", termsDigest: "e".repeat(64), disclosureVersion: "disclosure_1" };
-const payoutSupply = { fullPayoutTerms: async (gameId, releaseId) => { assert.equal(gameId, "game_1"); assert.equal(releaseId, "release_1"); return { releaseId, fullPayoutTerms }; } };
+function payoutPreview(url, terms) {
+  const query = new URL(url, "http://127.0.0.1").searchParams;
+  return json({ schema: "rental-price-preview.v1", binding: { ...Object.fromEntries(query), listingHash: confirmation.listingHash },
+    quote: confirmation.quote, baseTenantDeposit: confirmation.baseTenantDeposit,
+    compensationDisclosure: { selected: true, disclosureVersion: terms.disclosureVersion, terms } });
+}
+function payoutRouter(routes, log, read = url => payoutPreview(url, fullPayoutTerms)) {
+  return (url, init) => String(url).startsWith("/api/rental-price-preview?") ? read(String(url), init) : router(routes, log)(url, init);
+}
 async function acceptPayout(window, probe) {
   const checkbox = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
   assert.ok(checkbox, `payout acceptance checkbox missing; text=${probe.host.textContent?.slice(0, 300)}`);
@@ -1217,13 +1226,13 @@ test("F4: missing agreement evidence blocks creation instead of accepting a vers
   await withDom(async (window) => {
     const log = [];
     const fetchImpl = router([
-      { match: "/api/order-confirmations", method: "POST", respond: () => json(confirmation) },
+      { match: "/api/order-confirmations", method: "POST", respond: () => json({ ...confirmation, agreement: undefined }) },
     ], log);
-    const Panel = loadPanel("user_A", async () => { throw new Error("options unavailable"); });
+    const Panel = loadPanel("user_A", async () => publishingOptions);
     const probe = createProbe(window, Panel, { accountId: "account_3", gameId: "game_1", versionId: "listing_1", releaseId: "release_1" }, fetchImpl);
     await probe.render();
     await probe.click("查看我的报价");
-    assert.ok(probe.host.textContent.includes("条款依据暂时无法读取"), probe.host.textContent.slice(0, 300));
+    assert.ok(probe.host.textContent.includes("本账号冻结的出租协议暂不可核验"), probe.host.textContent.slice(0, 300));
     const create = probe.buttons().find((text) => text.includes("确认并创建订单"));
     const button = [...probe.host.querySelectorAll("button")].find((candidate) => candidate.textContent?.includes("确认并创建订单"));
     assert.ok(button.disabled, "create must be disabled while agreement evidence is unavailable");
@@ -1235,26 +1244,25 @@ test("F4: missing agreement evidence blocks creation instead of accepting a vers
 test("D8-R1: StrictMode replaces an aborted terms read without accepting or posting", async () => {
   await withDom(async (window) => {
     const reads = [], log = [];
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, {
-      fullPayoutTerms: (gameId, releaseId, signal) => {
-        const result = deferred();
-        reads.push({ gameId, releaseId, signal, result });
-        return result.promise;
-      },
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
+    const fetchImpl = payoutRouter([], log, (url, { signal }) => {
+      const result = deferred();
+      reads.push({ signal, result, url });
+      return result.promise;
     });
-    const probe = createProbe(window, Panel, { ...detailPanelProps, fullPayoutSelected: true }, router([], log), { strict: true });
+    const probe = createProbe(window, Panel, { ...detailPanelProps, fullPayoutSelected: true }, fetchImpl, { strict: true });
     try {
       await probe.render();
       assert.equal(reads.length, 2, "StrictMode's replacement effect starts a fresh read");
       assert.equal(reads[0].signal.aborted, true);
       assert.equal(reads[1].signal.aborted, false);
       await React.act(async () => {
-        reads[0].result.resolve({ releaseId: "release_1", fullPayoutTerms: { ...fullPayoutTerms, termsDigest: "f".repeat(64) } });
+        reads[0].result.resolve(payoutPreview(reads[0].url, { ...fullPayoutTerms, termsDigest: "f".repeat(64) }));
         await tick();
       });
       assert.equal(probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]'), null, "the cancelled response stays ignored");
       await React.act(async () => {
-        reads[1].result.resolve({ releaseId: "release_1", fullPayoutTerms });
+        reads[1].result.resolve(payoutPreview(reads[1].url, fullPayoutTerms));
         await tick();
       });
       const checkbox = probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
@@ -1276,11 +1284,11 @@ test("D1: a declared full-payout listing reads the sealed terms and binds the sa
   await withDom(async (window) => {
     const log = [];
     let createCalls = 0;
-    const fetchImpl = router([
+    const fetchImpl = payoutRouter([
       { match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) },
       { match: "/api/v2/orders", method: "POST", respond: () => { createCalls += 1; if (createCalls === 1) throw new TypeError("network down"); return json({ order: { id: "order_P", displayNo: "ZZ-9", status: "PENDING_PAYMENT" } }); } },
     ], log);
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
     const props = { ...detailPanelProps, accountId: "account_payout", fullPayoutSelected: true };
     const first = createProbe(window, Panel, props, fetchImpl);
     await first.render();
@@ -1323,13 +1331,14 @@ test("D1: a declared full-payout listing reads the sealed terms and binds the sa
 test("D1: unreadable full-payout terms block ordering instead of confirming blind", async () => {
   await withDom(async (window) => {
     const log = [];
-    const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) }], log);
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, { fullPayoutTerms: async () => { throw new Error("terms down"); } });
+    const fetchImpl = payoutRouter([{ match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) }], log,
+      () => json({ error: { code: "CONFIRMATION_DEPENDENCY_UNAVAILABLE" } }, 503));
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
     const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "account_payout_unreadable", fullPayoutSelected: true }, fetchImpl);
     try {
       await probe.render();
       await tick();
-      assert.ok(probe.host.textContent.includes("全额包赔条款暂时无法读取"), probe.host.textContent.slice(0, 300));
+      assert.ok(probe.host.textContent.includes("本账号适用的全额包赔条款暂不可读"), probe.host.textContent.slice(0, 300));
       assert.equal(log.filter((entry) => entry.url.includes("order-confirmations")).length, 0);
       const gated = [...probe.host.querySelectorAll("button")].find((button) => button.textContent.includes("包赔条款暂不可用"));
       assert.ok(gated?.disabled);
@@ -1341,8 +1350,8 @@ test("D1: authoritative terms that differ from the accepted version stop creatio
   await withDom(async (window) => {
     const log = [];
     const drifted = { ...payoutConfirmation, compensationDisclosure: { selected: true, disclosureVersion: "disclosure_1", terms: { ...fullPayoutTerms, termsDigest: "f".repeat(64) } } };
-    const fetchImpl = router([{ match: "/api/order-confirmations", method: "POST", respond: () => json(drifted) }], log);
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
+    const fetchImpl = payoutRouter([{ match: "/api/order-confirmations", method: "POST", respond: () => json(drifted) }], log);
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
     const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "account_payout_drift", fullPayoutSelected: true }, fetchImpl);
     try {
       await probe.render();
@@ -1358,8 +1367,8 @@ test("D1: authoritative terms that differ from the accepted version stop creatio
 test("D-terms: only explicit modal confirmation commits its draft; dismissal restores parent consent and focus", async () => {
   await withDom(async window => {
     const log = [];
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
-    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_draft", fullPayoutSelected: true }, router([], log));
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_draft", fullPayoutSelected: true }, payoutRouter([], log));
     const outside = () => probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
     try {
       await probe.render();
@@ -1418,8 +1427,8 @@ test("D-terms: only explicit modal confirmation commits its draft; dismissal res
 test("D-terms: a quoted locked panel permits reading and closing without changing consent", async () => {
   await withDom(async window => {
     const log = [];
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, payoutSupply);
-    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_locked", fullPayoutSelected: true }, router([
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
+    const probe = createProbe(window, Panel, { ...detailPanelProps, accountId: "payout_modal_locked", fullPayoutSelected: true }, payoutRouter([
       { match: "/api/order-confirmations", method: "POST", respond: () => json(payoutConfirmation) },
     ], log));
     try {
@@ -1452,12 +1461,11 @@ test("D-terms: a changed terms tuple or unavailable state clears an open draft",
   await withDom(async window => {
     const log = [];
     const nextTerms = { ...fullPayoutTerms, termsVersionId: "terms_2", termsDigest: "f".repeat(64), disclosureVersion: "disclosure_2", title: "新版包赔条款", body: "新版条款正文（TEST_ONLY）" };
-    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions, {
-      fullPayoutTerms: async (_gameId, releaseId) => ({ releaseId, fullPayoutTerms: releaseId === "release_1" ? fullPayoutTerms : nextTerms }),
-    });
+    const Panel = loadPanelForSession(session("user_A"), async () => publishingOptions);
     const props = { ...detailPanelProps, accountId: "payout_modal_scope", fullPayoutSelected: true };
     const nextProps = { ...props, versionId: "listing_2", releaseId: "release_2" };
-    const probe = createProbe(window, Panel, props, router([], log));
+    const probe = createProbe(window, Panel, props, payoutRouter([], log,
+      url => payoutPreview(url, new URL(url, "http://127.0.0.1").searchParams.get("releaseId") === "release_1" ? fullPayoutTerms : nextTerms)));
     const outside = () => probe.host.querySelector('[aria-label="我已阅读并同意全额包赔条款"]');
     try {
       await probe.render();

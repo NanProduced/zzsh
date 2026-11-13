@@ -1,4 +1,7 @@
 "use client";
+
+import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
+import TradeTermsDocument from "../content/trade-terms-document";
 import { BusinessUpdateNotices } from "@/components/content/platform-update-notices";
 import { formatReferenceYuan } from "@zzsh/ui/display-money";
 import { ManagedNoticeSections, ManagedNoticeText } from "@/components/content/managed-notice";
@@ -495,7 +498,7 @@ function Notice({ error, text, onDismiss }: { error?: SupplyRequestError | null;
   );
 }
 
-function AgreementBody({ body }: { body: string }) {
+function AgreementBody({ body, bodyDocument, target = "", onReady }: { body: string; bodyDocument?: PlateDocumentEnvelope | null; target?: string; onReady?: (target: string) => void }) {
   const [text, setText] = useState<string | null>(null);
   useEffect(() => {
     if (!/<\/?[a-z][^>]*>/i.test(body)) { setText(body); return; }
@@ -508,6 +511,7 @@ function AgreementBody({ body }: { body: string }) {
     doc.querySelectorAll("td,th").forEach((node) => node.append("\t"));
     setText(doc.body.textContent ?? "");
   }, [body]);
+  if (bodyDocument) return <div className="publish-terms-body"><TradeTermsDocument body={body} document={bodyDocument} target={target} onReady={onReady} /></div>;
   return <div className="publish-terms-body">{text ?? "正在读取条款正文…"}</div>;
 }
 
@@ -656,7 +660,7 @@ function PublishingNotice({
             <Dialog.Portal><Dialog.Backdrop className="modal-overlay publish-dialog-backdrop publish-agreement-backdrop" /><Dialog.Popup className="publish-dialog publish-agreement-dialog" data-slot="dialog-content">
               <header><Dialog.Title>{agreement?.title ?? "出租交易须知"}</Dialog.Title><Dialog.Close className="publish-reading-close" aria-label="关闭交易须知"><X size={20} aria-hidden="true" /></Dialog.Close></header>
               <Dialog.Description>当前读取的协议正文；阅读不会自动同意条款，上架前仍需确认本次报价对应的协议。</Dialog.Description>
-              {agreement ? <AgreementBody body={agreement.body} /> : <p>暂未取得协议正文。</p>}
+              {agreement ? <AgreementBody body={agreement.body} bodyDocument={agreement.bodyDocument} /> : <p>暂未取得协议正文。</p>}
               <Dialog.Close className="button secondary">返回上架须知</Dialog.Close>
             </Dialog.Popup></Dialog.Portal>
           </Dialog.Root>
@@ -1089,6 +1093,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const leavingRef = useRef(false);
   const navigationFocusRef = useRef<HTMLElement | null>(null);
   const [agreementChecked, setAgreementChecked] = useState(false);
+  const [readAgreement, setReadAgreement] = useState<string | null>(null);
+  const [readPayoutTerms, setReadPayoutTerms] = useState<string | null>(null);
   const [termsModalOpen, setTermsModalOpen] = useState(false);
   const [payoutTermsModalOpen, setPayoutTermsModalOpen] = useState(false);
   const [payoutTerms, setPayoutTerms] = useState<{ target: string; terms: FullPayoutTerms | null; status: "loading" | "ready" | "unavailable" } | null>(null);
@@ -3338,6 +3344,8 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
   const blockers = [...(catalog?.blockers ?? []).map((item) => item.code), ...(supply?.blockers ?? [])];
   const breakdown = ownerQuoteBreakdown(quoteData);
   const agreement = supply?.agreement ?? options?.agreement ?? null;
+  const agreementReadable = Boolean(agreement && (!agreement.bodyDocument || readAgreement === agreement.digest));
+  const payoutReadable = Boolean(currentPayoutTerms && (!currentPayoutTerms.bodyDocument || readPayoutTerms === currentPayoutTerms.termsDigest));
   const readOnly = Boolean(accountId && !editing);
   const mustCreateAccount = ["ARCHIVED", "DELISTED"].includes(supply?.account.lifecycle ?? "") || supply?.version?.origin === "LEGACY_OBSERVATION" || Boolean(supply?.version?.publication) || ["PUBLISHED", "APPROVED"].includes(supply?.version?.reviewState ?? "") || Boolean(supply?.blockers?.includes("LEGACY_LISTING_RELIST_REQUIRED"));
   const formDisabled = identityState !== "confirmed" || !identityRef.current || readOnly || Boolean(busy) || writePending || Boolean(intentStorageIssue);
@@ -3731,11 +3739,11 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
     return document.querySelector<HTMLElement>(".publish-outline a");
   };
   const agreementConsent = <div className="publish-consent-row publish-agreement-acceptance">
-    <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreement} aria-label="我已阅读并同意出租协议" onChange={(event) => setAgreementChecked(event.target.checked)} /><span>我已阅读并同意</span></label>
+    <label className="supply-check"><input type="checkbox" checked={agreementChecked} disabled={formDisabled || !agreementReadable} aria-label="我已阅读并同意出租协议" onChange={(event) => setAgreementChecked(event.target.checked)} /><span>我已阅读并同意</span></label>
     {agreement ? <button type="button" className="publish-terms-inline-link" onClick={() => setTermsModalOpen(true)}>出租协议</button> : null}
   </div>;
   const payoutConsent = payoutSelected === true ? <div className="publish-consent-row publish-payout-acceptance">
-    <label className="supply-check"><input type="checkbox" checked={Boolean(payoutAcceptance)} disabled={formDisabled || !currentPayoutTerms} aria-label="我已阅读并同意包赔条款" onChange={(event) => setPayoutAccepted(event.target.checked)} /><span>我已阅读并同意</span></label>
+    <label className="supply-check"><input type="checkbox" checked={Boolean(payoutAcceptance)} disabled={formDisabled || !payoutReadable} aria-label="我已阅读并同意包赔条款" onChange={(event) => setPayoutAccepted(event.target.checked)} /><span>我已阅读并同意</span></label>
     {currentPayoutTerms ? <button type="button" className="publish-terms-inline-link" onClick={() => setPayoutTermsModalOpen(true)}>包赔条款</button> : null}
   </div> : null;
 
@@ -4608,10 +4616,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           <Dialog.Description className="sr-only">
             当前读取的协议正文；阅读不会自动同意条款，上架前仍需单独勾选确认。
           </Dialog.Description>
-          {agreement ? <AgreementBody body={agreement.body} /> : <p>暂未取得协议正文。</p>}
+          {agreement ? <AgreementBody body={agreement.body} bodyDocument={agreement.bodyDocument} target={agreement.digest} onReady={setReadAgreement} /> : <p>暂未取得协议正文。</p>}
           <div className="publish-agreement-dialog-actions">
             <Dialog.Close className="button secondary">返回</Dialog.Close>
-            {agreement ? <button type="button" className="button primary" disabled={formDisabled} onClick={() => { setAgreementChecked(true); setTermsModalOpen(false); }}>我已阅读并同意本条款</button> : null}
+            {agreement ? <button type="button" className="button primary" disabled={formDisabled || !agreementReadable} onClick={() => { setAgreementChecked(true); setTermsModalOpen(false); }}>我已阅读并同意本条款</button> : null}
           </div>
         </Dialog.Popup>
       </Dialog.Portal>
@@ -4630,10 +4638,10 @@ export function PublishForm({ mode, gameCode: gameCodeProp, accountId: accountId
           <Dialog.Description className="sr-only">
             当前读取的全额包赔协议正文；阅读不会自动同意条款，上架前仍需单独勾选确认。
           </Dialog.Description>
-          {currentPayoutTerms ? <AgreementBody body={currentPayoutTerms.body} /> : <p>暂未取得协议正文。</p>}
+          {currentPayoutTerms ? <AgreementBody body={currentPayoutTerms.body} bodyDocument={currentPayoutTerms.bodyDocument} target={currentPayoutTerms.termsDigest} onReady={setReadPayoutTerms} /> : <p>暂未取得协议正文。</p>}
           <div className="publish-agreement-dialog-actions">
             <Dialog.Close className="button secondary">返回</Dialog.Close>
-            {currentPayoutTerms ? <button type="button" className="button primary" disabled={formDisabled} onClick={() => { setPayoutAccepted(true); setPayoutTermsModalOpen(false); }}>我已阅读并同意包赔条款</button> : null}
+            {currentPayoutTerms ? <button type="button" className="button primary" disabled={formDisabled || !payoutReadable} onClick={() => { setPayoutAccepted(true); setPayoutTermsModalOpen(false); }}>我已阅读并同意包赔条款</button> : null}
           </div>
         </Dialog.Popup>
       </Dialog.Portal>

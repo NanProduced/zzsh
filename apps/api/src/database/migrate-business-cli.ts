@@ -44,19 +44,17 @@ async function main(): Promise<void> {
   try {
     await assertBusinessMigrationIdentity(pool, config);
     await runBusinessMigrations(pool, { runtimeUser: config.database.runtimeUser, initialInstall, initialBaseline });
-    if (pricingPackage) {
-      const bytes = pricingPackage;
-      const result = await withTransaction(pool, client => initializeFixedFeeDeployment(client, bytes, packageSha256));
-      console.log(JSON.stringify(result));
-    }
-    if (actorAdminId) {
-      const result = await withTransaction(pool, async client => {
-        await client.query("SELECT pg_advisory_xact_lock(hashtextextended('confirmed-content-bootstrap', 0))");
-        await assertContentBootstrapBoss(client, actorAdminId);
+    if (pricingPackage || actorAdminId) {
+      const results = await withTransaction(pool, async client => {
+        const pricing = pricingPackage ? await initializeFixedFeeDeployment(client, pricingPackage, packageSha256) : undefined;
+        if (!actorAdminId) return { pricing };
         const input = { actorAdminId, requestId: randomUUID() };
-        return { content: await bootstrapDefaultContent(client, input), legal: await bootstrapLegalDocuments(client, input) };
+        await assertContentBootstrapBoss(client, actorAdminId);
+        const legal = await bootstrapLegalDocuments(client, input);
+        return { pricing, content: { content: await bootstrapDefaultContent(client, input), legal } };
       });
-      console.log(JSON.stringify(result));
+      if (results.pricing) console.log(JSON.stringify(results.pricing));
+      if (results.content) console.log(JSON.stringify(results.content));
     }
   } finally {
     await pool.end();

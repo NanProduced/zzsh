@@ -1541,6 +1541,13 @@
       "when": 1794456000021,
       "tag": "0219_legacy_system_media_paths",
       "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1794456000022,
+      "tag": "0220_trade_terms_plate",
+      "breakpoints": true
     }
   ]
 }

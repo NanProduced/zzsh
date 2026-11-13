@@ -690,7 +690,7 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
     ...termDiff(rules, baseline?.termVersionId, termId),
     ...agreementDiff(rules, baseline?.agreementVersionId, agreementId),
   ], [rules, baseline, priceId, termId, agreementId, fixedFee]);
-  const same = Boolean(baseline && priceId === baseline.priceVersionId && termId === baseline.termVersionId && agreementId === baseline.agreementVersionId);
+  const same = Boolean(baseline && baseline.earlySettlementVersionId === scheduling?.earlySettlement?.versionId && priceId === baseline.priceVersionId && termId === baseline.termVersionId && agreementId === baseline.agreementVersionId);
   const unchanged = [priceId === baseline?.priceVersionId ? "组合资金政策" : null, termId === baseline?.termVersionId ? "租期与每日消耗" : null, agreementId === baseline?.agreementVersionId ? "出租协议" : null].filter(Boolean);
   const curRef = payoutRef(rules.priceVersions.find((v) => v.id === baseline?.priceVersionId));
   const nextRef = payoutRef(rules.priceVersions.find((v) => v.id === priceId));
@@ -711,13 +711,13 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
     return () => request.abort();
   }, [rules.game.id, scheduling?.available, readAttempt]);
 
-  const ready = !shortcutOutsideWindow && scheduling?.available && effectiveAt && Date.parse(effectiveAt) > Date.parse(scheduling.asOf)
+  const ready = !shortcutOutsideWindow && scheduling?.available && scheduling.earlySettlement && effectiveAt && Date.parse(effectiveAt) > Date.parse(scheduling.asOf)
     && announcements?.some(row => row.id === announcementVersionId);
   const activate = () => {
     if (!ready || !scheduling) return;
     return command.write({ operation: RULES_RELEASE_OPERATION, resourceId: rules.game.id, gameId: rules.game.id,
       path: "/supply/releases", method: "POST", body: { gameId: rules.game.id, priceVersionId: priceId, termVersionId: termId,
-        agreementVersionId: agreementId, expectedGeneration: scheduling.generation, effectiveAt, announcementVersionId } });
+        agreementVersionId: agreementId, expectedGeneration: scheduling.generation, effectiveAt, announcementVersionId, earlySettlement: scheduling.earlySettlement } });
   };
   const done = state.kind === "done" && state.operation === RULES_RELEASE_OPERATION;
   const busy = state.kind === "busy" || state.kind === "recovering";
@@ -754,6 +754,8 @@ export function ConfirmDialog({ rules, command, onClose, onOpenSettlement, prefe
                 : !announcements ? <p role="status" className="text-sm text-muted-foreground">正在读取公告…</p>
                 : !announcements.length ? <p className="text-sm text-muted-foreground">请先发布适用公告。</p> : null}
             </div> : <p role="status" className="text-sm text-muted-foreground">规则组合排期尚未安装。</p>}
+            {scheduling?.earlySettlement ? <p className="text-xs text-muted-foreground">本次引用的提前结算告知：{scheduling.earlySettlement.versionId}</p>
+              : <p role="status" className="text-sm text-muted-foreground">请先在内容管理发布提前结算告知。</p>}
             {shortcutOutsideWindow ? <p role="status" className="text-sm text-muted-foreground">此时点的计划超出当前列表，请从规则总览选择完整组合。</p> : null}
             {!crossGame ? <div><p className="mb-2 text-sm font-semibold">改了的规则</p><DiffTable rows={rows} empty={same ? "所选组合与该时点的规则组合相同，无需排期。" : "已提供的业务字段未发现差异；版本引用将变化。"} /></div> : null}
             <div className="grid grid-cols-1 gap-3 rounded-lg border border-border/60 bg-muted/20 p-3 text-xs sm:grid-cols-2">

@@ -339,6 +339,9 @@ export function changesSettingsContent(current: WorkspaceTab, next: WorkspaceTab
 }
 
 export function changesWorkspaceContent(current: WorkspaceTab, next: WorkspaceTab): boolean {
+  if (current.kind === "content-legal" && next.kind === "content-legal") {
+    return ["trade", "gameId", "version"].some(key => current.query[key] !== next.query[key]);
+  }
   return changesSettingsContent(current, next) || current.id === "docs" && next.id === "docs"
     && (current.objectId !== next.objectId || (current.query.view === "trash") !== (next.query.view === "trash"));
 }
@@ -378,7 +381,7 @@ export function canOpenKind(kind: WorkspaceRouteKind, nav: NavPermission): boole
   if (kind === "content") return has("content.platform.read") || has("content.read") || nav.isBoss;
   if (kind === "content-help") return nav.isBoss || has("content.platform.read") || has("content.help.read") || has("content.read");
   if (kind === "content-updates") return nav.isBoss || has("content.platform.read") || has("content.read");
-  if (kind === "content-legal") return nav.isBoss || ["content.platform.read", "content.platform.edit", "content.platform.publish", "content.fixed.submit", "content.fixed.publish"].some(has);
+  if (kind === "content-legal") return nav.isBoss || ["supply.rules.edit", "content.platform.read", "content.platform.edit", "content.platform.publish", "content.fixed.submit", "content.fixed.publish"].some(has);
   if (kind === "content-pages" || kind === "content-media") return nav.isBoss || has("content.platform.read");
   if (kind === "docs" || kind === "docs-object") return has("docs.internal.read") || nav.isBoss;
   // P0b 预览：导航与开关/权限门禁在 page-content 内判定（受限说明 / 403），此处放行以便渲染门禁文案。

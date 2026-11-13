@@ -20,7 +20,7 @@ import { fullPayoutServiceFeeCents } from "../supply/full-payout-fee";
 import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
 import { fixedFeeSettlementSchemaReady, scheduledSpreadSettlementSchemaReady } from "../finance/fixed-fee-settlement-schema";
 import { assertDistributionAccrualTask } from "../finance/distribution-accrual-tasks";
-import { readEarlySettlementDisclosure, recordDocumentAcceptance } from "../legal/legal-documents";
+import { earlySettlementReference, resolveEarlySettlementDisclosure, recordDocumentAcceptance, type LegalAcceptanceRef } from "../legal/legal-documents";
 import { assertSupportOrderAccess } from "./manual-close";
 import { openingConfirmStep, type OpeningConfirmParty } from "./opening-auto-confirm";
 import {frozenPersonalGrowthV4Valid} from './personal-growth-confirmation';
@@ -95,7 +95,7 @@ export async function assertSettlementReadDatabase(client:PoolClient,identity:Se
 
 /** Existing v2 orders predate the new disclosure and retain their original contract. */
 export function requiresEarlySettlementAcceptance(order: Pick<LockedOrder, "quote">): boolean {
-  return readEarlySettlementDisclosure(order.quote) !== null;
+  return earlySettlementReference(order.quote) !== null;
 }
 
 /** Labeled policy probe. HTTP order loading never calls this and never treats it as a paid order. */
@@ -1057,7 +1057,7 @@ function projectSettlementBody(value: unknown, viewer: SettlementViewer): unknow
   const body = pickFields(value, [
     "error", "orderId", "revision", "rentalStarted", "consumptionMode", "extraResources", "openings", "openingGeneration", "openingGenerationRecoveryRequired", "intakes", "versions", "currentRequest", "settlement", "posting",
     "ready", "reasons", "stage", "postingAuthorized", "feeDeducted", "orderStatus", "accepted", "early", "amounts", "versionHash",
-    "baseVersionId", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedPlatformServiceFee", "proposedMembershipDiscount", "proposedRenterRefund", "reason",
+    "baseVersionId", "earlySettlementDisclosure", "earlySettlementDisclosureUnavailable", "consumed", "systemOwnerNet", "systemRenterRefund", "proposedOwnerNet", "proposedOwnerGross", "proposedFullPayoutFee", "proposedPlatformServiceFee", "proposedMembershipDiscount", "proposedRenterRefund", "reason",
   ]);
   if(Array.isArray(body.extraResources))body.extraResources=body.extraResources.map(item=>pickFields(item,["itemId","name","unit","pricingKind"]));
   if (Array.isArray(body.openings)) body.openings = body.openings.map((opening) => {
@@ -1126,7 +1126,16 @@ export async function readSettlement(client: PoolClient, orderId: string, actor:
   const order = await lockSettlement(client, orderId, actor, false);
   const result = await view(client, order);
   // B3 (Owner t274u): optional additive stage, same settlementStageOf as the list batch read.
-  return { ...result, body: { ...result.body, stage: settlementStageOf(settlementStageFactsFromView(result.body, viewerPartyOf(order, actor))) } };
+  const disclosure = (result.body.settlement as { early?: boolean } | null)?.early === true
+    ? await resolveEarlySettlementDisclosure(client, order.quote).then(
+      earlySettlementDisclosure => earlySettlementDisclosure ? { earlySettlementDisclosure } : {},
+      error => {
+        if (error instanceof SecurityApiError && error.status === 503) return { earlySettlementDisclosureUnavailable: true };
+        throw error;
+      },
+    ) : {};
+  return { ...result, body: { ...result.body, ...disclosure,
+    stage: settlementStageOf(settlementStageFactsFromView(result.body, viewerPartyOf(order, actor))) } };
 }
 function viewerPartyOf(order: LockedOrder, actor: Actor): "RENTER" | "OWNER" | null {
   if (actor.realm !== "user") return null;
@@ -1498,7 +1507,7 @@ async function insertVersion(client: PoolClient, input: {
   return view(client, input.order);
 }
 
-async function recordIntake(client: PoolClient, order: LockedOrder, actor: Actor, opening: { id: string; versionNo: number }, basis: Basis, remaining: LineQty[], base: AcceptanceBase, requestId: string): Promise<Command> {
+async function recordIntake(client: PoolClient, order: LockedOrder, actor: Actor, opening: { id: string; versionNo: number }, basis: Basis, remaining: LineQty[], base: AcceptanceBase, requestId: string, acceptedHash: string, disclosure: LegalAcceptanceRef | null): Promise<Command> {
   const lines = stableRemaining(remaining);
   const basisHash = hashApprovalPayload({ openingId: opening.id, openingVersion: opening.versionNo, quoteDigest: basis.quoteDigest, paymentDigest: basis.paymentDigest }).hash;
   let superseded: { id: string; versionNo: number; lines: StoredSettlementLine[] } | null = null;
@@ -1525,6 +1534,13 @@ async function recordIntake(client: PoolClient, order: LockedOrder, actor: Actor
     intakeId: id, versionNo, party, lines,
     ...(superseded ? { supersededIntake: superseded, replacementLines: lines } : {}),
   });
+  if (disclosure) {
+    await audit(client, actor, "order.settlement.disclosure.accepted", order.id, requestId, { disclosure, intakeId: id, acceptedHash, source: "SETTLEMENT_SUBMIT" });
+    await recordDocumentAcceptance(client, { userId: actor.userId,
+      documentType: party === "RENTER" ? "EARLY_SETTLEMENT_RENTER" : "EARLY_SETTLEMENT_OWNER",
+      documentVersionId: `${disclosure.versionId}:${acceptedHash}`, documentDigest: disclosure.digest,
+      subjectType: "ORDER", subjectId: order.id, source: "SETTLEMENT_SUBMIT", requestId }, "SETTLEMENT_AUDIT");
+  }
   return view(client, order);
 }
 
@@ -1562,7 +1578,9 @@ export async function previewSettlement(client: PoolClient, orderId: string, act
   const result = probe(order, bill.opening.id, bill.basis, bill.lines, "NORMAL", "preview");
   if (needsEarlyReason(result)) {
     const credential = hashApprovalPayload(intakePayload(order, bill.opening, bill.basis, remaining, base)).hash;
-    return done({ accepted: false, early: true, reasons: ["EARLY_REASON_REQUIRED"], amounts: null, versionHash: credential, baseVersionId: base.versionId }, order.status);
+    const earlySettlementDisclosure = await resolveEarlySettlementDisclosure(client, order.quote);
+    return done({ accepted: false, early: true, reasons: ["EARLY_REASON_REQUIRED"], amounts: null, versionHash: credential, baseVersionId: base.versionId,
+      ...(earlySettlementDisclosure ? { earlySettlementDisclosure } : {}) }, order.status);
   }
   if (!result.ok || result.early !== false || !result.amounts) return blocked(result.reasons);
   const payload = payloadFor({
@@ -1580,19 +1598,11 @@ export async function submitSettlement(client: PoolClient, orderId: string, acto
   const base = await acceptanceBase(client, order.id);
   const result = probe(order, bill.opening.id, bill.basis, bill.lines, "NORMAL", "preview");
   if (needsEarlyReason(result)) {
-    if (requiresEarlySettlementAcceptance(order) && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
     if (hashApprovalPayload(intakePayload(order, bill.opening, bill.basis, remaining, base)).hash !== acceptedHash) return blocked(["SETTLEMENT_HASH_MISMATCH"]);
-    const intake = await recordIntake(client, order, actor, bill.opening, bill.basis, remaining, base, requestId);
-    if (requiresEarlySettlementAcceptance(order)) {
-      const party = partyOf(order, actor.userId);
-      const disclosure = readEarlySettlementDisclosure(order.quote)!;
-      await audit(client, actor, "order.settlement.disclosure.accepted", orderId, requestId, { disclosure, acceptedHash, source: "SETTLEMENT_SUBMIT" });
-      await recordDocumentAcceptance(client, { userId: actor.userId,
-        documentType: party === "RENTER" ? "EARLY_SETTLEMENT_RENTER" : "EARLY_SETTLEMENT_OWNER",
-        documentVersionId: `${disclosure.versionId}:${acceptedHash}`, documentDigest: disclosure.digest,
-        subjectType: "ORDER", subjectId: orderId, source: "SETTLEMENT_SUBMIT", requestId }, "SETTLEMENT_AUDIT");
-    }
-    return intake;
+    const disclosure = await resolveEarlySettlementDisclosure(client, order.quote);
+    if (disclosure && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
+    return recordIntake(client, order, actor, bill.opening, bill.basis, remaining, base, requestId, acceptedHash,
+      disclosure ? { versionId: disclosure.versionId, digest: disclosure.digest } : null);
   }
   if (!result.ok || result.early !== false || !result.amounts) return blocked(result.reasons);
   const payload = payloadFor({
@@ -2092,7 +2102,8 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
   const party = partyOf(order, actor.userId);
   if (action === "REJECT" && !reason) throw invalid("A rejection reason is required");
   if (action === "CONFIRM" && settlementFeeReconfirmationRequired(version.inputSnapshot)) return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
-  if (action === "CONFIRM" && version.early && requiresEarlySettlementAcceptance(order) && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
+  const disclosure = action === "CONFIRM" && version.early ? await resolveEarlySettlementDisclosure(client, order.quote) : null;
+  if (disclosure && !termsAccepted) return blocked(["EARLY_TERMS_NOT_ACCEPTED"]);
   if (action === "CONFIRM") {
     if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
       return blocked(["SETTLEMENT_INTAKE_PENDING"]);
@@ -2113,9 +2124,10 @@ export async function decideSettlement(client: PoolClient, orderId: string, vers
     );
   }
   await audit(client, actor, "order.settlement.decided", orderId, requestId, { settlementVersionId: version.id, party, action });
-  if (action === "CONFIRM" && version.early && requiresEarlySettlementAcceptance(order)) {
-    const disclosure = readEarlySettlementDisclosure(order.quote)!;
-    await audit(client, actor, "order.settlement.disclosure.accepted", orderId, requestId, { disclosure, versionHash: version.versionHash, source: "SETTLEMENT_DECISION" });
+  if (!existing && disclosure) {
+    await audit(client, actor, "order.settlement.disclosure.accepted", orderId, requestId, {
+      disclosure: { versionId: disclosure.versionId, digest: disclosure.digest }, settlementVersionId: version.id, versionHash: version.versionHash, source: "SETTLEMENT_DECISION",
+    });
     await recordDocumentAcceptance(client, { userId: actor.userId,
       documentType: party === "RENTER" ? "EARLY_SETTLEMENT_RENTER" : "EARLY_SETTLEMENT_OWNER",
       documentVersionId: `${disclosure.versionId}:${version.versionHash}`, documentDigest: disclosure.digest,
@@ -2132,6 +2144,7 @@ export async function reviewSettlement(client: PoolClient, orderId: string, vers
   if (!version || version.supersededAt || version.versionHash !== versionHash) return blocked(["STALE_VERSION"]);
   if (settlementFeeReconfirmationRequired(version.inputSnapshot)) return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
   if (!version.early) return blocked(["SUPPORT_REVIEW_NOT_REQUIRED"]);
+  await resolveEarlySettlementDisclosure(client, order.quote);
   if ((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id = $1 AND status = 'OPEN' LIMIT 1`, [orderId])).rowCount) {
     return blocked(["SETTLEMENT_INTAKE_PENDING"]);
   }
@@ -2167,6 +2180,7 @@ export async function finalizeSettlementBySupport(client:PoolClient,orderId:stri
   if(!version||version.supersededAt||version.versionHash!==versionHash)return blocked(["STALE_VERSION"]);
   if(settlementFeeReconfirmationRequired(version.inputSnapshot))return blocked(["SETTLEMENT_FEE_RECONFIRM_REQUIRED"]);
   if(version.kind!=="SYSTEM")return blocked(["MANUAL_ADJUSTMENT_REQUIRES_REVIEW"]);
+  if(version.early)await resolveEarlySettlementDisclosure(client,order.quote);
   if((await client.query(`SELECT 1 FROM zzsh_order.settlement_intake WHERE order_id=$1 AND status='OPEN' LIMIT 1`,[orderId])).rowCount)return blocked(["SETTLEMENT_INTAKE_PENDING"]);
   if((await client.query(`SELECT 1 FROM zzsh_order.settlement_decision WHERE settlement_version_id=$1 AND party='SUPPORT' AND action='FINALIZE'`,[version.id])).rowCount)return blocked(["FINALIZATION_REQUIRES_RECONCILIATION"]);
   await client.query(`INSERT INTO zzsh_order.settlement_decision (id,settlement_version_id,version_hash,basis_hash,party,action,subject_id,reason)

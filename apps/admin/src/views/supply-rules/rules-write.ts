@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AdminApiError, adminRequest, friendlyError, type RulesResponse, type PricingScheduleRow, type RuleReleasePlan } from "../../api";
 import { SupplyWriteLockError, withSupplyWriteLock } from "../../lib/supply-write-lock";
 
-type RuleKind = "price" | "term" | "agreement";
+type RuleKind = "price" | "term" | "agreement" | "full_payout_terms";
 type Receipt = { id?: string; releaseId?: string; revision?: string; generation?: string; affectedCount?: number; effectiveAt?: string };
 type Command = { operation: string; resourceId?: string; gameId: string; path: string; method: "POST" | "PUT"; body: Record<string, unknown> };
 export type PendingRulesWrite = Command & { schema: 1; adminId: string; key: string; fingerprint: string; receipt?: Receipt };
@@ -31,7 +31,7 @@ export const rulesStorageKey = (adminId: string) => `zzsh.admin.rules.pending.v1
 
 export const draftCommand = (gameId: string, kind: RuleKind, action: "create" | "update" | "seal", body: Record<string, unknown>, id?: string): Command => ({
   gameId, operation: `supply.rules.${kind}_draft.${action}`, ...(id ? { resourceId: id } : {}),
-  path: `/supply/${kind}-drafts${id ? `/${encodeURIComponent(id)}` : ""}${action === "seal" ? "/seal" : ""}`, method: action === "update" ? "PUT" : "POST", body,
+  path: `/supply/${kind === "full_payout_terms" ? "full-payout-terms" : kind}-drafts${id ? `/${encodeURIComponent(id)}` : ""}${action === "seal" ? "/seal" : ""}`, method: action === "update" ? "PUT" : "POST", body,
 });
 
 function receiptOf(value: unknown, operation: string, resourceId?: string, body?: Record<string, unknown>, stored = false): Receipt | null {
@@ -84,7 +84,7 @@ export function parsePendingRulesWrite(raw: string | null, adminId: string): Pen
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("规则请求恢复记录损坏，请联系维护者核对原回执。");
   const p = value as PendingRulesWrite;
   const id = supplyId, schedule = scheduleKind(p.operation);
-  const match = /^supply\.rules\.(price|term|agreement)_draft\.(create|update|seal)$/.exec(p.operation);
+  const match = /^supply\.rules\.(price|term|agreement|full_payout_terms)_draft\.(create|update|seal)$/.exec(p.operation);
   const expected = schedule ? pricingScheduleCommand(p.gameId, schedule, {}) : match ? draftCommand(p.gameId, match[1] as RuleKind, match[2] as "create" | "update" | "seal", {}, p.resourceId) : { path: "/supply/releases", method: "POST" };
   if (p.schema !== 1 || p.adminId !== adminId || !id(p.gameId) || !/^idem_[A-Za-z0-9_-]+$/.test(p.key) || !/^[0-9a-f]{64}$/.test(p.fingerprint)
     || (!schedule && !match && p.operation !== RULES_RELEASE_OPERATION) || p.path !== expected.path || p.method !== expected.method
@@ -107,8 +107,8 @@ function readbackContains(fresh: RulesResponse, original: PendingRulesWrite, rec
     const current = BigInt(fresh.release.generation), accepted = BigInt(receipt.generation!);
     return current > accepted || (current === accepted && fresh.release.id === receipt.releaseId && fresh.release.priceVersionId === original.body.priceVersionId && fresh.release.termVersionId === original.body.termVersionId && fresh.release.agreementVersionId === original.body.agreementVersionId);
   }
-  const match = /^supply\.rules\.(price|term|agreement)_draft\.(create|update|seal)$/.exec(original.operation)!;
-  const versions = match[1] === "price" ? fresh.priceVersions : match[1] === "term" ? fresh.termVersions : fresh.agreementVersions;
+  const match = /^supply\.rules\.(price|term|agreement|full_payout_terms)_draft\.(create|update|seal)$/.exec(original.operation)!;
+  const versions = match[1] === "price" ? fresh.priceVersions : match[1] === "term" ? fresh.termVersions : match[1] === "agreement" ? fresh.agreementVersions : fresh.fullPayoutTermsVersions;
   const version = versions.find(version => version.id === receipt.id);
   if (!version) return false;
   if (match[2] === "create") return true;

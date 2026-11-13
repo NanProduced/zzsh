@@ -7,7 +7,7 @@ import { ensureOnlyFields, invalid } from "../supply/supply-util";
 import type { PublishingAccount, ListingVersion } from "../supply/publishing";
 import { parseFullPayoutTermsAcceptance, type FullPayoutTermsAcceptance } from "../supply/full-payout-terms";
 import { assertFinalConfirmationFunding } from "../supply/funding-authority";
-import { parseLegalAcceptanceRef, readCurrentEarlySettlementDisclosure, recordDocumentAcceptance, sameAcceptanceRef, type LegalAcceptanceRef } from "../legal/legal-documents";
+import { parseLegalAcceptanceRef, readReleaseEarlySettlementReference, recordDocumentAcceptance, sameAcceptanceRef, type LegalAcceptanceRef } from "../legal/legal-documents";
 
 export const PERSONAL_ORDER_OPERATION="order.reservation.create.v2";
 export function personalOrderInput(body:Record<string,unknown>):{confirmationToken:string;fullPayoutTermsAcceptance?:FullPayoutTermsAcceptance;agreementAcceptance?:LegalAcceptanceRef} {
@@ -43,13 +43,10 @@ export async function createPersonalReservation(client:PoolClient,context:OrderU
   if (agreementAcceptance && !sameAcceptanceRef(agreementAcceptance, personal.ruleRefs.agreementVersionId, personal.ruleRefs.agreementDigest)) {
     throw new SecurityApiError(409,"CONFIRMATION_CHANGED","Agreement changed; confirm again");
   }
-  const earlySettlementDisclosure = agreementAcceptance ? await readCurrentEarlySettlementDisclosure(client) : null;
-  if (agreementAcceptance && !earlySettlementDisclosure) {
-    throw new SecurityApiError(503, "CONFIRMATION_DEPENDENCY_UNAVAILABLE", "提前结算告知暂不可用，请稍后重试");
-  }
+  const earlySettlementDisclosure = agreementAcceptance ? await readReleaseEarlySettlementReference(client, account.game_id, input.releaseId) : null;
   const snapshot={...quote,quoteKind:"ORDER_CONFIRMATION" as const,orderSnapshotSchema:1,confirmationId:verified.claims.confirmationId,confirmationDigest:verified.claims.quoteDigest,confirmationExpiresAt:verified.claims.expiresAt,listingHash:verified.claims.listingHash,personal,
     ...(settlementPricing===undefined?{}:{settlementPricing}),
-    ...(earlySettlementDisclosure ? { agreementAcceptanceSchema: 1, agreementAcceptance, earlySettlementDisclosure } : {}),
+    ...(earlySettlementDisclosure ? { agreementAcceptanceSchema: 2, agreementAcceptance, earlySettlementDisclosure } : {}),
     ...(fullPayoutTermsAcceptance ? { fullPayoutTermsAcceptance } : {})};
   try {
     const created=await insertReservationSnapshot(client,{context,account,version,snapshot,holdSeconds:options.holdSeconds!,requestId,confirmationId:verified.claims.confirmationId});

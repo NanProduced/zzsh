@@ -332,7 +332,9 @@ test("early settlement v1 keeps the golden digest and the unchanged snapshot ver
   assert.equal(createHash("sha256").update(bytes).digest("hex"), golden.digest);
   assert.equal(bytes.toString("utf8"), golden.body);
   const manifest = JSON.parse(readFileSync(resolve(DEFAULTS, "manifest.confirmed.json"), "utf8")) as { items: { key: string; digest: string }[] };
-  assert.equal(manifest.items.find(item => item.key === "early-settlement-v1")?.digest, golden.digest);
+  const entry = JSON.parse(readFileSync(resolve(DEFAULTS, "legal/early-settlement-v1.json"), "utf8"));
+  assert.equal(entry.sourceSha256, golden.digest);
+  assert.equal(manifest.items.find(item => item.key === "early-settlement-v1")?.digest, await plateDigest(entry.document));
   // 快照校验逻辑不变：只比 sha256(存储原文)。
   const quote = { agreementAcceptanceSchema: 1, earlySettlementDisclosure: golden };
   assert.deepEqual(readEarlySettlementDisclosure(quote), golden);

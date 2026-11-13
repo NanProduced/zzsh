@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, ChevronRight, Clock3, FileText, Headphones, RotateCcw, RotateCw, ShieldCheck, WalletCards, X } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { orderApi, orderIntentKey, OrderRequestError, type Order, type PersonalRentalQuote, type RentalPricePreview, type FullPayoutTerms, type FullPayoutTermsAcceptance } from "@/lib/order-client";
+import { orderApi, orderIntentKey, OrderRequestError, type Order, type PersonalRentalQuote, type RentalPricePreview, type RentalAgreement, type FullPayoutTerms, type FullPayoutTermsAcceptance } from "@/lib/order-client";
 import { clearIntent, isIntentStale, loadIntent, saveIntent } from "@/lib/order-intents";
 import { formatMoneyLabel } from "@/lib/listing-view";
-import { supplyApi } from "@/lib/supply-client";
+import TradeTermsDocument from "@/components/content/trade-terms-document";
 import { useUserSession } from "@/components/session/user-session-provider";
 import { useIdentityReset } from "@/components/session/identity-reset";
 import { RentalPriceSummary, MembershipBenefitsCard, type ReferenceFees } from "./rental-price-summary";
@@ -15,7 +15,7 @@ import { moneyText,paymentObservation,personalMembershipLabel,membershipBenefitP
 import { performGuardedWrite, type WriteOutcome } from "@/components/order/order-trade-actions";
 import { PaymentDialog } from "@/components/order/payment-dialog";
 
-type AgreementInfo = { id: string; title: string; body: string; digest: string };
+type AgreementInfo = RentalAgreement;
 type StoredContext = { payable?: string; tier?: string; deposit?: string; expiresAt?: string; disclosure?: string };
 
 type PreviewState =
@@ -94,6 +94,8 @@ function PayoutTerms({
     ? JSON.stringify([state.terms.termsVersionId, state.terms.termsDigest, state.terms.disclosureVersion])
     : null;
   const [modal, setModal] = useState<{ target: string; accepted: boolean } | null>(null);
+  const [renderedTarget, setRenderedTarget] = useState<string | null>(null);
+  const termsReadable = state?.status === "ready" && (!state.terms.bodyDocument || renderedTarget === termsTarget);
   const modalOpen = Boolean(termsTarget && modal?.target === termsTarget);
   useEffect(() => { setModal(null); }, [termsTarget, locked]);
   if (!state) return null;
@@ -129,8 +131,8 @@ function PayoutTerms({
               type="checkbox"
               aria-label="我已阅读并同意全额包赔条款"
               checked={accepted}
-              disabled={locked}
-              onChange={(event) => { if (!locked) onAccept(event.target.checked); }}
+              disabled={locked || !termsReadable}
+              onChange={(event) => { if (!locked && termsReadable) onAccept(event.target.checked); }}
             />
             <span>{accepted ? "已阅读并同意该包赔条款" : "我已阅读并同意该包赔条款"}</span>
           </label>
@@ -150,16 +152,16 @@ function PayoutTerms({
                 </Dialog.Close>
               </div>
               <div className="rental-terms-dialog-body" role="region" aria-label="全额包赔条款全文">
-                <pre>{state.terms.body}</pre>
+                {termsTarget ? <TradeTermsDocument body={state.terms.body} document={state.terms.bodyDocument} target={termsTarget} onReady={setRenderedTarget} /> : null}
               </div>
               <div className="rental-terms-dialog-footer">
                 <label className="rental-terms-dialog-accept">
                   <input
                     type="checkbox"
                     checked={Boolean(modalOpen && modal?.accepted)}
-                    disabled={locked}
+                    disabled={locked || !termsReadable}
                     onChange={(event) => {
-                      if (!locked && modalOpen && termsTarget) setModal({ target: termsTarget, accepted: event.target.checked });
+                      if (!locked && termsReadable && modalOpen && termsTarget) setModal({ target: termsTarget, accepted: event.target.checked });
                     }}
                   />
                   <span>我已阅读并同意该包赔条款</span>
@@ -167,9 +169,9 @@ function PayoutTerms({
                 <button
                   type="button"
                   className="button primary rental-terms-dialog-confirm"
-                  disabled={locked || !modalOpen || !modal?.accepted}
+                  disabled={locked || !termsReadable || !modalOpen || !modal?.accepted}
                   onClick={() => {
-                    if (locked || !modalOpen || !modal?.accepted) return;
+                    if (locked || !termsReadable || !modalOpen || !modal?.accepted) return;
                     onAccept(true);
                     setModal(null);
                   }}
@@ -311,6 +313,7 @@ export function RentalConfirmPanel({
   const [payout, setPayout] = useState<PayoutState | null>(fullPayoutSelected ? { status: "loading" } : null);
   const [payoutAccepted, setPayoutAccepted] = useState(false);
   const [agreementAccepted, setAgreementAccepted] = useState(false);
+  const [readAgreement, setReadAgreement] = useState<string | null>(null);
   const quoteTarget = JSON.stringify([accountId, gameId, versionId, releaseId]);
   const currentQuoteTarget = useRef(quoteTarget);
   currentQuoteTarget.current = quoteTarget;
@@ -346,7 +349,7 @@ export function RentalConfirmPanel({
 
   const fetchPreview = useCallback(async (isFocusRefresh = false) => {
     if (stageKindRef.current !== "idle") return;
-    if (!autoPreview || !userId || !versionId || !releaseId) {
+    if ((!autoPreview && !fullPayoutSelected) || !userId || !versionId || !releaseId) {
       setPreviewState((prev) => (prev.status === "idle" ? prev : { status: "idle" }));
       return;
     }
@@ -462,7 +465,7 @@ export function RentalConfirmPanel({
         isFetchingPreviewRef.current = false;
       }
     }
-  }, [autoPreview, userId, accountId, versionId, releaseId]);
+  }, [autoPreview, fullPayoutSelected, userId, accountId, versionId, releaseId]);
 
   useEffect(() => {
     if (stage.kind === "idle") void fetchPreview();
@@ -495,21 +498,15 @@ export function RentalConfirmPanel({
     return () => window.removeEventListener("focus", onFocus);
   }, [fetchPreview]);
 
-  const payoutTarget = `${gameId ?? ""}:${releaseId ?? ""}`;
+  const previewTerms = previewState.status === "ready" ? previewState.preview.compensationDisclosure?.terms : undefined;
+  const previewTermsKey = previewTerms ? `${previewTerms.termsVersionId}:${previewTerms.termsDigest}:${previewTerms.disclosureVersion}` : null;
+  useEffect(() => { setPayoutAccepted(false); }, [quoteTarget, previewTermsKey]);
   useEffect(() => {
-    if (!fullPayoutSelected || !gameId || !releaseId) { setPayout(null); return; }
-    setPayoutAccepted(false);
-    setPayout({ status: "loading" });
-    const controller = new AbortController();
-    supplyApi.fullPayoutTerms(gameId, releaseId, controller.signal).then((result) => {
-      if (controller.signal.aborted) return;
-      if (result.releaseId !== releaseId || !result.fullPayoutTerms) setPayout({ status: "unavailable", message: "当前发布版本没有可读取的全额包赔条款，暂不能创建订单。" });
-      else setPayout({ status: "ready", terms: result.fullPayoutTerms });
-    }).catch(() => {
-      if (!controller.signal.aborted) setPayout({ status: "unavailable", message: "全额包赔条款暂时无法读取；为安全起见暂不能创建订单，请稍后重试。" });
-    });
-    return () => controller.abort();
-  }, [fullPayoutSelected, gameId, releaseId, payoutTarget]);
+    if (!fullPayoutSelected || !userId) { setPayout(null); return; }
+    if (previewTerms) setPayout({ status: "ready", terms: previewTerms });
+    else if (previewState.status === "error" || previewState.status === "ready") setPayout({ status: "unavailable", message: "本账号适用的全额包赔条款暂不可读，请重试报价。" });
+    else setPayout({ status: "loading" });
+  }, [fullPayoutSelected, userId, previewState.status, previewTerms]);
 
   // Only an exact acceptance of the terms read for this listing may be sent; a missing
   // acceptance blocks the same calls the API fails closed on (409 terms conflict).
@@ -574,21 +571,15 @@ export function RentalConfirmPanel({
       const changeNotice = findQuoteChanges(baseline, quote);
       setPriceChangeNotice(changeNotice);
       const authoritativeTerms = quote.compensationDisclosure?.terms;
-      if (quote.compensationDisclosure?.selected && payoutAcceptance && authoritativeTerms
-        && (authoritativeTerms.termsVersionId !== payoutAcceptance.termsVersionId || authoritativeTerms.termsDigest !== payoutAcceptance.termsDigest
-          || authoritativeTerms.disclosureVersion !== payoutAcceptance.disclosureVersion)) {
+      if (fullPayoutSelected && (!quote.compensationDisclosure?.selected || !payoutAcceptance || !authoritativeTerms
+        || authoritativeTerms.termsVersionId !== payoutAcceptance.termsVersionId || authoritativeTerms.termsDigest !== payoutAcceptance.termsDigest
+        || authoritativeTerms.disclosureVersion !== payoutAcceptance.disclosureVersion)) {
         setStage({ kind: "notice", message: "包赔条款版本与已同意的版本不一致，请刷新页面后重新确认。", canRequote: false, action: "refresh" });
         return;
       }
-      let agreement: AgreementInfo | null = null;
-      let agreementProblem: string | null = null;
-      try {
-        const options = await supplyApi.publishingOptions(gameId);
-        if (options.releaseId === releaseId && (!quote.agreementAcceptance || options.agreement?.id === quote.agreementAcceptance.versionId && options.agreement?.digest === quote.agreementAcceptance.digest)) agreement = options.agreement;
-        else agreementProblem = "当前生效的协议版本与你确认的发布版本不一致；为避免绑定错误条款，暂不能创建订单。";
-      } catch {
-        agreementProblem = "协议与条款依据暂时无法读取；为安全起见暂不能创建订单，请稍后重试。";
-      }
+      const agreement = quote.agreement && quote.agreement.id === quote.agreementAcceptance?.versionId
+        && quote.agreement.digest === quote.agreementAcceptance.digest ? quote.agreement : null;
+      const agreementProblem = agreement ? null : "本账号冻结的出租协议暂不可核验，请重新报价。";
       if (!isQuoteCurrent()) return;
       setStage({ kind: "quoted", quote, agreement, agreementProblem });
     } catch (error) {
@@ -600,7 +591,7 @@ export function RentalConfirmPanel({
       } else if (typed.status === 0 || typed.status >= 500) setStage({ kind: "notice", message: "最终报价暂时无法读取，请稍后重试。", canRequote: true });
       else setStage({ kind: "notice", ...noticeFor(typed) });
     }
-  }, [accountId, gameId, releaseId, userId, isCurrent, versionId, session, payoutGateOpen, payoutAcceptance, autoPreview, stage]);
+  }, [accountId, gameId, releaseId, userId, isCurrent, versionId, session, payoutGateOpen, payoutAcceptance, autoPreview, stage, fullPayoutSelected]);
 
   /**
    * The account detail page opts into a single checkout entry: once the payout gate is open and
@@ -624,7 +615,7 @@ export function RentalConfirmPanel({
       return;
     }
     const agreement = stage.kind === "quoted" ? stage.agreement : null;
-    if (!agreement || !agreementAccepted) {
+    if (!agreement || !agreementAccepted || (agreement.bodyDocument && readAgreement !== agreement.digest)) {
       setStage({ kind: "notice", message: "请先阅读并同意本单适用协议，再创建订单。", canRequote: false });
       return;
     }
@@ -676,7 +667,7 @@ export function RentalConfirmPanel({
       createKey.current = null;
       setStage({ kind: "notice", ...noticeFor(typed) });
     }
-  }, [accountId, userId, isCurrent, session, fullPayoutSelected, payoutAcceptance, stage, agreementAccepted]);
+  }, [accountId, userId, isCurrent, session, fullPayoutSelected, payoutAcceptance, stage, agreementAccepted, readAgreement]);
 
   const recoverCreate = useCallback(async () => {
     if (!userId) return;
@@ -1013,7 +1004,7 @@ export function RentalConfirmPanel({
                 <p className="rental-terms-dialog-copy"><ShieldCheck size={14} aria-hidden="true" />包赔条款：{disclosure ? disclosure.selected ? "已选择" : "未选择" : "本单适用旧版依据（未选择包赔）"}；选择全额包赔时，服务费由号主承担，按结算时号主扣费前收入的 8% 计算。费用不与押金、平台价差、提前补足混算；实际赔付按约定处理。</p>
                 {stage.agreement ? <section className="rental-terms-dialog-agreement">
                   <h3>{stage.agreement.title}</h3>
-                  <pre>{stage.agreement.body}</pre>
+                  <TradeTermsDocument body={stage.agreement.body} document={stage.agreement.bodyDocument} target={stage.agreement.digest} onReady={setReadAgreement} />
                 </section> : <p className="detail-stage-note">本单适用协议暂时无法读取。</p>}
                 {stage.agreementProblem ? <p className="rental-confirm-error"><AlertCircle size={14} aria-hidden="true" />{stage.agreementProblem}</p> : null}
               </div>
@@ -1032,7 +1023,7 @@ export function RentalConfirmPanel({
           <input
             type="checkbox"
             checked={agreementAccepted}
-            disabled={!stage.agreement || Boolean(stage.agreementProblem)}
+            disabled={!stage.agreement || Boolean(stage.agreementProblem) || Boolean(stage.agreement.bodyDocument && readAgreement !== stage.agreement.digest)}
             onChange={(event) => setAgreementAccepted(event.target.checked)}
           />
           <span>我已阅读并同意本单适用协议{stage.agreement ? `《${stage.agreement.title}》` : ""}</span>
@@ -1047,7 +1038,7 @@ export function RentalConfirmPanel({
             type="button"
             className="button rental-confirm-primary"
             onClick={() => void sendCreate(quote)}
-            disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || expired || (fullPayoutSelected && !payoutAcceptance)}
+            disabled={Boolean(stage.agreementProblem) || !stage.agreement || !agreementAccepted || Boolean(stage.agreement.bodyDocument && readAgreement !== stage.agreement.digest) || expired || (fullPayoutSelected && !payoutAcceptance)}
           >
             <ShieldCheck size={18} className="rental-confirm-primary-shield" aria-hidden="true" />
             <span className="rental-confirm-primary-cta">确认并创建订单</span>

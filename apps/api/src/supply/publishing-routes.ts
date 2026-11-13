@@ -1,5 +1,6 @@
 import { effectiveRuleRelease } from "./effective-rule-release";
 import { lockFixedFeePolicyChange } from "../auth/fixed-fee-policy-timeline";
+import { verifyTradeTermsBody } from "./full-payout-terms";
 import { projectDeltaQuote, type ProjectedQuote } from "./pricing";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, DELTA_INFO_SOURCE_DICTIONARY, DELTA_PUBLISH_LEVELS, deltaPublicationLevels } from "./delta-rental";
 import { formatDecimalExact, parseSignedDecimal } from "./decimal";
@@ -181,13 +182,14 @@ export async function handlePublishingRoute(
         const account=await readPublishingAccount(client,accountId);
         if(account.owner_user_id!==context.userId||account.game_id!==gameId)throw notFound();
       }
-      const release=(await client.query<IncomePreviewRelease&{agreement_id:string;title:string;body:string;digest:string}>(
+      const release=(await client.query<IncomePreviewRelease&{agreement_id:string;title:string;body:string;digest:string;body_document:unknown}>(
         `SELECT r.id AS "releaseId",r.generation::text AS generation,r.price_version_id AS "priceVersionId",r.term_version_id AS "termVersionId",
           g.catalog_revision::text AS "catalogRevision",p.mode,p.commission_rate::text AS "commissionRate",p.rounding_policy AS "roundingPolicy",
-          p.status AS "priceStatus",p.haff_rule AS "haffRule",ag.id AS agreement_id,ag.title,ag.body,ag.digest
+          p.status AS "priceStatus",p.haff_rule AS "haffRule",ag.id AS agreement_id,ag.title,ag.body,ag.digest,to_jsonb(ag)->'body_document' AS body_document
          FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")} JOIN zzsh_supply.price_version p ON p.id=r.price_version_id
          JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE g.id=$1 AND g.enabled`,[gameId])).rows[0];
       if(!release)throw notFound();
+      const bodyDocument = await verifyTradeTermsBody(release.body, release.digest, release.body_document);
       const asOf=(await client.query<{at:string}>(`SELECT to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at`)).rows[0]?.at;
       if(!asOf)throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"上架规则暂不可用");
       const resolved=await resolveIncomePreviewRelease(client,gameId,release,{asOf,...(context&&accountId?{accountId,ownerUserId:context.userId}:{})});
@@ -198,9 +200,9 @@ export async function handlePublishingRoute(
         const row=(await client.query<{rates:unknown}>(`SELECT fixed_fee_rates AS rates FROM zzsh_supply.price_version WHERE id=$1 AND game_id=$2 AND status='SEALED'`,[resolved.release.priceVersionId,gameId])).rows[0];
         try{fixedFeeRates=parseFixedFeeRates(row?.rates);}catch{throw new SecurityApiError(503,API_V1_ERROR_CODES.INTERNAL_ERROR,"手续费率暂不可用");}
       }
-      return {release,terms,rule:resolved.release.haffRule,pricingPolicy:resolved.release.pricingPolicy,fixedFeeRates};
+      return {release,terms,rule:resolved.release.haffRule,pricingPolicy:resolved.release.pricingPolicy,fixedFeeRates,bodyDocument};
     });
-    const {release,terms}=result;
+    const {release,terms,bodyDocument}=result;
     const rule = result.rule as {
       schema?: string;
       compatibility?: import("./delta-rental").DeltaCompatPricing;
@@ -265,6 +267,7 @@ export async function handlePublishingRoute(
           title: release.title,
           body: release.body,
           digest: release.digest,
+          ...(bodyDocument ? { bodyDocument } : {}),
         },
       },
       requestId,

@@ -280,9 +280,11 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
       zzsh_supply.valid_funding_policy_draft(jsonb), zzsh_supply.valid_funding_policy(jsonb) TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_supply.full_payout_terms_version') AS relation`)).rows[0]?.relation) {
+    const hasDocument = (await pool.query(`SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'zzsh_supply' AND table_name = 'full_payout_terms_version' AND column_name = 'body_document') AS present`)).rows[0]?.present === true;
+    const documentColumn = hasDocument ? ",body_document" : "";
     await pool.query(`REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON zzsh_supply.full_payout_terms_version FROM ${runtimeUser};
-      GRANT INSERT(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser};
-      GRANT UPDATE(title,body,disclosure_version,digest,status,revision,updated_at,sealed_by_admin_id,sealed_at) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser}`);
+      GRANT INSERT(id,game_id,policy_ref,policy_version,disclosure_version,title,body,digest,created_by_admin_id${documentColumn}) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser};
+      GRANT UPDATE(title,body,disclosure_version,digest,status,revision,updated_at,sealed_by_admin_id,sealed_at${documentColumn}) ON zzsh_supply.full_payout_terms_version TO ${runtimeUser}`);
   }
   if ((await pool.query(`SELECT to_regclass('zzsh_content.legal_document_version') AS relation`)).rows[0]?.relation) {
     await resetRuntimeTablePrivileges(pool, "zzsh_content.legal_document_version", "PUBLIC", { select: false });

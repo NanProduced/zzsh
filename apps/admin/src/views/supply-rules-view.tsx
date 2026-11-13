@@ -10,7 +10,6 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Field } from "../components/ui/field";
 import { Skeleton } from "../components/ui/skeleton";
 import { Input } from "../components/ui/input";
-import { Textarea } from "../components/ui/textarea";
 import { SupplySelect } from "../components/supply/supply-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { ConfirmDialog, RulesOverview, SettlementRules } from "./supply-rules/rules-overview";
@@ -19,11 +18,9 @@ import { draftCommand, isPricingScheduleOperation, RULES_RELEASE_OPERATION, useR
 import { PricingSchedulesPanel } from "./supply-rules/pricing-schedules-panel";
 import { SkinDepositPolicyEditor } from "./supply-rules/skin-deposit-policy-editor";
 import { RentalModeEditor } from "./supply-rules/rental-mode-editor";
-import { FullPayoutTermsPanel } from "./supply-rules/full-payout-terms-panel";
 import { BasePricingEditor, DepositCapEditor, FixedRentalModeEditor, PriceItemsEditor, type EnsureDraft } from "./supply-rules/step0-editors";
 import { activePriceDraft, pendingSealedPrice, docStage, DocStatusRow, PublishBar } from "./supply-rules/publish-flow";
 import { sourcePriceVersion } from "./supply-rules/price-draft";
-import { LegalDocumentsPanel } from "./legal-documents-panel";
 
 const inputClass = "h-9";
 
@@ -91,12 +88,14 @@ export function SupplyRulesView({
   refreshNonce = 0,
   section: sectionQuery,
   onOpenPath,
+  agreementVersion,
 }: {
   snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   onDirtyChange: (dirty: boolean) => void;
   refreshNonce?: number;
   section?: string;
   onOpenPath?: (path: string) => void;
+  agreementVersion?: string;
 }) {
   const requestedSection = rulesSection(sectionQuery);
   // 分区切换：有未保存的价格草稿输入时先确认，避免切走后误以为已保存
@@ -105,7 +104,6 @@ export function SupplyRulesView({
   const [resetNonce, setResetNonce] = useState(0);
   const canEdit = hasPermission(snapshot, "supply.rules.edit");
   const canPreview = hasPermission(snapshot, "supply.quote.internal.read");
-  const canLegal = snapshot.security.isBoss || ["content.platform.read", "content.platform.edit", "content.platform.publish"].some(p => hasPermission(snapshot, p));
   const isBoss = snapshot.security.isBoss;
   const canSchedule = isBoss && canEdit && hasPermission(snapshot, "supply.rules.activate");
   const [games, setGames] = useState<SupplyGame[]>([]);
@@ -118,9 +116,8 @@ export function SupplyRulesView({
   const [pricingTab, setPricingTab] = useState<typeof PRICING_TABS[number][0]>("base");
   const [termId, setTermId] = useState("");
   const [agreementId, setAgreementId] = useState("");
+
   const [termOptions, setTermOptions] = useState<TermOptionDraft[]>([]);
-  const [agreementTitle, setAgreementTitle] = useState("");
-  const [agreementBody, setAgreementBody] = useState("");
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
   const [fundingVersion, setFundingVersion] = useState("");
@@ -128,8 +125,8 @@ export function SupplyRulesView({
   const [scheduleAsk, setScheduleAsk] = useState<{ priceVersionId?: string; agreementVersionId?: string } | null>(null);
   const [loading, setLoading] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const [sealAsk, setSealAsk] = useState<{ kind: "term" | "agreement"; id: string; revision: string; label: string } | null>(null);
-  const [switchAsk, setSwitchAsk] = useState<{ kind: "term" | "agreement"; id: string } | null>(null);
+  const [sealAsk, setSealAsk] = useState<{ kind: "term"; id: string; revision: string; label: string } | null>(null);
+  const [switchAsk, setSwitchAsk] = useState<{ kind: "term"; id: string } | null>(null);
   const [depositDirty, setDepositDirty] = useState(false);
   const [modeDirty, setModeDirty] = useState(false);
   const [capDirty, setCapDirty] = useState(false);
@@ -203,9 +200,6 @@ export function SupplyRulesView({
     applyTerm(nextTerm, result.termOptions);
     const nextAgreement = (currentFixed ? result.release?.agreementVersionId : latestSealed(result.agreementVersions)) || result.agreementVersions[0]?.id || "";
     setAgreementId(nextAgreement);
-    const agreement = result.agreementVersions.find((version) => version.id === nextAgreement);
-    setAgreementTitle(agreement?.title ?? "");
-    setAgreementBody(agreement?.body ?? "");
     setDirty(false);
   }, [applyTerm]);
 
@@ -242,6 +236,11 @@ export function SupplyRulesView({
   };
   const command = useRulesWrite(snapshot.adminUserId, gameId, reload, snapshot.session?.id ?? "");
 
+  const tradePath = (trade: "agreement" | "full_payout_terms", version?: string | null) =>
+    "/content/legal?" + new URLSearchParams({ trade, gameId, ...(version ? { version } : {}) });
+  useEffect(() => {
+    if (agreementVersion && rules?.agreementVersions.some(version => version.id === agreementVersion)) setAgreementId(agreementVersion);
+  }, [agreementVersion, rules]);
   const selectedTerm = rules?.termVersions.find((version) => version.id === termId);
   const selectedAgreement = rules?.agreementVersions.find((version) => version.id === agreementId);
   const items = rules?.items ?? [];
@@ -270,27 +269,6 @@ export function SupplyRulesView({
     }
   };
 
-  const saveAgreement = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!selectedAgreement) return;
-    if (!agreementTitle.trim() || !agreementBody.trim()) {
-      setError("协议标题与正文不能为空。");
-      return;
-    }
-    setError(undefined);
-    setLoading(true);
-    try {
-      const result = await command.write(draftCommand(gameId, "agreement", "update", { expectedRevision: selectedAgreement.revision, title: agreementTitle, body: agreementBody }, selectedAgreement.id));
-      if (!result) return;
-      setSuccess("已保存草稿。");
-      setDirty(false);
-    } catch (failure) {
-      setError(friendlyError(failure));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const createTerm = async () => {
     try {
       const result = await command.write(draftCommand(gameId, "term", "create", { gameId }));
@@ -301,20 +279,7 @@ export function SupplyRulesView({
     }
   };
 
-  const createAgreement = async () => {
-    try {
-      const result = await command.write(draftCommand(gameId, "agreement", "create", { gameId, title: "出租协议草稿", body: "在此填写协议正文。" }));
-      if (!result) return;
-      const record = result.fresh.agreementVersions.find((version) => version.id === result.receipt.id);
-      setAgreementId(result.receipt.id!);
-      setAgreementTitle(record?.title ?? "");
-      setAgreementBody(record?.body ?? "");
-    } catch (failure) {
-      setError(friendlyError(failure));
-    }
-  };
-
-  const seal = async (kind: "price" | "term" | "agreement", id: string, revision: string) => {
+  const seal = async (kind: "price" | "term", id: string, revision: string) => {
     setError(undefined);
     setLoading(true);
     try {
@@ -384,13 +349,7 @@ export function SupplyRulesView({
   };
   const commitSwitch = () => {
     if (!switchAsk || !rules) return;
-    if (switchAsk.kind === "term") applyTerm(switchAsk.id, rules.termOptions);
-    else {
-      const record = rules.agreementVersions.find((version) => version.id === switchAsk.id);
-      setAgreementId(switchAsk.id);
-      setAgreementTitle(record?.title ?? "");
-      setAgreementBody(record?.body ?? "");
-    }
+    applyTerm(switchAsk.id, rules.termOptions);
     setDirty(false);
     setSwitchAsk(null);
   };
@@ -467,7 +426,15 @@ export function SupplyRulesView({
                 onClick={() => void saveFunding().catch(failure => setError(friendlyError(failure)))}>保存资金政策版本</Button>
             </section> : null}
           </div>
-          <div hidden={show("settlement")} className="space-y-6"><section className="section-panel" aria-label="结算与退赔"><p className="mb-3 text-xs text-muted-foreground">谁承担、怎么补差按已生效规则执行，费率不能在这里改。条款正文在下方维护。</p><SettlementRules fixedFee={fixedFee} /></section><FullPayoutTermsPanel gameId={gameId} versions={rules.fullPayoutTermsVersions ?? []} canEdit={canEdit} isBoss={isBoss} live={(() => { const fp = currentPrice?.fundingPolicy; return fp ? { ref: fp.fullPayoutPolicyRef, version: fp.fullPayoutPolicyVersion, id: currentPrice?.fullPayoutTermsVersionId } : null; })()} onReload={reload} /></div>
+          <div hidden={show("settlement")} className="space-y-6">
+            <section className="section-panel" aria-label="结算与退赔"><SettlementRules fixedFee={fixedFee} /></section>
+            <section className="section-panel flex flex-wrap items-center justify-between gap-3">
+              <div><h3 className="text-sm font-semibold">全额包赔条款</h3><p className="mt-1 text-xs text-muted-foreground">
+                {rules.fullPayoutTermsVersions?.find(version => version.id === rules.currentFullPayoutTermsVersionId)?.title ?? "当前价格版本未引用条款"}
+              </p></div>
+              {onOpenPath ? <Button type="button" variant="outline" onClick={() => onOpenPath(tradePath("full_payout_terms", rules.currentFullPayoutTermsVersionId))}>在协议条款中查看</Button> : null}
+            </section>
+          </div>
           <div hidden={show("pricing")} className="space-y-4">
             <div role="tablist" aria-label="租赁定价" className="flex flex-wrap gap-2">{PRICING_TABS.map(([value, label]) => <Button key={value} type="button" role="tab" aria-selected={pricingTab === value} variant={pricingTab === value ? "secondary" : "ghost"} onClick={() => setPricingTab(value)}>{label}</Button>)}</div>
             <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${snapshot.adminUserId}:${snapshot.session?.id}:${gameId}`} gameId={gameId} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
@@ -520,32 +487,26 @@ export function SupplyRulesView({
           <div hidden={show("items")}><PriceItemsEditor key={`items:${editorKey}`} {...editorProps} onDirtyChange={setItemsDirty} /></div>
           <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} readOnly={!(priceEditable || fixedFee && canEdit)} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
           <div hidden={show("agreement")} className="space-y-6">
-        <section className="section-panel">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold">协议版本</h3>
-            <BusyButton type="button" busy={loading} disabled={command.locked} onClick={() => void guard(createAgreement)}>新建协议草稿</BusyButton>
-          </div>
-          {rules.agreementVersions.length === 0 ? (
-            <div className="mt-3"><EmptyHint>还没有出租协议版本。点击「新建协议草稿」后填写标题与正文。</EmptyHint></div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-2 mt-3">
-              <div className="w-full min-w-0 sm:w-96"><RulesSelect label="协议版本" value={agreementId} onChange={(value) => { if (dirty && value !== agreementId) { setSwitchAsk({ kind: "agreement", id: value }); return; } const record = rules.agreementVersions.find((version) => version.id === value); setAgreementId(value); setAgreementTitle(record?.title ?? ""); setAgreementBody(record?.body ?? ""); setDirty(false); }} options={rules.agreementVersions.map((version) => ({ value: version.id, label: `${version.title} · ${version.id === rules.release?.agreementVersionId ? "线上" : version.status === "DRAFT" ? "草稿" : "已提交"}${versionTime(version) ? " · " + versionTime(version) : ""}` }))} /></div>
-              {selectedAgreement?.status === "DRAFT" ? <BusyButton type="button" variant="secondary" busy={loading} disabled={command.locked} title="封存后可由 Boss 绑定公告安排生效" busyText="提交中…" onClick={() => setSealAsk({ kind: "agreement", id: selectedAgreement.id, revision: selectedAgreement.revision, label: selectedAgreement.title })}>封存版本</BusyButton> : null}
-            </div>
-          )}
-          {selectedAgreement ? (() => { const live = selectedAgreement.id === rules.release?.agreementVersionId; const st = docStage(selectedAgreement, { dirty, live, after: rules.release?.activatedAt }); return <div className="mt-3"><DocStatusRow stage={st} at={live ? rules.release?.activatedAt : null} note={st === "unsaved" ? "有输入还没保存" : st === "draft" ? "草稿，线上还没变" : st === "sealed" ? (isBoss ? "已提交，待安排生效" : "已提交，等 Boss 排期") : st === "live" ? "当前新上架账号使用这份协议" : "旧版本，只读"}>{st === "sealed" && canSchedule ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked || !rules.release} onClick={() => setScheduleAsk({ agreementVersionId: selectedAgreement.id })}>安排生效</BusyButton> : null}</DocStatusRow></div>; })() : null}
-          {selectedAgreement ? (
-            <form onSubmit={(event) => { event.preventDefault(); void guard(() => saveAgreement(event)); }} className="mt-4 space-y-3">
-              <Field label="标题"><Input value={agreementTitle} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementTitle(event.target.value); setDirty(true); }} className={inputClass} /></Field>
-              <Field label="协议正文" hint={selectedAgreement.status === "SEALED" ? "已提交，只读；要修改请新建协议草稿" : "纯文本；租客下单时阅读的就是这份正文，保存不改变字节语义"}>
-                <Textarea aria-label="协议正文" value={agreementBody} disabled={selectedAgreement.status === "SEALED" || command.locked} onChange={(event) => { setAgreementBody(event.target.value); setDirty(true); }} className="min-h-64 text-xs leading-relaxed" />
-              </Field>
-              {selectedAgreement.status === "DRAFT" ? <BusyButton type="submit" busy={loading} disabled={command.locked} busyText="保存中…">保存协议草稿</BusyButton> : null}
-            </form>
-          ) : null}
-        </section>
-
-            {canLegal && section === "agreement" ? <section className="section-panel space-y-3" aria-label="法律文书"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">法律文书（参考）</h3>{onOpenPath ? <Button type="button" variant="ghost" size="sm" onClick={() => onOpenPath("/content?tab=legal")}>在内容管理中打开</Button> : null}</div><LegalDocumentsPanel snapshot={snapshot} /></section> : null}
+            <section className="section-panel space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold">协议版本</h3>
+                {onOpenPath ? <Button type="button" variant="outline" onClick={() => onOpenPath(tradePath("agreement", selectedAgreement?.id))}>在协议条款中查看与编辑</Button> : null}
+              </div>
+              {rules.agreementVersions.length ? <div className="w-full sm:w-96"><RulesSelect label="协议版本" value={agreementId}
+                disabled={command.locked} onChange={setAgreementId} options={rules.agreementVersions.map(version => ({
+                  value: version.id,
+                  label: version.title + (version.id === rules.release?.agreementVersionId ? " · 当前生效" : version.status === "DRAFT" ? " · 草稿" : " · 已封存"),
+                }))} /></div> : <p className="text-sm text-muted-foreground">暂无协议版本。可在「协议条款」起草。</p>}
+              {selectedAgreement ? (() => {
+                const live = selectedAgreement.id === rules.release?.agreementVersionId;
+                const stage = docStage(selectedAgreement, { dirty: false, live, after: rules.release?.activatedAt });
+                return <DocStatusRow stage={stage} at={live ? rules.release?.activatedAt : null}
+                  note={live ? "租客下单时看到的就是这份" : selectedAgreement.status === "DRAFT" ? "草稿待提交" : "可在协议条款查看正文和版本差异"}>
+                  {selectedAgreement.status === "SEALED" && !live && canSchedule && rules.release
+                    ? <BusyButton type="button" size="sm" busy={loading} disabled={command.locked} onClick={() => setScheduleAsk({ agreementVersionId: selectedAgreement.id })}>安排生效</BusyButton> : null}
+                </DocStatusRow>;
+              })() : null}
+            </section>
           </div>
         </div>
       ) : null}

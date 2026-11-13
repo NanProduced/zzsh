@@ -215,6 +215,9 @@ const readyPayoutSupply = {
     publishingOptions: async () => ({ releaseId: "r1", agreement: { id: "agr1", title: "离线测试协议", body: "合成内容", digest: "offline" } }),
   },
 };
+const offlineAgreement = { id: "agreement", title: "离线测试协议", body: "合成内容", digest: "d".repeat(64) };
+const agreementResponse = { agreement: offlineAgreement, agreementAcceptance: { versionId: offlineAgreement.id, digest: offlineAgreement.digest } };
+
 function confirmationFor(preview) {
   return {
     quote: structuredClone(preview.quote),
@@ -222,6 +225,7 @@ function confirmationFor(preview) {
     membershipBenefits: structuredClone(preview.membershipBenefits),
     customerTier: preview.customerTier,
     ...(preview.compensationDisclosure ? { compensationDisclosure: structuredClone(preview.compensationDisclosure) } : {}),
+    ...agreementResponse,
     depositWaived: false,
     confirmationId: "OFFLINE_CONFIRMATION",
     listingHash: preview.binding.listingHash,
@@ -447,7 +451,8 @@ test("D-06: price change between preview and confirmation surfaces priceChangeNo
         tenantPayableTotal: cny("280.00"), // price increased from 270.18 to 280.00!
       },
       baseTenantDeposit: cny("50.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       confirmationId: "conf_new",
       listingHash: "hash1",
       expiresAt: new Date(Date.now() + 300000).toISOString(),
@@ -487,8 +492,8 @@ test("D-07: terms and full payout consent required before ordering", async () =>
   await withDom(async (window) => {
     const log = [];
     const fetchImpl = router([
-      { match: "/api/rental-price-preview", method: "GET", respond: () => json(previewPayload) },
-      { match: "/api/full-payout-terms", method: "GET", respond: () => json({ releaseId: "r1", fullPayoutTerms: { termsVersionId: "pv1", termsDigest: "pd1", disclosureVersion: "d1", title: "包赔条款", body: "包赔条款正文" } }) },
+      { match: "/api/rental-price-preview", method: "GET", respond: () => json({ ...previewPayload,
+        compensationDisclosure: { selected: true, disclosureVersion: readyPayoutTerms.disclosureVersion, terms: readyPayoutTerms } }) },
     ], log);
 
     const { RentalConfirmPanel } = loadComponent("apps/web/src/components/order/rental-confirm-panel.tsx", loggedSession, { "@/lib/supply-client": readyPayoutSupply });
@@ -592,7 +597,8 @@ test("D-10: equal payable total with changed resource breakdown and deposit surf
     const confirmPayload = {
       quote: changedQuote,
       baseTenantDeposit: cny("50.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       confirmationId: "conf_changed",
       listingHash: "hash1",
       expiresAt: new Date(Date.now() + 300000).toISOString(),
@@ -629,7 +635,8 @@ test("D-11: equal amounts with changed membership benefits policy surfaces recon
       quote: previewPayload.quote,
       baseTenantDeposit: cny("50.00"),
       membershipBenefits: changedBenefits,
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       confirmationId: "conf_benefits_changed",
       listingHash: "hash1",
       expiresAt: new Date(Date.now() + 300000).toISOString(),
@@ -1066,6 +1073,7 @@ test("R1-07: owner/internal fields are strictly excluded from DOM output", async
         ownerTotal: { currency: "CNY", unit: "yuan", amount: "8.00", scale: 2 },
       },
       baseTenantDeposit: { currency: "CNY", unit: "yuan", amount: "50.00", scale: 2 },
+      ...agreementResponse,
       depositWaived: true,
       confirmationId: "c1",
       listingHash: "h1",
@@ -1107,7 +1115,8 @@ test("R1-08: personal quote lines isolate prices and never borrow public price w
         tenantPayableTotal: null,
       },
       baseTenantDeposit: { currency: "CNY", unit: "yuan", amount: "100.00", scale: 2 },
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       confirmationId: "c2",
       listingHash: "h2",
       expiresAt: new Date(Date.now() + 60000).toISOString(),
@@ -1318,7 +1327,8 @@ test("silver member with only a deposit reduction shows one card and no invented
       ...original,
       membershipBenefits: benefits("SILVER", "GROWTH"),
       baseTenantDeposit: cny("800.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       quote: { ...original.quote, tenantDeposit: cny("780.00"), tenantPayableTotal: cny("959.08") },
     };
     await render(React.createElement(RentalPriceSummary, { reference: matchedPersonalReference, quote }));
@@ -1352,7 +1362,8 @@ test("silver member with a clean resource ratio shows 9.8折 and 减免押金 to
       ...original,
       membershipBenefits: benefits("SILVER", "GROWTH"),
       baseTenantDeposit: cny("800.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       quote: {
         ...original.quote,
         lines: [personal],
@@ -1387,7 +1398,8 @@ test("matching cheaper personal resource lines show one card with fallback 已�
       ...original,
       membershipBenefits: benefits("GOLD", "FRIEND"),
       baseTenantDeposit: cny("50.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       quote: {
         ...original.quote,
         lines: [cheaperHaff, personalAwm],
@@ -1461,7 +1473,8 @@ test("itemized personal amounts remain authoritative while catalog units are lab
       ...original,
       membershipBenefits: benefits("SILVER", "GROWTH"),
       baseTenantDeposit: cny("800.00"),
-      depositWaived: false,
+      ...agreementResponse,
+    depositWaived: false,
       quote: {
         ...original.quote,
         lines: [personalHaffDisc, personalAwmDisc, personalBulletDisc],

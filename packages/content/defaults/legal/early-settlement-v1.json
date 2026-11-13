@@ -1,0 +1,23 @@
+{
+  "key": "early-settlement-v1",
+  "source": "legal/early-settlement-v1.txt",
+  "sourceSha256": "81f4072ced38de89f047c6c09522145d6a2ce904462a42b8e89405c4c116717d",
+  "meta": {
+    "title": "提前结算告知"
+  },
+  "document": {
+    "format": "plate",
+    "schemaVersion": 1,
+    "preset": "legal",
+    "value": [
+      {
+        "type": "p",
+        "children": [
+          {
+            "text": "本次提前结束需双方确认并经受权客服复核后生效。费用和退款责任以本次结算版本列示的金额为准，具体承担按核实的结束原因处理。退款在结算生效后7个自然日发起；发起退款不代表渠道或银行到账。"
+          }
+        ]
+      }
+    ]
+  }
+}

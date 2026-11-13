@@ -42,7 +42,7 @@ function fixture() {
       full_payout_declaration: { schema: "full-payout-declaration-v1", selected: false }, media_categories: { "media-preview": "SHOWCASE" } },
       inventory: [{ itemId: "haff-preview", quantity: "1000000" }, { itemId: "ammo-preview", quantity: "60" }], skins: [], entitlements: [],
       termOptionCode: "daily-10m", pricingOptionCode: "", mediaBindings: [{ assetId: "media-preview", purpose: "ACCOUNT_DISPLAY", byteHash: "a".repeat(64), position: 0 }] },
-    ruleRefs: { releaseId: input.releaseId, priceVersionId: "price-preview", termVersionId: "term-preview", agreementVersionId: "agreement-preview", agreementDigest: "d".repeat(64), catalogRevision: "1" }, quoteValues: calculated.quote });
+    ruleRefs: { releaseId: input.releaseId, priceVersionId: "price-preview", termVersionId: "term-preview", agreementVersionId: "agreement-preview", agreementDigest: hash("Synthetic rental agreement"), catalogRevision: "1" }, quoteValues: calculated.quote });
   const account: PublishingAccount = { id: input.accountId, owner_user_id: "owner-preview", game_id: "game-preview", current_version_id: input.versionId,
     owner_paused: false, staff_restricted: false, restriction_reason: null, lifecycle: "ACTIVE", legacy_hold: "NONE", revision: "1", display_no: "ZZ20261025000001" };
   const version: ListingVersion = { id: input.versionId, account_id: account.id, sequence: "1", origin: "NATIVE", review_state: "PUBLISHED", schema_version: 2,
@@ -69,8 +69,9 @@ function fixture() {
       rows = state.published && match ? [p] : [];
     }
     else if (sql.includes("SELECT u.suspended")) rows = [{ suspended: false, account_status: "ACTIVE", identity_status: "VERIFIED", age_status: "ADULT" }];
+    else if (sql.includes("JOIN zzsh_supply.legacy_supply_map")) rows = [{ retired: false }];
     else if (sql.includes("game_service_operation")) rows = [{ id: "service-preview", gameId: account.game_id, gameCode: "delta", gameEnabled: true, enabled: true, revision: "1" }];
-    else if (sql.includes("SELECT id,code,name,enabled,current_release_id")) rows = [{ id: account.game_id, code: "delta", name: "Synthetic game", enabled: state.gameEnabled, current_release_id: input.releaseId, catalog_revision: "1" }];
+    else if (sql.includes("SELECT id,code,name,enabled,") && sql.includes("zzsh_supply.game")) rows = [{ id: account.game_id, code: "delta", name: "Synthetic game", enabled: state.gameEnabled, current_release_id: input.releaseId, catalog_revision: "1" }];
     else if (sql.includes("funding_policy AS policy") || sql.includes('funding_policy AS policy,p.status')) rows = state.policyAvailable ? [{ priceVersionId: "price-preview", policy, status: "SEALED", policyStatus: "SEALED", priceStatus: "SEALED", gameId: account.game_id, releaseId: input.releaseId,
       versionId: version.id, currentVersionId: account.current_version_id, ownerUserId: account.owner_user_id, accountId: account.id, contentHash: version.content_hash, payload: version.payload, publicationSource: "OWNER_DIRECT" }] : [];
     else if (sql.includes("account_guarantee_proof")) rows = [];
@@ -81,6 +82,7 @@ function fixture() {
     else if (sql.includes("FROM zzsh_supply.rule_acceptance")) rows = state.accepted ? [{}] : [];
     else if (sql.includes("SELECT a.* FROM zzsh_supply.listing_media")) rows = [{ id: "media-preview", account_id: account.id, game_id: account.game_id, owner_user_id: account.owner_user_id, ownership_kind: "USER_SUPPLY", purpose: "ACCOUNT_DISPLAY", content_hash: "a".repeat(64), review_state: "APPROVED", access_class: "PUBLIC_DISPLAY", technical_state: state.mediaReady ? "READY" : "FAILED", public_storage_key: "synthetic-not-a-real-storage-key" }];
     else if (sql.includes("current-trade-resources")) rows = state.resourceMissing ? [] : (values[1] as string[]).map(id => ({ id, code: id === "haff-preview" ? "haff" : "level6_bullet", unit: id === "haff-preview" ? state.resourceUnit : "ROUND", enabled: state.resourceEnabled }));
+    else if (sql.includes("JOIN zzsh_supply.agreement_version")) rows = [{ id: "agreement-preview", title: "Synthetic rental agreement", body: "Synthetic rental agreement", digest: hash("Synthetic rental agreement") }];
     else if (sql.includes("SELECT p.id,p.status,p.mode")) rows = [{ id: "price-preview", status: "SEALED", mode: "SPREAD", haff_rule: rule, commission_rate: null, rounding_policy: "HALF_UP_CENT_V1", term_version_id: "term-preview" }];
     else if (sql.includes("FROM zzsh_supply.price_line")) rows = [{ item_id: "haff-preview", pricing_kind: "HAFF_RATIO", unit_quantity: null, buyer_unit_amount: null, owner_unit_amount: null }, { item_id: "ammo-preview", pricing_kind: "FIXED_UNIT", unit_quantity: "60", buyer_unit_amount: "3", owner_unit_amount: "2" }];
     else if (sql.includes("FROM zzsh_supply.term_option") || sql.includes("JOIN zzsh_supply.term_option")) rows = [{ ...quoteInput.termOption, name: "Synthetic daily" }];

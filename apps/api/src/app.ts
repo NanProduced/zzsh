@@ -92,8 +92,12 @@ function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: ()
     const method = request.method?.toUpperCase();
     const resourceBody = json && (method === "POST" || method === "PUT") && ["/api/v1/admin/content/resources", "/api/bff/admin/content/resources"].some(prefix => path === prefix || path.startsWith(`${prefix}/`));
     const docsContentBody = json && method === "PUT" && /^\/api\/(?:bff\/admin|v1\/admin)\/docs\/[^/]+\/content$/.test(path);
+    const legalDocumentBody = json && (method === "POST" || method === "PUT") && (
+      /^\/api\/(?:v1\/admin|bff\/admin)\/supply\/(?:agreement|full-payout-terms)-drafts(?:\/[^/]+)?$/.test(path)
+      || /^\/api\/(?:v1\/admin|bff\/admin)\/legal-documents\/drafts(?:\/[^/]+)?$/.test(path)
+    );
     const largeMessage = json && method === "POST" && LARGE_IM_MESSAGE_PATHS.has(path);
-    if (!resourceBody && !docsContentBody && !largeMessage) {
+    if (!resourceBody && !docsContentBody && !legalDocumentBody && !largeMessage) {
       next();
       return;
     }
@@ -104,7 +108,7 @@ function installScopedBodyParsers(app: { getHttpAdapter: () => { getInstance: ()
       if (closed || chunk === undefined) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += bytes.length;
-      if (total > (resourceBody || docsContentBody ? 256 * 1024 : 15 * 1024 * 1024)) {
+      if (total > (resourceBody || docsContentBody || legalDocumentBody ? 256 * 1024 : 15 * 1024 * 1024)) {
         closed = true;
         response.statusCode = 413;
         response.end();

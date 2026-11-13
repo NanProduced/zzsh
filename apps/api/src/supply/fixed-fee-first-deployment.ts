@@ -7,6 +7,8 @@ import { assertSealedRuleRelease } from "../auth/membership-growth-approval";
 import { NORMAL_GROWTH_TIERS, validateBenefitPolicy, type GrowthBenefitPolicy } from "../auth/membership-growth";
 import { normalizeUnifiedMembershipPolicy, projectUnifiedMembershipPricing } from "../auth/membership-unified-pricing";
 import { assertContentBootstrapBoss } from "../content/content-bootstrap";
+import { bootstrapLegalDocuments } from "../legal/legal-bootstrap";
+import { readCurrentEarlySettlementDisclosure, readReleaseEarlySettlementReference } from "../legal/legal-documents";
 import { canonicalize, normalizeTime } from "./content-hash";
 import { DELTA_CUSTOM_DAILY_CONSUMPTION, validateDeltaHaffRule } from "./delta-rental";
 import { initializeFixedFeePricing } from "./pricing-policy-schedule";
@@ -88,6 +90,11 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
     && previous[0].details?.packageSha256 === expectedSha256 && previous[0].details.gameId === gameId) {
     const result = await initializeFixedFeePricing(client, { gameId, priceVersionId: previous[0].details.priceVersionId, effectiveAt, requestId });
     if (result.status !== "ALREADY_INITIALIZED") throw conflict("首次租赁配置的原回执不完整");
+    if (typeof previous[0].details.earlySettlementVersionId !== "string" || typeof previous[0].details.earlySettlementDigest !== "string")
+      throw conflict("首次租赁配置的原回执缺少提前结算告知依据，请核对规则组合");
+    const ref = await readReleaseEarlySettlementReference(client, gameId, previous[0].releaseId);
+    if (ref.versionId !== previous[0].details.earlySettlementVersionId || ref.digest !== previous[0].details.earlySettlementDigest)
+      throw conflict("首次租赁配置的提前结算告知依据不一致");
     return { ...result, releaseId: previous[0].releaseId, packageSha256: expectedSha256 };
   }
   await client.query("LOCK TABLE zzsh_iam.membership_growth_policy IN SHARE ROW EXCLUSIVE MODE");
@@ -100,6 +107,9 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   if (game.releaseId !== null || existing?.occupied !== false || previous.length) throw conflict("已有租赁或会员配置，未覆盖");
   // Use the reserved Boss for version provenance. The migration creates no session or approval.
   await assertContentBootstrapBoss(client, boss);
+  await bootstrapLegalDocuments(client, { actorAdminId: boss, requestId, earlySettlementOnly: true });
+  const earlySettlement = await readCurrentEarlySettlementDisclosure(client);
+  if (!earlySettlement) throw conflict("首次租赁配置缺少可核验的提前结算告知");
   await setSystemInitialSource(client, expectedSha256);
   const payout = await createFullPayoutTermsDraft(client, boss, true, gameId, fullPayoutTerms);
   await sealVersion(client, boss, true, "full_payout_terms_version", payout.id, "0");
@@ -114,8 +124,9 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   const agreementVersion = await createAgreementDraft(client, boss, true, gameId, requiredString(agreement, "title", 120), requiredString(agreement, "body", 20_000));
   await sealVersion(client, boss, true, "agreement_version", agreementVersion.id, "1");
   const releaseId = newSupplyId("release");
-  await client.query(`INSERT INTO zzsh_supply.rule_release(id,game_id,price_version_id,term_version_id,agreement_version_id,generation,activated_by_admin_id,system_initial_sha256)
-    VALUES($1,$2,$3,$4,$5,1,$6,$7)`, [releaseId, gameId, priceVersionId, term.id, agreementVersion.id, boss, expectedSha256]);
+  await client.query(`INSERT INTO zzsh_supply.rule_release(id,game_id,price_version_id,term_version_id,agreement_version_id,generation,activated_by_admin_id,system_initial_sha256,
+    early_settlement_version_id,early_settlement_digest)
+    VALUES($1,$2,$3,$4,$5,1,$6,$7,$8,$9)`, [releaseId, gameId, priceVersionId, term.id, agreementVersion.id, boss, expectedSha256, earlySettlement.versionId, earlySettlement.digest]);
   await client.query("UPDATE zzsh_supply.game SET current_release_id=$2,updated_at=clock_timestamp() WHERE id=$1", [gameId, releaseId]);
   const sealed = await assertSealedRuleRelease(client, releaseId, priceVersionId);
   if (!sealed.fixedFeeRates || sealed.enabledModes.length !== 3) throw invalid("首次价格必须明确配置普通、自定义和极速");
@@ -137,6 +148,7 @@ export async function initializeFixedFeeDeployment(client: PoolClient, bytes: Bu
   const result = await initializeFixedFeePricing(client, { gameId, priceVersionId, effectiveAt, requestId });
   await setSystemInitialSource(client, null);
   await recordAudit(client, { actorType: "system", action: "supply.rules.first_fixed_fee.initialized", objectType: "rule_release",
-    objectId: releaseId, outcome: "SUCCESS", requestId, details: { packageSha256: expectedSha256, gameId, priceVersionId, membershipPolicyId, compatibilityBossRef: boss } });
+    objectId: releaseId, outcome: "SUCCESS", requestId, details: { packageSha256: expectedSha256, gameId, priceVersionId, membershipPolicyId, compatibilityBossRef: boss,
+      earlySettlementVersionId: earlySettlement.versionId, earlySettlementDigest: earlySettlement.digest } });
   return { ...result, releaseId, packageSha256: expectedSha256 };
 }

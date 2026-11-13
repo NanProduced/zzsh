@@ -13,13 +13,14 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } f
 import { Field } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { Skeleton } from "../components/ui/skeleton";
-import { Switch } from "../components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
 import { formatBeijingDateTime } from "../workspace/beijing-time";
 import { ContentResourcesTab } from "./content-resources-tab";
 import { resourcePath, type ResourceDetail, type ResourcePage } from "./content-resources-model";
 import { ContentSaveStatus, emptyPlateDocument } from "./content-plate";
+import { DiffBlocks, type DiffBlock } from "./legal-document-diff";
+import { TradeTermsPanel, type TradeTermKind } from "./trade-terms-panel";
 import "./legal-documents.css";
 
 import PlateEditor from "../components/plate/plate-editor-loader";
@@ -41,13 +42,12 @@ type LegalVersion = {
   createdAt: string;
 };
 type LegalList = { versions: LegalVersion[]; current?: LegalVersion[] };
-type DiffBlock = { status: "ADDED" | "REMOVED" | "CHANGED" | "UNCHANGED"; before: string | null; after: string | null };
 type DiffResult = { draft: LegalVersion; current: LegalVersion | null; blocks: DiffBlock[] };
 type NoticeOption = { key: string; title: string };
 type SubmitItem = { kind: DocType | "NOTICE"; key: string; draftVersionId: string; digest: string; baseVersionId: string | null };
 type Mode = "edit" | "preview" | "compare";
-type WorkbenchSection = DocType | "notices";
-type DraftForm = { title: string; body: string; document: PlateDocumentEnvelope };
+type WorkbenchSection = DocType | "notices" | TradeTermKind;
+type DraftForm = { title: string; document: PlateDocumentEnvelope };
 type ReleaseTarget = { version: LegalVersion } | { notice: ResourceDetail };
 type WriteCommand = {
   action: "save" | "submit" | "return";
@@ -70,7 +70,6 @@ const NOTICE_GROUPS = [
   { group: "rental", label: "账号详情" },
 ] as const;
 const NOTICE_DEFINITIONS = RESOURCE_DEFINITIONS.filter(definition => definition.kind === "notice" && definition.key !== "placement:RENTAL_PROCESS");
-const CHANGE_LABELS: Record<DiffBlock["status"], string> = { ADDED: "新增", REMOVED: "删除", CHANGED: "修改", UNCHANGED: "未变" };
 const NO_GAMES: [] = [];
 
 function versionLabel(version: LegalVersion, live: LegalVersion | undefined): string {
@@ -82,21 +81,20 @@ function versionLabel(version: LegalVersion, live: LegalVersion | undefined): st
 
 function formFor(version?: LegalVersion, drafting = false): DraftForm {
   const empty = emptyPlateDocument("legal");
-  const legacyText = drafting && version?.bodyFormat === "text" && version.docType !== "EARLY_SETTLEMENT";
+  const legacyText = drafting && version?.bodyFormat === "text";
   const document = version?.bodyDocument ?? (legacyText ? {
     ...empty,
     value: version.body.split(/\r?\n/).map(text => ({ type: "p", children: [{ text }] })),
   } : empty);
-  return { title: version?.title ?? "", body: version?.body ?? "", document };
+  return { title: version?.title ?? "", document };
 }
 
 function supportsDraft(version: LegalVersion): boolean {
-  return version.status === "DRAFT" && version.bodyFormat === (version.docType === "EARLY_SETTLEMENT" ? "text" : "plate");
+  return version.status === "DRAFT" && version.bodyFormat === "plate";
 }
 
-function draftBody(type: DocType, form: DraftForm) {
-  return type === "EARLY_SETTLEMENT" ? { title: form.title.trim(), body: form.body }
-    : { title: form.title.trim(), bodyDocument: form.document };
+function draftBody(form: DraftForm) {
+  return { title: form.title.trim(), bodyDocument: form.document };
 }
 
 function UserPreview({ version }: { version: Pick<LegalVersion, "body" | "bodyFormat" | "bodyDocument"> }) {
@@ -106,56 +104,6 @@ function UserPreview({ version }: { version: Pick<LegalVersion, "body" | "bodyFo
   return <article className="fixed-doc-preview-text" aria-label="用户端预览">
     {version.body.split(/\n+/).filter(Boolean).map((paragraph, index) => <p key={index}>{paragraph}</p>)}
   </article>;
-}
-
-function changedText(before: string, after: string) {
-  const left = Array.from(before);
-  const right = Array.from(after);
-  const common = Math.min(left.length, right.length);
-  let start = 0;
-  let end = 0;
-  while (start < common && left[start] === right[start]) start += 1;
-  while (end < common - start && left[left.length - end - 1] === right[right.length - end - 1]) end += 1;
-  return {
-    prefix: left.slice(0, start).join(""),
-    removed: left.slice(start, left.length - end).join(""),
-    added: right.slice(start, right.length - end).join(""),
-    suffix: left.slice(left.length - end).join(""),
-  };
-}
-
-export function DiffBlocks({ blocks, emptyText, beforeLabel = "当前生效", afterLabel = "提交版本" }: {
-  blocks: DiffBlock[]; emptyText: string; beforeLabel?: string; afterLabel?: string;
-}) {
-  const [showAll, setShowAll] = useState(false);
-  const changed = blocks.filter(block => block.status !== "UNCHANGED");
-  const visible = showAll ? blocks : changed;
-  if (!blocks.length) return <p className="text-sm text-muted-foreground">{emptyText}</p>;
-  return <div aria-label="与线上差异" className="fixed-doc-diff">
-    <div className="fixed-doc-diff-header">
-      <p role="status">{changed.length} 处正文变更</p>
-      {changed.length < blocks.length ? <label className="flex items-center gap-2 text-sm">
-        显示全文 <Switch aria-label="显示全文" checked={showAll} onCheckedChange={setShowAll} />
-      </label> : null}
-    </div>
-    {visible.length ? <ul className="fixed-doc-diff-list">
-      {visible.map((block, index) => {
-        if (block.status === "UNCHANGED") return <li key={index} className="fixed-doc-diff-context">{block.before ?? block.after}</li>;
-        const change = changedText(block.before ?? "", block.after ?? "");
-        return <li key={index} className="fixed-doc-change" data-change={block.status}>
-          <Badge variant={block.status === "ADDED" ? "success" : block.status === "REMOVED" ? "destructive" : "warning"}>{CHANGE_LABELS[block.status]}</Badge>
-          <div className="fixed-doc-change-grid">
-            <div><p className="fixed-doc-change-label">{beforeLabel}</p><p>{block.before === null ? "无此段落" : <>
-              {change.prefix}{change.removed ? <del>{change.removed}</del> : null}{change.suffix}
-            </>}</p></div>
-            <div><p className="fixed-doc-change-label">{afterLabel}</p><p>{block.after === null ? "已删除" : <>
-              {change.prefix}{change.added ? <ins>{change.added}</ins> : null}{change.suffix}
-            </>}</p></div>
-          </div>
-        </li>;
-      })}
-    </ul> : <p className="text-sm text-muted-foreground">两个版本的正文文字一致。</p>}
-  </div>;
 }
 
 async function noticeItem(detail: ResourceDetail): Promise<SubmitItem> {
@@ -172,15 +120,21 @@ type PanelProps = {
   onDirtyChange?: (dirty: boolean) => void;
   onWriteLockChange?: (locked: boolean) => void;
   onOpenPath?: (path: string) => void;
+  tradeKind?: TradeTermKind;
+  tradeVersion?: string;
+  tradeGame?: string;
+  onTradeSection?: (kind?: TradeTermKind) => void;
 };
 
-export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange, onWriteLockChange, onOpenPath }: PanelProps) {
+export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange, onWriteLockChange, onOpenPath, tradeKind, tradeVersion, tradeGame, onTradeSection }: PanelProps) {
+  const canTrade = hasPermission(snapshot, "supply.rules.edit");
+  const canPlatform = ["content.platform.read", "content.platform.edit", "content.platform.publish", "content.fixed.submit", "content.fixed.publish"].some(permission => hasPermission(snapshot, permission));
   const canEdit = hasPermission(snapshot, "content.platform.edit");
   const canReturn = hasPermission(snapshot, "content.fixed.submit");
   const canSubmit = canReturn && hasPermission(snapshot, "approval.request.create");
   const canReadNotices = hasPermission(snapshot, "content.platform.read");
   const canOpenApproval = hasPermission(snapshot, "approval.request.read") || canSubmit || hasPermission(snapshot, "content.fixed.publish");
-  const [section, setSection] = useState<WorkbenchSection>("PLATFORM_TERMS");
+  const [section, setSection] = useState<WorkbenchSection>(() => canTrade && (tradeKind || !canPlatform) ? tradeKind ?? "agreement" : "PLATFORM_TERMS");
   const [noticeKey, setNoticeKey] = useState("");
   const [records, setRecords] = useState<LegalList>({ versions: [] });
   const [selectedId, setSelectedId] = useState("");
@@ -194,6 +148,8 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
   const [busy, setBusy] = useState<WriteCommand["action"] | null>(null);
   const [error, setError] = useState<string>();
   const [noticeDirty, setNoticeDirty] = useState(false);
+  const [tradeDirty, setTradeDirty] = useState(false);
+  const [tradeLocked, setTradeLocked] = useState(false);
   const [noticeLocked, setNoticeLocked] = useState(false);
   const [noticesRefresh, setNoticesRefresh] = useState(0);
   const [deferred, setDeferred] = useState<(() => void) | null>(null);
@@ -216,7 +172,11 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
   const mounted = useRef({ adminId: snapshot.adminUserId, sessionId: snapshot.session.id });
   mounted.current = { adminId: snapshot.adminUserId, sessionId: snapshot.session.id };
 
-  const docType = section === "notices" ? null : section;
+  const isTrade = section === "agreement" || section === "full_payout_terms";
+  const docType = section === "notices" || isTrade ? null : section;
+  useEffect(() => {
+    if (tradeKind && canTrade) setSection(tradeKind);
+  }, [tradeKind, canTrade]);
   const current = docType ? records.current?.find(version => version.docType === docType) : undefined;
   const docVersions = records.versions.filter(version => version.docType === docType);
   const selected = docVersions.find(version => version.id === selectedId);
@@ -224,21 +184,21 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
   const selectedLabel = selected ? versionLabel(selected, current) : "新草稿";
   const selectedDraft = selected && supportsDraft(selected) ? selected : undefined;
   const editable = Boolean(docType && canEdit && (creating || selectedDraft));
-  const working = useMemo(() => docType ? canonicalize(draftBody(docType, form)) : "", [docType, form]);
+  const working = useMemo(() => docType ? canonicalize(draftBody(form)) : "", [docType, form]);
   const dirty = editable && working !== baseline;
-  const writeLocked = Boolean(busy || preparing || pending || noticeLocked);
+  const writeLocked = Boolean(busy || preparing || pending || noticeLocked || tradeLocked);
   const canCompare = Boolean(selected && selected.id !== current?.id);
   const compareId = mode === "compare" && canCompare && !dirty ? selected?.id : undefined;
-  const plainBody = useMemo(() => docType === "EARLY_SETTLEMENT" ? form.body : extractPlate(form.document).plainText, [docType, form.body, form.document]);
+  const plainBody = useMemo(() => extractPlate(form.document).plainText, [form.document]);
   const invalid = !form.title.trim() ? "请填写标题。"
     : !plainBody.trim() ? "请填写正文。"
       : new TextEncoder().encode(plainBody).length > 20_000 ? "正文不能超过 20,000 字节。"
-        : docType !== "EARLY_SETTLEMENT" && !validatePlateDocument(form.document, { preset: "legal", mode: "draft" }).ok ? "请检查正文排版与长度。" : undefined;
-  const publishReady = docType === "EARLY_SETTLEMENT" || validatePlateDocument(form.document, { preset: "legal", mode: "publish" }).ok;
+        : !validatePlateDocument(form.document, { preset: "legal", mode: "draft" }).ok ? "请检查正文排版与长度。" : undefined;
+  const publishReady = validatePlateDocument(form.document, { preset: "legal", mode: "publish" }).ok;
   const bothPlatformLive = PLATFORM_TYPES.every(type => records.current?.some(version => version.docType === type));
 
   useEffect(() => { alive.current = true; return () => { alive.current = false; ++readSequence.current; }; }, []);
-  useEffect(() => { onDirtyChange?.(dirty || noticeDirty); }, [dirty, noticeDirty, onDirtyChange]);
+  useEffect(() => { onDirtyChange?.(dirty || noticeDirty || tradeDirty); }, [dirty, noticeDirty, tradeDirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   useEffect(() => { onWriteLockChange?.(writeLocked); }, [writeLocked, onWriteLockChange]);
   useEffect(() => () => onWriteLockChange?.(false), [onWriteLockChange]);
@@ -247,7 +207,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
     const next = formFor(version);
     setSelectedId(version?.id ?? "");
     setForm(next);
-    setBaseline(version ? canonicalize(draftBody(version.docType, next)) : "");
+    setBaseline(version ? canonicalize(draftBody(next)) : "");
     setCreating(false);
     if (view === "compare" && version) setMode("compare");
     else if (view !== "preview" && canEdit && version && supportsDraft(version)) setMode("edit");
@@ -265,7 +225,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
     setLoading(true);
     setLoadError(undefined);
     try {
-      const result = await adminRequest<LegalList>("/legal-documents");
+      const result = canPlatform ? await adminRequest<LegalList>("/legal-documents") : { versions: [] };
       if (!alive.current || seq !== readSequence.current || mounted.current.adminId !== identity.adminId || mounted.current.sessionId !== identity.sessionId) return;
       const versions = result.versions;
       const active = result.current ?? DOC_TYPES.flatMap(type => {
@@ -321,7 +281,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
 
   const guard = (action: () => void) => {
     if (writeLocked || operationActive.current) return;
-    if (dirty || noticeDirty) setDeferred(() => action);
+    if (dirty || noticeDirty || tradeDirty) setDeferred(() => action);
     else action();
   };
 
@@ -329,11 +289,12 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
     if (next === section && (next !== "notices" || nextNoticeKey === noticeKey)) return;
     guard(() => {
       setSection(next);
+      onTradeSection?.(next === "agreement" || next === "full_payout_terms" ? next : undefined);
       setNoticeKey(nextNoticeKey);
       setSubmitted(undefined);
       setNoticeDirty(false);
       setNoticeLocked(false);
-      select(next === "notices" ? undefined : records.current?.find(version => version.docType === next)
+      select(next === "notices" || next === "agreement" || next === "full_payout_terms" ? undefined : records.current?.find(version => version.docType === next)
         ?? records.versions.find(version => version.docType === next));
     });
   };
@@ -346,7 +307,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
       if (!next.title) next.title = DOC_LABELS[docType];
       setForm(next);
       setSelectedId("");
-      setBaseline(canonicalize(draftBody(docType, next)));
+      setBaseline(canonicalize(draftBody(next)));
       setCreating(true);
       setError(undefined);
       setConflict(false);
@@ -386,8 +347,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
         if (command.action === "return") {
           select(saved);
         } else {
-          const sentBody = { title: command.body.title, ...(saved.docType === "EARLY_SETTLEMENT"
-            ? { body: command.body.body } : { bodyDocument: command.body.bodyDocument }) };
+          const sentBody = { title: command.body.title, bodyDocument: command.body.bodyDocument };
           // 保存回执可能规范化空白，保留编辑器输入和光标，只确认这次提交的快照。
           setBaseline(canonicalize(sentBody));
           setSelectedId(saved.id);
@@ -411,7 +371,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
 
   const save = () => {
     if (!docType || !editable || (!dirty && !creating) || invalid || conflict || writeLocked || loading || (!creating && !selected)) return;
-    const body = draftBody(docType, form);
+    const body = draftBody(form);
     const command: WriteCommand = creating
       ? { action: "save", path: "/legal-documents/drafts", method: "POST", body: { ...body, docType }, key: newWriteKey() }
       : { action: "save", path: `/legal-documents/drafts/${encodeURIComponent(selected!.id)}`, method: "PUT", body: { ...body, expectedRevision: selected!.revision }, key: newWriteKey(), versionId: selected!.id };
@@ -514,7 +474,7 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
     <time dateTime={version.effectiveAt ?? version.createdAt}>{version.effectiveAt ? "生效" : "创建"} · {formatBeijingDateTime(version.effectiveAt ?? version.createdAt)}</time>
   </button>;
   const preview = editable && (dirty || creating) ? { title: form.title, body: plainBody,
-    bodyFormat: docType === "EARLY_SETTLEMENT" ? "text" as const : "plate" as const, bodyDocument: docType === "EARLY_SETTLEMENT" ? null : form.document } : selected;
+    bodyFormat: "plate" as const, bodyDocument: form.document } : selected;
   const validSubmit = selectedDraft && !dirty && !conflict && !invalid && publishReady && canSubmit;
   const noticeDefinition = NOTICE_DEFINITIONS.find(definition => definition.key === noticeKey);
   const title = docType ? (editable ? DOC_LABELS[docType] : selected?.title || DOC_LABELS[docType]) : noticeDefinition?.label ?? "页面说明";
@@ -524,13 +484,21 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
   return <section className="fixed-doc-workbench" aria-label="协议条款" data-saving={busy === "save" || undefined}>
     <aside className="fixed-doc-sidebar">
       <nav aria-label="协议条款目录">
-        <div className="fixed-doc-nav-group">
+        {canPlatform ? <div className="fixed-doc-nav-group">
           <h3>协议与告知</h3>
           {DOC_TYPES.map(type => <button key={type} type="button" className="fixed-doc-nav-item"
             aria-pressed={section === type} disabled={loading || writeLocked} onClick={() => openSection(type)}>
             <FileText size={16} aria-hidden="true" /> {DOC_LABELS[type]}
           </button>)}
-        </div>
+        </div> : null}
+        {canTrade ? <div className="fixed-doc-nav-group">
+          <h3>游戏交易条款</h3>
+          <h4 className="px-2 text-xs text-muted-foreground">三角洲行动</h4>
+          <button type="button" className="fixed-doc-nav-item" aria-pressed={section === "agreement"} disabled={writeLocked}
+            onClick={() => openSection("agreement")}><FileText size={16} aria-hidden="true" />出租协议</button>
+          <button type="button" className="fixed-doc-nav-item" aria-pressed={section === "full_payout_terms"} disabled={writeLocked}
+            onClick={() => openSection("full_payout_terms")}><FileText size={16} aria-hidden="true" />全额包赔条款</button>
+        </div> : null}
         {canReadNotices ? <div className="fixed-doc-nav-group">
           <h3>页面说明</h3>
           {NOTICE_GROUPS.map(group => <div key={group.group} className="fixed-doc-nav-subgroup">
@@ -554,7 +522,9 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
       </div> : null}
     </aside>
 
-    <div className="fixed-doc-main">
+    {isTrade && canTrade ? <TradeTermsPanel key={section + ":" + (tradeVersion ?? "") + ":" + (tradeGame ?? "")} kind={section} snapshot={snapshot}
+      preferredVersion={tradeKind === section ? tradeVersion : undefined} preferredGame={tradeKind === section ? tradeGame : undefined}
+      refreshNonce={refreshNonce} onOpenPath={onOpenPath} onDirtyChange={setTradeDirty} onWriteLockChange={setTradeLocked} /> : <div className="fixed-doc-main">
       <header className="fixed-doc-header">
         <div><h2>{title}</h2>
           {docType ? <p>{creating ? "新草稿" : editable && mode === "edit" ? "正在编辑草稿"
@@ -611,10 +581,9 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
         </TabsList>
         {editable ? <TabsContent value="edit"><div className="fixed-doc-body fixed-doc-form" inert={loading || busy === "submit" || preparing}>
           <Field label="标题"><Input value={form.title} maxLength={160} autoFocus={creating} onChange={event => setForm(previous => ({ ...previous, title: event.target.value }))} /></Field>
-          {docType === "EARLY_SETTLEMENT" ? <Field label="正文" hint="按纯文本保存。提前结算时，用户看到的是随订单留存的正文。"><Textarea rows={12} value={form.body} onChange={event => setForm(previous => ({ ...previous, body: event.target.value }))} /></Field>
-            : <Suspense fallback={<div role="status" aria-label="编辑器加载中"><Skeleton className="h-32 w-full" /></div>}>
-              <PlateEditor key={editorGeneration} preset="legal" canvas value={form.document.value} onChange={document => setForm(previous => ({ ...previous, document }))} />
-            </Suspense>}
+          <Suspense fallback={<div role="status" aria-label="编辑器加载中"><Skeleton className="h-32 w-full" /></div>}>
+            <PlateEditor key={editorGeneration} preset="legal" canvas value={form.document.value} onChange={document => setForm(previous => ({ ...previous, document }))} />
+          </Suspense>
           {invalid && dirty ? <p className="text-sm text-muted-foreground">{invalid}</p> : null}
           {dirty && !invalid && !publishReady ? <p className="text-sm text-muted-foreground">提交审批前请处理排版校验提示。</p> : null}
           {creating ? <Button type="button" size="sm" variant="ghost" disabled={writeLocked} onClick={() => guard(() => select(current))}>取消新建</Button> : null}
@@ -629,13 +598,15 @@ export function LegalDocumentsPanel({ snapshot, refreshNonce = 0, onDirtyChange,
                 <Button type="button" size="sm" variant="secondary" onClick={() => setDiffAttempt(value => value + 1)}>重试比较</Button></div>
                 : diff && diff.draft.id === compareId ? <>
                   <p className="fixed-doc-compare-basis">{diff.current ? "以当前生效版本为基准，对比正文文字。排版可在各版本的用户端预览查看。" : "暂无生效版本，显示所选版本的正文。"}</p>
+                  {diff.current && diff.current.digest !== diff.draft.digest && (diff.current.bodyDocument || diff.draft.bodyDocument)
+                    && diff.current.body === diff.draft.body ? <p role="status">两版文字一致，文档结构、排版或链接有变化。</p> : null}
                   <DiffBlocks key={compareId} blocks={diff.blocks} emptyText="正文文字无变化。"
                     beforeLabel={diff.current ? "当前生效" : "暂无生效版本"} afterLabel={selectedLabel} />
                 </>
                   : <div role="status" aria-label="读取版本差异"><Skeleton className="h-24 w-full" /></div>}
         </div></TabsContent> : null}
       </Tabs>}
-    </div>
+    </div>}
 
     <Dialog open={Boolean(deferred)} onOpenChange={open => { if (!open) setDeferred(null); }}>
       <DialogContent role="alertdialog">

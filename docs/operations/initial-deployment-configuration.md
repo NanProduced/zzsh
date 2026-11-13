@@ -48,13 +48,13 @@
 
 ### 固定手续费候选的首次配置包
 
-待正式结构装好并核对目标后，迁移角色可通过 API workspace 的 `migrate:business` 传入 `--bootstrap-fixed-fee=<受限 JSON 的绝对路径>` 和 `--bootstrap-fixed-fee-sha256=<已核对文件摘要>`。这两个参数不替代已有的 `--bootstrap-content`。输入是 UTF-8 JSON，`schema` 为 `initial-fixed-fee-v1`，包含：
+待正式结构装好并核对目标后，迁移角色可通过 API workspace 的 `migrate:business` 传入 `--bootstrap-fixed-fee=<受限 JSON 的绝对路径>` 和 `--bootstrap-fixed-fee-sha256=<已核对文件摘要>`。首次完整部署同时传 `--bootstrap-content=<初始 Boss ID>`，两步在同一业务事务提交。单独传固定费参数时只初始化规则组合所需的 Plate 提前结算告知，平台服务协议、隐私政策与帮助内容仍由 `--bootstrap-content` 成对补齐。输入是 UTF-8 JSON，`schema` 为 `initial-fixed-fee-v1`，包含：
 
 - `gameId`、`initialBossId`（已创建的初始 Boss，可未激活）、`effectiveAt`（不晚于当前时间）。启用的三角洲游戏和计费资源目录须先准备好。
 - `price`（`fixedFeeRates`、`haffRule`、`lines`、`fundingPolicy`）、`termOptions`、`agreement`（标题与正文）和 `fullPayoutTerms`（标题、正文和资金政策引用）。沿用规则草稿的格式和校验；哈夫币用 `haff-ratio-v3`，三个出租方式均提供费率。
 - `memberDeposits`：五个会员等级各自的 `tenantDeposit`，可附 `depositAllowanceCents`；`unifiedPricing` 使用管理端 `membership-unified-pricing.v1` 的统一折扣和礼遇范围格式。
 
-入口绑定原文件摘要和首版记录，原包可重放；已有租赁或会员配置时拒绝新初始化。固定费与 Plate 默认内容、法务首装共用只允许迁移属主写入的系统来源标记；初始 Boss 外键仅作兼容引用，读取不将其显示为操作人。既有未标记记录不据此反填。首装不建立 Boss 会话或审批，也不开放固定费交易。具体价格、费率、折扣和条款必须由经营方提供；三个手续费率均不得超过 92%，给 8% 包赔费留足毛收入。
+规则组合绑定已封存的提前结算告知版本和完整正文摘要。原始纯文本版本继续可核验，既有规则组合和订单历史保留原记录。入口绑定原文件摘要和首版记录，原包可重放；已有租赁或会员配置时拒绝新初始化。固定费与 Plate 默认内容、法务首装共用只允许迁移属主写入的系统来源标记；初始 Boss 外键仅作兼容引用，读取不将其显示为操作人。既有未标记记录不据此反填。首装不建立 Boss 会话或审批，也不开放固定费交易。具体价格、费率、折扣和条款必须由经营方提供；三个手续费率均不得超过 92%，给 8% 包赔费留足毛收入。
 
 ## 内容与对外材料
 

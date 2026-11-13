@@ -15,7 +15,7 @@ import {
   type SupplyGateReader,
 } from "../supply/publishing";
 import { projectDeltaQuote, type InternalQuote, type QuoteAmount } from "../supply/pricing";
-import { readEarlySettlementDisclosure } from "../legal/legal-documents";
+import { earlySettlementReference } from "../legal/legal-documents";
 import { conflict, forbidden, invalid, notFound, sha256Hex } from "../supply/supply-util";
 import { readLegacyAwareOrderOccupancy, readAccountOccupancyFacts } from "./legacy-order-occupancy";
 
@@ -166,7 +166,7 @@ export function projectOrder(
     return projected;
   };
   const expired = row.expiredAwaitingCancel === true;
-  const earlyDisclosure = readEarlySettlementDisclosure(row.quoteSnapshot);
+  const earlyDisclosure = earlySettlementReference(row.quoteSnapshot);
   const amounts = {
     rental: centsToYuan(row.rentalAmountCents),
     deposit: centsToYuan(row.depositAmountCents),

@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { plateDigest, type PlateDocumentEnvelope } from "@zzsh/content/plate";
+import { legalDigest, parseLegalPlateDocument, plateProjection } from "../legal/legal-documents";
 import type { PoolClient } from "pg";
 import { humanText } from "./content-hash";
 import type { FundingPolicy } from "./funding-policy";
@@ -6,7 +7,7 @@ import { conflict, ensureOnlyFields, invalid } from "./supply-util";
 
 export type FullPayoutTermsAcceptance = { termsVersionId: string; termsDigest: string; disclosureVersion: string };
 export type FullPayoutTerms = FullPayoutTermsAcceptance & {
-  policyRef: string; policyVersion: string; title: string; body: string;
+  policyRef: string; policyVersion: string; title: string; body: string; bodyDocument?: PlateDocumentEnvelope;
 };
 type PolicyRefs = Pick<FundingPolicy, "fullPayoutPolicyRef" | "fullPayoutPolicyVersion" | "disclosureVersion">;
 
@@ -42,20 +43,41 @@ export function fullPayoutDraftFields(body: Record<string, unknown>) {
     }
     fields[name] = value;
   }
-  return { ...fields, digest: createHash("sha256").update(fields.body!, "utf8").digest("hex") } as {
+  return { ...fields, digest: legalDigest(fields.body!) } as {
     policyRef: string; policyVersion: string; disclosureVersion: string; title: string; body: string; digest: string;
   };
 }
 
-export function verifyFullPayoutTermsRow(row: Record<string, unknown>): void {
+export async function verifyTradeTermsBody(body: string, digest: unknown, bodyDocument: unknown): Promise<PlateDocumentEnvelope | undefined> {
+  const document = bodyDocument == null ? undefined : parseLegalPlateDocument(bodyDocument, "publish");
+  if ((document && humanText(plateProjection(document)) !== body)
+    || (document ? await plateDigest(document) : legalDigest(body)) !== digest) {
+    throw conflict("交易条款正文与摘要不一致");
+  }
+  return document;
+}
+
+export async function verifyFullPayoutTermsRow(row: Record<string, unknown>): Promise<PlateDocumentEnvelope | undefined> {
   const fields = fullPayoutDraftFields({ policyRef: row.policy_ref, policyVersion: row.policy_version,
     disclosureVersion: row.disclosure_version, title: row.title, body: row.body });
-  if (fields.body !== row.body || fields.digest !== row.digest) throw conflict("包赔条款正文与摘要不一致");
+  if (fields.body !== row.body) throw conflict("包赔条款正文与摘要不一致");
+  return verifyTradeTermsBody(fields.body, row.digest, row.body_document);
+}
+
+export async function readReleaseAgreement(client: PoolClient, gameId: string, releaseId: string) {
+  const row = (await client.query<{ id: string; title: string; body: string; digest: string; body_document: unknown }>(
+    `SELECT a.id, a.title, a.body, a.digest, to_jsonb(a)->'body_document' AS body_document
+       FROM zzsh_supply.rule_release r JOIN zzsh_supply.agreement_version a ON a.id=r.agreement_version_id
+      WHERE r.id=$1 AND r.game_id=$2 AND a.game_id=r.game_id AND a.status='SEALED'`, [releaseId, gameId],
+  )).rows[0];
+  if (!row) return null;
+  const bodyDocument = await verifyTradeTermsBody(row.body, row.digest, row.body_document);
+  return { id: row.id, title: row.title, body: row.body, digest: row.digest, ...(bodyDocument ? { bodyDocument } : {}) };
 }
 
 export async function readFullPayoutTerms(client: PoolClient, gameId: string, policy: PolicyRefs, priceVersionId?: string): Promise<FullPayoutTerms> {
   const row = (await client.query<Record<string, unknown>>(
-    `SELECT t.id,t.policy_ref,t.policy_version,t.disclosure_version,t.title,t.body,t.digest,t.status
+    `SELECT t.id,t.policy_ref,t.policy_version,t.disclosure_version,t.title,t.body,t.digest,t.status,to_jsonb(t)->'body_document' AS body_document
        FROM zzsh_supply.full_payout_terms_version t
        ${priceVersionId ? `JOIN zzsh_supply.price_version p ON p.id=$4 AND p.game_id=t.game_id AND p.status='SEALED'
          AND p.full_payout_terms_version_id=t.id AND p.full_payout_terms_digest=t.digest AND p.full_payout_disclosure_version=t.disclosure_version` : ""}
@@ -66,9 +88,10 @@ export async function readFullPayoutTerms(client: PoolClient, gameId: string, po
     || row.policy_version !== policy.fullPayoutPolicyVersion || row.disclosure_version !== policy.disclosureVersion) {
     throw conflict("适用的包赔条款未配置、未封存或版本不一致");
   }
-  verifyFullPayoutTermsRow(row);
+  const bodyDocument = await verifyFullPayoutTermsRow(row);
   return { termsVersionId: String(row.id), termsDigest: String(row.digest), disclosureVersion: String(row.disclosure_version),
-    policyRef: String(row.policy_ref), policyVersion: String(row.policy_version), title: String(row.title), body: String(row.body) };
+    policyRef: String(row.policy_ref), policyVersion: String(row.policy_version), title: String(row.title), body: String(row.body),
+    ...(bodyDocument ? { bodyDocument } : {}) };
 }
 
 export function fullPayoutTermsSourceSuffix(terms: FullPayoutTerms): string {

@@ -616,6 +616,7 @@ export type PriceVersionRecord = {
 export type TermVersionRecord = { id: string; gameId: string; status: "DRAFT" | "SEALED"; revision: string; createdAt: string; sealedAt: string | null };
 export type TermOptionRecord = { versionId: string; code: string; name: string; dailyConsumption: string; durationRounding: "CEIL_DAY" };
 export type AgreementVersionRecord = {
+  bodyDocument?: import("@zzsh/content/plate").PlateDocumentEnvelope | null;
   id: string;
   gameId: string;
   title: string;
@@ -633,6 +634,7 @@ export type RuleReleaseRecord = {
   priceVersionId: string;
   termVersionId: string;
   agreementVersionId: string;
+  earlySettlementVersionId?: string | null;
   generation: string;
   activatedAt: string;
 };
@@ -644,11 +646,11 @@ export type FullPayoutTermsRecord = {
 };
 export type RuleReleasePlan = {
   id: string; generation: string; effectiveAt: string; announcementVersionId: string;
-  priceVersionId: string; termVersionId: string; agreementVersionId: string;
+  priceVersionId: string; termVersionId: string; agreementVersionId: string; earlySettlementVersionId?: string | null;
 };
 export type RulesResponse = {
   newListingPrice?: { priceVersionId: string; pricingModel: "FIXED_FEE" | "SPREAD" | "LEGACY_SPREAD" | "LEGACY_PERCENT"; priceEffectiveAt: string | null; modeEffectiveAt: string | null } | null;
-  ruleScheduling?: { available: boolean; asOf: string; generation: string; plans: RuleReleasePlan[]; truncated: boolean };
+  ruleScheduling?: { available: boolean; asOf: string; generation: string; plans: RuleReleasePlan[]; truncated: boolean; earlySettlement?: { versionId: string; digest: string } | null };
   game: SupplyGame;
   release: RuleReleaseRecord | null;
   priceVersions: PriceVersionRecord[];
@@ -657,6 +659,7 @@ export type RulesResponse = {
   termOptions: TermOptionRecord[];
   agreementVersions: AgreementVersionRecord[];
   fullPayoutTermsVersions: FullPayoutTermsRecord[];
+  currentFullPayoutTermsVersionId?: string | null;
   items: CatalogItem[];
   depositCatalog?: {
     catalogRevision: string;

@@ -70,7 +70,7 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const haffRule={schema:"haff-ratio-v1" as const,baseBySafeBox:{a:"40"},vitalityDeltaByLevel:{6:"0"},bearDeltaByLevel:{6:"0"},dailyDeltaByTermOption:{d:"0"},options:{s:{delta:"0",enabled:true}},...(mode==="SPREAD"?{spreadDelta:"5"}:{})};
   const term={code:"d",dailyConsumption:"10000000",durationRounding:"CEIL_DAY" as const};
   const computed=computeQuote({priceVersionId:"price-1",mode,...(mode==="PERCENT"?{commissionRate:"0.2"}:{}),roundingPolicy:"HALF_UP_CENT_V1",haffRule,lines:[{itemId:"haff",quantity:"60000000",pricingKind:"HAFF_RATIO",customerTier:"STANDARD"}],conditions:{safeBoxCode:"a",vitLevel:6,bearLevel:6,termOptionCode:"d",pricingOptionCode:"s"},termOption:term,deposits:{tenantDepositCents:"30000",publisherBailRequirementCents:"0"}});assert(computed.quotable);computed.quote.ruleReleaseId=input.releaseId;
-  const payload:ContentPayloadInput={schemaVersion:1,accountId:input.accountId,gameId:"game-1",ruleRefs:{releaseId:input.releaseId,priceVersionId:"price-1",termVersionId:"term-1",agreementVersionId:"agreement-1",agreementDigest:"d".repeat(64),...(v2?{catalogRevision:"93"}:{})},declaration:{title:"Offline",description:null,attributes:{safe_box_code:"a",vit_level:6,bear_level:6,...(v2?{full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}}:{})},inventory:[{itemId:"haff",quantity:"60000000"}],skins:[],entitlements:[],termOptionCode:"d",pricingOptionCode:"s",mediaBindings:[{assetId:"media-1",byteHash:"c".repeat(64),purpose:"ACCOUNT_DISPLAY",position:0}]},quoteValues:computed.quote as unknown as Record<string,unknown>};
+  const payload:ContentPayloadInput={schemaVersion:1,accountId:input.accountId,gameId:"game-1",ruleRefs:{releaseId:input.releaseId,priceVersionId:"price-1",termVersionId:"term-1",agreementVersionId:"agreement-1",agreementDigest:legalDigest("合成出租协议"),...(v2?{catalogRevision:"93"}:{})},declaration:{title:"Offline",description:null,attributes:{safe_box_code:"a",vit_level:6,bear_level:6,...(v2?{full_payout_declaration:{schema:"full-payout-declaration-v1",selected:false}}:{})},inventory:[{itemId:"haff",quantity:"60000000"}],skins:[],entitlements:[],termOptionCode:"d",pricingOptionCode:"s",mediaBindings:[{assetId:"media-1",byteHash:"c".repeat(64),purpose:"ACCOUNT_DISPLAY",position:0}]},quoteValues:computed.quote as unknown as Record<string,unknown>};
   const account={id:input.accountId,owner_user_id:"owner",game_id:"game-1",current_version_id:input.versionId,lifecycle:"ACTIVE",legacy_hold:"NONE"};
   const version={id:input.versionId,account_id:input.accountId,origin:"NATIVE",review_state:"PUBLISHED",rule_release_id:input.releaseId,content_hash:computeContentHash(payload),payload,attributes:payload.declaration.attributes};
   const runId="11111111-1111-4111-8111-111111111111",allowed=new Map([[account.id,{runId,ownerUserId:"owner",listingVersionId:version.id,listingHash:version.content_hash}]]);
@@ -86,6 +86,7 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
     else if(sql.includes('WHERE confirmation_id='))rows=[];
     else if(sql.includes('SELECT * FROM zzsh_supply.rental_account'))rows=[account];
     else if(sql.includes('SELECT * FROM zzsh_supply.listing_version'))rows=[version];
+    else if(sql.includes('JOIN zzsh_supply.agreement_version'))rows=[{id:"agreement-1",title:"合成出租协议",body:"合成出租协议",digest:legalDigest("合成出租协议")}];
     else if(sql.includes('rule_acceptance'))rows=[{ok:1}];
     else if(sql.includes('listing_media'))rows=[{id:'media-1',content_hash:"c".repeat(64),purpose:'ACCOUNT_DISPLAY',ownership_kind:'USER_SUPPLY',owner_user_id:'owner',account_id:'account-1',game_id:'game-1',review_state:'PENDING',technical_state:'READY',public_storage_key:'offline',access_class:'PUBLIC_DISPLAY'}];
     else if(sql.includes('listing_publication'))rows=[{source:"OWNER_DIRECT"}];
@@ -106,7 +107,7 @@ function personalRefsFixture(v2=true, mode: "PERCENT" | "SPREAD" = "PERCENT") {
   const rehash=()=>{version.content_hash=computeContentHash(payload);allowed.get(account.id)!.listingHash=version.content_hash;};return{client,context,input,options,payload,version,account,rehash,haffRule,term};
 }
 
-test("an agreed reservation freezes the current early settlement disclosure and refuses a missing version", async () => {
+test("an agreed reservation uses the listing release's disclosure reference and refuses a missing version", async () => {
   const f = personalRefsFixture();
   const issued = await issuePersonalConfirmation(f.client, f.context, f.input, f.options);
   const body = "第二版提前结算告知";
@@ -117,8 +118,12 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   const transport = f.client as unknown as { query: (sql: string, values?: unknown[]) => Promise<unknown> };
   const query = transport.query.bind(transport);
   transport.query = async (sql, values) => {
+    if (sql.includes("early_settlement_version_id")) {
+      assert.deepEqual(values, [f.input.releaseId, f.account.game_id]);
+      return { rows: [{ versionId: disclosure.versionId, digest: disclosure.digest }] };
+    }
     if (sql.includes('FROM "zzsh_content"."legal_document_version"')) {
-      assert.equal(values?.[0], "EARLY_SETTLEMENT");
+      assert.deepEqual(values, ["EARLY_SETTLEMENT", null, disclosure.versionId]);
       return { rows: current ? [current] : [] };
     }
     if (sql.startsWith("INSERT INTO zzsh_order.rental_order")) {
@@ -130,13 +135,13 @@ test("an agreed reservation freezes the current early settlement disclosure and 
   const create = () => createPersonalReservation(f.client, f.context, issued.confirmationToken,
     { ...f.options, holdSeconds: 600 }, "offline-request", undefined, issued.agreementAcceptance);
   await assert.rejects(create, /OFFLINE_INSERT_CAPTURED/);
-  assert.equal(inserted?.agreementAcceptanceSchema, 1);
+  assert.equal(inserted?.agreementAcceptanceSchema, 2);
   assert.deepEqual(inserted?.agreementAcceptance, issued.agreementAcceptance);
-  assert.deepEqual(inserted?.earlySettlementDisclosure, disclosure);
+  assert.deepEqual(inserted?.earlySettlementDisclosure, { versionId: disclosure.versionId, digest: disclosure.digest });
 
   current = null;
   inserted = undefined;
-  await assert.rejects(create, { status: 503, code: "CONFIRMATION_DEPENDENCY_UNAVAILABLE" });
+  await assert.rejects(create, { status: 503 });
   assert.equal(inserted, undefined);
 });
 

@@ -8,7 +8,6 @@ import { extractPlate, plateDigest, validatePlateDocument, type PlateDocumentEnv
 import { validateResource, type ContentResource } from "@zzsh/content";
 
 import { recordAudit } from "../auth/security-core";
-import { newEarlySettlementDisclosure } from "../legal/legal-documents";
 import { invalid } from "../supply/supply-util";
 import { createContentItem, loadContentItem, publishContentVersion } from "./content";
 import { contentSeedItemId, contentSeedVersionId } from "./content-seed";
@@ -56,18 +55,10 @@ async function verifyManifest(manifest: Manifest): Promise<{ problems: Bootstrap
   const problems: BootstrapProblem[] = [];
   const documents = new Map<string, PlateDocumentEnvelope>();
   const entries = new Map<string, Record<string, unknown>>();
-  const earlyDigest = newEarlySettlementDisclosure().digest;
   for (const item of manifest.items) {
     const absolute = path.join(DEFAULTS_DIR, item.file);
     if (!existsSync(absolute)) { problems.push({ key: item.key, reason: "MISSING", detail: item.file }); continue; }
     const bytes = readDefault(item.file);
-    if (item.file.endsWith(".txt")) {
-      // early-settlement v1: sha256 of the original text, equal to the live constant.
-      const digest = sha256(bytes);
-      if (digest !== item.digest) problems.push({ key: item.key, reason: "DIGEST_MISMATCH", detail: "early-settlement text" });
-      else if (digest !== earlyDigest) problems.push({ key: item.key, reason: "DIGEST_MISMATCH", detail: "early-settlement constant" });
-      continue;
-    }
     let entry: Record<string, unknown>;
     try { entry = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>; }
     catch { problems.push({ key: item.key, reason: "INVALID", detail: "json parse" }); continue; }

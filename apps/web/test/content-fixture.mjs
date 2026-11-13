@@ -47,6 +47,7 @@ export function contentFixtureDependency(name) {
   if (name === "@/components/content/platform-update-notices") return { BusinessUpdateNotices: () => null };
   if (["./public-content-provider", "@/components/content/public-content-provider"].includes(name)) return { usePublicContent: key => ({status:"ready",resource:{schema:RESOURCE_SCHEMA,key,source:"BUILTIN",state:"available",payload:DEFAULT_RESOURCES[key] ?? noticePayload(key) ?? null,media:[]},retry(){}}) };
   if (name === "@/components/content/managed-notice") return load("apps/web/src/components/content/managed-notice.tsx");
+  if (name === "@/components/content/trade-terms-document" || name === "../content/trade-terms-document") return load("apps/web/src/components/content/trade-terms-document.tsx");
   if (name === "@/components/content/market-content") return load("apps/web/src/components/content/market-content.tsx");
   if (["./catalog-item-art", "@/components/supply/catalog-item-art"].includes(name)) return load("apps/web/src/components/supply/catalog-item-art.tsx");
 }

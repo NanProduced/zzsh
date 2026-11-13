@@ -81,19 +81,44 @@ export function normalizeLegalDocumentBody(value: unknown): string {
  * 常量只保留作初始化比对与既有订单快照的金标准，不再作为新单的唯一来源。
  */
 const EARLY_DISCLOSURE_BODY = "本次提前结束需双方确认并经受权客服复核后生效。费用和退款责任以本次结算版本列示的金额为准，具体承担按核实的结束原因处理。退款在结算生效后7个自然日发起；发起退款不代表渠道或银行到账。";
-export type EarlySettlementDisclosure = { versionId: string; body: string; digest: string };
+export type EarlySettlementDisclosure = LegalAcceptanceRef & { body: string; bodyDocument?: PlateDocumentEnvelope };
 
 export function newEarlySettlementDisclosure(): EarlySettlementDisclosure {
   return { versionId: "early-settlement-fees-v1", body: EARLY_DISCLOSURE_BODY, digest: legalDigest(EARLY_DISCLOSURE_BODY) };
 }
 
-export function readEarlySettlementDisclosure(quote: { agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown }): EarlySettlementDisclosure | null {
-  if (quote.agreementAcceptanceSchema !== 1) return null;
+type EarlySettlementSnapshot = { agreementAcceptanceSchema?: unknown; earlySettlementDisclosure?: unknown };
+
+function earlySettlementUnavailable(): never {
+  throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "本单提前结束说明暂时无法核验");
+}
+
+export function earlySettlementReference(quote: EarlySettlementSnapshot): (LegalAcceptanceRef & { body?: string }) | null {
+  const schema = quote.agreementAcceptanceSchema;
+  if (schema === undefined || schema === 0) return null;
   const doc = quote.earlySettlementDisclosure as Partial<EarlySettlementDisclosure> | null;
-  if (!doc || typeof doc.versionId !== "string" || !ID.test(doc.versionId) || doc.versionId.length > 80 || typeof doc.body !== "string" || !doc.body || typeof doc.digest !== "string" || doc.digest !== legalDigest(doc.body)) {
-    throw new SecurityApiError(503, API_V1_ERROR_CODES.INTERNAL_ERROR, "本单提前结束说明暂时无法核验");
-  }
-  return { versionId: doc.versionId, body: doc.body, digest: doc.digest };
+  if ((schema !== 1 && schema !== 2) || !doc || typeof doc.versionId !== "string" || !ID.test(doc.versionId)
+    || typeof doc.digest !== "string" || !DIGEST.test(doc.digest)) return earlySettlementUnavailable();
+  if (schema === 2) return { versionId: doc.versionId, digest: doc.digest };
+  if (typeof doc.body !== "string" || !doc.body || doc.digest !== legalDigest(doc.body)) return earlySettlementUnavailable();
+  return { versionId: doc.versionId, digest: doc.digest, body: doc.body };
+}
+
+export function readEarlySettlementDisclosure(quote: EarlySettlementSnapshot): EarlySettlementDisclosure | null {
+  const ref = earlySettlementReference(quote);
+  return ref?.body === undefined ? null : { ...ref, body: ref.body };
+}
+
+export async function resolveEarlySettlementDisclosure(client: PoolClient, quote: EarlySettlementSnapshot): Promise<EarlySettlementDisclosure | null> {
+  const ref = earlySettlementReference(quote);
+  if (!ref) return null;
+  if (ref.body !== undefined) return { ...ref, body: ref.body };
+  const row = await readCurrentLegalDocument(client, "EARLY_SETTLEMENT", undefined, ref.versionId).catch(error => {
+    if (error instanceof SecurityApiError) return earlySettlementUnavailable();
+    throw error;
+  });
+  if (!row || !sameAcceptanceRef(ref, row.id, row.digest)) return earlySettlementUnavailable();
+  return { ...ref, body: row.body, ...(row.bodyDocument ? { bodyDocument: row.bodyDocument } : {}) };
 }
 
 export function parseLegalDocType(value: unknown): LegalDocType {
@@ -162,6 +187,7 @@ const RETURNING_FIELDS = SELECT_FIELDS.replaceAll('v."', '"').replace("to_jsonb(
 async function verifyRow(row: LegalDocumentVersion): Promise<LegalDocumentVersion> {
   if (row.bodyFormat === "plate") {
     if (!row.bodyDocument) throw conflict("法律文书正文与摘要不一致");
+    parseLegalPlateDocument(row.bodyDocument, row.status === "DRAFT" ? "draft" : "publish");
     if (await plateDigest(row.bodyDocument) !== row.digest) throw conflict("法律文书正文与摘要不一致");
     if (plateProjection(row.bodyDocument) !== row.body) throw conflict("法律文书正文与摘要不一致");
     return row;
@@ -227,17 +253,17 @@ async function lockLegalDocument(client: PoolClient, id: string): Promise<LegalD
 
 type DraftContent = { title: string; bodyFormat: LegalBodyFormat; bodyDocument: PlateDocumentEnvelope | null; documentBody: string; digest: string };
 
-async function draftContent(body: Record<string, unknown>, docType: FixedDocType, current?: LegalDocumentVersion): Promise<DraftContent> {
+async function draftContent(body: Record<string, unknown>, current?: LegalDocumentVersion): Promise<DraftContent> {
   const title = body.title === undefined ? current?.title ?? "" : text(body.title, "title", 640, 160);
   if (!title) throw invalid("Legal document field is invalid", "title");
-  const format: LegalBodyFormat = current ? current.bodyFormat : docType === "EARLY_SETTLEMENT" ? "text" : "plate";
+  const format: LegalBodyFormat = body.bodyDocument !== undefined ? "plate" : current?.bodyFormat ?? "plate";
   if (format === "plate") {
     if (body.body !== undefined) throw invalid("Plate legal document body is derived from bodyDocument", "body");
     if (body.bodyDocument === undefined && !current) throw invalid("Legal document plate payload is invalid", "bodyDocument");
     const document = body.bodyDocument === undefined ? current!.bodyDocument! : parseLegalPlateDocument(body.bodyDocument, "draft");
     return { title, bodyFormat: "plate", bodyDocument: document, documentBody: plateProjection(document), digest: await plateDigest(document) };
   }
-  if (body.bodyDocument !== undefined) throw invalid("Early settlement disclosure stays plain text", "bodyDocument");
+
   if (body.body === undefined && !current) throw invalid("Legal document field is invalid", "body");
   const documentBody = body.body === undefined ? current!.body : normalizeLegalDocumentBody(body.body);
   return { title, bodyFormat: "text", bodyDocument: null, documentBody, digest: legalDigest(documentBody) };
@@ -246,7 +272,7 @@ async function draftContent(body: Record<string, unknown>, docType: FixedDocType
 export async function createLegalDraft(client: PoolClient, adminUserId: string, body: Record<string, unknown>): Promise<LegalDocumentVersion> {
   ensureOnlyFields(body, ["docType", "title", "body", "bodyDocument", "effectiveAt"]);
   const docType = parseFixedDocType(body.docType);
-  const content = await draftContent(body, docType);
+  const content = await draftContent(body);
   const at = effectiveAt(body.effectiveAt);
   const id = newSupplyId("legal");
   const row = (await client.query<LegalDocumentVersion>(
@@ -267,7 +293,7 @@ export async function updateLegalDraft(client: PoolClient, id: string, body: Rec
   const current = await lockLegalDocument(client, id);
   if (current.status !== "DRAFT") throw conflict("Sealed legal document cannot be edited");
   if (current.revision !== body.expectedRevision) throw conflict("Legal document changed; reload and retry");
-  const content = await draftContent(body, current.docType, current);
+  const content = await draftContent(body, current);
   const at = body.effectiveAt === undefined ? current.effectiveAt : effectiveAt(body.effectiveAt);
   const row = (await client.query<LegalDocumentVersion>(
     `UPDATE "zzsh_content"."legal_document_version"
@@ -357,10 +383,19 @@ export async function readCurrentLegalDocument(client: PoolClient, docType: Fixe
   return row ? verifyRow(row) : null;
 }
 
-/** 当前生效的提前结算告知；读不到由调用方决定 503，绝不回退到代码常量。 */
 export async function readCurrentEarlySettlementDisclosure(client: PoolClient, at?: string): Promise<EarlySettlementDisclosure | null> {
   const row = await readCurrentLegalDocument(client, "EARLY_SETTLEMENT", at);
-  return row ? { versionId: row.id, body: row.body, digest: row.digest } : null;
+  return row ? { versionId: row.id, body: row.body, digest: row.digest, ...(row.bodyDocument ? { bodyDocument: row.bodyDocument } : {}) } : null;
+}
+
+export async function readReleaseEarlySettlementReference(client: PoolClient, gameId: string, releaseId: string): Promise<LegalAcceptanceRef> {
+  const ref = (await client.query<LegalAcceptanceRef>(
+    `SELECT early_settlement_version_id AS "versionId", early_settlement_digest AS digest
+       FROM zzsh_supply.rule_release WHERE id=$1 AND game_id=$2`, [releaseId, gameId],
+  )).rows[0];
+  const disclosure = await resolveEarlySettlementDisclosure(client, { agreementAcceptanceSchema: 2, earlySettlementDisclosure: ref });
+  if (!disclosure) return earlySettlementUnavailable();
+  return { versionId: disclosure.versionId, digest: disclosure.digest };
 }
 
 export async function readCurrentPlatformDocuments(client: PoolClient, at?: string): Promise<{ terms: LegalDocumentVersion | null; privacy: LegalDocumentVersion | null }> {

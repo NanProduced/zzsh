@@ -15,7 +15,7 @@ import { assertFixedFeeTestListingAdmission, type FixedFeeTestListingAdmission }
 import { boundListingPricingPolicy, readBoundListingPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
-import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, type FullPayoutTerms } from "../supply/full-payout-terms";
+import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, readReleaseAgreement, type FullPayoutTerms } from "../supply/full-payout-terms";
 import { assertFinalConfirmationFunding, isProductionConfirmationFundingReader, readProductionConfirmationFundingForPreview } from "../supply/funding-authority";
 import { EFFECTIVE_PUBLICATION_STATE_SQL, isEffectivePublicationState } from "../supply/listing-query";
 import { ensureOnlyFields, invalid, notFound } from "../supply/supply-util";
@@ -357,7 +357,7 @@ export async function rebuildPersonalConfirmation(client:PoolClient,context:Orde
     funding:{version:f.version,sourceRef:f.sourceRef,baseDepositCents:f.baseDepositCents,publisherBailRequirementCents:f.publisherBailRequirementCents,fullPayoutPolicyRef:v2Funding!.fullPayoutPolicyRef,fullPayoutPolicyVersion:v2Funding!.fullPayoutPolicyVersion,disclosureVersion:v2Funding!.disclosureVersion},quote,...(settlementPricing?{settlementPricing}:{})} : {...baseSnapshot,...(settlementPricing?{settlementPricing}:{})};
   const quoteDigest=createHash("sha256").update(canonicalize(snapshot)).digest("hex");
   const now=Number((await client.query(`SELECT floor(extract(epoch FROM clock_timestamp()))::text AS now`)).rows[0].now);
-  return {snapshot,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection};
+  return {snapshot,gameId:account.game_id,now,binding:{...input,userId:context.userId,sessionId:context.sessionId,listingHash:version.content_hash,quoteDigest},projection};
 
 }
 
@@ -371,7 +371,9 @@ export async function issuePersonalConfirmation(client:PoolClient,context:OrderU
       priceVersionId:snapshot.ruleRefs.priceVersionId,releaseId:snapshot.ruleRefs.releaseId,policyVersion:snapshot.funding.version,
       reference:snapshot.guarantee.reference,status:snapshot.guarantee.status},options.fundingReader);
   }
-  return {...rebuilt.projection,agreementAcceptance:{versionId:snapshot.ruleRefs.agreementVersionId,digest:snapshot.ruleRefs.agreementDigest},confirmationId:signed.claims.confirmationId,listingHash:rebuilt.binding.listingHash,expiresAt:new Date(signed.claims.expiresAt*1000).toISOString(),confirmationToken:signed.token};
+  const agreement = await readReleaseAgreement(client, rebuilt.gameId, snapshot.ruleRefs.releaseId);
+  if (!agreement || agreement.id !== snapshot.ruleRefs.agreementVersionId || agreement.digest !== snapshot.ruleRefs.agreementDigest) unavailable("Frozen rental agreement cannot be verified");
+  return {...rebuilt.projection,agreement,agreementAcceptance:{versionId:snapshot.ruleRefs.agreementVersionId,digest:snapshot.ruleRefs.agreementDigest},confirmationId:signed.claims.confirmationId,listingHash:rebuilt.binding.listingHash,expiresAt:new Date(signed.claims.expiresAt*1000).toISOString(),confirmationToken:signed.token};
 }
 export async function verifyPersonalConfirmation(client:PoolClient,context:OrderUserContext,input:ReturnType<typeof confirmationInput>,token:unknown,options:PersonalConfirmationOptions) {
   const rebuilt=await rebuildPersonalConfirmation(client,context,input,options);

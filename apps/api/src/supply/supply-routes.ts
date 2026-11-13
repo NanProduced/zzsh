@@ -74,6 +74,7 @@ import {
   updatePriceDraft,
   updateTermDraft,
 } from "./rules";
+import { parseLegalAcceptanceRef } from "../legal/legal-documents";
 import { readFullPayoutTerms } from "./full-payout-terms";
 import { readPricingSchedules, readSchedulePriceOptions, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
@@ -891,7 +892,7 @@ async function handleAdminRead(
     const id=decodeId(payoutRead[1]!);if([...query.keys()].length)throw invalid("Unsupported terms query");
     const result=await withTransaction(options.pool,async client=>{
       const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
-      const row=(await client.query(`SELECT id,game_id AS "gameId",policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,body,digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE id=$1`,[id])).rows[0];
+      const row=(await client.query(`SELECT id,game_id AS "gameId",policy_ref AS "policyRef",policy_version AS "policyVersion",disclosure_version AS "disclosureVersion",title,body,to_jsonb(full_payout_terms_version)->'body_document' AS "bodyDocument",digest,status,revision::text,created_at AS "createdAt",sealed_at AS "sealedAt" FROM zzsh_supply.full_payout_terms_version WHERE id=$1`,[id])).rows[0];
       if(!row)throw notFound();await assertGameScope(client,adminUserId,access.isBoss,row.gameId);return row;
     });sendJson(response,200,result,requestId);return;
   }
@@ -1425,7 +1426,7 @@ async function handleAdminWrite(
     return;
   }
   if(path==="/full-payout-terms-drafts" && method==="POST"){
-    const body=bodyOf(request);ensureOnlyFields(body,["gameId","policyRef","policyVersion","disclosureVersion","title","body"]);
+    const body=bodyOf(request);ensureOnlyFields(body,["gameId","policyRef","policyVersion","disclosureVersion","title","body","bodyDocument"]);
     const gameId=decodeId(requiredString(body,"gameId",128));
     await write("supply.rules.full_payout_terms_draft.create",undefined,ADMIN_PERMISSION.supplyRulesEdit,async()=>gameId,
       async(client,access)=>({status:200,body:await createFullPayoutTermsDraft(client,actor.id,access.isBoss,gameId,body)}),"supply.rules.full_payout_terms_draft_created");return;
@@ -1537,12 +1538,12 @@ async function handleAdminWrite(
   }
   if (path === "/agreement-drafts" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["gameId", "title", "body"]);
+    ensureOnlyFields(body, ["gameId", "title", "body", "bodyDocument"]);
     const gameId = decodeId(requiredString(body, "gameId", 128));
     const title = requiredString(body, "title", 120);
-    const agreementBody = requiredString(body, "body", 20_001);
+    const agreementBody = body.body === undefined && body.bodyDocument !== undefined ? undefined : requiredString(body, "body", 20_001);
     await write("supply.rules.agreement_draft.create", undefined, ADMIN_PERMISSION.supplyRulesEdit, async () => gameId, async (client, access) => {
-      const draft = await createAgreementDraft(client, actor.id, access.isBoss, gameId, title, agreementBody);
+      const draft = await createAgreementDraft(client, actor.id, access.isBoss, gameId, title, agreementBody, body.bodyDocument);
       return { status: 200, body: draft };
     }, "supply.rules.agreement_draft_created");
     return;
@@ -1551,7 +1552,8 @@ async function handleAdminWrite(
   if (agreementUpdateMatch && method === "PUT") {
     const versionId = decodeId(agreementUpdateMatch[1]!);
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["expectedRevision", "title", "body"]);
+    ensureOnlyFields(body, ["expectedRevision", "title", "body", "bodyDocument"]);
+    if (body.body !== undefined && typeof body.body !== "string") throw invalid("Agreement body is invalid", "body");
     await write("supply.rules.agreement_draft.update", versionId, ADMIN_PERMISSION.supplyRulesEdit, async (client) => {
       const found = await client.query<{ gameId: string }>(`SELECT "game_id" AS "gameId" FROM "zzsh_supply"."agreement_version" WHERE "id" = $1`, [versionId]);
       if (!found.rows[0]) throw notFound();
@@ -1575,7 +1577,7 @@ async function handleAdminWrite(
   }
   if (path === "/releases" && method === "POST") {
     const body = bodyOf(request);
-    ensureOnlyFields(body, ["gameId", "priceVersionId", "termVersionId", "agreementVersionId", "expectedGeneration", "effectiveAt", "announcementVersionId"]);
+    ensureOnlyFields(body, ["gameId", "priceVersionId", "termVersionId", "agreementVersionId", "expectedGeneration", "effectiveAt", "announcementVersionId", "earlySettlement"]);
     const gameId = decodeId(requiredString(body, "gameId", 128));
     const priceVersionId = decodeId(requiredString(body, "priceVersionId", 128));
     const termVersionId = decodeId(requiredString(body, "termVersionId", 128));
@@ -1589,7 +1591,8 @@ async function handleAdminWrite(
         const effectiveAt = requiredString(body, "effectiveAt", 40);
         const announcementVersionId = decodeId(requiredString(body, "announcementVersionId", 128));
         const result = await activateRelease(client, actor.id, access.isBoss, gameId, priceVersionId, termVersionId, agreementVersionId,
-          requiredString(body, "expectedGeneration", 20), { effectiveAt, announcementVersionId });
+          requiredString(body, "expectedGeneration", 20), { effectiveAt, announcementVersionId,
+            ...(body.earlySettlement === undefined ? {} : { earlySettlement: parseLegalAcceptanceRef(body.earlySettlement, "earlySettlement") }) });
         return { status: 200, body: result, details: { pricingSchedule: result } };
       },
       "supply.rules.release_scheduled", true,

@@ -9,6 +9,10 @@
       "types": "./index.d.ts",
       "default": "./index.cjs"
     },
+    "./legal-diff": {
+      "types": "./legal-diff.d.ts",
+      "default": "./legal-diff.cjs"
+    },
     "./updates": {
       "types": "./updates.d.ts",
       "default": "./updates.cjs"

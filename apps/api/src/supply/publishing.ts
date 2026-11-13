@@ -2,7 +2,8 @@ import { effectiveRuleRelease } from "./effective-rule-release";
 import { projectTenantMoney, projectTenantPriceQuote, publishedBaseRenterHaffRatioWanPerYuan, publishedListingFeeDisplay } from "./tenant-price-projection";
 import { projectPublicListingImages, type PublicListingProjection } from "./legacy-path-projection";
 import { readLegacyPublishedReference } from "./legacy-published-reference";
-import { assertFullPayoutTermsAccepted, readFullPayoutTerms } from "./full-payout-terms";
+import { assertFullPayoutTermsAccepted, readFullPayoutTerms, readReleaseAgreement } from "./full-payout-terms";
+import { readReleaseEarlySettlementReference } from "../legal/legal-documents";
 import type { LegacyPublicAdmission, LegacyPublicAdmissionDetailIndex } from "../legacy-load/legacy-public-admission";
 import type { Pool, PoolClient } from "pg";
 import { recordAudit, SecurityApiError, withTransaction } from "../auth/security-core";
@@ -1717,6 +1718,7 @@ export async function submitListing(
   if (blockers.length) throw conflict(blockers.join(","));
   await assertAccepted(client, a, v);
   await assertMediaReady(client, a, v, "direct", true);
+  await readReleaseEarlySettlementReference(client, a.game_id, v.rule_release_id!);
   // The gate has locked current credit/coverage; freeze only its explicit waiver.
   const waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
   a.display_no = await assignAccountNumber(client, a.id);
@@ -1780,6 +1782,7 @@ export async function reviewListing(
     if (blockers.length) throw conflict(blockers.join(","));
     await assertAccepted(client, a, v);
     await assertMediaReady(client, a, v, "review", true);
+    await readReleaseEarlySettlementReference(client, a.game_id, v.rule_release_id!);
     waivedRevision = publicationWaiverRevision(a, v, await gate(client, a, "WRITE"));
     a.display_no = await assignAccountNumber(client, a.id);
   }
@@ -2432,14 +2435,7 @@ export async function listingDetail(
         a.owner_user_id,
       ])
     ).rows[0]?.name ?? "号主";
-  const agreement = v.rule_release_id
-    ? (
-        await client.query(
-          `SELECT ag.id,ag.title,ag.body,ag.digest FROM zzsh_supply.rule_release r JOIN zzsh_supply.agreement_version ag ON ag.id=r.agreement_version_id WHERE r.id=$1`,
-          [v.rule_release_id],
-        )
-      ).rows[0]
-    : null;
+  const agreement = v.rule_release_id ? await readReleaseAgreement(client, a.game_id, v.rule_release_id) : null;
   const ownerOffer = projectPublicOffer({
     attributes: v.attributes,
     termOptionCode: v.term_option_code,

@@ -269,8 +269,8 @@
     {
       "key": "early-settlement-v1",
       "kind": "legal",
-      "file": "legal/early-settlement-v1.txt",
-      "digest": "81f4072ced38de89f047c6c09522145d6a2ce904462a42b8e89405c4c116717d",
+      "file": "legal/early-settlement-v1.json",
+      "digest": "7a8adc4a660b7601b7b85c1e2b1501936f9febbd05a8f09e3bce4dca970f61c0",
       "confirmedBy": "Owner",
       "confirmedAt": "2026-11-12"
     }

@@ -284,7 +284,7 @@ export type OrderImProjection = {
 };
 export type Order = {
   viewerParty?: OrderParty;
-  earlySettlementDisclosure?: { versionId: string; body: string; digest: string };
+  earlySettlementDisclosure?: { versionId: string; digest: string; body?: string };
   source?: { origin: "NATIVE" | "LEGACY"; statusLabel?: string };
   readOnly?: boolean;
   legacyAmounts?: LegacyOrder["legacyAmounts"];
@@ -373,7 +373,10 @@ export type RentalPricePreview = {
   compensationDisclosure?: { selected: boolean; disclosureVersion: string; terms?: FullPayoutTerms };
 };
 
+export type RentalAgreement = { id: string; title: string; body: string; digest: string; bodyDocument?: import("@zzsh/content/plate").PlateDocumentEnvelope | null };
+
 export type PersonalRentalQuote = {
+  agreement?: RentalAgreement;
   agreementAcceptance?: { versionId: string; digest: string };
   quote: OrderQuote & { resourceTotal?: Money | null; tenantDeposit?: Money | null; tenantPayableTotal?: Money | null };
   baseTenantDeposit: Money | null;
@@ -456,7 +459,11 @@ export type OrderSettlementStage = {
   viewerActionRequired: boolean;
   settlementVersionNo: number | null;
 };
+export type EarlySettlementDisclosure = { versionId: string; body: string; digest: string; bodyDocument?: import("@zzsh/content/plate").PlateDocumentEnvelope };
+
 export type OrderSettlement = {
+  earlySettlementDisclosure?: EarlySettlementDisclosure;
+  earlySettlementDisclosureUnavailable?: boolean;
   orderId: string;
   revision?: string;
   /** Additive settlementStageOf() result. Prefer it over a client-side reconstruction when present. */
@@ -487,6 +494,7 @@ export type OrderSettlement = {
   consumed?: { haff?: unknown; items?: Array<{ itemId: string; consumed: string; remaining: string }> } | null;
 };
 export type SettlementPreview = {
+  earlySettlementDisclosure?: EarlySettlementDisclosure;
   accepted: false;
   reasons: string[];
   amounts?: Record<string, unknown>;

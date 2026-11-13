@@ -9,7 +9,7 @@ import { EntityPreviewTrigger, OrderPreviewCard, UserProfilePreview } from "../.
 import { adminRequest } from "../../api";
 import { formatDiscountLabel } from "../membership-entitlement-form";
 import { financeMoney } from '../admin-finance-api';
-import { DiffBlocks } from "../legal-documents-panel";
+import { DiffBlocks } from "../legal-document-diff";
 import {
   BUSINESS_NOT_CONNECTED,
   entitlementStateView,

@@ -192,16 +192,15 @@ test("single update keeps the live base version and pending drafts can only retu
 test("keeps a dirty draft on navigation and retries an unknown save with the original key", async t => {
   const draft = version({
     id: "early_draft", docType: "EARLY_SETTLEMENT", title: "提前结算告知", body: "原告知正文",
-    bodyFormat: "text", bodyDocument: null,
   });
   const h = await harness(t, {
     versions: [draft], permissions: ["content.platform.read", "content.platform.edit"],
     writeResponse: (write, count) => count === 1 ? Response.json({ error: { code: "INTERNAL_ERROR" } }, { status: 503 })
-      : Response.json({ ...draft, body: write.body.body, revision: "2" }),
+      : Response.json({ ...draft, title: write.body.title, bodyDocument: write.body.bodyDocument, revision: "2" }),
   });
   await h.click("提前结算告知");
   await h.click("编辑");
-  await h.type(h.host.querySelector("textarea"), "修改后的告知正文");
+  await h.type(h.host.querySelector("input[maxlength='160']"), "修改后的告知标题");
   assert.equal(h.dirty.at(-1), true);
   await h.click("出租上架须知");
   assert.match(h.text(), /放弃未保存的修改/);
@@ -210,9 +209,9 @@ test("keeps a dirty draft on navigation and retries an unknown save with the ori
   await h.click("平台服务协议");
   assert.match(h.text(), /放弃未保存的修改/);
   await h.click("继续编辑");
-  assert.equal(h.host.querySelector("textarea").value, "修改后的告知正文");
+  assert.equal(h.host.querySelector("input[maxlength='160']").value, "修改后的告知标题");
   await h.click("保存草稿");
-  assert.equal(h.host.querySelector("textarea").value, "修改后的告知正文");
+  assert.equal(h.host.querySelector("input[maxlength='160']").value, "修改后的告知标题");
   await h.click("重试原请求");
   assert.equal(h.writes.length, 2);
   assert.deepEqual(h.writes[0], h.writes[1]);
@@ -223,10 +222,9 @@ test("keeps a dirty draft on navigation and retries an unknown save with the ori
 test("autosave acknowledges the sent draft without rewriting the editor, and reload keeps that version selected", async t => {
   const draft = version({
     id: "early_draft", docType: "EARLY_SETTLEMENT", title: "提前结算告知", body: "测试草稿正文",
-    bodyFormat: "text", bodyDocument: null,
   });
   const live = version({
-    ...draft, id: "early_live", status: "SEALED", body: "测试生效正文",
+    ...draft, id: "early_live", status: "SEALED", body: "测试生效正文", bodyDocument: plate("测试生效正文"),
     effectiveAt: "2026-11-01T00:00:00.000Z", sealedAt: "2026-11-01T00:00:00.000Z",
   });
   const versions = [draft, live];
@@ -235,28 +233,28 @@ test("autosave acknowledges the sent draft without rewriting the editor, and rel
     versions, current: [live], permissions: ["content.platform.read", "content.platform.edit"],
     writeResponse: write => new Promise(resolve => {
       acknowledge = () => {
-        versions[0] = { ...draft, revision: "2", body: write.body.body.trim() };
+        versions[0] = { ...draft, revision: "2", title: write.body.title, bodyDocument: write.body.bodyDocument };
         resolve(Response.json(versions[0]));
       };
     }),
   });
   await h.click("提前结算告知");
   await h.selectVersion("草稿");
-  const input = h.host.querySelector("textarea");
+  const input = h.host.querySelector("input[maxlength='160']");
   assert.ok(input, "草稿直接进入编辑");
   const typed = "修改后的测试正文   ";
   await h.type(input, typed);
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 2100)); });
   assert.equal(h.writes.length, 1);
   assert.equal(h.writes[0].body.expectedRevision, "1");
-  assert.equal(h.host.querySelector("textarea"), input);
+  assert.equal(h.host.querySelector("input[maxlength='160']"), input);
   await act(async () => acknowledge());
-  assert.equal(h.host.querySelector("textarea"), input);
+  assert.equal(h.host.querySelector("input[maxlength='160']"), input);
   assert.equal(input.value, typed);
   assert.equal(h.dirty.at(-1), false);
   await h.click("重新读取");
   assert.equal(h.host.querySelector(".fixed-doc-version[aria-pressed='true'] span").textContent, "草稿");
-  assert.equal(h.host.querySelector("textarea").value, typed.trim());
+  assert.equal(h.host.querySelector("input[maxlength='160']").value, typed.trim());
 });
 
 test("submits the saved scenario explanation through fixed document approval", async t => {

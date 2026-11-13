@@ -59,10 +59,11 @@ test("legal 去空白逐字等于 source 原文且 sourceSha256 匹配", () => {
   }
 });
 
-test("early-settlement-v1.txt 摘要命中清单与金标准", () => {
-  const item = manifest.items.find(i => i.file === "legal/early-settlement-v1.txt");
-  assert.ok(item);
-  const digest = sha256(fs.readFileSync(abs(item.file)));
-  assert.equal(digest, item.digest);
-  assert.equal(digest, "81f4072ced38de89f047c6c09522145d6a2ce904462a42b8e89405c4c116717d");
+test("提前结算 Plate 种子逐字保留原告知和原摘要", () => {
+  const item = manifest.items.find(i => i.key === "early-settlement-v1");
+  const entry = JSON.parse(fs.readFileSync(abs(item.file), "utf8"));
+  const source = fs.readFileSync(abs(entry.source));
+  assert.equal(entry.sourceSha256, "81f4072ced38de89f047c6c09522145d6a2ce904462a42b8e89405c4c116717d");
+  assert.equal(sha256(source), entry.sourceSha256);
+  assert.equal(extractPlate(entry.document).plainText, source.toString("utf8"));
 });
