@@ -75,6 +75,18 @@ function loadComponent(relativePath, session, extra) {
     if (name === "./order-aftersale") return {OrderAftersale:()=>null};
     if (name === "./order-account-dossier" || name === "@/components/order/order-account-dossier") return { OrderAccountDossier: () => null, OrderAccountDossierModal: () => null };
     if (name.endsWith(".css")) return {};
+    if (name.startsWith("./") || name.startsWith("../") || name.startsWith("@/components/order/")) {
+      const baseDir = path.dirname(path.join(tree, relativePath));
+      const targetBase = name.startsWith("@/components/order/")
+        ? path.join(tree, "apps/web/src/components/order", name.slice("@/components/order/".length))
+        : path.resolve(baseDir, name);
+      for (const ext of [".tsx", ".ts", ""]) {
+        const candidate = targetBase + ext;
+        if (fs.existsSync(candidate) && !fs.statSync(candidate).isDirectory()) {
+          return loadComponent(path.relative(tree, candidate).replace(/\\/g, "/"), session, extra);
+        }
+      }
+    }
     return requireFromTree(name);
   };
   module.require = ((original) => (name) => contentFixtureDependency(name) ?? original(name))(module.require.bind(module));
