@@ -185,6 +185,8 @@ async function mockFetch(input, init = {}) {
     return json(detailResponse ?? makeDetail(id, "PENDING", "发放会员礼遇给老客户"));
   }
   if (url.pathname.endsWith("/security/approvals/recovery")) return json(recoveryResponse);
+  // 旧 API 构建没有审批投影里的展示号；订单实体按订单详情回退读取。
+  if (url.pathname.includes("/orders/")) return json({ order: { id: decodeURIComponent(url.pathname.split("/").pop()), displayNo: "ZZ-FALLBACK" } });
   throw new Error(`unexpected test request ${url.pathname}${url.search}`);
 }
 
@@ -222,6 +224,16 @@ function buttons(root = browser.document.body) {
 
 function buttonByText(text, root = browser.document.body) {
   return buttons(root).find((button) => button.textContent.trim() === text);
+}
+
+function actionDialog() {
+  return browser.document.querySelector('[data-slot="dialog-content"]');
+}
+
+async function openAction(view, label) {
+  await clickRaw(buttonByText(label, view.host));
+  await waitFor(() => actionDialog() !== null);
+  return actionDialog();
 }
 
 function setInput(element, value) {
@@ -514,18 +526,84 @@ async function renderDetail(t, overrides = {}) {
   return view;
 }
 
-test("详情页顺序为 页头 → 申请内容卡（默认展开）→ 决定区 → 办理时间线", async (t) => {
+test("详情页顺序为 页头 → 审批流程 → 申请内容卡 → 办理 → 办理时间线", async (t) => {
   const view = await renderDetail(t, { tag: "detail-order" });
   const host = view.host;
   const cardButton = [...host.querySelectorAll("button[aria-expanded]")].find((item) => item.textContent.includes("申请内容"));
   assert.ok(cardButton, "申请内容卡可折叠");
   assert.equal(cardButton.getAttribute("aria-expanded"), "true", "申请内容默认展开");
-  assert.ok(host.querySelector('section[aria-label="决定区"]'));
-  assert.ok(host.querySelector('section[aria-label="流程与时间线"]'));
-  const order = [cardButton, host.querySelector('section[aria-label="决定区"]'), host.querySelector('section[aria-label="流程与时间线"]')];
-  assert.ok(order.every(Boolean));
+  const flow = host.querySelector('section[aria-label="审批流程"]');
+  const decision = host.querySelector('section[aria-label="办理"]');
+  const timeline = host.querySelector('section[aria-label="办理时间线"]');
+  assert.ok(flow, "审批流程优先展示");
+  assert.ok(decision, "办理区存在");
+  assert.ok(timeline, "办理时间线存在");
+  assert.ok(flow.compareDocumentPosition(cardButton) & Node.DOCUMENT_POSITION_FOLLOWING, "流程在申请内容之前");
+  assert.ok(cardButton.compareDocumentPosition(decision) & Node.DOCUMENT_POSITION_FOLLOWING, "申请内容在办理之前");
+  assert.ok(host.querySelector("[data-approval-workflow-canvas]"), "默认渲染流程画布");
   assert.ok(host.textContent.includes("办理时间线"));
   assert.ok(host.querySelector("dl[aria-label='申请基本信息']"), "页头含申请人等基本信息");
+});
+
+test("业务对象显示姓名与订单展示号，不把内部 ID 当正文", async (t) => {
+  const detail = makeDetail("r1", "PENDING", "订单全额包赔赔偿", "order.compensation.grant");
+  detail.business = {
+    businessTitle: "订单全额包赔赔偿",
+    changeSummary: "赔偿 68.90 元",
+    summary: {},
+    compensation: {
+      orderId: "order_internal_uuid", displayNo: "ZZ261107-000002", origin: "NATIVE", gameId: "game-1",
+      ownerUserId: "user_internal_uuid", ownerName: "号主小周", amountCents: "6890",
+      caseRef: "CASE-1", reason: "事故", evidenceRef: "EVID-1", sourceDigest: "digest",
+    },
+    resultAvailability: "NOT_APPLICABLE",
+    objectRefs: [{ type: "rental_order", id: "order_internal_uuid" }],
+  };
+  const view = await renderDetail(t, { tag: "detail-entities", detail, viewProps: { onOpenPath: () => undefined } });
+  const host = view.host;
+  assert.ok(host.textContent.includes("号主小周"), "入账对象显示姓名");
+  assert.ok(host.textContent.includes("ZZ261107-000002"), "订单显示展示号");
+  assert.ok(!host.textContent.includes("order_internal_uuid"), "正文不显示订单内部 ID");
+  assert.ok(!host.textContent.includes("user_internal_uuid"), "正文不显示用户内部 ID");
+  assert.ok(buttonByText("号主小周", host), "用户可点击进入资料页");
+  assert.ok(buttonByText("ZZ261107-000002", host), "订单可点击进入详情页");
+});
+
+test("旧 API 缺订单展示号时按订单详情回退读取，不显示内部 ID", async (t) => {
+  const detail = makeDetail("r1", "PENDING", "订单全额包赔赔偿", "order.compensation.grant");
+  detail.business = {
+    businessTitle: "订单全额包赔赔偿",
+    changeSummary: "赔偿 68.90 元",
+    summary: {},
+    compensation: {
+      orderId: "order_internal_uuid", origin: "NATIVE", gameId: "game-1",
+      ownerUserId: "user_internal_uuid", ownerName: "号主小周", amountCents: "6890",
+      caseRef: "CASE-1", reason: "事故", evidenceRef: "EVID-1", sourceDigest: "digest",
+    },
+    resultAvailability: "NOT_APPLICABLE",
+    objectRefs: [{ type: "rental_order", id: "order_internal_uuid" }],
+  };
+  const view = await renderDetail(t, { tag: "detail-order-fallback", detail, viewProps: { onOpenPath: () => undefined } });
+  await waitFor(() => buttonByText("ZZ-FALLBACK", view.host) !== undefined);
+  assert.ok(!view.host.textContent.includes("order_internal_uuid"));
+});
+
+test("礼遇申请内容显示目标用户姓名，不把用户内部 ID 当正文", async (t) => {
+  const detail = makeDetail("r1", "PENDING", "发放会员礼遇", "membership.entitlement.grant");
+  detail.business = {
+    businessTitle: "发放会员礼遇",
+    changeSummary: "发放挚友礼遇",
+    summary: {
+      targetUserId: "user_internal_uuid", targetUserName: "老客户",
+      entitlementKindTitle: "挚友礼遇", startsAt: "2026-11-01T00:00:00.000Z", endsAt: "2026-12-01T00:00:00.000Z",
+    },
+    resultAvailability: "NOT_APPLICABLE",
+    objectRefs: [],
+  };
+  const view = await renderDetail(t, { tag: "detail-entitlement-entity", detail, viewProps: { onOpenPath: () => undefined } });
+  assert.ok(view.host.textContent.includes("老客户"));
+  assert.ok(!view.host.textContent.includes("user_internal_uuid"));
+  assert.ok(buttonByText("老客户", view.host), "目标用户可点击进入资料页");
 });
 
 test("申请编号/模板/触发条件/哈希/事件编码收敛到页脚折叠的「技术详情」", async (t) => {
@@ -541,7 +619,7 @@ test("申请编号/模板/触发条件/哈希/事件编码收敛到页脚折叠�
 
 test("时间线用「提交」等中文动作，不显示英文事件编码", async (t) => {
   const view = await renderDetail(t, { tag: "detail-timeline" });
-  const timeline = view.host.querySelector('[aria-label="申请时间线"]') ?? view.host.querySelector('section[aria-label="流程与时间线"]');
+  const timeline = view.host.querySelector('[aria-label="申请时间线"]') ?? view.host.querySelector('section[aria-label="办理时间线"]');
   assert.ok(timeline);
   assert.ok(timeline.textContent.includes("提交"));
   assert.ok(!timeline.textContent.includes("approval.request.created"));
@@ -559,9 +637,10 @@ test("页面去掉了候选快照/通用资格/系统旁路/平台执行/规则�
 
 test("低影响类型批准：决定 body 只有 requestId/decision/reason，不含 password 与 totpCode", async (t) => {
   const view = await renderDetail(t, { tag: "decide-low" });
-  assert.equal(view.host.querySelector('input[aria-label="批准动态验证码"]'), null, "低影响类型不要求动态码");
-  await act(async () => setInput(view.host.querySelector('textarea[placeholder="补充说明（可选）"]'), "核对通过"));
-  await clickRaw(buttonByText("确认批准", view.host));
+  const dialog = await openAction(view, "批准");
+  assert.equal(dialog.querySelector('input[aria-label="批准动态验证码"]'), null, "低影响类型不要求动态码");
+  await act(async () => setInput(dialog.querySelector('textarea[placeholder="补充说明（可选）"]'), "核对通过"));
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const body = postCalls("/requests/decision")[0].body;
   assert.deepEqual(Object.keys(body).sort(), ["decision", "reason", "requestId"]);
@@ -575,12 +654,13 @@ test("高影响类型批准：需 6 位动态码，body 带 totpCode 且始终�
     tag: "decide-high",
     detail: makeDetail("r1", "PENDING", "调整分销政策", "distribution.policy.publish"),
   });
-  const totp = view.host.querySelector('input[aria-label="批准动态验证码"]');
+  const dialog = await openAction(view, "批准");
+  const totp = dialog.querySelector('input[aria-label="批准动态验证码"]');
   assert.ok(totp, "高影响类型显示 6 位动态码输入");
-  assert.equal(buttonByText("确认批准", view.host).disabled, true, "未填动态码时批准禁用");
+  assert.equal(buttonByText("确认批准", dialog).disabled, true, "未填动态码时批准禁用");
   await act(async () => setInput(totp, "123456"));
-  await waitFor(() => buttonByText("确认批准", view.host).disabled === false);
-  await clickRaw(buttonByText("确认批准", view.host));
+  await waitFor(() => buttonByText("确认批准", dialog).disabled === false);
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const body = postCalls("/requests/decision")[0].body;
   assert.equal(body.totpCode, "123456");
@@ -593,20 +673,21 @@ test("高影响类型批准时动态码只接受 6 位数字", async (t) => {
     tag: "decide-high-format",
     detail: makeDetail("r1", "PENDING", "发布会员权益政策", "membership.benefit.policy.publish"),
   });
-  const totp = view.host.querySelector('input[aria-label="批准动态验证码"]');
+  const dialog = await openAction(view, "批准");
+  const totp = dialog.querySelector('input[aria-label="批准动态验证码"]');
   await act(async () => setInput(totp, "12ab56"));
   await settle();
-  assert.equal(totp.value, "1256", "非数字被过滤");
-  assert.equal(buttonByText("确认批准", view.host).disabled, true, "不足 6 位不能批准");
+  assert.equal(buttonByText("确认批准", dialog).disabled, true, "非 6 位纯数字不能批准");
 });
 
 test("驳回不携带任何凭据（password / totpCode）", async (t) => {
   const view = await renderDetail(t, { tag: "decide-reject" });
-  const textarea = view.host.querySelector('textarea[placeholder="补充说明（可选）"]');
+  const dialog = await openAction(view, "驳回");
+  const textarea = dialog.querySelector("textarea");
   assert.ok(textarea);
   await act(async () => setInput(textarea, "资料与当前版本不符"));
-  await waitFor(() => buttonByText("确认驳回", view.host).disabled === false);
-  await clickRaw(buttonByText("确认驳回", view.host));
+  await waitFor(() => buttonByText("确认驳回", dialog).disabled === false);
+  await clickRaw(buttonByText("确认驳回", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const body = postCalls("/requests/decision")[0].body;
   assert.equal(body.decision, "REJECT");
@@ -617,7 +698,8 @@ test("驳回不携带任何凭据（password / totpCode）", async (t) => {
 test("撤回走 /requests/withdraw 且不带任何凭据", async (t) => {
   const view = await renderDetail(t, { tag: "withdraw" });
   assert.ok(buttonByText("撤回申请", view.host), "待审批且有资格时显示撤回");
-  await clickRaw(buttonByText("撤回申请", view.host));
+  const dialog = await openAction(view, "撤回申请");
+  await clickRaw(buttonByText("确认撤回", dialog));
   await waitFor(() => postCalls("/requests/withdraw").length >= 1);
   const body = postCalls("/requests/withdraw")[0].body;
   assert.equal(body.requestId, "r1");
@@ -647,8 +729,8 @@ test("纯客服看不到批准/驳回按钮，只显示不能办理的原因", a
     tag: "readonly-detail",
     viewProps: { snapshot: snapshot(READ_ONLY_PERMS) },
   });
-  assert.equal(buttonByText("确认批准", view.host), undefined);
-  assert.equal(buttonByText("确认驳回", view.host), undefined);
+  assert.equal(buttonByText("批准", view.host), undefined);
+  assert.equal(buttonByText("驳回", view.host), undefined);
   assert.ok(view.host.textContent.includes("当前账号没有审批权限，只能查看申请内容。"));
 });
 
@@ -657,11 +739,11 @@ test("不能批准/驳回时决定区只显示原因，不渲染办理按钮", a
   blocked.actions = actionsFor("APPROVED");
   blocked.statusReason = "这张申请已处理或你不在可办理范围内";
   const view = await renderDetail(t, { tag: "no-action", detail: blocked });
-  const decision = view.host.querySelector('section[aria-label="决定区"]');
+  const decision = view.host.querySelector('section[aria-label="办理"]');
   assert.ok(decision);
   assert.ok(decision.querySelector('[role="status"]'), "原因用 role=status 呈现");
-  assert.equal(buttonByText("确认批准", decision), undefined);
-  assert.equal(buttonByText("确认驳回", decision), undefined);
+  assert.equal(buttonByText("批准", decision), undefined);
+  assert.equal(buttonByText("驳回", decision), undefined);
 });
 
 test("客服+运营按运营显示：具备审批权限时显示批准与驳回按钮", async (t) => {
@@ -669,8 +751,8 @@ test("客服+运营按运营显示：具备审批权限时显示批准与驳回�
     tag: "ops-detail",
     viewProps: { snapshot: snapshot(["approval.request.read", "approval.request.approve"]) },
   });
-  assert.ok(buttonByText("确认批准", view.host));
-  assert.ok(buttonByText("确认驳回", view.host));
+  assert.ok(buttonByText("批准", view.host));
+  assert.ok(buttonByText("驳回", view.host));
 });
 
 test("结算单批准后未过账：显示「已批准，待订单确认」并提示回订单确认", async (t) => {

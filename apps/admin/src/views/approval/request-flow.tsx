@@ -48,7 +48,7 @@ function RequestFlowContent({ detail }: { detail: RequestDetail }) {
 
   return (
     <div className="space-y-3">
-      <div data-approval-workflow-canvas className="h-[360px] overflow-hidden rounded-lg border border-border sm:h-[320px]">
+      <div data-approval-workflow-canvas className="h-[500px] overflow-hidden rounded-lg border border-border sm:h-[340px]">
         <WorkflowCanvas policy={policy} direction={mobile ? "TB" : "LR"} selectedId={selected?.id} onSelectStep={setSelectedId} />
       </div>
       <div aria-live="polite" className="min-h-16 border-t border-border pt-3">

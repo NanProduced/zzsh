@@ -55,6 +55,8 @@ type Fixture = {
   templateCandidates?: { templateId: string; adminUserId: string }[];
   requestCandidates?: { requestId: string; adminUserId: string }[];
   games?: { id: string; name: string }[];
+  users?: { id: string; name: string; username?: string }[];
+  orders?: { id: string; displayNo: string }[];
   entitlements?: Record<string, unknown>[];
   policies?: Record<string, unknown>[];
   settlementVersions?: Record<string, unknown>[];
@@ -304,6 +306,17 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
       const rows = (fixture.entitlements ?? []).filter((row) => ids.includes(String(row.id)) || ids.includes(String(row.approvalRequestId)));
       return { rows, rowCount: rows.length };
     }
+    if (text.includes("order_compensation_posting") && text.includes("AS ready")) return { rows: [{ ready: false }], rowCount: 1 };
+    if (text.includes('FROM "zzsh_auth_user"."user"')) {
+      const ids = (values[0] as string[]) ?? [];
+      const rows = (fixture.users ?? []).filter((row) => ids.includes(row.id)).map((row) => ({ id: row.id, name: row.name, username: row.username ?? null }));
+      return { rows, rowCount: rows.length };
+    }
+    if (text.includes('SELECT "id", "display_no" AS "displayNo" FROM "zzsh_order"."rental_order"')) {
+      const ids = (values[0] as string[]) ?? [];
+      const rows = (fixture.orders ?? []).filter((row) => ids.includes(row.id));
+      return { rows, rowCount: rows.length };
+    }
     if (text.includes('FROM "zzsh_iam"."membership_growth_policy"')) {
       const rows = (fixture.policies ?? []).filter((row) => (values[0] as string[]).includes(String(row.id)) || (values[0] as string[]).includes(String(row.approvalRequestId)));
       return { rows, rowCount: rows.length };
@@ -314,7 +327,9 @@ function harness(fixture: Fixture, idempotencySeed: [string, { fingerprint: stri
     if (text.includes("FROM zzsh_supply.rule_release")) return { rows: [{ releaseId: "release_1", priceVersionId: "price_1", status: "SEALED", mode: "SPREAD", haffRule: { schema: "haff-ratio-v1" } }], rowCount: 1 };
     if (text.includes("FROM zzsh_supply.price_line")) return { rows: [], rowCount: 0 };
     if (text.includes('FROM "zzsh_order"."settlement_version"')) {
-      const rows = (fixture.settlementVersions ?? []).filter((row) => (values[0] as string[]).includes(String(row.approvalRequestId)));
+      const rows = (fixture.settlementVersions ?? [])
+        .filter((row) => (values[0] as string[]).includes(String(row.approvalRequestId)))
+        .map((row) => ({ ...row, displayNo: (fixture.orders ?? []).find((order) => order.id === row.orderId)?.displayNo ?? null }));
       return { rows, rowCount: rows.length };
     }
     if (text.includes('FROM "zzsh_order"."settlement_decision"')) {
@@ -1283,6 +1298,8 @@ test("F4 each formal operation links its own business result", async () => {
   const view = harness({
     actors: [BOSS, REQUESTER, CANDIDATE],
     games: [{ id: "game_a", name: "三角洲行动" }],
+    users: [{ id: "user_a", name: "测试用户" }],
+    orders: [{ id: "order_1", displayNo: "ZZ260101-000001" }],
     entitlements: [
       { id: "ent_new", approvalRequestId: "ar_grant", status: "ACTIVE", startsAt: new Date(Date.now() - 1000).toISOString(), endsAt: FUTURE, userId: "user_a", gameId: "game_a", kind: "FRIEND", scopeKey: "s", approvedPolicyId: "policy_approved", replacedById: null },
       { id: "ent_new2", approvalRequestId: "ar_replace", status: "EXECUTED_PENDING_START", startsAt: FUTURE, endsAt: FUTURE, userId: "user_a", gameId: "game_a", kind: "FRIEND", scopeKey: "s", approvedPolicyId: "policy_approved", replacedById: null },
@@ -1308,6 +1325,9 @@ test("F4 each formal operation links its own business result", async () => {
   assert.equal(projection.views.get("ar_publish")!.resultAvailability, "KNOWN");
   assert.ok(projection.views.get("ar_publish")!.publishedPolicy, "policy publish links the published version");
   assert.equal(projection.views.get("ar_grant")!.resultAvailability, "KNOWN");
+  assert.equal((projection.views.get("ar_grant")!.summary as Record<string, unknown>).targetUserName, "测试用户", "grant summary carries the readable target user name");
+  assert.equal((projection.views.get("ar_grant")!.summary as Record<string, unknown>).targetUserId, "user_a");
+  assert.equal((projection.views.get("ar_settle")!.summary as Record<string, unknown>).displayNo, "ZZ260101-000001", "settlement summary carries the order display number");
   assert.equal((projection.views.get("ar_grant")!.entitlement as Record<string, unknown>).effectiveState, "EFFECTIVE", "an active entitlement reads as effective, separate from the approval status");
   assert.equal(projection.views.get("ar_replace")!.resultAvailability, "KNOWN");
   assert.equal(JSON.stringify(projection.views.get("ar_replace")!.summary).includes("REPLACED"), true, "the replaced source keeps its own current state");
@@ -1316,6 +1336,22 @@ test("F4 each formal operation links its own business result", async () => {
   assert.equal((projection.views.get("ar_settle")!.settlementResult as Record<string, unknown>).posted, true);
   assert.deepEqual(projection.views.get("ar_settle")!.pendingConditionCodes, [], "both parties confirmed a normal settlement leaves nothing pending");
   assert.equal(JSON.stringify([...projection.views.values()]).includes("feeAmount"), false);
+});
+
+test("compensation detail carries the owner name and order display number for readable links", async () => {
+  const payload = {
+    schema: "order-compensation.v1", orderId: "order_1", origin: "NATIVE", gameId: "game_a", ownerUserId: "user_owner",
+    sourceDigest: "a".repeat(64), amountCents: "6890", caseRef: "CASE-01", reason: "掉号核实", evidenceRef: "EVID-01",
+  };
+  const view = harness(baseFixture({
+    requests: [requestFixture({ operationCode: "order.compensation.grant", operationPayload: payload, status: "PENDING" })],
+    users: [{ id: "user_owner", name: "号主小周", username: "13800000000" }],
+    orders: [{ id: "order_1", displayNo: "ZZ261107-000002" }],
+  }));
+  const detail = await call(view, BOSS.id, "GET", "/approvals/requests/detail?requestId=approval_req_target");
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  assert.equal(detail.body.business.compensation.ownerName, "号主小周");
+  assert.equal(detail.body.business.compensation.displayNo, "ZZ261107-000002");
 });
 
 test("F5 an unregistered request blocks every mutation entry", async () => {

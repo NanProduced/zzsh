@@ -156,6 +156,7 @@ type PolicyRow = {
 type SettlementRow = {
   id: string;
   orderId: string;
+  displayNo: string | null;
   gameId: string | null;
   versionNo: number;
   versionHash: string;
@@ -221,6 +222,24 @@ async function loadGames(client: Pool | PoolClient, gameIds: Set<string>): Promi
   return new Map(rows.rows.map((row) => [row.id, row.name]));
 }
 
+async function loadUserNames(client: Pool | PoolClient, userIds: Set<string>): Promise<Map<string, string>> {
+  if (userIds.size === 0) return new Map();
+  const rows = await client.query<{ id: string; name: string | null; username: string | null }>(
+    `SELECT "id", "name", "username" FROM "zzsh_auth_user"."user" WHERE "id" = ANY($1::text[])`,
+    [[...userIds]],
+  );
+  return new Map(rows.rows.map((row) => [row.id, row.name?.trim() || row.username?.trim() || ""]));
+}
+
+async function loadOrderDisplayNumbers(client: Pool | PoolClient, orderIds: Set<string>): Promise<Map<string, string>> {
+  if (orderIds.size === 0) return new Map();
+  const rows = await client.query<{ id: string; displayNo: string | null }>(
+    `SELECT "id", "display_no" AS "displayNo" FROM "zzsh_order"."rental_order" WHERE "id" = ANY($1::text[])`,
+    [[...orderIds]],
+  );
+  return new Map(rows.rows.map((row) => [row.id, row.displayNo?.trim() || ""]));
+}
+
 /** 目标权益按 id 批量取，执行结果权益按 approval_request_id 批量取：查询条数与行数无关。 */
 async function loadEntitlements(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]): Promise<{ byId: Map<string, EntitlementRow>; byRequestId: Map<string, EntitlementRow> }> {
   const targetIds = new Set<string>();
@@ -275,7 +294,7 @@ async function loadPolicies(client: Pool | PoolClient, rows: readonly ApprovalRe
 async function loadSettlements(client: Pool | PoolClient, rows: readonly ApprovalRequestFacts[]): Promise<Map<string, SettlementRow>> {
   if (rows.length === 0) return new Map();
   const version = await client.query<Omit<SettlementRow, "confirmedParties" | "rejectedParties" | "supportReviewed">>(
-    `SELECT v."id", v."order_id" AS "orderId", o."game_id" AS "gameId", v."version_no" AS "versionNo", v."version_hash" AS "versionHash",
+    `SELECT v."id", v."order_id" AS "orderId", o."display_no" AS "displayNo", o."game_id" AS "gameId", v."version_no" AS "versionNo", v."version_hash" AS "versionHash",
             v."kind", v."early", v."end_reason" AS "endReason", v."initiator_party" AS "initiatorParty",
             v."approval_request_id" AS "approvalRequestId", v."superseded_at" AS "supersededAt",
             p."id" AS "postingId", p."posted_at" AS "postedAt", p."refund_due_at" AS "refundDueAt"
@@ -328,11 +347,16 @@ async function loadReversalEarnings(client: Pool | PoolClient, rows: readonly Ap
   const ids = rows.map(row => textField(row.finalPayload ?? row.operationPayload, "earningId")).filter((id): id is string => Boolean(id));
   if (ids.length === 0) return new Map<string, Record<string, string | number | null>>();
   const result = await client.query<Record<string, string | number | null>>(
-    `SELECT e."id", e."order_id" AS "orderId", o."game_id" AS "gameId", e."state", e."amount_cents"::text AS "amountCents", e."beneficiary_role" AS "role",
-            e."beneficiary_user_id" AS "beneficiaryUserId", e."posting_id" AS "postingId", e."payment_confirmation_id" AS "paymentConfirmationId",
+    `SELECT e."id", e."order_id" AS "orderId", o."display_no" AS "orderDisplayNo", o."game_id" AS "gameId", e."state", e."amount_cents"::text AS "amountCents", e."beneficiary_role" AS "role",
+            e."beneficiary_user_id" AS "beneficiaryUserId",
+            COALESCE(NULLIF(btrim(u."name"), ''), NULLIF(btrim(u."username"), '')) AS "beneficiaryName",
+            e."posting_id" AS "postingId", e."payment_confirmation_id" AS "paymentConfirmationId",
             e."basis_digest" AS "basisDigest", e."policy_version" AS "policyVersion", e."version"::text AS "version",
             (SELECT count(*)::int FROM "zzsh_order"."rental_referral_transition" t WHERE t."earning_id" = e."id" AND t."action" IN ('REVOKE','RECOVER')) AS "reversals"
-       FROM "zzsh_order"."rental_referral_earning" e JOIN "zzsh_order"."rental_order" o ON o."id" = e."order_id" WHERE e."id" = ANY($1::text[])`,
+       FROM "zzsh_order"."rental_referral_earning" e
+       JOIN "zzsh_order"."rental_order" o ON o."id" = e."order_id"
+       LEFT JOIN "zzsh_auth_user"."user" u ON u."id" = e."beneficiary_user_id"
+      WHERE e."id" = ANY($1::text[])`,
     [[...new Set(ids)]],
   );
   return new Map(result.rows.map(row => [String(row.id), row]));
@@ -379,6 +403,7 @@ function membershipView(
   entitlements: { byId: Map<string, EntitlementRow>; byRequestId: Map<string, EntitlementRow> },
   policies: { byId: Map<string, PolicyRow>; byRequestId: Map<string, PolicyRow> },
   executions: Map<string, { status: string; resultCode: string; resultDetail: string | null }>,
+  userNames: Map<string, string>,
   asOf: string,
 ): Record<string, unknown> {
   const payload = row.finalPayload ?? row.operationPayload;
@@ -415,6 +440,9 @@ function membershipView(
     const value = textField(payload, payloadField);
     if (value) summary[viewField] = value;
   }
+  const targetUserId = textField(payload, "userId");
+  const targetUserName = targetUserId ? userNames.get(targetUserId) : null;
+  if (targetUserName) summary.targetUserName = targetUserName;
   const depositWaived = booleanField(payload, "depositWaived");
   if (depositWaived !== null) summary.depositWaived = depositWaived;
   const depositAllowance = textField(payload, "depositAllowanceCents");
@@ -511,6 +539,7 @@ function settlementView(
   viewer: ApprovalProjectionViewer,
   games: Map<string, string>,
   settlements: Map<string, SettlementRow>,
+  orderDisplayNumbers: Map<string, string>,
 ): Record<string, unknown> {
   const payload = row.operationPayload;
   const base: Record<string, unknown> = {
@@ -538,6 +567,12 @@ function settlementView(
     unit: "yuan",
     scale: 2,
   };
+  const orderId = textField(payload, "orderId");
+  if (orderId) {
+    summary.orderId = orderId;
+    const displayNo = orderDisplayNumbers.get(orderId);
+    if (displayNo) summary.displayNo = displayNo;
+  }
   for (const [payloadField, viewField] of [["baseVersionId", "baseSettlementVersionId"], ["baseVersionNo", "baseSettlementVersionNo"], ["openingId", "openingId"], ["openingVersion", "openingVersion"], ["paymentConfirmationId", "paymentConfirmationId"], ["decisionDigest", "decisionDigest"], ["quoteDigest", "quoteDigest"], ["paymentDigest", "paymentDigest"], ["listingHash", "listingHash"]] as const) {
     const value = scalarField(payload, payloadField);
     if (value) summary[viewField] = value;
@@ -649,9 +684,13 @@ export async function projectApprovalBusinesses(
     loadFixedDocumentFacts(client, content),
   ]);
   const gameIds = new Set<string>();
+  const userIds = new Set<string>();
+  const orderIds = new Set<string>();
   for (const row of membership) {
     const gameId = textField(row.operationPayload, "gameId");
     if (gameId) gameIds.add(gameId);
+    const targetUserId = textField(row.operationPayload, "userId");
+    if (targetUserId) userIds.add(targetUserId);
     const targetId = textField(row.operationPayload, "entitlementId") ?? textField(row.operationPayload, "replaceEntitlementId");
     const draftId = textField(row.operationPayload, "policyDraftId");
     objectStates.set(row.id, {
@@ -661,11 +700,33 @@ export async function projectApprovalBusinesses(
   }
   for (const row of settlementRows.values()) {
     if (row.gameId) gameIds.add(row.gameId);
+    if (row.orderId) orderIds.add(row.orderId);
   }
-  const games = await loadGames(client, gameIds);
+  for (const row of unknown) {
+    if (row.operationCode === ORDER_COMPENSATION_OPERATION) {
+      const payload = parseCompensationPayload(row.operationPayload);
+      if (payload) {
+        orderIds.add(payload.orderId);
+        userIds.add(payload.ownerUserId);
+      }
+    }
+    if (row.operationCode === "distribution.earning.reverse") {
+      const payload = row.finalPayload ?? row.operationPayload;
+      const orderId = textField(payload, "orderId");
+      if (orderId) orderIds.add(orderId);
+      const earning = reversalEarnings.get(String(textField(payload, "earningId") ?? ""));
+      if (earning?.orderId) orderIds.add(String(earning.orderId));
+      if (earning?.beneficiaryUserId) userIds.add(String(earning.beneficiaryUserId));
+    }
+  }
+  const [games, userNames, orderDisplayNumbers] = await Promise.all([
+    loadGames(client, gameIds),
+    loadUserNames(client, userIds),
+    loadOrderDisplayNumbers(client, orderIds),
+  ]);
 
-  for (const row of membership) views.set(row.id, membershipView(row, viewer, games, entitlements, policies, executions, asOf));
-  for (const row of settlements) views.set(row.id, settlementView(row, viewer, games, settlementRows));
+  for (const row of membership) views.set(row.id, membershipView(row, viewer, games, entitlements, policies, executions, userNames, asOf));
+  for (const row of settlements) views.set(row.id, settlementView(row, viewer, games, settlementRows, orderDisplayNumbers));
   for (const row of content) views.set(row.id, await fixedDocumentView(row, viewer, fixedFacts, executions.get(row.id)));
   for (const row of unknown) {
     const registration = approvalRegistration(row.operationCode);
@@ -683,7 +744,8 @@ export async function projectApprovalBusinesses(
       const receipt = executions.get(row.id);
       const posted = receipt?.status === 'SUCCEEDED' && receipt.resultCode === 'ORDER_COMPENSATION_POSTED' && !!receipt.resultDetail && compensationProofs.get(row.id)===receipt.resultDetail;
       views.set(row.id, { ...base, summaryAvailable:true, detailsAvailable:true, changeSummary:row.summary,
-        compensation:{ orderId:payload.orderId, origin:payload.origin, gameId:payload.gameId, ownerUserId:payload.ownerUserId,
+        compensation:{ orderId:payload.orderId, displayNo:orderDisplayNumbers.get(payload.orderId) || null, origin:payload.origin, gameId:payload.gameId, ownerUserId:payload.ownerUserId,
+          ownerName:userNames.get(payload.ownerUserId) || null,
           amountCents:payload.amountCents, caseRef:payload.caseRef, reason:payload.reason, evidenceRef:payload.evidenceRef, sourceDigest:payload.sourceDigest },
         objectRefs:[{type:payload.origin === 'NATIVE' ? 'rental_order' : 'legacy_order',id:payload.orderId}],
         resultAvailability:posted?'KNOWN':row.status==='EXECUTED'?'UNRESOLVED':'NOT_APPLICABLE',
@@ -702,9 +764,13 @@ export async function projectApprovalBusinesses(
       const authorized = receipt?.status === "SUCCEEDED" && receipt.resultCode === "DISTRIBUTION_REVERSAL_AUTHORIZED" && receipt.resultDetail === textField(payload, "earningId");
       views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true, changeSummary: row.summary,
         reversal: { schema: "distribution-reversal-review.v1",
-          earningId: textField(payload, "earningId"), orderId: textField(payload, "orderId"), amountCents: textField(payload, "amountCents"),
+          earningId: textField(payload, "earningId"), orderId: textField(payload, "orderId"),
+          orderDisplayNo: earning ? earning.orderDisplayNo ?? null : orderDisplayNumbers.get(textField(payload, "orderId") || "") || null,
+          amountCents: textField(payload, "amountCents"),
           full: payload.full === true, reason: textField(payload, "reason"),
-          original: earning ? { state: earning.state, role: earning.role, beneficiaryUserId: earning.beneficiaryUserId, postingId: earning.postingId,
+          original: earning ? { state: earning.state, role: earning.role, beneficiaryUserId: earning.beneficiaryUserId,
+            beneficiaryName: earning.beneficiaryName ?? userNames.get(String(earning.beneficiaryUserId)) ?? null,
+            postingId: earning.postingId,
             paymentConfirmationId: earning.paymentConfirmationId, basisDigest: earning.basisDigest, policyVersion: earning.policyVersion, version: earning.version, amountCents: earning.amountCents } : null,
           originalFactsKnowledge: earning ? (String(earning.amountCents) === textField(payload, "amountCents") ? "KNOWN" : "MISMATCH") : "UNKNOWN",
           reversalsAlreadyRecorded: earning ? Number(earning.reversals) : null,
