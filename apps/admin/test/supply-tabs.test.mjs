@@ -12,12 +12,12 @@ test("supply routes parse into dedicated workspace tabs", () => {
   assert.equal(canOpenKind("listing-object", { isBoss: false, permissions: [] }), false);
   assert.equal(canOpenKind("listing-object", { isBoss: false, permissions: ["supply.review.read"] }), true);
   assert.equal(upsertTab([{...account,title:"旧来源号 TEST-A"}], account)[0].title,"旧来源号 TEST-A");
-  assert.deepEqual(parseWorkspacePath("/supply/catalog"), { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "目录维护" });
+  assert.deepEqual(parseWorkspacePath("/supply/catalog"), { kind: "catalog", tabId: "catalog", path: "/supply/catalog", title: "游戏目录" });
   assert.deepEqual(parseWorkspacePath("/supply/rules"), { kind: "rules", tabId: "rules", path: "/supply/rules", title: "规则与价目" });
-  assert.deepEqual(parseWorkspacePath("/supply/media"), { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "平台素材审核" });
-  assert.equal(titleForPath("/supply/catalog"), "目录维护");
+  assert.deepEqual(parseWorkspacePath("/supply/media"), { kind: "media-review", tabId: "media-review", path: "/supply/media", title: "素材审核" });
+  assert.equal(titleForPath("/supply/catalog"), "游戏目录");
   assert.equal(titleForPath("/supply/rules"), "规则与价目");
-  assert.equal(titleForPath("/supply/media"), "平台素材审核");
+  assert.equal(titleForPath("/supply/media"), "素材审核");
   const tab = tabFromLocation("/supply/rules", "?state=SEALED");
   assert.equal(tab.kind, "rules");
   assert.equal(tab.query.state, "SEALED");
@@ -74,22 +74,23 @@ test("supply tabs require their own permissions instead of a generic admin role"
 
 test("the workspace menu exposes supply entries only with matching permissions", () => {
   const limited = workspaceMenuItems({ isBoss: false, permissions: [] });
-  assert.equal(limited.some((item) => item.label === "供给与目录"), false);
+  assert.equal(limited.some((item) => item.label === "目录与素材"), false);
   assert.equal(limited.some((item) => item.path?.startsWith("/supply")), false);
 
   const reviewer = workspaceMenuItems({ isBoss: false, permissions: ["supply.review.read"] });
-  assert.ok(reviewer.some((item) => item.label === "供给与目录"));
+  assert.ok(reviewer.some((item) => item.label === "交易"));
+  assert.ok(reviewer.some((item) => item.label === "目录与素材"));
   assert.deepEqual(reviewer.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/reviews", "/supply/media"]);
 
   const editor = workspaceMenuItems({ isBoss: false, permissions: ["supply.catalog.manage", "supply.rules.edit"] });
-  assert.deepEqual(editor.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/catalog", "/supply/rules?section=overview", "/supply/rules?section=deposit", "/supply/rules?section=settlement", "/supply/rules?section=agreement", "/supply/rules?section=pricing", "/supply/rules?section=items", "/supply/rules?section=skin"]);
+  assert.deepEqual(editor.filter((item) => item.path?.startsWith("/supply")).map((item) => item.path), ["/supply/rules?section=overview", "/supply/rules?section=deposit", "/supply/rules?section=settlement", "/supply/rules?section=agreement", "/supply/rules?section=pricing", "/supply/rules?section=items", "/supply/rules?section=skin", "/supply/catalog"]);
 });
 
-test("改枪码目录 sits under the 三角洲行动 group and keeps its route", () => {
+test("改枪码目录 sits under 目录与素材 and keeps its route", () => {
   const groupOf = (items, path) => { let g = null; for (const it of items) { if (it.isTitle) g = it.label; else if (it.path === path) return g; } return null; };
   const boss = workspaceMenuItems({ isBoss: true, permissions: [] });
-  assert.equal(groupOf(boss, "/supply/gunsmith"), "三角洲行动");
+  assert.equal(groupOf(boss, "/supply/gunsmith"), "目录与素材");
   const gunsmithOnly = workspaceMenuItems({ isBoss: false, permissions: ["supply.gunsmith.manage"] });
-  assert.equal(groupOf(gunsmithOnly, "/supply/gunsmith"), "三角洲行动");
-  assert.equal(gunsmithOnly.some((item) => item.label === "供给与目录"), false);
+  assert.equal(groupOf(gunsmithOnly, "/supply/gunsmith"), "目录与素材");
+  assert.equal(gunsmithOnly.some((item) => item.label === "三角洲行动"), false);
 });

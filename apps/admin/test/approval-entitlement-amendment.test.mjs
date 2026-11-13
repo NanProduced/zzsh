@@ -112,13 +112,19 @@ async function type(element, value) {
 async function check(host, text) {
   const label = [...host.querySelectorAll("label")].find((element) => element.textContent.trim() === text);
   assert.ok(label, `label ${text}`);
-  const control = browser.document.getElementById(label.htmlFor);
+  const control = browser.document.getElementById(label.htmlFor) ?? label.querySelector('[data-slot="checkbox"]');
   assert.ok(control, `control for ${text}`);
   await clickRaw(control);
 }
 
-function decisionArea(host) {
-  return host.querySelector('section[aria-label="决定区"]');
+function decisionArea() {
+  return browser.document.querySelector('[data-slot="dialog-content"]');
+}
+
+async function openAction(host, label) {
+  await clickRaw(button(label, host));
+  assert.ok(decisionArea(), "操作弹窗已打开");
+  return decisionArea();
 }
 
 async function mount(t, data) {
@@ -148,13 +154,14 @@ test("authorized amendment submits the exact final payload and keeps fixed ident
   const data = detail();
   const original = structuredClone(data.entitlementAmendment.editablePayload);
   const h = await mount(t, data);
-  assert.ok(h.host.textContent.includes("调整礼遇后批准"), "编辑入口仍在决定区");
-  await check(h.host, "按调整后的内容批准");
-  await type(decisionArea(h.host).querySelector('[aria-label="批准应付比例"]'), "0.85");
-  await check(h.host, "独立免押");
-  await type(decisionArea(h.host).querySelector('[aria-label="批准礼遇原因"]'), "核对后调整权益");
-  await type(decisionArea(h.host).querySelector('textarea[placeholder="补充说明（可选）"]'), "已核对申请依据");
-  await clickRaw(button("确认批准", decisionArea(h.host)));
+  const dialog = await openAction(h.host, "批准");
+  assert.ok(dialog.textContent.includes("调整礼遇后批准"), "编辑入口仍在办理弹窗");
+  await check(dialog, "按调整后的内容批准");
+  await type(dialog.querySelector('[aria-label="批准应付比例"]'), "0.85");
+  await check(dialog, "独立免押");
+  await type(dialog.querySelector('[aria-label="批准礼遇原因"]'), "核对后调整权益");
+  await type(dialog.querySelector('textarea[placeholder="补充说明（可选）"]'), "已核对申请依据");
+  await clickRaw(button("确认批准", dialog));
 
   assert.equal(h.decisions.length, 1);
   const written = h.decisions[0];
@@ -177,10 +184,13 @@ test("authorized amendment submits the exact final payload and keeps fixed ident
 
 test("rejecting never carries a previously edited amendment", async (t) => {
   const h = await mount(t, detail());
-  await check(h.host, "按调整后的内容批准");
-  await type(decisionArea(h.host).querySelector('[aria-label="批准应付比例"]'), "0.75");
-  await type(decisionArea(h.host).querySelector('textarea[placeholder="补充说明（可选）"]'), "当前依据不足");
-  await clickRaw(button("确认驳回", decisionArea(h.host)));
+  const approve = await openAction(h.host, "批准");
+  await check(approve, "按调整后的内容批准");
+  await type(approve.querySelector('[aria-label="批准应付比例"]'), "0.75");
+  await clickRaw(button("取消", approve));
+  const reject = await openAction(h.host, "驳回");
+  await type(reject.querySelector("textarea"), "当前依据不足");
+  await clickRaw(button("确认驳回", reject));
   assert.equal(h.decisions.length, 1);
   assert.equal(h.decisions[0].decision, "REJECT");
   assert.equal(h.decisions[0].reason, "当前依据不足");
@@ -190,8 +200,8 @@ test("rejecting never carries a previously edited amendment", async (t) => {
 
 test("invalid decimal ratios and an illegal deposit allowance disable approval", async (t) => {
   const h = await mount(t, detail());
-  await check(h.host, "按调整后的内容批准");
-  const area = decisionArea(h.host);
+  const area = await openAction(h.host, "批准");
+  await check(area, "按调整后的内容批准");
   for (const ratio of ["0", "1.1", "0.123456789"]) {
     await type(area.querySelector('[aria-label="批准应付比例"]'), ratio);
     assert.equal(button("确认批准", area).disabled, true, `比例 ${ratio} 应禁用批准`);
@@ -206,8 +216,9 @@ test("invalid decimal ratios and an illegal deposit allowance disable approval",
 test("old DTOs and non-eligible actions do not expose an amendment entry", async (t) => {
   const data = detail("request-old", false);
   const h = await mount(t, data);
-  assert.ok(!h.host.textContent.includes("调整礼遇后批准"), "旧 DTO 不暴露编辑入口");
-  await clickRaw(button("确认批准", decisionArea(h.host)));
+  const dialog = await openAction(h.host, "批准");
+  assert.ok(!dialog.textContent.includes("调整礼遇后批准"), "旧 DTO 不暴露编辑入口");
+  await clickRaw(button("确认批准", dialog));
   assert.equal(h.decisions.length, 1);
   assert.equal(h.decisions[0].decision, "APPROVE");
   assert.equal(h.decisions[0].amendment, undefined);
@@ -215,27 +226,29 @@ test("old DTOs and non-eligible actions do not expose an amendment entry", async
   const denied = detail("request-denied");
   denied.actions = denied.actions.map((action) => ({ ...action, allowed: false, reasonCode: "BUSINESS_PERMISSION_REQUIRED" }));
   await h.render(denied);
-  assert.equal(button("确认批准", h.host), undefined, "批准不可用时不再渲染批准按钮");
+  assert.equal(button("批准", h.host), undefined, "批准不可用时不再渲染批准按钮");
   assert.ok(!h.host.textContent.includes("调整礼遇后批准"));
-  assert.ok(decisionArea(h.host).querySelector('[role="status"]'), "只显示不能办理的原因");
+  assert.ok(h.host.querySelector('section[aria-label="办理"] [role="status"]'), "只显示不能办理的原因");
 });
 
 test("switching requests clears old edits and approval opinions before the next decision", async (t) => {
   const h = await mount(t, detail());
-  await check(h.host, "按调整后的内容批准");
-  await type(decisionArea(h.host).querySelector('[aria-label="批准应付比例"]'), "0.71");
-  await type(decisionArea(h.host).querySelector('textarea[placeholder="补充说明（可选）"]'), "旧申请意见");
+  const first = await openAction(h.host, "批准");
+  await check(first, "按调整后的内容批准");
+  await type(first.querySelector('[aria-label="批准应付比例"]'), "0.71");
+  await type(first.querySelector('textarea[placeholder="补充说明（可选）"]'), "旧申请意见");
+  await clickRaw(button("取消", first));
 
   const next = detail("request-b");
   next.entitlementAmendment.editablePayload.pricing.payableRatio = "0.97";
   await h.render(next);
 
-  const area = decisionArea(h.host);
+  const area = await openAction(h.host, "批准");
   assert.equal(area.querySelector('textarea[placeholder="补充说明（可选）"]').value, "", "切换后办理意见清空");
   assert.equal(area.querySelector('[aria-label="批准应付比例"]'), null, "切换后编辑重新收起");
-  await check(h.host, "按调整后的内容批准");
-  assert.equal(decisionArea(h.host).querySelector('[aria-label="批准应付比例"]').value, "0.97", "重新展开后是新申请的载荷");
-  await clickRaw(button("确认批准", decisionArea(h.host)));
+  await check(area, "按调整后的内容批准");
+  assert.equal(area.querySelector('[aria-label="批准应付比例"]').value, "0.97", "重新展开后是新申请的载荷");
+  await clickRaw(button("确认批准", area));
   assert.equal(h.decisions.length, 1);
   assert.equal(h.decisions[0].amendment.expectedPayloadHash, next.entitlementAmendment.expectedPayloadHash);
   assert.equal(h.decisions[0].amendment.finalPayload.userId, "user-b");

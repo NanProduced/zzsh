@@ -204,7 +204,7 @@ export function NavGroupOrderPanel({
         <div>
           <h2 id="nav-group-panel-title" className="nav-group-panel__title">侧栏分组顺序</h2>
           <p className="nav-group-panel__desc">
-            调整左侧导航的分组先后。「工作区」固定在最前，「个人」固定在最后；只显示当前账号有权访问的分组。
+            调整左侧导航的分组先后。「工作区」固定在最前，「系统与安全」固定在最后；只显示当前账号有权访问的分组。
           </p>
         </div>
         <button

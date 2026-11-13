@@ -676,6 +676,7 @@ export function ApprovalAuditView({
                 detail={detail}
                 busy={loading}
                 blocked={recovery !== null && recovery.kind !== "resolved"}
+                error={error}
                 canApprove={canApprove}
                 onOpenRequest={selectRequest}
                 onOpenPath={onOpenPath}
@@ -754,6 +755,7 @@ export function ApprovalAuditView({
               detail={detail}
               busy={loading}
               blocked={recovery !== null && recovery.kind !== "resolved"}
+              error={error}
               canApprove={canApprove}
               onOpenRequest={selectRequest}
               onOpenPath={onOpenPath}

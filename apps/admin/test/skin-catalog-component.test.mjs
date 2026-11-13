@@ -166,7 +166,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       assert.doesNotMatch(document.body.textContent, /Private old catalog/); assert.match(document.body.textContent, /Current identity catalog/);
       const readCount = reads.length;
       await act(async () => root.render(createElement(View, { snapshot: { ...actor("admin-b"), permissions: [] }, onDirtyChange: value => dirty.push(value) })));
-      assert.match(document.body.textContent, /没有供给目录维护权限/); assert.equal(reads.length, readCount); assert.equal(writes.length, 0);
+      assert.match(document.body.textContent, /没有游戏目录维护权限/); assert.equal(reads.length, readCount); assert.equal(writes.length, 0);
     });
     await t.test("409 preserves modified input, requires explicit version adoption and a new key", async () => {
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Kept input"); await fill("操作原因", "Row reason"); policy = "conflict"; await saveRow(); assert.equal(field("名称").value, "Kept input"); assert.equal(writes[0].body.expectedCatalogRevision, "10"); assert.equal(byText("保存").disabled, true);
@@ -310,7 +310,7 @@ test("catalog row editor: identity, conflicts and fixed request recovery", async
       await mount(); await click("编辑", row("legacy")); await fill("名称", "Actor A original"); await fill("操作原因", "Private operation reason"); policy = "network"; await saveRow();
       const key = "zzsh.admin.catalog.pending.v1:admin-a", original = browser.localStorage.getItem(key);
       await remount(actor("admin-b")); assert.ok(!byText("核对原提交")); assert.equal(browser.localStorage.getItem(key), original);
-      await remount({ ...identity, permissions: [] }); assert.match(document.body.textContent, /没有供给目录维护权限/); assert.doesNotMatch(document.body.textContent, /Private operation reason/); assert.equal(browser.localStorage.getItem(key), original);
+      await remount({ ...identity, permissions: [] }); assert.match(document.body.textContent, /没有游戏目录维护权限/); assert.doesNotMatch(document.body.textContent, /Private operation reason/); assert.equal(browser.localStorage.getItem(key), original);
       await remount(identity); policy = "recovery-denied"; await click("核对原提交"); assert.ok(byText("核对原提交")); assert.equal(byText("新增皮肤").disabled, true); assert.equal(writes.length, 1); assert.equal(browser.localStorage.getItem(key), original);
       policy = "ok"; await click("核对原提交"); assert.equal(writes.length, 1);
     });

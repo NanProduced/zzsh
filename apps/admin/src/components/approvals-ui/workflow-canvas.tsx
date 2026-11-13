@@ -49,12 +49,12 @@ function CanvasInner({ policy, direction = "LR", selectedId, onSelectStep }: Wor
   const sourceNodes = useMemo<Node[]>(() => buildNodes(policy, vertical, selectedId, onSelectStep), [policy, vertical, selectedId, onSelectStep]);
   const sourceEdges = useMemo(() => buildEdges(policy), [policy]);
   const { nodes, edges, onNodesChange, onEdgesChange } = useAutoLayout({
-    nodes: sourceNodes, edges: sourceEdges, vertical, nodeSep: 36, rankSep: 70,
+    nodes: sourceNodes, edges: sourceEdges, vertical, nodeSep: vertical ? 24 : 36, rankSep: vertical ? 44 : 70,
   });
   const structureKey = `${direction}:${policy.steps.map(step => `${step.id}>${step.next.join("|")}`).join(",")}`;
 
   useEffect(() => {
-    const timer = setTimeout(() => { void flow.fitView({ padding: 0.15, minZoom: vertical ? 0.65 : 0.5, maxZoom: 1 }); }, 180);
+    const timer = setTimeout(() => { void flow.fitView({ padding: 0.15, minZoom: vertical ? 0.45 : 0.5, maxZoom: 1 }); }, 180);
     return () => clearTimeout(timer);
   }, [structureKey, vertical, flow]);
 
@@ -85,7 +85,7 @@ function CanvasInner({ policy, direction = "LR", selectedId, onSelectStep }: Wor
         ariaLabelConfig={{ "controls.zoomIn.ariaLabel": "放大流程图", "controls.zoomOut.ariaLabel": "缩小流程图", "controls.fitView.ariaLabel": "适应画布" }}
       >
         <Background gap={18} />
-        <Controls showInteractive={false} />
+        <Controls showInteractive={false} position="bottom-right" />
       </ReactFlow>
     </div>
   );

@@ -62,17 +62,23 @@ test("page search only lists implemented pages in the current permission set", (
     "/support/overview",
     "/support/patrol",
     "/support/settings",
+    "/orders",
+    "/supply/reviews",
+    "/avatar-reviews",
+    "/membership-growth",
     "/distribution",
     "/distribution/earnings",
     "/distribution/participants",
     "/distribution/policy",
-    "/system",
-    "/admins",
-    "/roles",
+    "/content/help",
+    "/content/updates",
+    "/content/legal",
+    "/content/pages",
+    "/content/media",
+    "/docs",
+    "/approvals",
+    "/audit",
     "/operation-log",
-    "/supply/catalog",
-    "/supply/reviews",
-    "/supply/media",
     "/supply/rules?section=overview",
     "/supply/rules?section=deposit",
     "/supply/rules?section=settlement",
@@ -80,18 +86,12 @@ test("page search only lists implemented pages in the current permission set", (
     "/supply/rules?section=pricing",
     "/supply/rules?section=items",
     "/supply/rules?section=skin",
+    "/supply/catalog",
     "/supply/gunsmith",
-    "/content/help",
-    "/content/updates",
-    "/content/legal",
-    "/content/pages",
-    "/content/media",
-    "/docs",
-    "/orders",
-    "/avatar-reviews",
-    "/membership-growth",
-    "/approvals",
-    "/audit",
+    "/supply/media",
+    "/system",
+    "/admins",
+    "/roles",
     "/settings?section=security",
     "/settings",
   ]);
@@ -113,7 +113,7 @@ test("page search matches label, group and path, and stays empty for unknown bus
   });
   assert.deepEqual(filterSearchablePages(pages, "审计").map((page) => page.path), ["/audit", "/operation-log"]);
   assert.deepEqual(filterSearchablePages(pages, "/admins").map((page) => page.path), ["/admins"]);
-  assert.deepEqual(filterSearchablePages(pages, "系统").map((page) => page.path), ["/system", "/admins", "/operation-log"]);
+  assert.deepEqual(filterSearchablePages(pages, "系统").map((page) => page.path), ["/system", "/admins"]);
   assert.deepEqual(filterSearchablePages(pages, "设置").map((page) => page.path), ["/settings", "/support/settings"]);
   assert.deepEqual(filterSearchablePages(pages, "外观").map((page) => page.path), ["/settings"]);
   assert.deepEqual(filterSearchablePages(pages, "主题").map((page) => page.path), ["/settings"]);
@@ -290,9 +290,12 @@ test("aliases, pinyin initials, and multi-token AND matching work accurately", (
 
   // Explicit aliases
   assert.deepEqual(filterSearchablePages(boss, "定价").map((p) => p.path), ["/supply/rules?section=pricing"]);
-  assert.deepEqual(filterSearchablePages(boss, "价目").map((p) => p.path), ["/supply/rules?section=items", "/supply/rules?section=overview"]);
+  assert.deepEqual(filterSearchablePages(boss, "价目").map((p) => p.path), [
+    "/supply/rules?section=items", "/supply/rules?section=overview", "/supply/rules?section=deposit",
+    "/supply/rules?section=settlement", "/supply/rules?section=agreement", "/supply/rules?section=pricing", "/supply/rules?section=skin",
+  ]);
   assert.deepEqual(filterSearchablePages(boss, "图片审核").map((p) => p.path), ["/supply/media"]);
-  assert.deepEqual(filterSearchablePages(boss, "素材").map((p) => p.path), ["/supply/media", "/content/media"]);
+  assert.deepEqual(filterSearchablePages(boss, "素材").map((p) => p.path), ["/supply/media", "/content/media", "/supply/catalog", "/supply/gunsmith"]);
   assert.deepEqual(filterSearchablePages(boss, "素材库").map((p) => p.path), ["/content/media"]);
   assert.deepEqual(filterSearchablePages(boss, "展示位").map((p) => p.path), ["/content/pages"]);
   assert.deepEqual(filterSearchablePages(boss, "固定文书").map((p) => p.path), ["/content/legal"]);
@@ -306,8 +309,8 @@ test("aliases, pinyin initials, and multi-token AND matching work accurately", (
   assert.deepEqual(filterSearchablePages(boss, "sj").map((p) => p.path), ["/audit"]);
 
   // Multi-token AND search: every token must match across title/group/alias
-  const multiMatched = filterSearchablePages(boss, "供给 规则");
-  assert.ok(multiMatched.some((p) => p.path.startsWith("/supply/rules?section=")), "multi-token matches supply rules");
+  const multiMatched = filterSearchablePages(boss, "规则 定价");
+  assert.deepEqual(multiMatched.map((p) => p.path), ["/supply/rules?section=pricing"], "multi-token matches the pricing section");
   assert.equal(filterSearchablePages(boss, "未知 规则").length, 0, "unmatched token fails entire search");
 
   // Full-width ASCII & spaces normalization
@@ -374,7 +377,7 @@ test("open tabs search preserves detail ID leading zeros and activates without d
 test("dirty leave cancellation does not record recent access or switch tabs", async () => {
   const pages = [
     { label: "工作台", path: "/workbench", group: "工作区" },
-    { label: "规则与价目", path: "/supply/rules", group: "供给与目录" },
+    { label: "规则与价目", path: "/supply/rules", group: "规则与价目" },
   ];
   const tabs = [
     { id: "workbench", title: "工作台", path: "/workbench", query: {}, closable: false, kind: "workbench" },

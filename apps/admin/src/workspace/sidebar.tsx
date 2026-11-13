@@ -144,7 +144,7 @@ export function WorkspaceSidebar({
                   <SlidersHorizontalIcon />
                   <span>{editing ? "完成侧栏编辑" : "自定义侧栏"}</span>
                 </DropdownMenuItem>
-                {/* 与侧栏「账号安全」入口同一地址：两个入口都指向 /settings?section=security，任一状态下只有一个入口点亮。 */}
+                {/* 账号安全入口在头像菜单；与设置页同一地址，旧链接仍可用。 */}
                 <DropdownMenuItem onClick={() => onNavigate("/settings?section=security")}>
                   <ShieldIcon />
                   <span>登录与安全</span>

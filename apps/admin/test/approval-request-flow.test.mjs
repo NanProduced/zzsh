@@ -25,17 +25,18 @@ test("pending request has one candidate gate, two possible outcomes, and no impl
   assert.equal(step(policy, "review").status, "pending");
   assert.equal(step(policy, "approved").statusLabel, "尚无批准决定");
   assert.equal(step(policy, "approved").status, "inactive");
-  assert.equal(step(policy, "rejected").statusLabel, "尚无拒绝决定");
-  assert.equal(step(policy, "execution").statusLabel, "尚未执行");
-  assert.equal(step(policy, "execution").description, "业务摘要暂不可用");
+  assert.equal(step(policy, "rejected").statusLabel, "尚无驳回决定");
+  assert.equal(step(policy, "execution").label, "权益生效");
+  assert.equal(step(policy, "execution").statusLabel, "待权益生效");
+  assert.match(step(policy, "execution").description, /批准后按申请结果/);
 });
 
 test("approval is not execution or entitlement activation", () => {
   const policy = requestPolicy(detail({ status: "APPROVED", decision: { decision: "APPROVED", approver: person, reason: "已调整期限", createdAt: null } }));
   assert.equal(step(policy, "approved").status, "complete");
   assert.equal(step(policy, "execution").status, "pending");
-  assert.equal(step(policy, "execution").statusLabel, "待执行");
-  assert.equal(step(policy, "execution").description, "业务摘要暂不可用");
+  assert.equal(step(policy, "execution").statusLabel, "待权益生效");
+  assert.match(step(policy, "execution").description, /批准后按申请结果/);
   assert.equal(step(policy, "review").facts.find(fact => fact.label === "处理说明").value, "已调整期限");
 });
 
@@ -73,7 +74,7 @@ test("execution receipt and actual business result are separate facts", () => {
   }));
   assert.equal(step(policy, "execution").status, "complete");
   assert.equal(step(policy, "execution").statusLabel, "执行成功");
-  assert.equal(step(policy, "execution").description, "业务结果未读到");
+  assert.equal(step(policy, "execution").facts.find(fact => fact.label === "业务进度").value, "业务结果未读到");
   const failed = requestPolicy(detail({ execution: { status: "FAILED", resultCode: "FAILED", resultDetail: "未执行变更", executor: person, createdAt: null, completedAt: null } }));
   assert.equal(step(failed, "execution").status, "failed");
 });

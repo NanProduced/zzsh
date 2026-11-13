@@ -212,6 +212,16 @@ function setInput(element, value) {
   element.dispatchEvent(new browser.Event("input", { bubbles: true }));
 }
 
+function actionDialog() {
+  return browser.document.querySelector('[data-slot="dialog-content"]');
+}
+
+async function openAction(view, label) {
+  await clickRaw(buttonByText(label, view.host));
+  await waitFor(() => actionDialog() !== null);
+  return actionDialog();
+}
+
 function makeHost() {
   for (const previous of [...browser.document.querySelectorAll(".workspace-root")]) previous.classList.remove("workspace-root");
   const host = browser.document.createElement("div");
@@ -269,12 +279,13 @@ test("没有任何审批权限时视图拒绝，且不再渲染申请列表", as
   await settle();
   assert.ok(view.host.textContent.includes("当前账号没有审批读取或办理权限。"));
   assert.equal(view.host.querySelector("table"), null);
-  assert.equal(view.host.querySelector('section[aria-label="决定区"]'), null);
+  assert.equal(view.host.querySelector('section[aria-label="办理"]'), null);
 });
 
 test("决定写入带 idempotency-key 头，且成功后按 GET 读回详情与统一列表", async (t) => {
   const view = await renderDetail(t, { tag: "decide-readback" });
-  await clickRaw(buttonByText("确认批准", view.host));
+  const dialog = await openAction(view, "批准");
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const write = postCalls("/requests/decision")[0];
   assert.ok(write.headers["idempotency-key"], "决定写入带幂等键");
@@ -295,7 +306,8 @@ test("恢复白名单只登记决定与撤回路径，不登记密码或旧执�
 
 test("结果未知只提供「查询原结果」与「用原请求重试」，明确禁止换请求重试", async (t) => {
   const view = await renderDetail(t, { tag: "unknown-exits", decisionHttpStatus: 500 });
-  await clickRaw(buttonByText("确认批准", view.host));
+  const dialog = await openAction(view, "批准");
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => view.host.textContent.includes("请求结果未知"));
   assert.ok(view.host.textContent.includes("不要换请求重试"));
   assert.ok(buttonByText("用原请求重试", view.host), "提供用原请求重试");
@@ -307,8 +319,9 @@ test("结果未知只提供「查询原结果」与「用原请求重试」，�
 
 test("用原请求重试沿用同一幂等键与同一请求体，不换键", async (t) => {
   const view = await renderDetail(t, { tag: "retry-same-key", decisionHttpStatus: 500 });
-  await act(async () => setInput(view.host.querySelector('textarea[placeholder="补充说明（可选）"]'), "核对无误"));
-  await clickRaw(buttonByText("确认批准", view.host));
+  const dialog = await openAction(view, "批准");
+  await act(async () => setInput(dialog.querySelector('textarea[placeholder="补充说明（可选）"]'), "核对无误"));
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const first = postCalls("/requests/decision")[0];
   await clickRaw(buttonByText("用原请求重试", view.host));
@@ -320,7 +333,8 @@ test("用原请求重试沿用同一幂等键与同一请求体，不换键", as
 
 test("查询原结果走统一恢复接口，带 operation / key / requestId", async (t) => {
   const view = await renderDetail(t, { tag: "lookup", decisionHttpStatus: 500 });
-  await clickRaw(buttonByText("确认批准", view.host));
+  const dialog = await openAction(view, "批准");
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   const key = postCalls("/requests/decision")[0].headers["idempotency-key"];
   await clickRaw(buttonByText("查询原结果", view.host));
@@ -339,10 +353,11 @@ test("高影响批准的动态码只随 POST 发送，不写进 sessionStorage �
     decisionHttpStatus: 500,
     detail: makeDetail("r1", "PENDING", "调整分销政策", "distribution.policy.publish"),
   });
-  const totp = view.host.querySelector('input[aria-label="批准动态验证码"]');
+  const dialog = await openAction(view, "批准");
+  const totp = dialog.querySelector('input[aria-label="批准动态验证码"]');
   assert.ok(totp);
   await act(async () => setInput(totp, "123456"));
-  await clickRaw(buttonByText("确认批准", view.host));
+  await clickRaw(buttonByText("确认批准", dialog));
   await waitFor(() => postCalls("/requests/decision").length >= 1);
   assert.equal(postCalls("/requests/decision")[0].body.totpCode, "123456", "动态码随请求发出");
   const records = storedRecords();

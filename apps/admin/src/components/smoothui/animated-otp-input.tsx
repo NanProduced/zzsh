@@ -324,6 +324,7 @@ export interface SmoothTotpInputProps {
   autoFocus?: boolean;
   id?: string;
   className?: string;
+  ariaLabel?: string;
 }
 
 export function SmoothTotpInput({
@@ -334,6 +335,7 @@ export function SmoothTotpInput({
   autoFocus = true,
   id,
   className,
+  ariaLabel,
 }: SmoothTotpInputProps) {
   const handleChange = (raw: string) => {
     // Digits only
@@ -354,6 +356,7 @@ export function SmoothTotpInput({
       disabled={disabled}
       autoFocus={autoFocus}
       className={className}
+      aria-label={ariaLabel}
     >
       <AnimatedInputOTPGroup>
         <AnimatedInputOTPSlot index={0} />

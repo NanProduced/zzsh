@@ -153,7 +153,27 @@ export type BusinessView = {
   /** 分销申请的冻结改动，不是当前全局政策或完整原值。 */
   policyChange?: { schema?: string; initial?: boolean; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
   /** displayNo 为订单展示号；旧结构只有 orderId，展示时优先取 displayNo。 */
-  compensation?: { orderId:string;displayNo?:string|null;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
+  compensation?: { orderId:string;displayNo?:string|null;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;ownerName?:string|null;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
+  /** 分销佣金冲回的冻结原事实；批准只授权冲回，不直接改余额。 */
+  reversal?: {
+    schema: string;
+    earningId: string | null;
+    orderId: string | null;
+    orderDisplayNo?: string | null;
+    amountCents: string | null;
+    full: boolean;
+    reason: string | null;
+    original: {
+      state: string; role: string; beneficiaryUserId: string; beneficiaryName?: string | null;
+      postingId: string; paymentConfirmationId: string; basisDigest: string;
+      policyVersion: string; version: string; amountCents: string;
+    } | null;
+    originalFactsKnowledge: string;
+    reversalsAlreadyRecorded: number | null;
+    requestPayloadHash: string;
+    approvedPayloadHash: string | null;
+    authorization: { knowledge: string; executionReceiptId?: string; executedBy?: string };
+  };
   result?: { knowledge: string; policyVersionId?: string | null; caseId?:string|null };
 };
 
@@ -600,6 +620,9 @@ export const OPERATION_TITLES: Record<string, string> = {
   "membership.entitlement.grant": "发放会员礼遇",
   "membership.entitlement.replace": "替换会员礼遇",
   "membership.entitlement.revoke": "撤销会员礼遇",
+  "distribution.earning.reverse": "冲回分销佣金",
+  "content.fixed_document.publish": "固定文书发布",
+  "approval.test.execute": "本地非资金测试动作",
 };
 
 /** 高影响类型：批准时需要 6 位动态码。 */
@@ -697,9 +720,9 @@ export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | 
     const c = business.compensation;
     if (!c) return fallback;
     const amount = yuanFromCents(c.amountCents) ?? "金额待核";
-    const order = c.displayNo || c.orderId || "订单待核";
+    const order = c.displayNo ? ` · 订单 ${c.displayNo}` : "";
     const reason = c.reason || business.changeSummary || "";
-    return `赔偿 ${amount} · 订单 ${order}${reason ? ` · ${reason}` : ""}`;
+    return `赔偿 ${amount}${order}${reason ? ` · ${reason}` : ""}`;
   }
 
   if (code === "distribution.policy.publish") {
@@ -728,7 +751,7 @@ export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | 
   }
 
   if (code === "membership.entitlement.grant" || code === "membership.entitlement.replace") {
-    const user = strField(s, "targetUserName") ?? strField(s, "targetUserId") ?? "用户待核";
+    const user = strField(s, "targetUserName") ?? "用户";
     const kind = strField(s, "entitlementKindTitle") ?? strField(s, "entitlementKind") ?? "礼遇待核";
     const pricing = (s.pricingSummary ?? {}) as Record<string, unknown>;
     const discount = strField(pricing, "payableRatio");
@@ -738,7 +761,7 @@ export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | 
   }
 
   if (code === "membership.entitlement.revoke") {
-    const user = strField(s, "targetUserName") ?? strField(s, "targetUserId") ?? "用户待核";
+    const user = strField(s, "targetUserName") ?? "用户";
     const revoked = (s.revokedEntitlement ?? {}) as Record<string, unknown>;
     const kind = strField(revoked, "kindTitle") ?? strField(revoked, "kind") ?? strField(s, "entitlementKindTitle") ?? "礼遇待核";
     const end = strField(revoked, "currentEndsAt") ?? strField(revoked, "endsAt") ?? strField(s, "endsAt");
@@ -746,7 +769,7 @@ export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | 
   }
 
   if (code === "order.settlement.adjust") {
-    const order = strField(s, "displayNo") ?? strField(s, "orderId");
+    const order = strField(s, "displayNo");
     const ownerSys = amountText(s.systemOwnerNet), ownerNew = amountText(s.proposedOwnerNet);
     const renterSys = amountText(s.systemRenterRefund), renterNew = amountText(s.proposedRenterRefund);
     const parts: string[] = [];
@@ -754,6 +777,21 @@ export function requestSummaryLine(item: Pick<RequestSummary, "operationCode" | 
     if (renterSys || renterNew) parts.push(`租客应退 ${renterSys ?? "待核"} → ${renterNew ?? "待核"}`);
     const head = order ? `订单 ${order}` : "结算调整";
     return parts.length ? `${head} · ${parts.join(" · ")}` : (business.changeSummary || fallback);
+  }
+
+  if (code === "distribution.earning.reverse") {
+    const reversal = business.reversal;
+    if (!reversal) return fallback;
+    const amount = yuanFromCents(reversal.amountCents) ?? "金额待核";
+    const order = reversal.orderDisplayNo;
+    return `${reversal.full ? "全额" : "部分"}冲回 ${amount}${order ? ` · 订单 ${order}` : ""}${reversal.reason ? ` · ${reversal.reason}` : ""}`;
+  }
+
+  if (code === "content.fixed_document.publish") {
+    const fixed = (business.summary?.fixedDocument ?? {}) as { items?: unknown[] };
+    const count = Array.isArray(fixed.items) ? fixed.items.length : 0;
+    const effective = (business.result as { effectiveAt?: string | null } | undefined)?.effectiveAt;
+    return `固定文书${count ? ` ${count} 份` : ""}${effective ? ` · 拟生效 ${shortDate(effective)}` : ""}`;
   }
 
   return business.changeSummary || fallback;

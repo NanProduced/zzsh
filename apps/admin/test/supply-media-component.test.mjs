@@ -185,7 +185,7 @@ test("待审核队列渲染四轴事实；详情区分审核与可见性；缺�
       { match: "/api/bff/admin/supply/media/reviews", response: () => json(page([platform(), platform({ id: "asset_platform_2", purpose: "SKIN_MEDIA", reviewState: "APPROVED", accessClass: "PUBLIC_DISPLAY" })])) },
     ]),
   });
-  assert.ok(h.textOf().includes("平台素材审核"));
+  assert.ok(h.textOf().includes("素材审核"));
   assert.ok(h.textOf().includes("本页 2 条"), "显示本页条数不造总量");
   assert.ok(h.textOf().includes("游戏封面"));
   assert.ok(h.textOf().includes("三角洲行动"));

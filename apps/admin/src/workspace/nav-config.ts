@@ -1,38 +1,45 @@
 import {
-  SearchIcon,
-  WalletIcon,
   BadgeDollarSignIcon,
   BookOpenIcon,
   BotIcon,
   BoxesIcon,
   CalculatorIcon,
-  CrosshairIcon,
-  ClipboardCheckIcon,
-  CrownIcon,
-  FileSignatureIcon,
-  EyeIcon,
-  FolderOpenIcon,
-  HeadphonesIcon,
-  ImageIcon,
-  KeyRoundIcon,
-  LayoutDashboardIcon,
+  ChartColumnIcon,
   ChartNoAxesCombinedIcon,
-  MessagesSquareIcon,
+  ClipboardCheckIcon,
+  CrosshairIcon,
+  CrownIcon,
+  EyeIcon,
+  FileLock2Icon,
+  FileSignatureIcon,
+  FolderOpenIcon,
+  GaugeIcon,
+  HeadphonesIcon,
+  HistoryIcon,
+  ImagesIcon,
+  KeyRoundIcon,
+  LandmarkIcon,
+  LayoutDashboardIcon,
+  LayoutTemplateIcon,
   MegaphoneIcon,
+  MessagesSquareIcon,
   NotebookPenIcon,
   PackageIcon,
   PaletteIcon,
+  PercentIcon,
+  ReceiptTextIcon,
   ScaleIcon,
+  ScanFaceIcon,
+  Share2Icon,
   ShoppingBagIcon,
-  ScrollTextIcon,
-  HistoryIcon,
-  ShieldIcon,
-  Settings2Icon,
   SlidersHorizontalIcon,
+  ScrollTextIcon,
+  Settings2Icon,
   UserCheckIcon,
   UserRoundCogIcon,
   UsersRoundIcon,
   VaultIcon,
+  WalletIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -41,8 +48,8 @@ import { canOpenKind, CONTENT_WORKSPACES, type ContentWorkspaceKind, type NavPer
 export const CONTENT_ICONS: Record<ContentWorkspaceKind, LucideIcon> = {
   "content-help": BookOpenIcon,
   "content-updates": MegaphoneIcon,
-  "content-legal": FileSignatureIcon,
-  "content-pages": ImageIcon,
+  "content-legal": FileLock2Icon,
+  "content-pages": LayoutTemplateIcon,
   "content-media": FolderOpenIcon,
 };
 
@@ -62,26 +69,24 @@ export type WorkspaceMenuItem = {
 /**
  * 分组标题文案 → 固定标识。菜单本身仍是「标题项 + 跟随页面」的扁平数组，
  * 排序由 nav-group-order.ts 按标题切片完成，页面搜索与权限派生逻辑都不受影响。
- * 「工作区」固定最前、「个人」固定最后，两者不参与排序。
+ * 「工作区」固定最前、「系统与安全」固定最后，两者不参与排序。
  */
 export const NAV_GROUP_IDS: Record<string, string> = {
   工作区: "workspace",
   客户服务: "support",
-  分销: "distribution",
-  系统与安全: "system",
-  供给与目录: "supply",
-  供给与规则: "supply-rules",
-  三角洲行动: "delta",
-  运营内容: "content",
-  资金: "finance",
   交易: "orders",
+  资金: "finance",
   用户与会员: "users",
+  分销: "distribution",
+  运营内容: "content",
   审批与审计: "audit",
-  个人: "personal",
+  规则与价目: "supply-rules",
+  目录与素材: "supply",
+  系统与安全: "system",
 };
 
 export const NAV_FIXED_FIRST_GROUP_ID = "workspace";
-export const NAV_FIXED_LAST_GROUP_ID = "personal";
+export const NAV_FIXED_LAST_GROUP_ID = "system";
 /** 默认顺序即上方常量的声明顺序；新增分组只在此登记，即可自动落入默认位置。 */
 export const NAV_GROUP_DEFAULT_ORDER: readonly string[] = Object.values(NAV_GROUP_IDS);
 
@@ -101,83 +106,56 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
       items.push({ label: "我的接待", icon: HeadphonesIcon, path: "/support/mine", kind: "support-mine" });
     }
     if (supportManagementVisible) {
-      items.push({ label: "客服统计", icon: ChartNoAxesCombinedIcon, path: "/support/overview", kind: "support-overview" });
+      items.push({ label: "客服统计", icon: ChartColumnIcon, path: "/support/overview", kind: "support-overview" });
       items.push({ label: "会话巡视", icon: EyeIcon, path: "/support/patrol", kind: "support-patrol" });
       items.push({ label: "助手设置", icon: BotIcon, path: "/support/settings", kind: "support-settings" });
     }
   }
 
+  // 订单与用户出租账号是同一组交易对象；账号详情里也直接跳关联订单。
+  const trade: WorkspaceMenuItem[] = [];
+  if (has("order.read") || nav.isBoss) {
+    trade.push({ label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
+  }
+  if (has("supply.review.read") || nav.isBoss) {
+    trade.push({ label: "出租账号", icon: UserCheckIcon, path: "/supply/reviews", kind: "listing-review" });
+  }
+  if (trade.length > 0) items.push({ label: "交易", isTitle: true }, ...trade);
+
+  if (has("finance.read") || has("finance.document.read")) {
+    items.push({ label: "资金", isTitle: true });
+    if (has("finance.read")) items.push({ label: "资金与经营看板", icon: GaugeIcon, path: "/finance", kind: "finance-overview" });
+    items.push({ label: "资金记录", icon: ReceiptTextIcon, path: "/finance/records", kind: "finance-records" });
+    if (has("finance.read")) items.push({ label: "用户余额", icon: WalletIcon, path: "/finance/balances", kind: "finance-balances" });
+    if (has("finance.read")) items.push({ label: "汇聚对账", icon: LandmarkIcon, path: "/finance/channels", kind: "finance-channels" });
+  }
+
   const membershipOps = nav.isBoss || ["membership.policy.draft", "membership.policy.publish", "membership.growth.read.summary"].some(has)
     || has("approval.request.create") && has("membership.entitlement.request");
+  const users: WorkspaceMenuItem[] = [];
+  if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
+  if (has("profile.avatar.review") || has("profile.avatar.policy.manage") || nav.isBoss) users.push({ label: "头像审核", icon: ScanFaceIcon, path: "/avatar-reviews", kind: "avatar-review" });
+  // 「会员与礼遇」并入「用户与会员」，不再单独占用一个只有一项的分组。
+  if (membershipOps) users.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
+  if (users.length > 0) {
+    items.push({ label: "用户与会员", isTitle: true }, ...users);
+  }
+
   const distribution: WorkspaceMenuItem[] = [];
   if (nav.isBoss || has("distribution.dashboard.read")) {
     distribution.push(
       { label: "分销概览", icon: ChartNoAxesCombinedIcon, path: "/distribution", kind: "distribution-overview" },
       { label: "佣金明细", icon: BadgeDollarSignIcon, path: "/distribution/earnings", kind: "distribution-earnings" },
-      { label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" },
+      { label: "分销商", icon: Share2Icon, path: "/distribution/participants", kind: "distribution-participants" },
     );
   }
   if (!nav.isBoss && !has("distribution.dashboard.read") && has("distribution.participant.read")) {
-    distribution.push({ label: "分销商", icon: UsersRoundIcon, path: "/distribution/participants", kind: "distribution-participants" });
-  }
-  if (nav.isBoss || has("user.directory.read") && has("personal.distribution.policy.read")) {
+    distribution.push({ label: "分销商", icon: Share2Icon, path: "/distribution/participants", kind: "distribution-participants" });
   }
   if (nav.isBoss || ["personal.distribution.policy.read", "personal.distribution.policy.manage", "distribution.level.manage"].some(has)) {
-    distribution.push({ label: "分销政策", icon: ScaleIcon, path: "/distribution/policy", kind: "distribution-policy" });
+    distribution.push({ label: "分销政策", icon: PercentIcon, path: "/distribution/policy", kind: "distribution-policy" });
   }
   if (distribution.length) items.push({ label: "分销", isTitle: true }, ...distribution);
-
-  const system: WorkspaceMenuItem[] = [];
-  if (nav.isBoss) {
-    system.push({ label: "系统配置", icon: Settings2Icon, path: "/system", kind: "system-configuration" });
-  }
-  if (has("admin.account.read") || nav.isBoss) {
-    system.push({ label: "管理员管理", icon: UserRoundCogIcon, path: "/admins", kind: "admins" });
-  }
-  if (has("admin.role.read") || has("admin.permission.read")) {
-    system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
-  }
-  if (nav.isBoss) {
-    system.push({ label: "操作日志", icon: HistoryIcon, path: "/operation-log", kind: "operation-log" });
-  }
-  if (system.length > 0) {
-    items.push({ label: "系统与安全", isTitle: true }, ...system);
-  }
-
-  const supply: WorkspaceMenuItem[] = [];
-  if (has("supply.catalog.manage") || nav.isBoss) {
-    supply.push({ label: "目录维护", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
-  }
-  if (has("supply.review.read") || nav.isBoss) {
-    supply.push({ label: "账号供给", icon: UserCheckIcon, path: "/supply/reviews", kind: "listing-review" });
-    supply.push({ label: "平台素材审核", icon: ImageIcon, path: "/supply/media", kind: "media-review" });
-  }
-  if (supply.length > 0) {
-    items.push({ label: "供给与目录", isTitle: true }, ...supply);
-  }
-  const delta: WorkspaceMenuItem[] = [];
-  if (has("supply.rules.edit") || nav.isBoss) {
-    const r = (label: string, icon: LucideIcon, section: string) => ({ label, icon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
-    items.push(
-      { label: "供给与规则", isTitle: true },
-      r("规则总览", SlidersHorizontalIcon, "overview"),
-      r("押金规则", VaultIcon, "deposit"),
-      r("结算与退赔", ScaleIcon, "settlement"),
-      r("出租协议", FileSignatureIcon, "agreement"),
-    );
-    delta.push(
-      r("租赁定价", BadgeDollarSignIcon, "pricing"),
-      r("物资价目", PackageIcon, "items"),
-      r("皮肤推荐押金", PaletteIcon, "skin"),
-    );
-  }
-  // 改枪码目录归到游戏分组；路由仍是 /supply/gunsmith。
-  if (has("supply.gunsmith.manage") || nav.isBoss) {
-    delta.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
-  }
-  if (delta.length > 0) {
-    items.push({ label: "三角洲行动", isTitle: true }, ...delta);
-  }
 
   const content: WorkspaceMenuItem[] = (Object.keys(CONTENT_WORKSPACES) as ContentWorkspaceKind[])
     .filter((kind) => canOpenKind(kind, nav))
@@ -189,26 +167,6 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
     items.push({ label: "运营内容", isTitle: true }, ...content);
   }
 
-  if (has("finance.read") || has("finance.document.read")) {
-    items.push({ label: "资金", isTitle: true });
-    if (has("finance.read")) items.push({ label: "资金与经营看板", icon: WalletIcon, path: "/finance", kind: "finance-overview" });
-    items.push({ label: "资金记录", icon: SearchIcon, path: "/finance/records", kind: "finance-records" });
-    if (has("finance.read")) items.push({ label: "用户余额", icon: WalletIcon, path: "/finance/balances", kind: "finance-balances" });
-    if (has("finance.read")) items.push({ label: "汇聚对账", icon: WalletIcon, path: "/finance/channels", kind: "finance-channels" });
-  }
-  if (has("order.read") || nav.isBoss) {
-    items.push({ label: "交易", isTitle: true }, { label: "订单", icon: ShoppingBagIcon, path: "/orders", kind: "orders" });
-  }
-
-  const users: WorkspaceMenuItem[] = [];
-  if (has("user.directory.read")) users.push({ label: "用户管理", icon: UsersRoundIcon, path: "/users", kind: "users" });
-  if (has("profile.avatar.review") || has("profile.avatar.policy.manage") || nav.isBoss) users.push({ label: "头像审核", icon: ImageIcon, path: "/avatar-reviews", kind: "avatar-review" });
-  // 「会员与礼遇」并入「用户与会员」，不再单独占用一个只有一项的分组。
-  if (membershipOps) users.push({ label: "会员与礼遇", icon: CrownIcon, path: "/membership-growth", kind: "membership-growth" });
-  if (users.length > 0) {
-    items.push({ label: "用户与会员", isTitle: true }, ...users);
-  }
-
   const audit: WorkspaceMenuItem[] = [];
   if (["approval.request.read", "approval.request.approve", "approval.template.read", "approval.audit.read"].some(has)) {
     audit.push({ label: "审批中心", icon: ClipboardCheckIcon, path: "/approvals", kind: "approvals" });
@@ -216,11 +174,56 @@ export function workspaceMenuItems(nav: NavPermission): WorkspaceMenuItem[] {
   if (has("admin.audit.read")) {
     audit.push({ label: "账号与权限审计", icon: ScrollTextIcon, path: "/audit", kind: "audit" });
   }
+  if (nav.isBoss) {
+    audit.push({ label: "操作日志", icon: HistoryIcon, path: "/operation-log", kind: "operation-log" });
+  }
   if (audit.length > 0) {
     items.push({ label: "审批与审计", isTitle: true }, ...audit);
   }
 
-  items.push({ label: "个人", isTitle: true }, { label: "账号安全", icon: ShieldIcon, path: "/settings?section=security", kind: "settings" });
+  // 规则与价目是同一页面壳的分区；当前只适配三角洲，由页面头部标出游戏。
+  if (has("supply.rules.edit") || nav.isBoss) {
+    const r = (label: string, icon: LucideIcon, section: string) => ({ label, icon, path: `/supply/rules?section=${section}`, kind: "rules" as const });
+    items.push(
+      { label: "规则与价目", isTitle: true },
+      r("规则总览", SlidersHorizontalIcon, "overview"),
+      r("押金规则", VaultIcon, "deposit"),
+      r("结算与退赔", ScaleIcon, "settlement"),
+      r("出租协议", FileSignatureIcon, "agreement"),
+      r("租赁定价", CalculatorIcon, "pricing"),
+      r("物资价目", PackageIcon, "items"),
+      r("皮肤推荐押金", PaletteIcon, "skin"),
+    );
+  }
+
+  const catalog: WorkspaceMenuItem[] = [];
+  if (has("supply.catalog.manage") || nav.isBoss) {
+    catalog.push({ label: "游戏目录", icon: BoxesIcon, path: "/supply/catalog", kind: "catalog" });
+  }
+  if (has("supply.gunsmith.manage") || nav.isBoss) {
+    catalog.push({ label: "改枪码目录", icon: CrosshairIcon, path: "/supply/gunsmith", kind: "gunsmith" });
+  }
+  if (has("supply.review.read") || nav.isBoss) {
+    catalog.push({ label: "素材审核", icon: ImagesIcon, path: "/supply/media", kind: "media-review" });
+  }
+  if (catalog.length > 0) {
+    items.push({ label: "目录与素材", isTitle: true }, ...catalog);
+  }
+
+  const system: WorkspaceMenuItem[] = [];
+  if (nav.isBoss) {
+    system.push({ label: "系统配置", icon: Settings2Icon, path: "/system", kind: "system-configuration" });
+  }
+  if (has("admin.account.read") || nav.isBoss) {
+    system.push({ label: "管理员管理", icon: UserRoundCogIcon, path: "/admins", kind: "admins" });
+  }
+  if (has("admin.role.read") || has("admin.permission.read")) {
+    system.push({ label: "角色权限", icon: KeyRoundIcon, path: "/roles", kind: "roles" });
+  }
+  if (system.length > 0) {
+    items.push({ label: "系统与安全", isTitle: true }, ...system);
+  }
+
   return items.map((item) => item.isTitle ? { ...item, groupId: NAV_GROUP_IDS[item.label] ?? item.label } : item);
 }
 
@@ -237,11 +240,11 @@ export function titleForPath(pathname: string): string {
   if (pathname === "/users") return "用户管理";
   if (pathname === "/avatar-reviews") return "头像审核";
   if (pathname.startsWith("/users/")) return "用户详情";
-  if (pathname === "/supply/catalog") return "目录维护";
+  if (pathname === "/supply/catalog") return "游戏目录";
   if (pathname === "/supply/gunsmith") return "改枪码目录";
   if (pathname === "/supply/rules") return "规则与价目";
-  if (pathname === "/supply/reviews") return "账号供给";
-  if (pathname === "/supply/media") return "平台素材审核";
+  if (pathname === "/supply/reviews") return "出租账号";
+  if (pathname === "/supply/media") return "素材审核";
   if (pathname === "/content") return "内容管理";
   const contentPage = Object.values(CONTENT_WORKSPACES).find((page) => page.path === pathname);
   if (contentPage) return contentPage.title;
@@ -307,7 +310,7 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/membership-growth": ["会员与礼遇", "会员成长", "礼遇", "会员", "增长", "策略", "membership", "hy", "cz"],
   "/admins": ["管理员管理", "管理员", "账号", "staff", "admins", "gly", "zh"],
   "/roles": ["角色权限", "角色", "权限", "授权", "roles", "js", "qx"],
-  "/supply/catalog": ["目录维护", "商品", "目录", "货架", "皮肤", "catalog", "ml"],
+  "/supply/catalog": ["游戏目录", "目录维护", "游戏", "商品", "目录", "货架", "皮肤", "catalog", "ml"],
   "/supply/gunsmith": ["改枪码目录", "枪械", "改枪", "配装", "gunsmith", "qx", "pz"],
   "/supply/rules?section=overview": ["规则与价目", "规则总览", "规则", "版本", "生效", "rules", "gz", "bb"],
   "/supply/rules?section=deposit": ["押金规则", "押金", "上限", "deposit", "yj"],
@@ -316,8 +319,8 @@ export const PAGE_SEARCH_KEYWORDS: Record<string, string[]> = {
   "/supply/rules?section=pricing": ["租赁定价", "定价", "价格", "收费", "租赁模式", "租期", "每日消耗", "三角洲", "pricing", "delta", "dj"],
   "/supply/rules?section=items": ["物资价目", "价目", "物资", "价格行", "items", "jm", "wz"],
   "/supply/rules?section=skin": ["皮肤推荐押金", "皮肤", "推荐押金", "skin", "pf"],
-  "/supply/reviews": ["账号供给", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
-  "/supply/media": ["平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
+  "/supply/reviews": ["出租账号", "账号供给", "账号上架", "供给", "审核", "上架审核", "reviews", "sh", "gj"],
+  "/supply/media": ["素材审核", "平台素材审核", "图片审核", "素材", "截图", "图片", "media", "review", "sc", "tp"],
   "/content/help": ["帮助目录", "规则与手册", "文档编辑", "help", "bz"],
   "/content/updates": ["平台公告", "资讯", "发布", "updates", "gg", "zx"],
   "/content/legal": ["固定文书", "法律文书", "平台协议", "隐私政策", "页面说明", "场景说明", "审批", "legal", "ws"],
@@ -356,6 +359,12 @@ export function searchableWorkspacePages(nav: NavPermission): SearchableWorkspac
       });
     }
   }
+  pages.push({
+    label: "登录与安全",
+    path: "/settings?section=security",
+    group: "个人",
+    keywords: PAGE_SEARCH_KEYWORDS["/settings?section=security"],
+  });
   pages.push({
     label: "设置",
     path: "/settings",
