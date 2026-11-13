@@ -58,10 +58,10 @@ import { computeDepositRecommendation, validateOwnerDepositAmount, validateOwner
 import type { DepositSkinFacts } from "./deposit-recommendation";
 import { assignAccountNumber, publicAccountNumber } from "./account-number";
 import { FIXED_FEE_ALGORITHM } from "./fixed-fee";
-import { assertFixedFeeTestListingAdmission, readFixedFeeDemoAccounts, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
+import { assertFixedFeeTestListingAdmission, readScheduledDemoAccounts, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { validateFixedFeeTimeline } from "../auth/fixed-fee-policy-timeline";
-import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readNewListingPrice, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline, SCHEDULED_SPREAD_ORDER_ENABLED } from "./pricing-policy-schedule";
+import { boundListingPricingPolicy, readEffectiveFixedFeePrice, readNewListingPrice, readEffectiveSpreadPrice, readListingPricingModel, readFixedFeeTimeline } from "./pricing-policy-schedule";
 import { readLegacyListing, readLegacySkinHolding } from "./legacy-listing-read";
 import { publicSkinMediaIdSql, publicSkinMetadataSql, publicSkinOwnerNameSql, publicSkinRarityNameSql } from "./catalog";
 export type SupplyGate = {
@@ -382,8 +382,8 @@ export function listingCandidatePage(client: PoolClient, fixedFeeDemo?: { resour
     account: (id: string) => accounts.get(id),
     version: (id: string) => versions.get(id) ?? null,
     fixedFeeDemoAccount: async (id: string) => {
-      if (!fixedFeeDemo || versions.get(id)?.payload?.schemaVersion !== 4) return false;
-      demoAccounts ??= readFixedFeeDemoAccounts(client, fixedFeeDemo.resource, fixedFeeDemo.accountIds, "READ");
+      if (!fixedFeeDemo || !versions.get(id)?.payload?.pricingPolicy) return false;
+      demoAccounts ??= readScheduledDemoAccounts(client, fixedFeeDemo.resource, fixedFeeDemo.accountIds, "READ");
       return (await demoAccounts).has(id);
     },
     /** Only meaningful for ids covered by a load() that asked for publications. */
@@ -1713,17 +1713,18 @@ export async function submitListing(
   requireVersionToken(v, body);
   if (v.review_state !== "DRAFT") throw conflict("当前资料不能重复提交");
   // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
-  if (v.payload?.schemaVersion === 4) {
+  if (v.payload?.schemaVersion === 4 || v.payload?.pricingPolicy?.pricingModel === "SPREAD") {
     if (fixedFeeDemo) {
-      if (!(await readFixedFeeDemoAccounts(client, fixedFeeDemo, [a.id], "WRITE")).has(a.id))
-        throw conflict("此账号未获准进行固定手续费模拟交易");
+      if (!(await readScheduledDemoAccounts(client, fixedFeeDemo, [a.id], "WRITE")).has(a.id))
+        throw conflict("此账号未获准进行模拟交易");
     } else {
+      if (v.payload.pricingPolicy?.pricingModel === "SPREAD") throw conflict("价差订单结算暂未就绪");
       if (!fixedFeeTestAdmission) throw conflict("固定手续费订单结算暂未就绪");
       await assertFixedFeeTestListingAdmission(client, fixedFeeTestAdmission, { role: "OWNER", actorId, ownerUserId: a.owner_user_id,
         accountId: a.id, listingVersionId: v.id, listingHash: v.content_hash });
     }
   }
-  if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
+
   await assertCurrentRelease(client, a, v);
   if (!v.payload || !v.content_hash || !v.rule_release_id || !v.payload.ruleRefs)
     throw conflict("请先核对并生成本次资料的报价");
@@ -1790,7 +1791,8 @@ export async function reviewListing(
     await assertUnpublishedAccount(client, a);
     // shortcut: fixed-fee publication remains closed until the accounting and refund guards are complete.
     if(v.payload?.schemaVersion===4)throw conflict("固定手续费订单结算暂未就绪");
-    if(v.payload?.pricingPolicy?.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw conflict("价差订单结算暂未就绪");
+    if(v.payload?.pricingPolicy?.pricingModel==="SPREAD")throw conflict("价差订单仅支持号主直接上架");
+
     await validatePublicationAttributes(client, a, v.payload!.declaration.attributes, legacyGrading);
     await assertPublicationRentalTerm(client, v);
     const blockers = await publicationBlockers(client, a, v, gate);
@@ -2362,10 +2364,8 @@ export async function listingDetail(
     let priceReason: string | null = null;
     if (payload.schemaVersion === 4 || payload.pricingPolicy) {
       if (publication?.source !== "OWNER_DIRECT" || !boundListingPricingPolicy(payload, publication.publishedAtExact ?? publication.published_at)) quote = null;
-      const tradeEnabled = payload.schemaVersion === 4
-        ? prefetch?.fixedFeeDemoAccount ?? Boolean(prefetch?.fixedFeeDemo
-          && (await readFixedFeeDemoAccounts(client, prefetch.fixedFeeDemo, [a.id], "READ")).has(a.id))
-        : SCHEDULED_SPREAD_ORDER_ENABLED;
+      const tradeEnabled = prefetch?.fixedFeeDemoAccount ?? Boolean(prefetch?.fixedFeeDemo
+        && (await readScheduledDemoAccounts(client, prefetch.fixedFeeDemo, [a.id], "READ")).has(a.id));
       if (availability === "RENTABLE" && (!quote || !tradeEnabled)) {
         availability = quote ? "UNAVAILABLE" : "UNKNOWN";
         priceReason = quote ? "TRADE_NOT_ENABLED" : "PRICING_UNAVAILABLE";

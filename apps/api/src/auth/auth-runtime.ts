@@ -1485,6 +1485,10 @@ export async function mountAuthHandlers(
         ...(options.joinpayWithdrawal?.execution ? { payout: funds.payout } : {}), ...(queryCollection ? { collection: app.get(JoinpayCollectionRecoveryLifecycle).status() } : {}) }; } }); }
   if (options.ecsTestDemo) mountEcsDemoCheckoutRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.ecsTestDemo.checkout);
   if (options.ecsTestDemo) mountEcsDemoWithdrawalRoutes(app, { ...securityOptions, secureCookies: options.secureCookies }, options.ecsTestDemo.withdrawal);
+  const fixedFeeDemo = options.ecsTestDemo && settlementRecordingEnabled && options.creditGuaranteeEnabled === true
+    && membershipGrowthEnabled() && options.confirmationKey && Number.isSafeInteger(orderHoldSeconds) && orderHoldSeconds! > 0
+    ? options.ecsTestDemo.demo : undefined;
+  if (fixedFeeDemo) requireConfirmationKey(options.confirmationKey);
   mountAdminBffHandlers(app, {
     apiOrigin: options.apiOrigin,
     adminOrigin: options.adminOrigin,
@@ -1494,7 +1498,7 @@ export async function mountAuthHandlers(
     distributionReadScope: options.distributionReadScope,
     distributionManagement: options.distributionManagement,
     ...(options.distributionEarnings ? { distributionEarnings: options.distributionEarnings } : {}),
-    supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey },
+    supply: { ...securityOptions, mediaStorage, supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey,fixedFeeDemo },
     docsImages: options.docsImages ?? loadDocsImageFeature(process.env),
     order: orderOptions,
     ...(yunxinRuntime ? {
@@ -1510,10 +1514,6 @@ export async function mountAuthHandlers(
     } : {}),
   });
   const fixedFeeTestAdmission = options.fixedFeeTestListingAdmission;
-  const fixedFeeDemo = options.ecsTestDemo && settlementRecordingEnabled && options.creditGuaranteeEnabled === true
-    && membershipGrowthEnabled() && options.confirmationKey && Number.isSafeInteger(orderHoldSeconds) && orderHoldSeconds! > 0
-    ? options.ecsTestDemo.demo : undefined;
-  if (fixedFeeDemo) requireConfirmationKey(options.confirmationKey);
   mountUserSupplyBff(app,{...securityOptions,mediaStorage,supplyGateReader,legacyPublicAdmission,legacyPublicAdmissionDetail,listingCursorKey:options.listingCursorKey,fixedFeeTestAdmission,fixedFeeDemo});
   mountSupplyHandlers(app, {
     ...securityOptions,

@@ -958,7 +958,7 @@ async function handleAdminRead(
       await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
       const access=await requireAdminAccess(client,adminUserId);requirePermission(access,ADMIN_PERMISSION.supplyRulesEdit);
       await assertGameScope(client,adminUserId,access.isBoss,gameId);await assertRulesGameSupported(client,gameId);
-      return readPricingSchedules(client,gameId,confirmation);
+      return readPricingSchedules(client,gameId,confirmation,options.fixedFeeDemo);
     });
     sendJson(response,200,result,requestId);return;
   }
@@ -1460,8 +1460,10 @@ async function handleAdminWrite(
     const priceVersionId=decodeId(requiredString(body,"priceVersionId",128)),expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
     const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
     await write("supply.rules.pricing_policy_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
-      const result=await (pricingModel==="FIXED_FEE"?scheduleFixedFeePrice:scheduleSpreadPrice)(client,
-        {userId:actor.id,isBoss:access.isBoss},{gameId,priceVersionId,expectedGeneration,effectiveAt});
+      const pricingActor={userId:actor.id,isBoss:access.isBoss};
+      const scheduleInput={gameId,priceVersionId,expectedGeneration,effectiveAt};
+      const result=pricingModel==="FIXED_FEE" ? await scheduleFixedFeePrice(client,pricingActor,scheduleInput)
+        : await scheduleSpreadPrice(client,pricingActor,scheduleInput,options.fixedFeeDemo);
       await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
       const scheduled={...result,gameId,priceVersionId,pricingModel,announcementVersionId};
       return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
@@ -1476,7 +1478,7 @@ async function handleAdminWrite(
     const expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
     const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
     await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
-      const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt});
+      const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt},options.fixedFeeDemo);
       await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
       const scheduled={...result,gameId,pricingModel,announcementVersionId};
       return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};

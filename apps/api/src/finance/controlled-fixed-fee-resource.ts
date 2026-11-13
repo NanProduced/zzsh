@@ -3,9 +3,10 @@ import { ConfigurationError, type AppConfig } from "../config/config";
 import { SecurityApiError } from "../auth/security-core";
 import { assertBusinessRuntimeIdentity } from "../database/business";
 import { readReleaseEarlySettlementReference } from "../legal/legal-documents";
-import { fixedFeeTradeSchemaReady } from "./fixed-fee-settlement-schema";
+import { fixedFeeTradeSchemaReady, scheduledSpreadSettlementSchemaReady } from "./fixed-fee-settlement-schema";
 import { assertEcsTestDemoResource, readEcsTestDemoRegistration, type DemoFinanceResource } from "./ecs-test-demo-resource";
 import { readDistributionPolicyRowInTransaction } from "./distribution-policy-store";
+import { supportPoststartExecutorSafeSql } from "./support-poststart-schema";
 
 export const fixedFeeTestResource = Object.freeze({
   name: "zzsh_test_supply_fixed_fee",
@@ -69,19 +70,41 @@ export async function assertFixedFeeTestListingAdmission(client: PoolClient, adm
     throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee test trade guards unavailable");
 }
 
-/** Exact native creations within the current demo enrollment; user migration does not affect eligibility. */
-export async function readFixedFeeDemoAccounts(client: PoolClient, demo: DemoFinanceResource, accountIds: readonly string[], purpose: "READ" | "WRITE"): Promise<Set<string>> {
-  if (!accountIds.length) return new Set();
+/** The existing simulated cashier must be usable before admitting either pricing model. */
+async function readDemoTradeRegistration(client: PoolClient, demo: DemoFinanceResource, purpose: "READ" | "WRITE") {
   const registration = await assertEcsTestDemoResource(client, demo, purpose === "READ" ? "READ_ORIGINAL" : "WRITE");
-  if (!registration.active) return new Set();
+  if (!registration.active) return null;
   if (!await fixedFeeTradeSchemaReady(client))
-    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo trade guards unavailable");
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo trade guards unavailable");
   if ((await readDistributionPolicyRowInTransaction(client, false, "NATIVE")).knowledge !== "KNOWN")
-    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Fixed-fee demo distribution policy unavailable");
-  const result = await client.query<{ id: string; game_id: string; rule_release_id: string }>(`SELECT a.id,a.game_id,v.rule_release_id
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo distribution policy unavailable");
+  return registration;
+}
+
+export async function demoSpreadTradingReady(client: PoolClient, demo: DemoFinanceResource | undefined, purpose: "READ" | "WRITE"): Promise<boolean> {
+  if (!demo || !await readDemoTradeRegistration(client, demo, purpose)) return false;
+  return spreadOrderContractReady(client);
+}
+
+async function spreadOrderContractReady(client: PoolClient): Promise<boolean> {
+  if (!await scheduledSpreadSettlementSchemaReady(client)) return false;
+  const row = (await client.query(`SELECT COALESCE(has_function_privilege(current_user,
+    to_regprocedure('zzsh_order.cancel_order_after_start_v2(text,bigint,numeric,numeric,text)'),'EXECUTE'),false)
+    AND (${supportPoststartExecutorSafeSql}) AS ready`)).rows[0];
+  return row?.ready === true;
+}
+
+/** Exact native creations within the current demo enrollment; user migration does not affect eligibility. */
+export async function readScheduledDemoAccounts(client: PoolClient, demo: DemoFinanceResource, accountIds: readonly string[], purpose: "READ" | "WRITE"): Promise<Set<string>> {
+  if (!accountIds.length) return new Set();
+  const registration = await readDemoTradeRegistration(client, demo, purpose);
+  if (!registration) return new Set();
+  const result = await client.query<{ id: string; game_id: string; rule_release_id: string; pricing_model: string }>(`SELECT a.id,a.game_id,v.rule_release_id,v.payload#>>'{pricingPolicy,pricingModel}' AS pricing_model
     FROM zzsh_supply.rental_account a
     JOIN zzsh_supply.listing_version v ON v.id=a.current_version_id AND v.account_id=a.id
-      AND v.origin='NATIVE' AND v.schema_version=4 AND v.rule_release_id IS NOT NULL
+      AND v.origin='NATIVE' AND v.rule_release_id IS NOT NULL
+      AND ((v.schema_version=4 AND v.payload#>>'{pricingPolicy,pricingModel}'='FIXED_FEE')
+        OR (v.schema_version=2 AND v.payload#>>'{pricingPolicy,pricingModel}'='SPREAD'))
     JOIN zzsh_order.ecs_test_demo_finance_registration r ON r.reference=$2 AND r.active AND a.created_at>=r.registered_at
     JOIN zzsh_iam.audit_event e ON e.object_id=a.id AND e.object_type='rental_account'
       AND e.actor_type='user' AND e.actor_id=a.owner_user_id AND e.action='supply.account.created'
@@ -103,7 +126,9 @@ export async function readFixedFeeDemoAccounts(client: PoolClient, demo: DemoFin
           AND p.rule_release_id=v.rule_release_id AND p.content_hash=v.content_hash
           AND p.source='OWNER_DIRECT' AND p.published_at>=r.registered_at
       )))
-    GROUP BY a.id,v.rule_release_id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest, purpose]);
+    GROUP BY a.id,v.id HAVING count(e.id)=1`, [accountIds, registration.reference, readEcsTestDemoRegistration(demo).digest, purpose]);
+  if (result.rows.some(row => row.pricing_model === "SPREAD") && !await spreadOrderContractReady(client))
+    throw new SecurityApiError(503, "EVIDENCE_UNAVAILABLE", "Demo spread order guards unavailable");
   const releaseIds = new Set<string>();
   for (const { game_id, rule_release_id } of result.rows) {
     if (releaseIds.has(rule_release_id)) continue;

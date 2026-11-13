@@ -1,6 +1,8 @@
 export { assertPublishedPricingAnnouncement } from "./pricing-announcement";
 import { updateVisibilitySql } from "../content/updates";
 import type { PoolClient } from "pg";
+import { demoSpreadTradingReady } from "../finance/controlled-fixed-fee-resource";
+import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
 import { recordAudit, SecurityApiError } from "../auth/security-core";
 import { lockFixedFeePolicyChange, validateFixedFeeTimeline, type FixedFeeModeVersion, type FixedFeeTimelineInput } from "../auth/fixed-fee-policy-timeline";
 import { sealedEnabledRentalModes, type GrowthBenefitPolicy, type RentalMode } from "../auth/membership-growth";
@@ -17,9 +19,6 @@ type EntitlementRow = { id?: string; startsAt: string; endsAt: string; pricing: 
 const modeNames: readonly RentalMode[] = ["ordinary", "custom", "fast"];
 const instantSql = (column: string) => `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 type PricingModel = "SPREAD" | "FIXED_FEE";
-
-// Keep closed until v6 settlement, cancellation, compensation and database ACLs pass together.
-export const SCHEDULED_SPREAD_ORDER_ENABLED: boolean = false;
 
 function spreadRule(value: unknown) {
   try {
@@ -38,7 +37,7 @@ async function requirePricingScheduleSchema(client:PoolClient):Promise<void> {
 }
 
 /** The caller authorizes the game before reading its current and scheduled policies. */
-export async function readPricingSchedules(client: PoolClient, gameId: string, confirmation?: { id: string; kind: "price" | "mode" }) {
+export async function readPricingSchedules(client: PoolClient, gameId: string, confirmation?: { id: string; kind: "price" | "mode" }, demo?: DemoFinanceResource) {
   if(typeof gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId))throw invalid("Pricing policy reference is invalid");
   const state=(await client.query<{prices:boolean;modes:boolean;rates:boolean;asOf:string}>(`SELECT to_regclass('zzsh_supply.pricing_policy_schedule') IS NOT NULL AS prices,
     to_regclass('zzsh_supply.pricing_mode_schedule') IS NOT NULL AS modes,EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('zzsh_supply.price_version')
@@ -75,7 +74,7 @@ export async function readPricingSchedules(client: PoolClient, gameId: string, c
     WHERE i.type='ANNOUNCEMENT' AND (i.game_id=$1 OR i.game_id IS NULL)
       AND v.state='PUBLISHED' AND v.published_at<=$2::timestamptz AND ${visibility.visible} AND ${visibility.alive}
     ORDER BY v.published_at DESC, v.id DESC LIMIT 51`, [gameId, state.asOf])).rows;
-  return {available:true as const,asOf:state.asOf,current,currentPrices,spreadSchedulingEnabled:SCHEDULED_SPREAD_ORDER_ENABLED,
+  return {available:true as const,asOf:state.asOf,current,currentPrices,spreadSchedulingEnabled:await demoSpreadTradingReady(client,demo,"READ"),
     announcements:announcements.slice(0,50),announcementsTruncated:announcements.length>50,
     priceGenerations:{SPREAD:generations.find(row=>row.model==="SPREAD")?.generation??"0",FIXED_FEE:generations.find(row=>row.model==="FIXED_FEE")?.generation??"0"},
     modeGeneration,prices:prices.slice(0,100),modes:modes.slice(0,100),truncated:prices.length>100||modes.length>100};
@@ -439,12 +438,12 @@ export async function scheduleFixedFeePrice(client: PoolClient, actor: { userId:
 /** Publish a sealed price policy independently of the release carrying terms and funding. */
 export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string;isBoss:boolean},input:{
   gameId:string;priceVersionId:string;expectedGeneration:string;effectiveAt:string;
-}):Promise<{id:string;generation:string;effectiveAt:string}> {
+}, demo?: DemoFinanceResource):Promise<{id:string;generation:string;effectiveAt:string}> {
   const idPattern=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
   if(!actor||actor.isBoss!==true)throw new SecurityApiError(403,"FORBIDDEN","Only a boss can schedule pricing policies");
   if(typeof actor.userId!=="string"||!idPattern.test(actor.userId)||!input||![input.gameId,input.priceVersionId].every(value=>typeof value==="string"&&idPattern.test(value))
     ||typeof input.expectedGeneration!=="string"||!/^(0|[1-9]\d{0,18})$/.test(input.expectedGeneration))throw invalid("Pricing policy reference is invalid");
-  if(!SCHEDULED_SPREAD_ORDER_ENABLED)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
+  if(!await demoSpreadTradingReady(client,demo,"WRITE"))throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
   let effectiveAt:string;
   try{effectiveAt=normalizeTime(input.effectiveAt)??"";}catch{throw invalid("Pricing policy effective time is invalid");}
   if(!effectiveAt)throw invalid("Pricing policy effective time is invalid");
@@ -472,13 +471,13 @@ export async function scheduleSpreadPrice(client:PoolClient,actor:{userId:string
 /** Changes only future default modes; existing listings and orders retain their own snapshots. */
 export async function schedulePricingMode(client: PoolClient, actor: {userId:string;isBoss:boolean}, input: {
   gameId:string;pricingModel:PricingModel;expectedGeneration:string;effectiveAt:string;
-}): Promise<{id:string;generation:string;effectiveAt:string}> {
+}, demo?: DemoFinanceResource): Promise<{id:string;generation:string;effectiveAt:string}> {
   if(!actor||actor.isBoss!==true)throw new SecurityApiError(403,"FORBIDDEN","Only a boss can schedule pricing modes");
   if(typeof actor.userId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(actor.userId)
     ||!input||typeof input.gameId!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input.gameId)
     ||!["SPREAD","FIXED_FEE"].includes(input.pricingModel)||typeof input.expectedGeneration!=="string"
     ||!/^(0|[1-9]\d{0,18})$/.test(input.expectedGeneration))throw invalid("Pricing mode reference is invalid");
-  if(input.pricingModel==="SPREAD"&&!SCHEDULED_SPREAD_ORDER_ENABLED)throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
+  if(input.pricingModel==="SPREAD"&&!await demoSpreadTradingReady(client,demo,"WRITE"))throw new SecurityApiError(503,"EVIDENCE_UNAVAILABLE","价差订单结算暂未就绪");
   let effectiveAt:string;
   try{effectiveAt=normalizeTime(input.effectiveAt)??"";}catch{throw invalid("Pricing mode effective time is invalid");}
   if(!effectiveAt)throw invalid("Pricing mode effective time is invalid");

@@ -11,9 +11,9 @@ import { computeDeltaQuote, computePublishedFixedFeeQuote, computePublishedSprea
 import { normalizeRentalPricing } from "../supply/delta-rental";
 import { decimalToBigInt, divideToScale, formatDecimalExact, parseNonNegativeDecimal, yuanAmountObject } from "../supply/decimal";
 import { FIXED_FEE_ALGORITHM, fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
-import { assertFixedFeeTestListingAdmission, readFixedFeeDemoAccounts, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
+import { assertFixedFeeTestListingAdmission, readScheduledDemoAccounts, type FixedFeeTestListingAdmission } from "../finance/controlled-fixed-fee-resource";
 import type { DemoFinanceResource } from "../finance/ecs-test-demo-resource";
-import { boundListingPricingPolicy, readBoundListingPrice, SCHEDULED_SPREAD_ORDER_ENABLED } from "../supply/pricing-policy-schedule";
+import { boundListingPricingPolicy, readBoundListingPrice } from "../supply/pricing-policy-schedule";
 import { payableCentsFor } from "../auth/membership-total-discount";
 import { evaluatePricePreviewPublication, readListingPublication, evaluatePublication, type PublishingAccount, type ListingVersion, type SupplyGateReader } from "../supply/publishing";
 import { assertFullPayoutTermsAccepted, parseFullPayoutTermsAcceptance, readReleaseAgreement, type FullPayoutTerms } from "../supply/full-payout-terms";
@@ -180,11 +180,12 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
   if(version.payload.accountId!==account.id || version.payload.gameId!==account.game_id || computeContentHash(version.payload)!==version.content_hash)unavailable("Listing snapshot cannot be verified");
   const legacy = version.payload.schemaVersion === 3;
   const fixedFee = version.payload.schemaVersion === 4;
-  if (fixedFee && purpose === "WRITE") {
+  if ((fixedFee || version.payload.pricingPolicy?.pricingModel === "SPREAD") && purpose === "WRITE") {
     if (options.fixedFeeDemo) {
-      if (!(await readFixedFeeDemoAccounts(client, options.fixedFeeDemo, [account.id], "WRITE")).has(account.id))
-        unavailable("Fixed fee demo order creation is not enabled for this account");
+      if (!(await readScheduledDemoAccounts(client, options.fixedFeeDemo, [account.id], "WRITE")).has(account.id))
+        unavailable("Demo order creation is not enabled for this account");
     } else {
+      if (!fixedFee) unavailable("Scheduled spread settlement contract is not enabled");
       if (!options.fixedFeeTestAdmission) unavailable("Fixed fee order creation is not enabled");
       await assertFixedFeeTestListingAdmission(client, options.fixedFeeTestAdmission!, { role: "RENTER", actorId: context.userId,
         ownerUserId: account.owner_user_id, accountId: account.id, listingVersionId: version.id, listingHash: version.content_hash });
@@ -262,7 +263,7 @@ async function calculateBoundPersonalPrice(client:PoolClient,context:OrderUserCo
     if (publication?.source !== "OWNER_DIRECT") return unavailable("Published pricing policy is unavailable");
     pricingPolicy = boundListingPricingPolicy(version.payload, publication.publishedAtExact ?? publication.published_at) ??
       unavailable("Published pricing policy is unavailable");
-    if (!fixedFee && !SCHEDULED_SPREAD_ORDER_ENABLED && purpose === "WRITE") unavailable("Scheduled spread settlement contract is not enabled");
+
     if (!options.membershipGrowthReader || !ownerDeclaration) unavailable("Published pricing requires the current membership policy");
     const rentalMode = normalizeRentalPricing(attrs.rentalPricing).rentalMode;
     const frozen = await readBoundListingPrice(client, account.game_id, pricingPolicy, rentalMode);
