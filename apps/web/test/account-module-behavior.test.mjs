@@ -10,9 +10,8 @@ const require = createRequire(path.join(tree, "package.json"));
 const React = require("react");
 const { Window } = require("happy-dom");
 const ts = require("typescript");
-const compiled = ts.transpileModule(fs.readFileSync(path.join(tree, "apps/web/src/components/supply-workspaces.tsx"), "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
-}).outputText;
+const tsOptions = { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true } };
+const workspaceFile = path.join(tree, "apps/web/src/components/supply-workspaces.tsx");
 class ProbeWebAuthError extends Error {
   constructor(status, code) { super(code); this.status = status; this.code = code; }
 }
@@ -54,11 +53,12 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
   const previousFetch = globalThis.fetch;
   // viaFetch：走真实 supply-client（含 myAccountsQuery 归一），在传输层拦截，请求不得到达真实 API。
   if (viaFetch) globalThis.fetch = async (url, init) => { calls.fetch.push(String(url)); return viaFetch(String(url), init); };
-  const module = new Module(path.join(tree, "account-module-probe.cjs"));
-  module.filename = path.join(tree, "account-module-probe.cjs");
+  const localModules = new Map();
+  const module = new Module(workspaceFile);
+  module.filename = workspaceFile;
   module.paths = Module._nodeModulePaths(tree);
-  module.require = (name) => {
-    // supply-workspaces.tsx 现在带列表 CSS 副作用导入（my-rental-accounts.css），探针按仓库既有约定桩掉。
+  const requireFrom = (owner, name) => {
+    // 工作区及其同级 supply-workspace-*.tsx 的 CSS 副作用导入按仓库既有约定桩掉。
     if (name.endsWith(".css")) return {};
     if (name === "next/link") return ({ scroll: _scroll, ...props }) => React.createElement("a", props);
     if (name === "next/navigation") return { useRouter: () => router };
@@ -135,10 +135,29 @@ async function probe({ rows = [], detail = null, identityStatus = "UNVERIFIED", 
         listing: async (accountId, signal) => { if (listing) return listing(accountId, signal); throw Error("no public listing fixture"); },
       } };
     }
+    if (name.startsWith("./supply-workspace-")) {
+      const base = path.resolve(path.dirname(owner.filename), name);
+      const candidate = [`${base}.tsx`, `${base}.ts`, base].find((option) => fs.existsSync(option) && fs.statSync(option).isFile());
+      if (!candidate) throw new Error("missing supply workspace module: " + name);
+      return loadSibling(candidate).exports;
+    }
     if (name.startsWith("../lib/")) return require(path.join(tree, "apps/web/src/lib", `${name.slice(7)}.ts`));
     return require(name);
   };
-  module._compile(compiled, module.filename);
+  const loadSibling = (filename) => {
+    const cached = localModules.get(filename);
+    if (cached) return cached;
+    const child = new Module(filename);
+    child.filename = filename;
+    child.paths = Module._nodeModulePaths(tree);
+    localModules.set(filename, child);
+    child.require = (request) => requireFrom(child, request);
+    child._compile(ts.transpileModule(fs.readFileSync(filename, "utf8"), tsOptions).outputText, filename);
+    return child;
+  };
+  module.require = (name) => requireFrom(module, name);
+  localModules.set(workspaceFile, module);
+  module._compile(ts.transpileModule(fs.readFileSync(workspaceFile, "utf8"), tsOptions).outputText, module.filename);
   const host = window.document.createElement("div");
   window.document.body.append(host);
   const root = require("react-dom/client").createRoot(host);
