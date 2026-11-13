@@ -158,14 +158,14 @@ test('same account follows an external version and section selection while dirty
   assert.equal(h.el.querySelector('textarea').value, '保留这次图片核对说明'); assert(h.el.querySelector('[data-supply-action]')); assert.equal(h.writes.length, 0);
 });
 
-test('image review keeps one owner action and the duplicate form opens only on request', async t => {
+test('image review keeps one owner action without a duplicate-account workflow', async t => {
   const value = workDetail();
   const h = await mountHarness(t, { permissions: [...permissions, 'supply.duplicate.review'], initialAccountId: 'a', initialQuery: { context: 'changes' }, fetchImpl: async url => url.pathname.endsWith('/listing-reviews') ? json(page([])) : json(value) }); await tick(h);
   assert.equal([...h.el.querySelectorAll('button')].filter(button => /查看.*号主资料/.test(button.textContent)).length, 1);
   assert.equal(h.el.querySelector('[aria-label="关联队列中的另一个账号"]'), null);
-  const trigger = h.btn('疑似重复线索'); assert.equal(trigger.getAttribute('aria-expanded'), 'false');
-  await h.click(trigger); await tick(h); assert(h.el.querySelector('[aria-label="关联队列中的另一个账号"]'));
-  assert.equal(h.el.querySelector('textarea'), null); assert(h.btn('记录关联线索').disabled); assert.equal(h.writes.length, 0);
+  assert.equal(h.btn('疑似重复线索'), undefined);
+  assert.equal(h.btn('记录关联线索'), undefined);
+  assert.equal(h.el.querySelector('textarea'), null); assert.equal(h.writes.length, 0);
 });
 
 for (const [label, readPermissions, access] of [
@@ -199,8 +199,9 @@ test('rental permission never opens the supervision list and unreadable media do
 });
 
 test('StrictMode discards an aborted old query after a work view changes',async t=>{
- const deferred=[];const h=await mountHarness(t,{permissions,strict:true,fetchImpl:async url=>{if(url.searchParams.get('view')==='paused')return json(page([item('b',true)]));return await new Promise(resolve=>deferred.push(()=>resolve(json(page([item('a')])))));}});
- await h.click(h.btn('号主暂停'));await tick(h);for(const finish of deferred)finish();await tick(h);
+ const deferred=[];const h=await mountHarness(t,{permissions,strict:true,fetchImpl:async url=>{if(url.searchParams.get('view')==='restricted')return json(page([item('b',true)]));return await new Promise(resolve=>deferred.push(()=>resolve(json(page([item('a')])))));}});
+ assert.doesNotMatch(h.el.querySelector('[aria-label="出租账号工作视图"]').textContent,/最近资料变更|号主暂停/);
+ await h.click(h.btn('运营限制'));await tick(h);for(const finish of deferred)finish();await tick(h);
  assert.ok(h.el.textContent.includes('TEST-b'));assert.ok(!h.el.textContent.includes('TEST-a'));assert.equal(h.writes.length,0);
 });
 test('UNKNOWN freezes original request and acknowledged write recovers by GET only',async t=>{
