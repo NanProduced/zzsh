@@ -1,4 +1,5 @@
 import type { PlateDocumentEnvelope } from "@zzsh/content/plate";
+import { cache } from "react";
 import type { LegalDocId } from "@/content/legal/documents";
 import { isHttpOrigin } from "@/lib/user-proxy";
 
@@ -23,7 +24,7 @@ export type LegalDocumentView =
     }
   | { state: "UNAVAILABLE" };
 
-export async function readLegalDocument(doc: LegalDocId, version?: string): Promise<LegalDocumentView> {
+export const readLegalDocument = cache(async (doc: LegalDocId, version?: string): Promise<LegalDocumentView> => {
   if (!isHttpOrigin(apiOrigin) || !isHttpOrigin(webOrigin)) return { state: "UNAVAILABLE" };
   try {
     const url = new URL(`/api/v1/legal-documents/${doc}`, apiOrigin);
@@ -42,4 +43,4 @@ export async function readLegalDocument(doc: LegalDocId, version?: string): Prom
   } catch {
     return { state: "UNAVAILABLE" };
   }
-}
+});

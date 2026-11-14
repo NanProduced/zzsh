@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { legacySiteUrlMap } from "@/content/help/legacy-links";
-import { seoIndexable } from "@/lib/seo";
+import { seoIndexable, seoMetadataBase } from "@/lib/seo";
 
 const LEGACY_PATH_TARGETS: Readonly<Record<string, string>> = {
   "/home": "/",
@@ -39,7 +39,8 @@ export function proxy(request: NextRequest) {
   const { pathname, searchParams } = request.nextUrl;
   const target = legacyRedirectTarget(pathname, searchParams.get("id"));
   // 旧站参数（no/homeDetailId/id 等）一律不带入目标地址；百度对 301 识别最稳定。
-  if (target) return NextResponse.redirect(new URL(target, request.url), 301);
+  // base 取权威 ZZSH_WEB_ORIGIN：反代后 request.url 可能是内部监听地址；仅本地未配置时回退。
+  if (target) return NextResponse.redirect(new URL(target, seoMetadataBase() ?? request.nextUrl.origin), 301);
   const response = NextResponse.next();
   if (!seoIndexable()) response.headers.set("X-Robots-Tag", "noindex, nofollow");
   else if (pathname.startsWith("/api/") && !PUBLIC_IMAGE_PATH.test(pathname)) response.headers.set("X-Robots-Tag", "noindex");

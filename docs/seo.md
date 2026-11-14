@@ -32,11 +32,13 @@
 | `/login`（含 `?returnTo`/`?next` 等参数） | 是 | `/login` |
 | `/help` | 是 | `/help` |
 | `/help?q=…` | `noindex, follow` | `/help` |
-| `/help?category=…` | 是 | 带 `category` 的自身地址 |
+| `/help?category=…`（真实分类） | 是 | 带 `category` 的自身地址 |
+| `/help?category=…`（不存在的分类） | `noindex, follow` | `/help` |
 | `/help/[slug]`（已发布） | 是 | 自身 |
 | `/help/[slug]`（RETIRED） | `noindex` | 不输出 |
 | `/updates`、`/updates/[id]` | 是 | 自身（去参数） |
-| `/legal/[doc]` | 是 | 去掉 `version` 后的地址 |
+| `/legal/[doc]`（PUBLISHED） | 是 | 去掉 `version` 后的地址 |
+| `/legal/[doc]`（PENDING 或读取失败） | `noindex` | 不输出 |
 | `/legal/[doc]?version=…` | `noindex` | 同上 |
 | `/gunsmith` | 不处理 | 不处理 |
 | `/account/*` | `noindex`（`app/account/layout.tsx`） | 不输出 |
@@ -50,21 +52,20 @@
 
 ```
 User-agent: *
-Allow: /
 Allow: /accounts
 Disallow: /account
 Sitemap: https://www.zzsh51.com/sitemap.xml
 ```
 
-`Allow: /accounts` 是必需行：`Disallow: /account` 按前缀会命中 `/accounts`，最长匹配规则下不放行则租号大厅被禁止抓取。不得写 `Disallow: /api/`（非 CDN 模式图片走 `/api/supply/...`）；登录页等用 noindex 控制，不写 Disallow。
+**不得写 `Allow: /`**：百度按“从上往下、第一条匹配生效”解析，`Allow: /` 会使 `Disallow: /account` 永远不生效；Google 按最长路径优先。只保留 `Allow: /accounts` 与 `Disallow: /account` 时两种解析结果都正确（`/accounts` 显式放行，避免被 `/account` 前缀命中；其余路径无匹配规则默认允许）。不得写 `Disallow: /api/`（非 CDN 模式图片走 `/api/supply/...`）；登录页等用 noindex 控制，不写 Disallow。
 
 ## sitemap.xml
 
 - 仅可收录环境输出；不可收录环境 404。
-- 第一阶段包含：`/`、`/accounts`、`/publish`、`/help`、`/updates`、`/login`；全部已发布帮助文章（`loadPublicHelpArticles`）；全部平台动态（`loadPlatformUpdates` 逐页取全）；协议目录 `/legal/terms`、`/legal/privacy`。
+- 第一阶段包含：`/`、`/accounts`、`/publish`、`/help`、`/updates`、`/login`；全部已发布帮助文章（`loadPublicHelpArticles`）；全部平台动态（`loadPlatformUpdates` 逐页取全）；**仅 PUBLISHED** 的协议 `/legal/terms`、`/legal/privacy`（PENDING 排除）。
 - 不包含 `/gunsmith`、`/account/*`、noindex 页面与账号详情页（详情页入 sitemap 属第二阶段）。
 - `lastModified` 只取数据源可信时间：帮助文章 `updatedAt`、平台动态 `publishedAt`；静态页与协议不写 `lastModified`，不得用当前时间伪造。
-- 任一数据源读取失败时整个 sitemap 返回 5xx，不输出缺项的 200。
+- 任一数据源读取失败时整个 sitemap 返回 5xx，不输出缺项的 200；协议读取返回 UNAVAILABLE 同样视为失败。
 - 单个 sitemap 上限 5 万条，接近上限时改 `generateSitemaps` 分片。
 
 ## 旧站 URL 跳转（301）
@@ -91,5 +92,13 @@ Sitemap: https://www.zzsh51.com/sitemap.xml
 ## 状态码原则
 
 - 跳转一律 301，不用 Next 默认的 308。
+- 旧站 301 的 Location 以 `ZZSH_WEB_ORIGIN` 为 base 拼接（反向代理后 `request.url` 可能是内部监听地址）；仅本地未配置该变量时回退请求自身 origin。
 - 资源不存在返回真 404；禁止 200 加空页面或统一跳首页。
 - 上游读取失败走 5xx 或现有 `error.tsx`；禁止渲染成空列表、空 sitemap 或 200 的“无结果”。
+
+## 上线检查（代码侧清单）
+
+1. 生产**构建**必须注入 `ZZSH_SEO_INDEXABLE=1` 与 `ZZSH_WEB_ORIGIN=https://www.zzsh51.com`：首页保持静态预渲染，其 canonical、JSON-LD 与绝对地址 OG 图片在构建期固定。构建入口见 `docs/operations/initial-deployment-configuration.md`；**测试镜像不得直接提升到生产**。
+2. 生产首页 HTML 必须同时包含 `<link rel="canonical" href="https://www.zzsh51.com/">` 与 `application/ld+json`（WebSite + Organization）；缺失即构建未注入变量，禁止上线。
+3. 运维确认裸域与 http 均 301 到规范域名；带 `Host: www.zzsh51.com` 与 `X-Forwarded-Proto: https` 抽查旧站跳转，Location 必须为规范域名绝对地址。
+4. 生产复跑收录口径、robots、sitemap 与候选页检查（对应验收 A2、A4、A5、A7、A10）。

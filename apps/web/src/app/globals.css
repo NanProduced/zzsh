@@ -264,7 +264,7 @@ html[data-theme="light"] .brand-logo { filter: none; }
 .functional-inline-heading { margin: 0 0 12px; font-size: 20px; font-weight: 600; color: var(--color-text-primary); }
 .auth-page-lead { margin: 6px 0 0; font-size: 13px; color: var(--color-text-muted); }
 .publish-visual-banner-heading { margin: 0; font-size: inherit; line-height: 0; }
-.publish-visual-banner-lead { margin: 10px 2px 0; font-size: 13px; color: var(--color-text-muted); }
+.publish-visual-banner-lead { margin: 14px 2px 0; font-size: 13px; color: var(--color-text-muted); }
 .hero-section { padding-top: 20px; padding-bottom: 16px; }
 .hero-grid { display: grid; grid-template-columns: 236px minmax(0,1fr) 248px; gap: 16px; align-items: stretch; }
 .hero-main { min-width: 0; }

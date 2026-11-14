@@ -14,9 +14,13 @@ export async function generateMetadata({ searchParams }: { searchParams: Promise
   const query = typeof params.q === "string" ? params.q.trim() : "";
   const category = typeof params.category === "string" ? params.category : "";
   if (query) return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path: "/help", robots: "noindex, follow" });
-  // 分类是入口而非搜索结果，canonical 保留 category 自身地址。
-  const path = category ? `/help?category=${encodeURIComponent(category)}` : "/help";
-  return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path });
+  // 分类是入口而非搜索结果：仅真实存在的分类保留 category 自身地址，垃圾参数按搜索页处理。
+  if (category) {
+    const group = findHelpGroup(buildHelpNavData(await loadPublicHelpTree()), category);
+    if (group) return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path: `/help?category=${encodeURIComponent(category)}` });
+    return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path: "/help", robots: "noindex, follow" });
+  }
+  return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path: "/help" });
 }
 
 const MAX_QUERY_LENGTH = 120;

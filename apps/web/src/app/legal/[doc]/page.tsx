@@ -4,7 +4,7 @@ import { PlateDocument } from "@zzsh/ui/plate-document";
 import "@zzsh/ui/plate-document.css";
 import { notFound } from "next/navigation";
 import { BrandLogo } from "@/components/brand/brand-logo";
-import { getLegalDocument, getLegalDocumentSibling, isLegalDocId, listLegalDocuments } from "@/content/legal/documents";
+import { getLegalDocument, getLegalDocumentSibling, isLegalDocId, listLegalDocuments, type LegalDocId } from "@/content/legal/documents";
 import { readLegalDocument } from "@/lib/legal-server";
 import { seoPageMetadata } from "@/lib/seo";
 
@@ -19,6 +19,9 @@ export async function generateMetadata({ params, searchParams }: { params: Promi
   const entry = getLegalDocument(doc);
   if (!entry) notFound();
   const version = (await searchParams)?.version;
+  // 收录状态按当前发布版判定；version 只影响 noindex，canonical 始终为去掉 version 的地址。
+  const reading = await readLegalDocument(doc as LegalDocId);
+  if (reading.state !== "PUBLISHED") return { title: `《${entry.title}》`, robots: "noindex" };
   return seoPageMetadata({
     title: `《${entry.title}》`,
     description: `${entry.title}全文与生效版本。`,

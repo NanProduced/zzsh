@@ -4,6 +4,8 @@
 
 API参考模板为 `apps/api/.env.deployment.example`，Next参考 `apps/web/.env.deployment.example`。部署使用 `npm run start:prod -w @zzsh/api` 或直接运行编译后的main，不自动加载本机 `.env`，由服务管理器注入；本地dev/start脚本仍显式使用Node的 `--env-file-if-exists=.env`。`*_FILE` 使用相对API工作目录的 `.secrets/` 路径，文件只对服务身份与维护者可读；不要在聊天、仓库、前端或日志中粘贴真实值。占位项必须替换，模板不能直接作为可运行配置。
 
+**用户站 SEO 变量必须在构建期注入**：首页保持静态预渲染，其 canonical、JSON-LD 与绝对地址 OG 图片在 `next build` 时读取 `ZZSH_SEO_INDEXABLE` 与 `ZZSH_WEB_ORIGIN` 并固定进产物（见[用户站 SEO 约定](../seo.md)）。生产构建必须传 `ZZSH_SEO_INDEXABLE=1` 与 `ZZSH_WEB_ORIGIN=https://www.zzsh51.com`；测试构建不传。现有 `deploy/ecs-test/app.Dockerfile` 的 web-build 阶段默认不传这两个变量，沿用该入口构建生产镜像时必须显式注入（BuildKit `--build-arg` 或等价机制），**测试镜像不得直接提升到生产**。robots、sitemap、响应头与其余页面 canonical 仍在运行时按开关判定。上线核对清单见[用户站 SEO 约定](../seo.md)的“上线检查”。
+
 ## Owner需要提供的外部配置
 
 | 项目 | 需准备 | 代码配置与边界 |
