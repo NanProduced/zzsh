@@ -357,14 +357,17 @@ export async function readAdminChannelActivity(client: PoolClient, q: ActivityQu
     const records=await client.query(`SELECT a.id,${utc('a.recorded_at')} AS at,w.id AS number,w.gross_cents::text AS gross_cents,
       w.net_cents::text AS amount,w.fee_cents::text AS fee_cents,w.user_id,u.name,
       CASE s.canonical_registration::jsonb->>'schema' WHEN 'ecs-test-demo-finance.v1' THEN 'ECS_TEST_SIMULATED' ELSE 'LOCAL_DEMO_SIMULATED' END AS demo_origin,
-      (w.state='SUCCEEDED' AND w.funds_disposition='PAYOUT_POSTED' AND w.terminal->>'reference'=a.id) AS completed
+      (w.state='SUCCEEDED' AND w.funds_disposition='PAYOUT_POSTED' AND w.terminal->>'reference'=a.id) AS completed,
+      EXISTS(SELECT 1 FROM zzsh_order.finance_event e JOIN zzsh_order.settlement_ledger_entry l ON l.finance_event_id=e.id WHERE e.economic_root_id=w.economic_root_id) AS has_ledger
       FROM zzsh_order.controlled_payout_operation a JOIN zzsh_order.withdrawal_intent w ON w.id=a.intent_id AND w.payout_key=a.payout_key
       JOIN zzsh_order.ecs_test_demo_finance_registration s ON s.reference=w.sandbox_registration_ref
       LEFT JOIN zzsh_auth_user."user" u ON u.id=w.user_id WHERE a.id=ANY($1::text[])`,[demoWithdrawalIds]);
+    // WITHDRAWAL:<intent id> is readable only when the original ledger root is posted; hiding the link is not an authorization substitute.
+    const canReadDocument=access.isBoss||access.financeDocumentRead;
     for(const row of records.rows)mapped.set(`demo_withdrawal:${row.id}`,{id:`demo_withdrawal:${row.id}`,source:'NATIVE',kind:'WITHDRAWAL',dataOrigin:row.demo_origin,
       bankArrival:'UNKNOWN',subjectId:row.user_id,subjectName:displayName(row.name,row.user_id),...(q.subjectUserId?{subjectRole:'WITHDRAWER'}:{}),
       number:row.number,relatedNumber:null,amountCents:row.amount,grossCents:row.gross_cents,feeCents:row.fee_cents,
-      amountLabel:'模拟金额（未发生汇聚出款）',occurredAt:row.at,state:row.completed?'SIMULATED':'UNKNOWN',documentRef:null});
+      amountLabel:'模拟金额（未发生汇聚出款）',occurredAt:row.at,state:row.completed?'SIMULATED':'UNKNOWN',documentRef:canReadDocument&&row.has_ledger===true?'WITHDRAWAL:'+row.number:null});
   }
   return { version:'admin.finance-channel-activity.v1', asOf:page.asOf, page:q.page, pageSize:q.pageSize, total:page.total, hasMore:page.hasMore, items:page.rows.map(row=>mapped.get(`${row.family}:${row.id}`)).filter(Boolean) };
 }

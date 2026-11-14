@@ -115,6 +115,17 @@ test('three source history retains separate cursors/count scopes and roundtrips 
  const result=parseWithdrawalHistory(raw,userId);assert.equal(result.sections.historical.data.count,'0');assert.equal(result.sections.controlled.data.pagination.nextCursor,'controlled_cursor');assert.equal(result.sections.joinpay.data.nextCursor,'native_cursor');assert.equal(result.sections.joinpay.data.scope,'LOCAL_NATIVE_INTENTS_ONLY');
  const projected=projectWithdrawalHistory(raw,userId);assert.equal(projected.sections.controlled.data.scope,'LOCAL_CONTROLLED');assert.deepEqual(parseWithdrawalHistory(projected,userId),result);
 });
+test('v2 controlled history roundtrips an indefinite cohort end=null but rejects undefined, empty, numeric, malformed and inverted ends',()=>{
+ const cohort=(end)=>({id:'cohort',revision:'1',start:'2026-10-04T00:00:00Z',end});
+ const raw=historyRead();raw.sections.controlled.data.coverage.cohorts=[cohort(null)];
+ const parsed=parseWithdrawalHistory(raw,userId);assert.equal(parsed.sections.controlled.data.cohorts[0].end,null);
+ const projected=projectWithdrawalHistory(raw,userId);assert.equal(projected.sections.controlled.data.coverage.cohorts[0].end,null);
+ assert.deepEqual(parseWithdrawalHistory(projected,userId),parsed);
+ for(const end of [undefined,'',7,'bad','2026-10-03T00:00:00Z']){
+  const bad=historyRead();bad.sections.controlled.data.coverage.cohorts=[cohort(end)];
+  assert.throws(()=>parseWithdrawalHistory(bad,userId),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');
+ }
+});
 test('a legacy delegated source identity error retains its authorization type',()=>{
  const raw=historyRead();raw.sections.controlled.data.subjectId='different_user';
  assert.throws(()=>parseWithdrawalHistory(raw,userId),e=>e instanceof WithdrawalRequestError&&e.status===401&&e.code==='IDENTITY_CHANGED');

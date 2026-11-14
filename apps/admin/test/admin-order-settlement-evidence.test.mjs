@@ -72,7 +72,7 @@ test('order body renders before financial evidence and a failed read never becom
 });
 test('source-qualified native evidence preserves exact zero and keeps refund and channel unknown',async t=>{
  const calls=[];globalThis.fetch=async url=>{calls.push(String(url));return response(String(url).includes('/finance/')?finance(url):{order:native});};const ui=await setup(t);await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));
- const card=ui.node.querySelector('[data-order-settlement-evidence]');assert(card);assert.match(card.textContent,/号主结算净额/);assert.match(card.textContent,/90\.00 元/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/已知事实/);assert.match(card.textContent,/渠道到账情况未取得/);assert.doesNotMatch(card.textContent,/旧平台未记录渠道信息/);await act(async()=>button(card,'尚未取得依据的金额').click());assert.match(card.textContent,/退款出款记录[\s\S]*未记录/);await act(async()=>button(card,'展开缺失清单').click());assert.match(card.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(card.textContent,/历史应退记录|已退款|已到账/);assert.match(ui.node.textContent,/开租未记录/);assert.equal(calls.filter(p=>p.includes('/finance/')).length,1);assert(calls.some(p=>decodeURIComponent(p).includes('/finance/documents/ORDER:order_native')));ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('90.00 元'));assert.equal(calls.filter(p=>p.includes('/finance/')).length,2,'refresh waits for its current order body, rather than querying once for the stale body');
+ const card=ui.node.querySelector('[data-order-settlement-evidence]');assert(card);assert.match(card.textContent,/号主结算净额/);assert.match(card.textContent,/90\.00 元/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/已知事实/);assert.match(card.textContent,/渠道到账情况未取得/);assert.doesNotMatch(card.textContent,/旧平台未记录渠道信息/);assert.match(card.textContent,/本地模拟退款记录[\s\S]*未取得本地模拟退款记录/);assert.match(card.textContent,/真实渠道出款记录[\s\S]*真实渠道出款未接入 \/ 未取得依据/);await act(async()=>button(card,'展开缺失清单').click());assert.match(card.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(card.textContent,/历史应退记录|已退款|已到账/);assert.match(ui.node.textContent,/开租未记录/);assert.equal(calls.filter(p=>p.includes('/finance/')).length,1);assert(calls.some(p=>decodeURIComponent(p).includes('/finance/documents/ORDER:order_native')));ui.props.refreshNonce++;await ui.render();await until(()=>ui.node.textContent.includes('90.00 元'));assert.equal(calls.filter(p=>p.includes('/finance/')).length,2,'refresh waits for its current order body, rather than querying once for the stale body');
 });
 test('403 404 and 503 are distinct from a successfully proved NOT_POSTED fact',async t=>{
  const ui=await setup(t);let code=403;globalThis.fetch=async url=>response(String(url).includes('/finance/')?{error:{code:'EVIDENCE_UNAVAILABLE',requestId:'req-'+code}}:{order:native},String(url).includes('/finance/')?code:200);
@@ -118,7 +118,7 @@ test('CHAIN unpaid cancelled order does not grow an unknown settlement wall and 
 test('FINALIZED_ZERO is a zero responsibility finalization without ledger posting or channel payment',async t=>{
  const legacy={...native,id:'legacy_zero',displayNo:'LEGACY-ZERO',source:{origin:'LEGACY'}};
  const zero=facts('LEGACY_ORDER:legacy_zero',{posting:{state:'FINALIZED_ZERO',ref:'LEGACY_DUTY:duty_zero',postedAt:'2026-10-01T02:00:00Z'},captured:unknown(),ownerNet:known('0'),refundPayable:known('0'),refunded:unknown(),historicalRefund:known('0'),dutyRefs:[{documentRef:'LEGACY_DUTY:duty_zero',kind:'RENTER_REFUND',state:'SETTLED',amount:known('0')},{documentRef:'LEGACY_DUTY:owner_zero',kind:'OWNER_CREDIT',state:'SETTLED',amount:known('0')},{documentRef:'LEGACY_DUTY:compensation_zero',kind:'DEPOSIT_COMPENSATION',state:'SETTLED',amount:known('0')}]});
- globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,zero):{order:legacy});const ui=await setup(t);ui.props.initialOrderId=legacy.id;await ui.render();await until(()=>ui.node.textContent.includes('零额责任已终定'));const card=ui.node.querySelector('[data-order-settlement-evidence]');assert.match(card.textContent,/号主租赁收益责任/);assert.match(card.textContent,/责任终定时间/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/旧平台渠道到账情况未取得/);await act(async()=>button(card,'尚未取得依据的金额').click());assert.match(card.textContent,/退款出款记录[\s\S]*未记录/);await act(async()=>button(card,'展开缺失清单').click());assert.match(card.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(card.textContent,/原过账|原入账基数|已退款|已到账|渠道已付|号主结算净额/);
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,zero):{order:legacy});const ui=await setup(t);ui.props.initialOrderId=legacy.id;await ui.render();await until(()=>ui.node.textContent.includes('零额责任已终定'));const card=ui.node.querySelector('[data-order-settlement-evidence]');assert.match(card.textContent,/号主租赁收益责任/);assert.match(card.textContent,/责任终定时间/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/旧平台渠道到账情况未取得/);assert.doesNotMatch(card.textContent,/本地模拟退款记录/);await act(async()=>button(card,'尚未取得依据的金额').click());assert.match(card.textContent,/真实渠道出款记录[\s\S]*真实渠道出款未接入 \/ 未取得依据/);await act(async()=>button(card,'展开缺失清单').click());assert.match(card.textContent,/渠道到账[\s\S]*未取得依据/);assert.doesNotMatch(card.textContent,/原过账|原入账基数|已退款|已到账|渠道已付|号主结算净额/);
  await act(async()=>button(card,'依据与说明').click());assert.match(card.textContent,/原责任依据/);assert.doesNotMatch(card.textContent,/原过账/);const {orderSettlementSummary}=await ui.source.ssrLoadModule('/apps/admin/src/views/admin-order-settlement-evidence.tsx');const summary=orderSettlementSummary(zero).join('\n');assert.match(summary,/责任终定：零额责任已终定/);assert.match(summary,/号主租赁收益责任：0\.00 元/);assert.doesNotMatch(summary,/原过账|原入账|结算过账|渠道已付|已退款|已到账/);
 });
 
@@ -160,6 +160,42 @@ test('legacy account capture is labelled separately from the order frozen facts'
  const ui=await setup(t,['order.read','supply.rental_account.read']);ui.props.initialOrderId=legacy.id;await ui.render();
  await until(()=>ui.node.textContent.includes('迁入时账号：'));
  assert.match(ui.node.textContent,/迁入时账号：比例 1元=56万哈夫币 · 包赔已选择；不是本单冻结记录/);
+});
+
+test('refund disbursement keeps simulated refunds, real-channel payout and bank arrival as three distinct facts',async t=>{
+ const ui=await setup(t);const {AdminOrderSettlementEvidence,refundDisbursementFacts,orderSettlementSummary}=await ui.source.ssrLoadModule('/apps/admin/src/views/admin-order-settlement-evidence.tsx');
+ const succeeded={state:'SUCCEEDED',amount:known('5817'),count:1,reasonCodes:['LOCAL_SIMULATED_REFUND_NOT_REAL_CHANNEL_PAYOUT']};
+ const evidence=facts(undefined,{simulatedRefund:succeeded});
+ await act(async()=>ui.root.render(createElement(AdminOrderSettlementEvidence,{evidence})));
+ const text=ui.node.textContent;
+ assert.match(text,/模拟退款已记录 58\.17 元（未走真实渠道）/);
+ assert.match(text,/真实渠道出款记录[\s\S]*真实渠道出款未接入 \/ 未取得依据/);
+ assert.match(text,/银行 \/ 渠道到账[\s\S]*未取得依据/);
+ assert.doesNotMatch(text,/UNKNOWN/);
+ assert.doesNotMatch(text,/退款出款记录/);
+ assert.equal(evidence.refunded.knowledge,'UNKNOWN');
+ assert.match(orderSettlementSummary(evidence).join('\n'),/本地模拟退款记录：模拟退款已记录 58\.17 元（未走真实渠道）/);
+ assert.deepEqual(refundDisbursementFacts(evidence).map(line=>line.label),['本地模拟退款记录','真实渠道出款记录','银行 / 渠道到账']);
+ for(const state of ['PROCESSING','UNKNOWN','FAILED']){
+  await act(async()=>ui.root.render(createElement(AdminOrderSettlementEvidence,{evidence:facts(undefined,{simulatedRefund:{...succeeded,state}})})));
+  assert.doesNotMatch(ui.node.textContent,/模拟退款已记录/);assert.match(ui.node.textContent,/状态未决或未成功/);
+  assert.match(ui.node.textContent,/真实渠道出款未接入 \/ 未取得依据/);
+ }
+ await act(async()=>ui.root.render(createElement(AdminOrderSettlementEvidence,{evidence:facts(undefined,{simulatedRefund:{state:'AMBIGUOUS',amount:unknown(),count:2,reasonCodes:[]}})})));
+ assert.match(ui.node.textContent,/存在 2 笔本地模拟退款记录，金额未汇总（未走真实渠道）/);
+ assert.doesNotMatch(ui.node.textContent,/模拟退款已记录/);
+});
+
+test('order key-fee card shows the simulated refund separately from real-channel payout and bank arrival',async t=>{
+ const simulated={state:'SUCCEEDED',amount:known('5817'),count:1,reasonCodes:[]};
+ globalThis.fetch=async url=>response(String(url).includes('/finance/')?finance(url,facts(undefined,{simulatedRefund:simulated})):{order:native});
+ const ui=await setup(t);await ui.render();await until(()=>ui.node.textContent.includes('159.08 元'));
+ const card=ui.node.querySelector('.oc-overview-grid');assert(card);
+ assert.match(card.textContent,/本地模拟退款记录[\s\S]*模拟退款已记录 58\.17 元（未走真实渠道）/);
+ assert.match(card.textContent,/真实渠道出款记录[\s\S]*真实渠道出款未接入 \/ 未取得依据/);
+ assert.match(card.textContent,/银行 \/ 渠道到账[\s\S]*未取得依据/);
+ assert.doesNotMatch(card.textContent,/UNKNOWN/);
+ assert.doesNotMatch(card.textContent,/退款出款记录/);
 });
 
 test('native order keeps the authorized channel reconciliation entry and order group section',async t=>{

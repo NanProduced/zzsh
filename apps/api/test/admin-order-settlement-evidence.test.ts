@@ -180,6 +180,26 @@ test('legacy financial root closes its source-qualified old-order link only afte
   if(!invalidFact)assert(r.queries.some(query=>query.sql.startsWith('WITH finance_order_rows')&&query.sql.includes('zzsh_order.legacy_order_read_snapshot')&&query.values.some(value=>Array.isArray(value)&&value.includes(oldOrderId))));
  }
 });
+test('a CONTROLLED simulated refund stays a separate book fact and never becomes real-channel payout evidence',()=>{
+ const request={id:'r1',order_id:'order1',renter_user_id:'renter',amount_cents:'5817',state:'SUCCEEDED',payment_source:'CONTROLLED',at};
+ const readWith=(states:string[])=>{
+  const f=facts(false,[]);f.orders![0]!.postingState='NOT_POSTED';
+  f.entries=states.map((state,index)=>projectUnpostedFinanceSource({...request,id:'r'+index,state},'REFUND_INTENT'));
+  return evidence(f) as any;
+ };
+ const ok=readWith(['SUCCEEDED']);
+ assert.equal(ok.simulatedRefund.state,'SUCCEEDED');assert.equal(ok.simulatedRefund.count,1);assert.equal(ok.simulatedRefund.amount.cents,'5817');
+ assert.equal(ok.business.simulatedRefund.state,'SUCCEEDED');
+ assert.equal(ok.refunded.knowledge,'UNKNOWN');assert.equal(ok.refunded.cents,null,'simulated money must not fill real-channel payout');
+ assert.equal(ok.channel.state,'UNKNOWN');
+ for(const state of ['PROCESSING','UNKNOWN','FAILED']){
+  const pending=readWith([state]);assert.notEqual(pending.simulatedRefund.state,'SUCCEEDED');assert.equal(pending.refunded.cents,null);
+ }
+ const multiple=readWith(['SUCCEEDED','SUCCEEDED']);
+ assert.equal(multiple.simulatedRefund.state,'AMBIGUOUS');assert.equal(multiple.simulatedRefund.amount.knowledge,'UNKNOWN');assert.equal(multiple.refunded.cents,null);
+ assert.equal((evidence(facts()) as any).simulatedRefund.state,'NONE');
+});
+
 test('unreadable objects and absent old finance relation do not trigger a duty query or invent empty-known amounts',async()=>{
  const denied=detailReader(undefined,{objectReadable:false}),a=await loadAdminFinanceFacts(denied.client,{documentRef:'LEGACY_ORDER:'+oldOrderId},relationAccess);assert.equal(readAdminFinanceDocument(a,'LEGACY_ORDER:'+oldOrderId).orderSettlement,undefined);assert.equal(denied.queries.filter(query=>query.sql.includes('admin exact legacy duty')).length,0);
  const missing=detailReader(undefined,{ready:false}),b=await loadAdminFinanceFacts(missing.client,{documentRef:'LEGACY_ORDER:'+oldOrderId},relationAccess),read=readAdminFinanceDocument(b,'LEGACY_ORDER:'+oldOrderId).orderSettlement!;assert.equal(read.readiness,'UNAVAILABLE');assert.equal(read.refundPayable.cents,null);assert.equal(missing.queries.filter(query=>query.sql.includes('admin exact legacy duty')).length,0);

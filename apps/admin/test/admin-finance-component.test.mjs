@@ -243,6 +243,22 @@ test('native payout evidence uses API fee serial and original target names witho
  assert.match(card.textContent,/4\.00 元/);assert.match(card.textContent,/0\.00 元/);assert.match(card.textContent,/\*\*\*\*1234/);assert.match(card.textContent,/JOINPAY-T-1/);assert.match(card.textContent,/PAYOUT-1/);assert.match(card.textContent,/汇聚原生记录/);assert.doesNotMatch(ui.node.textContent,/本地受控成功/);
 });
 
+test('controlled withdrawal document shows only the frozen masked target and degrades without borrowing a current card',async t=>{
+ const entry={id:'w-line',documentRef:'WITHDRAWAL:w1',documentNumber:'申请一',subjectId:'u1',subjectName:'用户一',bucket:'RESERVED',direction:'OUT',deltaCents:'-20000',knowledge:'KNOWN',kind:'WITHDRAWAL',state:'SUCCEEDED',classification:'CURRENT_POSTED',occurredAt:null,evidence:{},reasonCodes:[],sourceType:'NATIVE',sourceSystem:'zzsh',sourceEntity:'withdrawal_intent',sourceId:'w1'};
+ const evidence={grossCents:'20000',feeCents:'100',netCents:'19900',destinationId:'dest_1',destinationRevision:'3',originalDestinationMask:'**** **** 0015',fundsDisposition:'PAYOUT_POSTED'};
+ globalThis.fetch=async url=>response(payload(url,{document,entries:[entry],evidence,related:[],reasonCodes:[]}));
+ const ui=await setup(t,'frozen-target','/finance/documents/WITHDRAWAL%3Aw1');await ui.render();
+ await until(()=>ui.node.querySelector('[data-withdrawal-evidence]'));
+ const card=ui.node.querySelector('[data-withdrawal-evidence]');
+ assert.match(card.textContent,/原出款目标[\s\S]*\*\*\*\* \*\*\*\* 0015/);
+ assert.match(card.textContent,/本地受控，不代表银行到账/);
+ assert.doesNotMatch(ui.node.textContent,/未取得原目标|未取得安全显示资料/);
+ globalThis.fetch=async url=>response(payload(url,{document,entries:[entry],evidence:{...evidence,originalDestinationMask:null},related:[],reasonCodes:[]}));
+ ui.props.refreshNonce++;await ui.render();
+ await until(()=>ui.node.textContent.includes('原目标已登记，未取得安全显示资料'));
+ assert.doesNotMatch(ui.node.textContent,/\*\*\*\* \*\*\*\* 0015/);
+});
+
 test('object header names the business type and localizes the raw original order status', async t => {
   const known = cents => ({ knowledge: 'KNOWN', cents, reasonCodes: [] });
   const unknown = () => ({ knowledge: 'UNKNOWN', cents: null, reasonCodes: ['ORIGINAL_BASIS_UNAVAILABLE'] });

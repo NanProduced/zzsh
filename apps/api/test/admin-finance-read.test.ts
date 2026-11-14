@@ -199,6 +199,37 @@ test('finance documents preserve the zero-net owner and distinguish accepted pay
  assert.ok(readAdminFinanceDocument(f,order.ref).document.subjects.some(s=>s.id==='owner_zero'));
 });
 
+test('WITHDRAWAL evidence exposes only the exact frozen destination mask, never a current or raw card', async () => {
+ const at='2026-10-03T00:00:00.000000Z';
+ const ledgerRow={id:'w-line',account_code:'WALLET_AVAILABLE',delta:'-200',event_kind:'RESERVE',subject_id:'u1',subject_name:'用户',at,source_entity:'withdrawal_intent',source_id:'w1'};
+ const intent=(overrides:Record<string,unknown>={})=>({id:'w1',user_id:'u1',state:'SUCCEEDED',operation_version:'2',funds_disposition:'PAYOUT_POSTED',gross_cents:'200',net_cents:'196',fee_cents:'4',policy_version:'p1',destination_id:'dest_1',destination_revision:'3',frozen_display_mask:'**** **** 0015',accepted_at:at,terminal_state:'SUCCEEDED',terminal_reference:'op1',query_ref:null,queried_at:null,...overrides});
+ const read=async(ready:Record<string,boolean>,row:Record<string,unknown>)=>{
+  const calls:string[]=[];
+  const client={query:async(sql:string)=>{
+   calls.push(sql);
+   if(sql.startsWith('SELECT to_regclass'))return {rows:[{ready:true,withdrawals:true,...ready}]};
+   if(sql.includes('AS finance_version'))return {rows:[{finance_version:'v1'}]};
+   if(sql.includes('clock_timestamp()'))return {rows:[{at}]};
+   if(sql.startsWith('WITH finance_scoped_rows'))return {rows:sql.includes('settlement_ledger_entry')?[ledgerRow]:[]};
+   if(sql.startsWith('SELECT id,COALESCE(name'))return {rows:[{id:'u1',name:'用户'}]};
+   if(sql.startsWith('SELECT i.id'))return {rows:[row]};
+   return {rows:[]};
+  }} as unknown as PoolClient;
+  const loaded=await loadAdminFinanceFacts(client,{documentRef:'WITHDRAWAL:w1'});
+  return{evidence:readAdminFinanceDocument(loaded,'WITHDRAWAL:w1').evidence,calls};
+ };
+ const ok=await read({withdrawal_destinations:true},intent());
+ assert.equal(ok.evidence.destinationId,'dest_1');assert.equal(ok.evidence.destinationRevision,'3');assert.equal(ok.evidence.originalDestinationMask,'**** **** 0015');
+ const sql=ok.calls.find(text=>text.startsWith('SELECT i.id'))!;
+ assert.match(sql,/LEFT JOIN zzsh_order\.withdrawal_destination d ON d\.id=i\.destination_id AND d\.user_id=i\.user_id AND d\.admission_id=i\.admission_id AND d\.revision=i\.destination_revision/);
+ assert.doesNotMatch(sql,/card_no|card_mask|receiver_account|receiver_name|bank_binding/i);
+ const unreadable=await read({withdrawal_destinations:false},intent({frozen_display_mask:null}));
+ assert.equal(unreadable.evidence.originalDestinationMask,null);assert.equal(unreadable.evidence.destinationId,'dest_1');assert.equal(unreadable.evidence.destinationRevision,'3');
+ assert.doesNotMatch(unreadable.calls.find(text=>text.startsWith('SELECT i.id'))!,/zzsh_order\.withdrawal_destination/);
+ for(const mask of ['',null,'1234567890123456','local bank','**** **** 1234567890'])assert.equal((await read({withdrawal_destinations:true},intent({frozen_display_mask:mask}))).evidence.originalDestinationMask,null,'an unsafe or missing mask stays unavailable');
+ for(const revision of [null,'0','bad'])assert.equal((await read({withdrawal_destinations:true},intent({destination_revision:revision}))).evidence.originalDestinationMask,null,'only an exact frozen revision can supply a mask');
+});
+
 test('finance actual relational payment projection uses current APPLIED, isolates REVIEW, and keeps no-payment unknown amount', async () => {
  const fixture=new FinanceSqlFixture({native:[
   {id:'o_applied',display_no:'ZZ1',owner_user_id:'u1',renter_user_id:'u2',account_id:'a',game_id:'g',status:'PAID',revision:'2',paid_confirmation_id:'p1',paid_at:'2026-10-03T01:00:00.000000Z',rental_amount_cents:'328686',deposit_amount_cents:'40000',created_at:'2026-10-03T00:00:00.000000Z'},

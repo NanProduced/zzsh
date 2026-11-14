@@ -181,6 +181,22 @@ test('history view never mixes current ledger or opening facts and retains an ex
  assert.equal(result.total,4);assert.equal(result.items.length,0);assert.equal(result.hasMore,false);
 });
 
+test('a simulated withdrawal exposes its WITHDRAWAL document only with a posted ledger root and document read authority',async()=>{
+ let hasLedger=true,detail='';
+ const client={query:async(sql:string)=>{
+  if(sql.includes('AS "legacyFormalExists"'))return {rows:[{exists:true,readable:true,refundReady:true,legacyRefundReady:true,withdrawalReady:true,legacyFormalExists:false,legacyFormalReady:false}]};
+  if(sql.startsWith('WITH activity_candidates'))return {rows:[{family:'demo_withdrawal',id:'op1',at:'2026-01-01T00:00:00Z',total:'1'}]};
+  detail=sql;
+  return {rows:[{id:'op1',at:'2026-01-01T00:00:00Z',number:'wd_1',gross_cents:'500',amount:'400',fee_cents:'100',user_id:'u1',name:'用户',demo_origin:'ECS_TEST_SIMULATED',completed:true,has_ledger:hasLedger}]};
+ }} as unknown as PoolClient;
+ const q={...base,kind:'WITHDRAWAL' as const};
+ const read=async(subject=access)=>((await readAdminChannelActivity(client,q,subject)).items[0] as any).documentRef;
+ assert.equal(await read(),'WITHDRAWAL:wd_1');
+ assert.match(detail,/EXISTS\(SELECT 1 FROM zzsh_order\.finance_event e JOIN zzsh_order\.settlement_ledger_entry l ON l\.finance_event_id=e\.id WHERE e\.economic_root_id=w\.economic_root_id\)/);
+ hasLedger=false;assert.equal(await read(),null,'no posted ledger entry means no document link');
+ hasLedger=true;assert.equal(await read({...access,isBoss:false,financeDocumentRead:false}),null,'hiding the link without document authority');
+});
+
 test('date and type filters are applied before counting and opening can select nonzero values',async()=>{
  let sql='',values:unknown[]=[];const client={query:async(text:string,params:unknown[])=>{sql=text;values=params;return {rows:[{family:null,id:null,at:null,total:'0'}]};}} as unknown as PoolClient;
  const history=parseActivityQuery(new URLSearchParams('view=HISTORY&type=SETTLEMENT&from=2026-01-01&to=2026-01-31'),true);

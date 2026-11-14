@@ -259,6 +259,7 @@ async function appendUnpostedFinanceSources(client: PoolClient, ready: Raw, scop
 export async function readFinanceSourceVersion(client: PoolClient, scope?: FinanceVersionScope) {
   const ready = (await client.query(`SELECT to_regclass('zzsh_order.wallet_coverage') IS NOT NULL AND to_regclass('zzsh_order.personal_finance_observation') IS NOT NULL AND to_regclass('zzsh_order.wallet_revision') IS NOT NULL AND to_regclass('zzsh_order.finance_economic_root') IS NOT NULL AND to_regclass('zzsh_order.finance_event') IS NOT NULL AND to_regclass('zzsh_order.finance_opening_basis') IS NOT NULL AS ready,
     to_regclass('zzsh_order.withdrawal_intent') IS NOT NULL AND to_regclass('zzsh_order.withdrawal_provider_fact') IS NOT NULL AND to_regclass('zzsh_order.controlled_payout_operation') IS NOT NULL AS withdrawals,
+    (to_regclass('zzsh_order.withdrawal_destination') IS NOT NULL AND COALESCE(has_table_privilege(to_regclass('zzsh_order.withdrawal_destination'),'SELECT'),false)) AS withdrawal_destinations,
     to_regclass('zzsh_order.rental_order') IS NOT NULL AS native_orders,to_regclass('zzsh_order.legacy_order_read_snapshot') IS NOT NULL AS legacy_orders,
     to_regclass('zzsh_order.rental_referral_earning') IS NOT NULL AS native_distribution,to_regclass('zzsh_order.payment_distribution_basis') IS NOT NULL AS earning_basis,to_regclass('zzsh_order.rental_referral_transition') IS NOT NULL AS earning_transitions,to_regclass('zzsh_order.personal_finance_observation_coverage') IS NOT NULL AS history_coverage,
     to_regclass('zzsh_order.legacy_duty_finance_fact') IS NOT NULL AND to_regclass('zzsh_order.legacy_order_duty') IS NOT NULL AS legacy_duty_finance,
@@ -346,6 +347,14 @@ function projectLegacyOrderFinanceObservations(rows:Raw[],order:FinanceOrderFact
   }));
 }
 
+/** The frozen destination join is the only accepted source: never re-read the subject's current card or emit raw/encrypted card data. */
+function originalDestinationMask(intent:Raw,readable:boolean):string|null{
+ if(!readable||typeof intent.destination_id!=='string'||!intent.destination_id||typeof intent.destination_revision!=='string'||!/^[1-9]\d*$/.test(intent.destination_revision))return null;
+ const mask=intent.frozen_display_mask;
+ if(typeof mask!=='string'||!mask||mask.length>100||/[\u0000-\u001f\u007f]/.test(mask)||!mask.includes('*')||/\d{8,}/.test(mask.replace(/[\s-]/g,'')))return null;
+ return mask;
+}
+
 export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLoadScope = {},relations?:HistoricalRelationAccess): Promise<FinanceFacts> {
   const versionScope: FinanceVersionScope | undefined = scope.lookup ? undefined : scope.documentRef ? { mode: "document", documentRef: scope.documentRef } : scope.subjectId ? { mode: "subject", subjectId: scope.subjectId } : undefined;
   const {ready,version,asOf}=await readFinanceSourceVersion(client, versionScope);
@@ -394,9 +403,14 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     subjectCandidates={items:candidates.map(row=>({id:String(row.id),name:displayName(row.name,String(row.id))})),total:Number(count)};
   }
   const intentIds=[...new Set(ledger.filter(row=>row.source_entity==="withdrawal_intent").map(row=>row.source_id))];
+  // Only the exact frozen destination key may be joined; a missing table/privilege degrades to a null mask instead of breaking non-simulation databases.
+  const destinationReadable=ready.withdrawal_destinations===true;
+  const destinationJoin=destinationReadable?`LEFT JOIN zzsh_order.withdrawal_destination d ON d.id=i.destination_id AND d.user_id=i.user_id AND d.admission_id=i.admission_id AND d.revision=i.destination_revision`:'';
+  const frozenMaskColumn=destinationReadable?'d.display_mask':'NULL::text';
   const withdrawals:Raw[]=ready.withdrawals&&intentIds.length?(await client.query(`SELECT i.id,i.user_id,i.state,i.operation_version::text,i.funds_disposition,i.gross_cents::text,i.net_cents::text,i.fee_cents::text,i.policy_version,
+    i.destination_id,i.destination_revision::text AS destination_revision,${frozenMaskColumn} AS frozen_display_mask,
     ${utc("i.accepted_at")} AS accepted_at,i.terminal->>'state' AS terminal_state,i.terminal->>'reference' AS terminal_reference,
-    f.id AS query_ref,${utc("f.observed_at")} AS queried_at FROM zzsh_order.withdrawal_intent i LEFT JOIN zzsh_order.withdrawal_provider_fact f ON f.id=i.last_provider_fact_id WHERE i.id=ANY($1::text[]) ORDER BY i.id COLLATE "C"`,[intentIds])).rows:[];
+    f.id AS query_ref,${utc("f.observed_at")} AS queried_at FROM zzsh_order.withdrawal_intent i ${destinationJoin} LEFT JOIN zzsh_order.withdrawal_provider_fact f ON f.id=i.last_provider_fact_id WHERE i.id=ANY($1::text[]) ORDER BY i.id COLLATE "C"`,[intentIds])).rows:[];
   const operations=ready.withdrawals&&intentIds.length?(await client.query(`SELECT id,intent_id,final_evidence_digest,${utc("recorded_at")} AS at,final_evidence_canonical::jsonb->>'outcome' AS outcome,final_evidence_canonical::jsonb->>'reference' AS reference FROM zzsh_order.controlled_payout_operation WHERE intent_id=ANY($1::text[]) ORDER BY id COLLATE "C"`,[intentIds])).rows:[];
   const entries=[...ledger.map(projectAdminFinanceLedger),...history.map(projectAdminFinanceObservation)], localSourceLimits: string[] = [];
   await appendUnpostedFinanceSources(client, ready, scope, lookupPage?.refs, entries, localSourceLimits);
@@ -437,7 +451,10 @@ export async function loadAdminFinanceFacts(client: PoolClient, scope: FinanceLo
     if (intent) { entry.state = intent.state; entry.evidence = { ...entry.evidence, intentId: intent.id, mode: "LOCAL_CONTROLLED", fundsDisposition: intent.funds_disposition,
       grossCents: cents(intent.gross_cents), netCents: cents(intent.net_cents), feeCents: cents(intent.fee_cents), policyVersion: intent.policy_version,
       acceptedAt: intent.accepted_at, operationVersion: intent.operation_version, channelState: intent.terminal_state ?? null,
-      channelReference: intent.terminal_reference ?? null, queryRef: intent.query_ref ?? null, queriedAt: intent.queried_at ?? null };
+      channelReference: intent.terminal_reference ?? null, queryRef: intent.query_ref ?? null, queriedAt: intent.queried_at ?? null,
+      destinationId: typeof intent.destination_id==='string'&&intent.destination_id?intent.destination_id:null,
+      destinationRevision: typeof intent.destination_revision==='string'&&/^[1-9]\d*$/.test(intent.destination_revision)?intent.destination_revision:null,
+      originalDestinationMask: originalDestinationMask(intent,destinationReadable) };
       entry.reasonCodes.push("LOCAL_CONTROLLED_NOT_BANK_RECEIPT");
       const operation = operationByIntent.get(intent.id);
       if (operation) { entry.evidence.originalOperationRef = operation.id; entry.evidence.originalOperationRecordedAt = operation.at; entry.evidence.originalOperationOutcome = operation.outcome; entry.evidence.originalOperationReference = operation.reference;
@@ -584,7 +601,8 @@ export function readAdminFinanceDocument(facts: FinanceFacts, ref: string, entry
     related.push(...facts.entries.filter(entry => entry.related.some(link => link.ref === ref)).map(entry => ({ ref: entry.documentRef, label: entry.documentNumber })));
   }
   const receipt=order?.objectReadable===true?projectAdminOrderSettlementEvidence(order,entries,facts.orderSettlementFacts):undefined;
-  const orderSettlement=receipt&&order?{...receipt,business:projectAdminOrderFinanceBusiness(order,receipt,facts)}:undefined;
+  const business=receipt&&order?projectAdminOrderFinanceBusiness(order,receipt,facts):undefined;
+  const orderSettlement=receipt&&business?{...receipt,simulatedRefund:business.simulatedRefund,business}:undefined;
   if(orderSettlement)related.push(...orderSettlement.dutyRefs.filter((duty):duty is typeof duty&{documentRef:string}=>duty.documentRef!==null).map(duty=>({ref:duty.documentRef,label:duty.kind==='RENTER_REFUND'?'已记退款责任':'已记旧单责任'})));
   return { document, entries, evidence, related: [...new Map(related.map(link => [link.ref + (link.path ?? ""), link])).values()], reasonCodes: [...new Set([...entries.flatMap(entry => entry.reasonCodes),...(reverse?.reasonCodes??[]),...(facts.localSourceLimits??[]), ...(order ? ["ORDER_RECORD_NOT_CHANNEL_RESULT", ...(!entries.length ? ["ORDER_NO_CURRENT_POSTING"] : [])] : [])])],
     ...(orderSettlement?{orderSettlement}:{}),

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';import {test} from 'node:test';
-import {quoteLocalWithdrawal,pendingLocalWithdrawal,submitLocalWithdrawal,recoverLocalWithdrawal,readLocalWithdrawal,yuanToCents,parseWithdrawalRead,parseWithdrawalDetail,readMyWithdrawalRecords,readMyWithdrawalRecord} from '../src/lib/controlled-withdrawal-client.ts';
+import {quoteLocalWithdrawal,pendingLocalWithdrawal,submitLocalWithdrawal,recoverLocalWithdrawal,readLocalWithdrawal,yuanToCents,parseWithdrawalRead,parseWithdrawalDetail,readMyWithdrawalRecords,readMyWithdrawalRecord,localWithdrawalScope} from '../src/lib/controlled-withdrawal-client.ts';
 const user='user_test',body={amountCents:'200',destinationId:'code',policyVersion:'local_v1',expectedWalletVersion:'1'},quote={...body,requestKey:'original-server-key',netCents:'196',feeCents:'4',destinationMask:'local code',acceptedAt:'2026-10-04T00:00:00Z'};
 const intent={id:'wd_1',scope:'LOCAL_CONTROLLED',evidenceLevel:'LOCAL_CONTROLLED',userId:user,state:'UNKNOWN',operationVersion:'3',fundsDisposition:'RESERVED',amountCents:'200',netCents:'196',feeCents:'4',destinationId:'code',policyVersion:'local_v1',acceptedAt:'2026-10-04T00:00:00Z',terminal:null};
 async function withBrowser(run){const fetch=globalThis.fetch,storage=Object.getOwnPropertyDescriptor(globalThis,'localStorage'),nav=Object.getOwnPropertyDescriptor(globalThis,'navigator'),values=new Map();let locked=false;Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem:k=>values.get(k)??null,setItem:(k,v)=>values.set(k,v),removeItem:k=>values.delete(k)}});Object.defineProperty(globalThis,'navigator',{configurable:true,value:{locks:{request:async(_key,_options,fn)=>{if(locked)return fn(null);locked=true;try{return await fn({name:'test'});}finally{locked=false;}}}}});try{await run(values);}finally{globalThis.fetch=fetch;if(storage)Object.defineProperty(globalThis,'localStorage',storage);else delete globalThis.localStorage;if(nav)Object.defineProperty(globalThis,'navigator',nav);else delete globalThis.navigator;}}
@@ -28,6 +28,22 @@ test('zero without coverage remains unknown while proved-native empty has an exp
 test('history requests only issue GET, encode exact source IDs and reject mixed query combinations before fetch',async()=>{const old=globalThis.fetch,seen=[];globalThis.fetch=async(url,options)=>{seen.push({url:String(url),options});return Response.json(String(url).includes('history%3A')?{contractVersion:'personal-withdrawals.read.v1',subjectId:user,source:'HISTORICAL_WITHDRAWAL',item:historyItem}:historyEnvelope());};try{assert.equal((await readMyWithdrawalRecords(user)).historical.items.length,1);assert.equal((await readMyWithdrawalRecord(user,historyItem.id)).item.id,historyItem.id);assert(seen[1].url.endsWith('/history%3Aobs_z'));assert(seen.every(row=>row.options.method==='GET'&&!row.options.body));const count=seen.length;for(const filter of [{source:'ALL',cursor:'x'},{source:'HISTORICAL',state:'SUCCEEDED'},{source:'LOCAL_CONTROLLED',state:'2'},{limit:101}])await assert.rejects(readMyWithdrawalRecords(user,filter),e=>e.status===400);assert.equal(seen.length,count);assert.throws(()=>parseWithdrawalDetail({contractVersion:'personal-withdrawals.read.v1',subjectId:user,source:'HISTORICAL_WITHDRAWAL',item:historyItem},user,'controlled:obs_z'));assert.throws(()=>parseWithdrawalRead({...historyEnvelope(),subjectId:'other'},user),e=>e.status===401);}finally{globalThis.fetch=old;}});
 test('history read rejects a response for another requested source or state',async()=>{const old=globalThis.fetch;globalThis.fetch=async()=>Response.json(historyEnvelope());try{await assert.rejects(readMyWithdrawalRecords(user,{source:'HISTORICAL'}),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');await assert.rejects(readMyWithdrawalRecords(user,{source:'HISTORICAL',state:'2'}),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');}finally{globalThis.fetch=old;}});
 
+
+/* --- Indefinite local admission coverage (walkthrough 55435 P1) --- */
+const cohortScope=(end)=>({scope:'LOCAL_CONTROLLED',subjectId:user,coverage:{knowledge:'KNOWN',meaning:'EXPLICIT_LOCAL_INTENTS_ONLY_NOT_TOTAL_HISTORICAL_WALLET',cohorts:[{id:'cohort',revision:'1',start:'2026-10-04T00:00:00Z',end}]},items:[],destinations:[],totals:{reservedCents:'0',payoutCents:'0',feeCents:'0'},globalReserved:'UNKNOWN'});
+test('an indefinite admission cohort end=null parses while every other invalid end stays a 502 contract error',()=>{
+ assert.deepEqual(localWithdrawalScope(cohortScope(null),user).cohorts,[{id:'cohort',revision:'1',start:'2026-10-04T00:00:00Z',end:null}]);
+ assert.equal(localWithdrawalScope(cohortScope('2026-10-05T00:00:00Z'),user).cohorts[0].end,'2026-10-05T00:00:00Z');
+ for(const end of [undefined,'',0,123,'not-a-time','2026-10-03T00:00:00Z'])assert.throws(()=>localWithdrawalScope(cohortScope(end),user),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');
+});
+test('v1 controlled read and detail projections accept the indefinite cohort without relaxing other guards',()=>{
+ const read={contractVersion:'personal-withdrawals.read.v1',subjectId:user,source:'LOCAL_CONTROLLED',state:'ALL',historical:null,controlled:{availability:'AVAILABLE',reason:null,data:cohortScope(null)}};
+ assert.equal(parseWithdrawalRead(read,user).controlled.data.cohorts[0].end,null);
+ const bad=structuredClone(read);bad.controlled.data.coverage.cohorts[0].end='';
+ assert.throws(()=>parseWithdrawalRead(bad,user),e=>e.code==='WITHDRAWAL_CONTRACT_REQUIRED');
+ const otherUser=structuredClone(read);otherUser.subjectId='user_other';
+ assert.throws(()=>parseWithdrawalRead(otherUser,user),e=>e.status===401);
+});
 
 /* --- Channel Withdrawal Client Tests --- */
 

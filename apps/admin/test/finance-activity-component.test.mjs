@@ -112,3 +112,15 @@ test('document-only users can search a record by its complete number',async t=>{
  const ui=await mount(t,'finance-records',[{id:'one',source:'LEGACY',kind:'REFUND',subjectId:'u1',subjectName:'用户一',documentRef:'HISTORY_REFUND:one',number:'PAY-123',state:'旧平台记录',amountCents:'100',occurredAt:null}],{permissions:['finance.document.read'],query:{q:'PAY-123'}});
  assert.match(ui.requests[0],/q=PAY-123/);assert.match(ui.host.textContent,/PAY-123/);
 });
+
+test('a Boss without the finance.document.read permission can still open an authorized document link',async t=>{
+ const row={id:'wd1',source:'NATIVE',kind:'WITHDRAWAL',subjectId:'u1',subjectName:'用户一',documentRef:'WITHDRAWAL:wd_1',number:'wd_1',state:'SIMULATED',dataOrigin:'ECS_TEST_SIMULATED',bankArrival:'UNKNOWN',amountCents:'400',amountLabel:'模拟金额（未发生汇聚出款）',occurredAt:null};
+ const ui=await mount(t,'finance-records',[row],{permissions:['finance.read']});
+ const view=()=>[...ui.host.querySelectorAll('button')].find(button=>button.textContent.trim()==='查看');
+ assert.ok(view());assert.equal(view().disabled,false);
+ await act(async()=>view().click());
+ assert.match(ui.opened.at(-1)[0],/^\/finance\/documents\/WITHDRAWAL%3Awd_1/);
+ ui.props.snapshot={...ui.props.snapshot,security:{...ui.props.snapshot.security,isBoss:false}};
+ await ui.render();await waitFor(()=>view()?.disabled===true);
+ assert.equal(view().disabled,true);
+});

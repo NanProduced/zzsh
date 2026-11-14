@@ -81,7 +81,7 @@ export function FinanceActivity({ tab, snapshot, onOpenPath, onQueryChange, onRe
   const clearDates = () => { const next={...filters,from:'',to:'',page:1,asOf:''};setDraft(next);setFilters(next);setValidation('');onQueryChange(draftQuery(next)); };
   const toggleNonzero = () => { const nonzero=!filters.nonzero;setDraft(value=>({...value,nonzero}));setFilters(value=>({...value,nonzero,page:1,asOf:''}));onQueryChange(draftQuery({...filters,nonzero})); };
   const loading = allowed && !needsExact && !body && !error;
-  const canOpenDocument = snapshot.permissions.includes('finance.document.read');
+  const canOpenDocument = snapshot.security.isBoss || snapshot.permissions.includes('finance.document.read');
   const canOpenOrder = snapshot.security.isBoss || snapshot.permissions.includes('order.read');
   const canOpenUser = snapshot.security.isBoss || snapshot.permissions.includes('user.directory.read');
   const returnQuery = new URLSearchParams(draftQuery(filters)).toString();

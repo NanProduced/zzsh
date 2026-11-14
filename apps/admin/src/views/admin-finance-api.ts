@@ -122,6 +122,8 @@ export function financeEntryEvent(entry: FinanceEntry): string {
   return ({EARNING_PENDING:'分销计提',EARNING_SETTLED:'分销转可用'} as Record<string,string>)[evidence.eventKind??'']??'分销事件未记录';
 }
 export type OrderSettlementMoney = { knowledge: 'KNOWN' | 'UNKNOWN'; cents: string | null; reasonCodes: string[] };
+/** Local CONTROLLED refund records are book facts, never real-channel payout evidence or bank arrival. */
+export type OrderSimulatedRefund = { state: 'NONE' | 'SUCCEEDED' | 'PROCESSING' | 'FAILED' | 'UNKNOWN' | 'AMBIGUOUS'; amount: OrderSettlementMoney; count: number; reasonCodes: string[] };
 export type FinancePlatformComponent = { code: string; cents: string; payer: 'OWNER' | 'RENTER' | 'NONE' | null; feeBase: string | null; feeRate: string | null };
 export type OrderFinanceTransaction = {
   documentRef: string; number: string; kind: 'PAYMENT' | 'REFUND'; source: 'NATIVE' | 'LEGACY_MYSQL';
@@ -134,7 +136,7 @@ export type OrderFinanceBusiness = {
   payment: { state: 'SITE_ACCEPTED' | 'LEGACY_RECORDED_PAID' | 'UNPAID' | 'REVIEW_REQUIRED' | 'UNKNOWN'; amount: OrderSettlementMoney; occurredAt: string | null };
   settlementState: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_SETTLED' | 'LEGACY_RECORDED_COMPLETE' | 'UNKNOWN';
   legacyCompletedAmounts: { ownerEarnings: OrderSettlementMoney; refundAmount: OrderSettlementMoney } | null;
-  paymentAttempts: OrderFinanceTransaction[]; refundOrders: OrderFinanceTransaction[]; reasonCodes: string[];
+  paymentAttempts: OrderFinanceTransaction[]; refundOrders: OrderFinanceTransaction[]; simulatedRefund?: OrderSimulatedRefund; reasonCodes: string[];
 };
 export type OrderSettlementEvidence = {
   business?: OrderFinanceBusiness;
@@ -142,7 +144,7 @@ export type OrderSettlementEvidence = {
   posting: { state: 'POSTED' | 'FINALIZED_ZERO' | 'NOT_POSTED' | 'UNKNOWN'; ref: string | null; postedAt: string | null };
   captured: OrderSettlementMoney; ownerNet: OrderSettlementMoney; refundPayable: OrderSettlementMoney;
   platformContribution?: OrderSettlementMoney; platformComponents?: FinancePlatformComponent[];
-  refunded: OrderSettlementMoney; historicalRefund: OrderSettlementMoney; refundDueAt: string | null;
+  refunded: OrderSettlementMoney; historicalRefund: OrderSettlementMoney; simulatedRefund?: OrderSimulatedRefund; refundDueAt: string | null;
   channel: { state: 'UNKNOWN'; reference: null };
   dutyRefs: { documentRef: string | null; kind: string; state: string; amount: OrderSettlementMoney; finalization?: 'POSTED' | 'FINALIZED_ZERO' | 'UNKNOWN'; postedAt?: string | null }[];
   reasonCodes: string[];

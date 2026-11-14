@@ -9,10 +9,12 @@ import {sha256Hex} from '../supply/supply-util';
 
 export type OrderSettlementMoney={knowledge:'KNOWN'|'UNKNOWN';cents:string|null;reasonCodes:string[]};
 export type OrderSettlementFacts={legacyDutyReady:boolean;duties:AdminLegacyDutyFinance[]};
+/** A local CONTROLLED refund record is a book fact, never proof of real-channel payout or bank arrival. */
+export type OrderSimulatedRefund={state:'NONE'|'SUCCEEDED'|'PROCESSING'|'FAILED'|'UNKNOWN'|'AMBIGUOUS';amount:OrderSettlementMoney;count:number;reasonCodes:string[]};
 export type AdminOrderSettlementEvidence={
  schema:'admin-order-settlement-evidence.v1';documentRef:string;readiness:'READY'|'UNAVAILABLE';
  posting:{state:'POSTED'|'FINALIZED_ZERO'|'NOT_POSTED'|'UNKNOWN';ref:string|null;postedAt:string|null};
- captured:OrderSettlementMoney;ownerNet:OrderSettlementMoney;refundPayable:OrderSettlementMoney;refunded:OrderSettlementMoney;historicalRefund:OrderSettlementMoney;
+ captured:OrderSettlementMoney;ownerNet:OrderSettlementMoney;refundPayable:OrderSettlementMoney;refunded:OrderSettlementMoney;historicalRefund:OrderSettlementMoney;simulatedRefund:OrderSimulatedRefund;
  /** The verified posting's platform component. It is not net profit and excludes distribution/channel costs. */
  platformContribution:OrderSettlementMoney;
  platformComponents?:{code:string;cents:string;payer:'OWNER'|'RENTER'|'NONE'|null;feeBase:string|null;feeRate:string|null}[];
@@ -31,7 +33,7 @@ type OrderFinanceBusiness={
  settlementState:'POSTED'|'FINALIZED_ZERO'|'NOT_SETTLED'|'LEGACY_RECORDED_COMPLETE'|'UNKNOWN';
  /** Original sale earnings before separate deductions and the original recorded refund amount. */
  legacyCompletedAmounts:{ownerEarnings:OrderSettlementMoney;refundAmount:OrderSettlementMoney}|null;
- paymentAttempts:OrderFinanceTransaction[];refundOrders:OrderFinanceTransaction[];reasonCodes:string[];
+ paymentAttempts:OrderFinanceTransaction[];refundOrders:OrderFinanceTransaction[];simulatedRefund:OrderSimulatedRefund;reasonCodes:string[];
 };
 const unknown=(reason:string):OrderSettlementMoney=>({knowledge:'UNKNOWN',cents:null,reasonCodes:[reason]});
 function money(value:unknown,reason:string):OrderSettlementMoney{
@@ -51,6 +53,16 @@ function legacyCompletedAmounts(order:FinanceOrderFact):OrderFinanceBusiness['le
  const original=(value:unknown,reason:string)=>{try{return money(sourceYuanToCents(value),reason);}catch{return unknown(reason);}};
  return{ownerEarnings:original(snapshot.sale_earnings,'LEGACY_OWNER_EARNINGS_SOURCE_UNAVAILABLE'),
   refundAmount:original(snapshot.return_order_money,'LEGACY_REFUND_AMOUNT_SOURCE_UNAVAILABLE')};
+}
+
+/** Only one SUCCEEDED CONTROLLED record counts as a recorded simulated refund; pending, failed and multiple records stay explicitly unresolved. */
+export function projectOrderSimulatedRefund(refundOrders:readonly OrderFinanceTransaction[]):OrderSimulatedRefund{
+ const records=refundOrders.filter(row=>row.kind==='REFUND'&&row.paymentSource==='CONTROLLED');
+ if(!records.length)return{state:'NONE',amount:unknown('NO_LOCAL_SIMULATED_REFUND_RECORD'),count:0,reasonCodes:['NO_LOCAL_SIMULATED_REFUND_RECORD']};
+ if(records.length>1)return{state:'AMBIGUOUS',amount:unknown('MULTIPLE_LOCAL_SIMULATED_REFUND_RECORDS'),count:records.length,reasonCodes:['MULTIPLE_LOCAL_SIMULATED_REFUND_RECORDS','LOCAL_SIMULATED_REFUND_NOT_REAL_CHANNEL_PAYOUT']};
+ const state=records[0]!.state,amount=money(records[0]!.amountCents,'LOCAL_SIMULATED_REFUND_AMOUNT_UNAVAILABLE');
+ const resolved:OrderSimulatedRefund['state']=state==='SUCCEEDED'?'SUCCEEDED':state==='PROCESSING'?'PROCESSING':state==='FAILED'?'FAILED':'UNKNOWN';
+ return{state:resolved,amount,count:1,reasonCodes:['LOCAL_SIMULATED_REFUND_NOT_REAL_CHANNEL_PAYOUT',...(state==='SUCCEEDED'?[]:['LOCAL_SIMULATED_REFUND_NOT_SETTLED'])]};
 }
 
 export function projectAdminOrderFinanceBusiness(order:FinanceOrderFact,receipt:AdminOrderSettlementEvidence,facts:Pick<FinanceFacts,'entries'|'legacyOrderObservations'|'orderSettlementFacts'>):OrderFinanceBusiness{
@@ -99,7 +111,7 @@ export function projectAdminOrderFinanceBusiness(order:FinanceOrderFact,receipt:
  }
  const paymentAttempts=transactions.filter(row=>row.kind==='PAYMENT'),refundOrders=transactions.filter(row=>row.kind==='REFUND');
  const reasonCodes=paymentAttempts.filter(row=>row.state==='RECORDED_PAID').length>1?['LEGACY_MULTIPLE_RECORDED_PAID_ATTEMPTS']:[];
- return{payment,settlementState,legacyCompletedAmounts:completedAmounts,paymentAttempts,refundOrders,reasonCodes};
+ return{payment,settlementState,legacyCompletedAmounts:completedAmounts,paymentAttempts,refundOrders,simulatedRefund:projectOrderSimulatedRefund(refundOrders),reasonCodes};
 }
 
 function nativeReceipt(order:FinanceOrderFact,entries:readonly FinanceEntry[],base:AdminOrderSettlementEvidence):AdminOrderSettlementEvidence{
@@ -131,7 +143,7 @@ function nativeReceipt(order:FinanceOrderFact,entries:readonly FinanceEntry[],ba
 /** No quote recalculation, current policy lookup, financial write or channel result inference. */
 export function projectAdminOrderSettlementEvidence(order:FinanceOrderFact,entries:readonly FinanceEntry[],legacy?:OrderSettlementFacts):AdminOrderSettlementEvidence{
  const base:AdminOrderSettlementEvidence={schema:'admin-order-settlement-evidence.v1',documentRef:order.ref,readiness:order.sourceType==='NATIVE'||legacy?.legacyDutyReady===true?'READY':'UNAVAILABLE',posting:{state:'UNKNOWN',ref:null,postedAt:null},
-  captured:unknown('ORIGINAL_CAPTURED_EVIDENCE_UNAVAILABLE'),ownerNet:unknown('ORIGINAL_OWNER_NET_EVIDENCE_UNAVAILABLE'),refundPayable:unknown('ORIGINAL_REFUND_RESPONSIBILITY_UNAVAILABLE'),refunded:unknown('REFUND_PAYMENT_SOURCE_NOT_AVAILABLE'),historicalRefund:unknown('HISTORICAL_REFUND_SOURCE_UNAVAILABLE'),platformContribution:unknown('SETTLEMENT_PLATFORM_COMPONENT_UNAVAILABLE'),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
+  captured:unknown('ORIGINAL_CAPTURED_EVIDENCE_UNAVAILABLE'),ownerNet:unknown('ORIGINAL_OWNER_NET_EVIDENCE_UNAVAILABLE'),refundPayable:unknown('ORIGINAL_REFUND_RESPONSIBILITY_UNAVAILABLE'),refunded:unknown('REFUND_PAYMENT_SOURCE_NOT_AVAILABLE'),historicalRefund:unknown('HISTORICAL_REFUND_SOURCE_UNAVAILABLE'),simulatedRefund:projectOrderSimulatedRefund([]),platformContribution:unknown('SETTLEMENT_PLATFORM_COMPONENT_UNAVAILABLE'),refundDueAt:null,channel:{state:'UNKNOWN',reference:null},dutyRefs:[],reasonCodes:[]};
  if(order.sourceType==='NATIVE')return nativeReceipt(order,entries,base);
  const raw=order.legacySource?.snapshot.return_order_money;
  try{base.historicalRefund=money(sourceYuanToCents(raw),'HISTORICAL_REFUND_SOURCE_INVALID');}catch{if(raw!==null&&raw!==undefined)base.historicalRefund=unknown('HISTORICAL_REFUND_SOURCE_INVALID');}

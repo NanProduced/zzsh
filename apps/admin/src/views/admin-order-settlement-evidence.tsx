@@ -17,9 +17,29 @@ function moneyRows(evidence: OrderSettlementEvidence): [string, OrderSettlementM
   const sameLegacyRefund = evidence.documentRef.startsWith('LEGACY_ORDER:') && originalRefund &&
     (originalRefund.knowledge === 'KNOWN' && evidence.historicalRefund.knowledge === 'KNOWN' && originalRefund.cents !== null && originalRefund.cents === evidence.historicalRefund.cents ||
      originalRefund.knowledge === 'UNKNOWN' && evidence.historicalRefund.knowledge === 'UNKNOWN');
-  return [[evidence.posting.state === 'FINALIZED_ZERO' ? '原收款依据金额' : '原入账基数', evidence.captured], [evidence.documentRef.startsWith('LEGACY_ORDER:') ? '号主租赁收益责任' : '号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable], ['退款出款记录', evidence.refunded],
+  return [[evidence.posting.state === 'FINALIZED_ZERO' ? '原收款依据金额' : '原入账基数', evidence.captured], [evidence.documentRef.startsWith('LEGACY_ORDER:') ? '号主租赁收益责任' : '号主结算净额', evidence.ownerNet], ['租客应退责任', evidence.refundPayable],
     ...(platform ? [['本单已记平台结算贡献（非净利润）', platform] as [string, OrderSettlementMoney]] : []),
     ...(evidence.documentRef.startsWith('LEGACY_ORDER:') && !sameLegacyRefund ? [['历史应退记录', evidence.historicalRefund] as [string, OrderSettlementMoney]] : [])];
+}
+export type RefundDisbursementFact = { label: string; value: string };
+/** Local simulated refund records, real-channel payout evidence and bank arrival are three distinct facts; a simulated amount never becomes channel payout. */
+export function refundDisbursementFacts(evidence: OrderSettlementEvidence): RefundDisbursementFact[] {
+  const simulated = evidence.simulatedRefund;
+  const amount = simulated?.amount.knowledge === 'KNOWN' && simulated.amount.cents !== null ? financeMoney(simulated.amount.cents) : null;
+  let simulatedText = '未取得本地模拟退款记录';
+  if (simulated) {
+    if (simulated.state === 'SUCCEEDED' && amount) simulatedText = `模拟退款已记录 ${amount}（未走真实渠道）`;
+    else if (simulated.state === 'AMBIGUOUS') simulatedText = `存在 ${simulated.count} 笔本地模拟退款记录，金额未汇总（未走真实渠道）`;
+    else if (simulated.state !== 'NONE') simulatedText = `本地模拟退款记录状态未决或未成功${amount ? ` · 记录金额 ${amount}` : ''}（未走真实渠道）`;
+  }
+  const legacy = evidence.documentRef.startsWith('LEGACY_ORDER:');
+  const showSimulated = !legacy || (!!simulated && simulated.state !== 'NONE');
+  const real = evidence.refunded.knowledge === 'KNOWN' && evidence.refunded.cents !== null ? financeMoney(evidence.refunded.cents) : '真实渠道出款未接入 / 未取得依据';
+  return [
+    ...(showSimulated ? [{ label: '本地模拟退款记录', value: simulatedText }] : []),
+    { label: '真实渠道出款记录', value: real },
+    { label: '银行 / 渠道到账', value: '未取得依据' },
+  ];
 }
 const postingLabel = (evidence: OrderSettlementEvidence) => evidence.posting.state === 'FINALIZED_ZERO' ? '零额责任已终定' : evidence.posting.state === 'POSTED' ? '原过账已证实' : evidence.posting.state === 'NOT_POSTED' ? '当前未查到过账记录' : '过账未记录';
 const paymentLabels: Record<OrderFinanceBusiness['payment']['state'], string> = {
@@ -85,7 +105,7 @@ function Transactions({ rows, label, onOpenDocument }: { rows: OrderFinanceTrans
 export function orderSettlementSummary(evidence: OrderSettlementEvidence): string[] {
   const business = evidence.business;
   return [...(business ? [`实付记录：${paymentLabels[business.payment.state]} · ${business.payment.amount.knowledge === 'KNOWN' ? money(business.payment.amount) : '金额待核实'}`, `付款时间：${financeTime(business.payment.occurredAt)}`, `结算状态：${settlementLabels[business.settlementState]}`,
-    ...(business.legacyCompletedAmounts ? [`旧单号主收益原记（扣减前）：${money(business.legacyCompletedAmounts.ownerEarnings)}`, `旧单退款金额原记：${money(business.legacyCompletedAmounts.refundAmount)}`] : [])] : []), (evidence.posting.state === 'FINALIZED_ZERO' ? '责任终定：' : '结算过账：') + postingLabel(evidence), ...moneyRows(evidence).map(([label, value]) => `${label}：${money(value)}`), '渠道到账：未取得依据'];
+    ...(business.legacyCompletedAmounts ? [`旧单号主收益原记（扣减前）：${money(business.legacyCompletedAmounts.ownerEarnings)}`, `旧单退款金额原记：${money(business.legacyCompletedAmounts.refundAmount)}`] : [])] : []), (evidence.posting.state === 'FINALIZED_ZERO' ? '责任终定：' : '结算过账：') + postingLabel(evidence), ...moneyRows(evidence).map(([label, value]) => `${label}：${money(value)}`), ...refundDisbursementFacts(evidence).map(({ label, value }) => `${label}：${value}`)];
 }
 
 export function AdminOrderSettlementEvidence({ state = 'ready', evidence, requestId, paymentState, onRetry, onOpenDocument, embedded = false }: {
@@ -102,10 +122,10 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
   }
   const business = evidence.business;
   const originalRows: [string, OrderSettlementMoney][] = business?.legacyCompletedAmounts ? [['旧单号主收益原记（扣减前）', business.legacyCompletedAmounts.ownerEarnings], ['旧单退款金额原记', business.legacyCompletedAmounts.refundAmount]] : [];
-  const rows = moneyRows(evidence), reasons = [...new Set([...(evidence.reasonCodes ?? []), ...rows.flatMap(([, value]) => value?.reasonCodes ?? []), ...originalRows.flatMap(([, value]) => value.reasonCodes ?? []), ...(evidence.historicalRefund.reasonCodes ?? []), ...(business?.payment.amount.reasonCodes ?? [])])];
+  const rows = moneyRows(evidence), reasons = [...new Set([...(evidence.reasonCodes ?? []), ...rows.flatMap(([, value]) => value?.reasonCodes ?? []), ...originalRows.flatMap(([, value]) => value.reasonCodes ?? []), ...(evidence.historicalRefund.reasonCodes ?? []), ...(evidence.refunded.reasonCodes ?? []), ...(evidence.simulatedRefund?.reasonCodes ?? []), ...(business?.payment.amount.reasonCodes ?? [])])];
   const reasonTexts = [...new Set(reasons.map(reason => settlementReasonLabels[reason] ?? reasonLabels[reason] ?? '部分原始资金依据尚未确认'))];
   const allocated = evidence.readiness === 'READY' && evidence.posting.state === 'POSTED' && [evidence.captured, evidence.ownerNet, evidence.refundPayable, evidence.platformContribution].every(value => value?.knowledge === 'KNOWN' && value.cents !== null);
-  const visibleRows = allocated ? rows.filter(([, value]) => value === evidence.refunded || value === evidence.historicalRefund && evidence.documentRef.startsWith('LEGACY_ORDER:')) : evidence.posting.state === 'NOT_POSTED' ? rows.filter(([, value]) => value?.knowledge === 'KNOWN') : rows;
+  const visibleRows = allocated ? rows.filter(([, value]) => value === evidence.historicalRefund && evidence.documentRef.startsWith('LEGACY_ORDER:')) : evidence.posting.state === 'NOT_POSTED' ? rows.filter(([, value]) => value?.knowledge === 'KNOWN') : rows;
   const knownRows = visibleRows.filter(([, value]) => value?.knowledge === 'KNOWN' && value.cents !== null);
   const unknownRows = [...originalRows, ...visibleRows].filter(([, value]) => value?.knowledge !== 'KNOWN' || value.cents === null);
   const noPosting = evidence.posting.state === 'NOT_POSTED';
@@ -131,6 +151,7 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
       {business?.paymentAttempts.length ? <Transactions rows={business.paymentAttempts} label="付款尝试" onOpenDocument={onOpenDocument}/> : null}
       {business?.refundOrders.length ? <Transactions rows={business.refundOrders} label="退款单据" onOpenDocument={onOpenDocument}/> : business ? <p className="text-sm text-muted-foreground">本次未读取到关联退款单据。</p> : null}
     </div> : null}
+    <div className="space-y-2 border-t border-border pt-3"><h3 className="text-sm font-medium">退款出款与到账</h3><dl className="space-y-2 text-sm">{refundDisbursementFacts(evidence).map(({ label, value }) => <div key={label} className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt className="text-muted-foreground">{label}</dt><dd>{value}</dd></div>)}</dl></div>
     {refundNeedsReview ? <Alert variant="warning" role="status"><CircleAlert aria-hidden /><AlertTitle>{refundAmountMismatch ? '旧订单退款原记金额不一致' : '旧订单退款原记待核对'}</AlertTitle><AlertDescription>请核对原订单记录与本次读取的历史金额。</AlertDescription></Alert> : null}
     {unknownRows.length ? <Collapsible><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="px-0"/>}>尚未取得依据的金额<ChevronDown aria-hidden size={13}/></CollapsibleTrigger><CollapsibleContent><dl className="space-y-2 text-sm">{unknownRows.map(([label, value]) => <div key={label} className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt>{label}</dt><dd>{money(value)}</dd></div>)}</dl></CollapsibleContent></Collapsible> : null}
     {evidence.readiness !== 'READY' ? <p className="text-sm text-muted-foreground">部分资金依据暂未就绪，以下只展示已取得的独立事实。</p> : null}
@@ -154,7 +175,7 @@ export function AdminOrderSettlementEvidence({ state = 'ready', evidence, reques
           <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt>渠道流水号</dt><dd>{evidence.channel.reference ?? '未取得'}</dd></div>
           {!posted ? <div className="flex flex-wrap justify-between gap-x-4 gap-y-1"><dt>原过账时间</dt><dd>未记录</dd></div> : null}
         </dl>
-        <p className="leading-relaxed">应退责任、历史记录和退款出款记录分别核对，均不证明渠道到账。{(evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution ? "平台结算贡献不是净利润，未扣分销与渠道成本。" : ""}</p>
+        <p className="leading-relaxed">应退责任、历史记录、本地模拟退款记录和真实渠道出款依据分别核对，均不证明渠道到账。{(evidence as OrderSettlementEvidence & { platformContribution?: OrderSettlementMoney }).platformContribution ? "平台结算贡献不是净利润，未扣分销与渠道成本。" : ""}</p>
       </CollapsibleContent>
     </Collapsible>
     {reasons.length || evidence.posting.ref ? <Collapsible><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="px-0" />}>依据与说明<ChevronDown aria-hidden size={13} /></CollapsibleTrigger><CollapsibleContent className="space-y-2 pt-2 text-xs text-muted-foreground">{evidence.posting.ref ? <p className="break-all">{evidence.posting.state === 'FINALIZED_ZERO' ? '原责任依据' : '原过账引用'}：{evidence.posting.ref}</p> : null}{reasonTexts.map(reason => <p key={reason}>{reason}</p>)}{reasons.length ? <Collapsible><CollapsibleTrigger render={<Button variant="ghost" size="sm" className="px-0"/>}>技术追溯<ChevronDown aria-hidden size={13}/></CollapsibleTrigger><CollapsibleContent>{reasons.map(reason=><p key={reason} className="break-all font-mono">{reason}</p>)}</CollapsibleContent></Collapsible> : null}</CollapsibleContent></Collapsible> : null}
