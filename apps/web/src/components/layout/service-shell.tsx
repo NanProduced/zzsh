@@ -87,7 +87,7 @@ export function ServiceShell({
           <Chip className="functional-context-chip" color={meta.color} variant="soft">{context}</Chip>
           <span>{meta.hint}</span>
         </div> : null}
-      </header> : headingInContent ? null : <h1 className="sr-only">{title}</h1>}
+      </header> : headingInContent ? null : surface === "browse" ? <h1 className="functional-inline-heading">{title}</h1> : <h1 className="sr-only">{title}</h1>}
       {children}
     </main>
     <PortalFooter />

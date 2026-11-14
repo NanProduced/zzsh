@@ -6,6 +6,7 @@ import '@zzsh/ui/plate-document.css';
 import { loadPlatformUpdate } from '@/lib/updates-server';
 import { updateDate, updateReturnHref, updateTypeLabel } from '@/lib/platform-updates';
 import { UpdateBackLink } from '@/components/content/updates-list';
+import { seoPageMetadata } from '@/lib/seo';
 import '../updates.css';
 
 function plateMediaUrls(urls: Readonly<Record<string, string | null>>): Record<string, string> {
@@ -16,7 +17,9 @@ export const dynamic = 'force-dynamic';
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }) {
   const item = await loadPlatformUpdate((await params).id).catch(() => null);
-  return { title: `${item?.title ?? '平台动态'} · 洲洲商行` };
+  if (!item) return {};
+  const description = item.summary || (item.body ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+  return seoPageMetadata({ title: `${item.title} - 平台动态`, description, path: `/updates/${item.id}` });
 }
 
 export default async function PlatformUpdatePage({

@@ -47,7 +47,8 @@ function LoginPageContent() {
     </header>
     <main className="auth-page-main">
       <section className="auth-page-card" aria-labelledby="login-page-title">
-        <h1 id="login-page-title" className="sr-only">账户登录</h1>
+        <h1 id="login-page-title" className="auth-page-title">登录或注册</h1>
+        <p className="auth-page-lead">登录或注册洲洲商行账号，即可在线租用或出租三角洲行动账号。</p>
         {loading ? <div className="auth-page-session-state" role="status" aria-live="polite"><h2>正在准备登录…</h2><div className="auth-page-skeleton" aria-hidden="true"><span /><span /><span /></div></div> : null}
         {failed ? <div className="auth-page-session-state is-error" role="alert"><h2>暂时无法确认账号状态</h2><p>登录窗口暂时无法打开；可以先重试账号状态确认，或直接打开登录表单。</p><div className="auth-page-session-actions"><button type="button" className="button secondary" onClick={session.revalidate}>重试</button><button type="button" className="button primary" onClick={openForm}>打开登录窗口</button></div></div> : null}
         {confirmed ? <div className="auth-page-session-state" role="status"><h2>登录成功</h2><p>正在进入个人中心…</p></div> : null}

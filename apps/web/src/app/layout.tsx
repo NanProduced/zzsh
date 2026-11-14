@@ -6,14 +6,25 @@ import { AuthOverlayProvider } from "@/components/auth/auth-overlay-provider";
 import { SupportRail } from "@/components/support/support-rail";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { PublicContentProvider } from "@/components/content/public-content-provider";
+import { SEO_HOME_DESCRIPTION, SEO_HOME_TITLE, SEO_LOGO_PATH, SEO_SITE_NAME, seoMetadataBase } from "@/lib/seo";
 import "./globals.css";
 import "@zzsh/ui/content-document.css";
 
 export const metadata: Metadata = {
-  title: "洲洲商行 · 游戏服务与高价值账号租赁门户",
-  description: "洲洲商行游戏服务门户。浏览三角洲行动资源账号，了解资源费用、押金、租期与真人客服履约流程。",
+  metadataBase: seoMetadataBase(),
+  title: { default: SEO_HOME_TITLE, template: `%s - ${SEO_SITE_NAME}` },
+  description: SEO_HOME_DESCRIPTION,
+  applicationName: SEO_SITE_NAME,
+  openGraph: {
+    siteName: SEO_SITE_NAME,
+    locale: "zh_CN",
+    type: "website",
+    title: SEO_HOME_TITLE,
+    description: SEO_HOME_DESCRIPTION,
+    images: [{ url: SEO_LOGO_PATH, width: 1254, height: 1254, alt: SEO_SITE_NAME }],
+  },
   icons: {
-    icon: { url: "/brand/zzsh-web-favicon.png", type: "image/png", sizes: "64x64" },
+    icon: [{ url: "/favicon.ico", type: "image/x-icon", sizes: "48x48 96x96" }],
   },
 };
 

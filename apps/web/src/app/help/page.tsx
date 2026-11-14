@@ -5,11 +5,19 @@ import { listFeaturedArticles } from "@/content/help";
 import { loadPublicHelpArticles, loadPublicHelpTree } from "@/lib/content-server";
 import { legacyHelpHashMap } from "@/content/help/legacy-links";
 import { searchHelpArticles } from "@/content/help/search";
+import { seoPageMetadata } from "@/lib/seo";
 
-export const metadata: Metadata = {
-  title: "帮助中心 · 洲洲商行",
-  description: "洲洲商行帮助中心：租号与使用、出租与管理、费用与资金、账号与安全、售后与保障等说明。",
-};
+const HELP_DESCRIPTION = "洲洲商行帮助中心：租号与使用、出租与管理、费用与资金、账号与安全、售后与保障等说明。";
+
+export async function generateMetadata({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }): Promise<Metadata> {
+  const params = await searchParams;
+  const query = typeof params.q === "string" ? params.q.trim() : "";
+  const category = typeof params.category === "string" ? params.category : "";
+  if (query) return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path: "/help", robots: "noindex, follow" });
+  // 分类是入口而非搜索结果，canonical 保留 category 自身地址。
+  const path = category ? `/help?category=${encodeURIComponent(category)}` : "/help";
+  return seoPageMetadata({ title: "帮助中心", description: HELP_DESCRIPTION, path });
+}
 
 const MAX_QUERY_LENGTH = 120;
 export const dynamic = "force-dynamic";

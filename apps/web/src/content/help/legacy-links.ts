@@ -13,7 +13,7 @@ export function resolveLegacyHash(hash: string): string | null {
   return legacyHelpHashMap[key] ?? null;
 }
 
-/** 旧站公开页面 → 新文章；站点切换重定向由唯一维护者另行接入，本轮不改全局路由 */
+/** 旧站公开页面 → 新文章；站点切换 301 由 src/proxy.ts 复用本表实现 */
 export const legacySiteUrlMap: readonly { source: string; title: string; slug: string }[] = [
   { source: "/individualMenu/postRentNotice?id=14", title: "号主须知", slug: "publish-prepare" },
   { source: "/individualMenu/postRentNotice?id=15", title: "租客须知", slug: "rental-getting-started" },

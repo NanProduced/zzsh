@@ -22,7 +22,10 @@ export function PortalHome({ accounts, supplyState, supplyMayHaveMore, fastEnabl
     <a href="#main-content" className="skip-link">跳到主要内容</a>
     <PortalHeader query={query} onQueryChange={setQuery} onSearch={(value) => router.push(accountSearchHref(value))} />
     <main id="main-content">
-      <h1 className="sr-only">洲洲商行游戏服务与账号租赁</h1>
+      <div className="portal-width home-intro">
+        <h1 className="home-intro-title">三角洲行动账号租赁平台</h1>
+        <p className="home-intro-lead">在线挑选高价值账号，支付后由真人客服全程履约。</p>
+      </div>
       <HeroSection />
       <ServiceBenefits />
       <div className="portal-width activity-shell"><PlatformStats data={stats} deals={deals} isDemo={statsAreDemo}/></div>

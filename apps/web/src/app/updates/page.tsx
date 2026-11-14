@@ -2,9 +2,10 @@ import { ServiceShell } from '@/components/layout/service-shell';
 import { UpdatesList } from '@/components/content/updates-list';
 import { loadPlatformUpdates } from '@/lib/updates-server';
 import type { UpdateFilter } from '@/lib/platform-updates';
+import { seoPageMetadata } from '@/lib/seo';
 import './updates.css';
 export const dynamic = 'force-dynamic';
-export const metadata = { title: '平台动态 · 洲洲商行', description: '平台公告、服务更新与最新资讯。' };
+export const metadata = seoPageMetadata({ title: '平台公告与动态', description: '洲洲商行平台公告、服务更新与最新资讯。', path: '/updates' });
 export default async function PlatformUpdatesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const query = await searchParams, type: UpdateFilter = query.type === 'ANNOUNCEMENT' || query.type === 'NEWS' ? query.type : 'ALL';
   const page = typeof query.page === 'string' && /^[1-9]\d{0,3}$/.test(query.page) ? Number(query.page) : 1;

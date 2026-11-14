@@ -6,6 +6,7 @@ import { notFound } from "next/navigation";
 import { BrandLogo } from "@/components/brand/brand-logo";
 import { getLegalDocument, getLegalDocumentSibling, isLegalDocId, listLegalDocuments } from "@/content/legal/documents";
 import { readLegalDocument } from "@/lib/legal-server";
+import { seoPageMetadata } from "@/lib/seo";
 
 export const dynamic = "force-dynamic";
 
@@ -13,11 +14,17 @@ export function generateStaticParams(): { doc: string }[] {
   return listLegalDocuments().map((record) => ({ doc: record.doc }));
 }
 
-export async function generateMetadata({ params }: { params: Promise<{ doc: string }> }): Promise<Metadata> {
+export async function generateMetadata({ params, searchParams }: { params: Promise<{ doc: string }>; searchParams?: Promise<{ version?: string }> }): Promise<Metadata> {
   const { doc } = await params;
   const entry = getLegalDocument(doc);
   if (!entry) notFound();
-  return { title: `《${entry.title}》 · 洲洲商行` };
+  const version = (await searchParams)?.version;
+  return seoPageMetadata({
+    title: `《${entry.title}》`,
+    description: `${entry.title}全文与生效版本。`,
+    path: `/legal/${doc}`,
+    robots: version !== undefined ? "noindex" : undefined,
+  });
 }
 
 function PublishedBody({ body }: { body: string }) {

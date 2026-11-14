@@ -8,6 +8,7 @@ import { HelpShell } from "@/components/help/help-shell";
 import { HelpNavAside, HelpNavDrawer } from "@/components/help/help-nav";
 import { HelpArticleAsideToc, HelpArticleBody } from "@/components/help/help-article";
 import { HelpArticlePager } from "@/components/help/help-article-pager";
+import { seoPageMetadata } from "@/lib/seo";
 import "@/components/help/help.css";
 
 export const dynamic = "force-dynamic";
@@ -15,8 +16,10 @@ export const dynamic = "force-dynamic";
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
   const article = (await loadPublicHelpArticles().catch(() => [])).find(value => value.slug === slug);
-  if (!article) return {};
-  return { title: `${article.title} · 帮助中心 · 洲洲商行`, description: article.summary };
+  if (article) return seoPageMetadata({ title: `${article.title} - 帮助中心`, description: article.summary, path: `/help/${slug}` });
+  const status = await loadHelpSlugStatus(slug).catch(() => null);
+  if (status?.state === "RETIRED") return { title: "该文档已下线", robots: "noindex" };
+  return {};
 }
 
 export default async function Page({ params }: { params: Promise<{ slug: string }> }) {

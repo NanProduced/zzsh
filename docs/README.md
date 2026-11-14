@@ -35,6 +35,7 @@
 - [分销看板、汇总与权限](architecture/distribution-dashboard.md)
 - [开租与结算确认](architecture/settlement-confirmation.md)
 - [公开列表组合筛选与配置](architecture/listing-query.md)
+- [用户站 SEO 约定](seo.md)（环境开关、收录口径、robots/sitemap 与旧站 301 跳转表）
 - [账号公开查看、可租状态与编号](architecture/account-visibility.md)
 - [认证与账号安全](architecture/authentication.md)
 - [个人头像](architecture/profile-avatars.md)

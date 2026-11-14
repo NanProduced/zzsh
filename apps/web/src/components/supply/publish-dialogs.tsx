@@ -114,11 +114,13 @@ export function SectionCard({ id, title, hasError, headerMeta, children, actions
 
 export function PublishVisualBanner() {
   return <section className="publish-visual-banner" aria-labelledby="publish-banner-title">
-    <h1 id="publish-banner-title" className="sr-only">上架出租</h1>
-    <picture>
-      <source media="(max-width:600px)" srcSet="/art/zhouzhou/publish-banner-approved-mobile-v1.png" width={1050} height={378} />
-      <img className="publish-visual-banner-image" src="/art/zhouzhou/publish-banner-approved-v1.png" width={2141} height={251} alt="填写资料，核对报价后确认上架。流程：填写资料、核对报价、确认上架。" fetchPriority="high" decoding="async" />
-    </picture>
+    <h1 id="publish-banner-title" className="publish-visual-banner-heading">
+      <picture>
+        <source media="(max-width:600px)" srcSet="/art/zhouzhou/publish-banner-approved-mobile-v1.png" width={1050} height={378} />
+        <img className="publish-visual-banner-image" src="/art/zhouzhou/publish-banner-approved-v1.png" width={2141} height={251} alt="上架出租：填写资料，核对报价后确认上架。" fetchPriority="high" decoding="async" />
+      </picture>
+    </h1>
+    <p className="publish-visual-banner-lead">把闲置的三角洲行动账号上架出租，通过审核后向租客展示，订单由平台真人客服履约。</p>
   </section>;
 }
 
