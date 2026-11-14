@@ -5,7 +5,7 @@ import Link from "next/link";
 import { AlertCircle, CheckCircle2, ChevronRight, Clock3, FileText, Headphones, RotateCcw, RotateCw, ShieldCheck, X } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { formatMoneyLabel } from "@/lib/listing-view";
-import { type FullPayoutTerms, type FullPayoutTermsAcceptance, type PersonalRentalQuote } from "@/lib/order-client";
+import { orderApi, type FullPayoutTerms, type FullPayoutTermsAcceptance, type PersonalRentalQuote } from "@/lib/order-client";
 import TradeTermsDocument from "@/components/content/trade-terms-document";
 import { type UserSessionApi } from "@/components/session/user-session-provider";
 import { PaymentDialog } from "@/components/order/payment-dialog";
@@ -364,6 +364,28 @@ export function RentalConfirmBody({
     if (stage.kind === "created") {
       const created = stage.order;
       const total = formatMoneyLabel(created.amounts?.totalDue ?? stage.quote.quote?.tenantPayableTotal ?? null);
+      // 付款弹窗用的是建单时的初始快照；任何状态变化都按原订单号读回服务端单据，
+      // 让已支付/已取消立即推进页面并收起过期的待支付弹窗。读回失败不推测结果。
+      const readBack = () => {
+        if (!userId) return;
+        const expectedId = created.id;
+        void (async () => {
+          try {
+            const fresh = await orderApi.detail(userId, expectedId);
+            if (!fresh || (fresh.id != null && fresh.id !== expectedId) || typeof fresh.status !== "string") return;
+            setStage((current) => current.kind === "created" && current.order.id === expectedId ? { ...current, order: fresh } : current);
+            if (fresh.status === "PAID" || fresh.status === "COMPLETED") {
+              setPaymentAccepted(true);
+              setPayOpen(false);
+            } else if (fresh.status === "CANCELLED") {
+              setPaymentCancelled(true);
+              setPayOpen(false);
+            }
+          } catch {
+            // 读不到最新单据时保留原快照与现有提示，不把未知结果伪装成成功或失败。
+          }
+        })();
+      };
       return <>
         <div className="rental-confirm rental-confirm--quote rental-confirm--created">
           <div className="rental-confirm-head">
@@ -393,7 +415,7 @@ export function RentalConfirmBody({
             <Link className="button quiet button--sm" href={orderHref(created.id)}>查看订单</Link>
           </div>
         </div>
-        <PaymentDialog order={created} party="renter" open={payOpen} onOpenChange={setPayOpen} onChanged={() => {}} onAccepted={() => setPaymentAccepted(true)} onCancelled={() => { setPaymentCancelled(true); setPayOpen(false); }} />
+        <PaymentDialog order={created} party="renter" open={payOpen} onOpenChange={setPayOpen} onChanged={readBack} onAccepted={() => setPaymentAccepted(true)} onCancelled={() => { setPaymentCancelled(true); setPayOpen(false); }} />
       </>;
     }
 

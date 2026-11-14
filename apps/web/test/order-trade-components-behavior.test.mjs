@@ -44,8 +44,10 @@ function loadComponent(relativePath, session, extra) {
     if (name === "./recommended-accounts") return { RecommendedAccountsSection: () => null };
     if (name === "./payment-dialog" || name === "@/components/order/payment-dialog") {
       const { PaymentAction } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session, extra);
-      return { PaymentDialog: ({ order, party, open, onChanged, onPaymentFacts }) =>
-        open ? React.createElement("div", { "data-testid": "payment-dialog" }, React.createElement(PaymentAction, { order, party, onChanged, onPaymentFacts, embedded: true })) : null };
+      return { PaymentDialog: ({ order, party, open, onChanged, onPaymentFacts, onAccepted }) =>
+        open ? React.createElement("div", { "data-testid": "payment-dialog" },
+          extra?.exposePaymentDialogChanged ? React.createElement("button", { type: "button", "data-testid": "read-back", onClick: onChanged }, "同步订单状态") : null,
+          React.createElement(PaymentAction, { order, party, onChanged, onPaymentFacts, onAccepted, embedded: true })) : null };
     }
     if (name === "./order-action-dialog" || name === "@/components/order/order-action-dialog") {
       const { SettlementAction } = loadComponent("apps/web/src/components/order/order-trade-actions.tsx", session, extra);
@@ -528,7 +530,10 @@ test("Native UI selects method, persists a request, reads its action and waits f
    assert.equal(calls.filter(c=>c.method==="POST").length,1);assert.equal(changed,0);assert.doesNotMatch(probe.host.textContent,/渠道付款已接纳/);
    const link=probe.host.querySelector('.order-channel-payment a');assert.equal(link?.getAttribute("href"),"https://example.invalid/synthetic-pay");assert.equal(link?.getAttribute("rel"),"noopener noreferrer");assert.match(probe.host.textContent,/1\.25/);assert.ok(probe.host.querySelector('svg[aria-label="本单支付二维码"]'));
    assert.equal(intents.loadIntent("user_A","order.channel-payment","order_A"),null);assert.equal(intents.loadIntent("user_A","order.payment","order_A"),null);
-   phase="PAID";await probe.click("刷新支付状态");assert.match(probe.host.textContent,/渠道付款已接纳/);assert.equal(changed,1);assert.equal(calls.filter(c=>c.method==="POST").length,1);assert.equal([...probe.host.querySelectorAll("button")].find(b=>b.textContent==="取消订单")?.disabled,true);
+   phase="PAID";await probe.click("刷新支付状态");assert.match(probe.host.textContent,/渠道付款已接纳/);assert.equal(changed,1);assert.equal(calls.filter(c=>c.method==="POST").length,1);
+   // 已确定生效的付款不再保留取消入口与支付保留倒计时，也不再提示继续付款。
+   assert.equal([...probe.host.querySelectorAll("button")].find(b=>b.textContent==="取消订单"),undefined);
+   assert.match(probe.host.textContent,/支付已接纳/);assert.doesNotMatch(probe.host.textContent,/支付保留至|关闭后仍可从个人中心/);
   }finally{await probe.dispose(()=>intents.clearIntent("user_A","order.channel-payment","order_A"));}
  });
 });
@@ -1919,7 +1924,8 @@ test("F5: a settled order shows the effective result, its records and no owner-s
     assert.ok(renter.host.textContent.includes("结算已生效"), renter.host.textContent.slice(0, 300));
     assert.ok(renter.host.textContent.includes("¥248.00"), "the settled charge renders");
     assert.ok(renter.host.textContent.includes("¥280.00"), "the payable refund renders");
-    assert.ok(renter.host.textContent.includes("¥470.00 元"), "the captured amount is the reconciliation figure");
+    assert.ok(renter.host.textContent.includes("¥470.00"), "the captured amount is the reconciliation figure");
+    assert.doesNotMatch(renter.host.textContent, /¥\d+\.\d{2} 元|¥¥/, "money keeps exactly one currency unit");
     assert.ok(!renter.host.textContent.includes("预计应退"), "an effective posting is never shown as an estimate");
     assert.ok(!renter.host.textContent.includes("¥168.36"), "the renter view must not carry owner-side internals");
     assert.ok(renter.host.textContent.includes("800 哈夫币"), "consumption comes from the server computation");
@@ -1950,7 +1956,8 @@ test("F5: an effective manual adjustment shows the system-to-final pair with its
     const probe = createProbe(window, OrderTradeActions, { order: { ...paidOrder, status: "COMPLETED" }, party: "owner", onChanged() {} }, fetchImpl);
     await probe.render();
     assert.ok(probe.host.textContent.includes("人工调整"), probe.host.textContent.slice(0, 300));
-    assert.ok(probe.host.textContent.includes("¥168.36 元 → ¥160.00 元"), "the adjustment shows the pair, not one overwritten figure");
+    assert.ok(probe.host.textContent.includes("¥168.36 → ¥160.00"), "the adjustment shows the pair, not one overwritten figure");
+    assert.doesNotMatch(probe.host.textContent, /¥\d+\.\d{2} 元/, "the adjustment pair uses a single currency unit");
     assert.ok(probe.host.textContent.includes("客服按复核结果调整"), "the human-readable reason is shown");
     assert.ok(!probe.host.textContent.includes("approvalPayloadHash"), "internal approval material is never exposed");
     await probe.dispose();
@@ -2276,9 +2283,21 @@ test("M3-F4: each side reads only its own money, and an unpaid figure never clai
     assert.doesNotMatch(renterUnpaid.host.querySelector(".order-amount-block").textContent, /已付/, "an unpaid order never claims a capture");
     await renterUnpaid.dispose();
 
-    const renterPaid = await detailProbe(window, { ...paidOrder, status: "COMPLETED", paidAt: "2026-10-12T01:00:00Z" }, "renter");
-    assert.ok([...renterPaid.host.querySelectorAll("dt")].some((node) => node.textContent === "下单金额"), "the order amount is not promoted to an independently verified payment");
+    // 已完成订单的租客金额卡：主数字是应退，另外清楚列出实付金额，两者不可混标为「实付金额」。
+    const renterPaid = await detailProbe(window, { ...paidOrder, status: "COMPLETED", paidAt: "2026-10-12T01:00:00Z" }, "renter", postedSettlement);
+    const paidCard = renterPaid.host.querySelector(".order-amount-block").textContent;
+    assert.equal(renterPaid.host.querySelector(".order-amount-head-tag").textContent, "已结算", "a settled order is not labelled as a payable amount");
+    assert.match(paidCard, /本单应退/, "the lead number names the refund, not the amount paid");
+    assert.match(paidCard, /¥280\.00/, "the refund is the posted payable amount");
+    assert.match(paidCard, /实付金额/, "a paid/completed order names the amount actually paid");
+    assert.match(paidCard, /470\.00/, "the amount actually paid stays visible beside the refund");
+    assert.doesNotMatch(paidCard, /下单金额|¥\d+\.\d{2} 元|¥¥/, "no stale order-amount label or double currency unit");
     await renterPaid.dispose();
+
+    // 未付款订单才叫「下单金额」，已付款订单不把同一数字标成下单金额。
+    const renterPaidNoPosting = await detailProbe(window, { ...paidOrder, status: "COMPLETED", paidAt: "2026-10-12T01:00:00Z" }, "renter");
+    assert.ok([...renterPaidNoPosting.host.querySelectorAll("dt")].some((node) => node.textContent === "实付金额"));
+    await renterPaidNoPosting.dispose();
   });
 });
 
@@ -3494,6 +3513,205 @@ test("master review: the order detail recovers a card-created opening intent wit
     assert.deepEqual(sent, [{ key: firstKey, body: { versionNo: 1 }, context: { openingId: "opening_1", orderId: "order_card" }, subject: "user_A" }]);
     assert.equal(intents.inspectIntent("user_A", "opening.confirm", "order_card").state, "NONE");
   } finally { globalThis.fetch = previousFetch; clearCardIntent(); }
+}));
+
+// ---- 55435 走查回归：P1 收银流程 / P2 结算弹窗 / P2 金额展示 / P2 订单群状态 ----
+
+const appliedChannelView = channelView("order_A", {
+  dataOrigin: "LOCAL_CONTROLLED",
+  capability: { channelEnabled: true, productionPaymentCapability: false, methods: ["ALIPAY_NATIVE", "WEIXIN_NATIVE"], evidenceProfile: "CONTROLLED_TEST" },
+  order: { id: "order_A", displayNo: "SYNTHETIC", status: "PAID", paidAt: "2026-10-24T10:00:01.000Z" },
+  request: channelRequest("ACCEPTED"),
+  projection: { displayState: "PAID", actionBlockedReason: null },
+  payment: { confirmationId: "formal_component_fact", disposition: "APPLIED", reasonCode: null, amount: { cents: "47000", currency: "CNY" }, acceptedAt: "2026-10-24T10:00:01.000Z" },
+});
+
+test("55435 P1: a definite APPLIED+PAID read hides the stale pending-payment UI and reports acceptance upward", async () => withDom(async window => {
+  let accepted = 0;
+  const { PaymentAction } = loadComponent("apps/web/src/components/order/order-payment-action.tsx", session("user_A"));
+  const probe = createProbe(window, PaymentAction, {
+    order: { ...channelOrder, holdUntil: "2099-01-01T00:00:00.000Z" },
+    party: "renter", onChanged() {}, onAccepted() { accepted++; },
+  }, async () => json(appliedChannelView));
+  try {
+    await probe.render();
+    assert.equal(accepted, 1, "the channel read reports the definite paid fact up to PaymentAction");
+    assert.match(probe.host.textContent, /支付已接纳/);
+    assert.doesNotMatch(probe.host.textContent, /支付保留至|原支付保留截止|待支付|请使用原支付方式完成付款/);
+    assert.equal([...probe.host.querySelectorAll("button")].find(b => b.textContent === "取消订单"), undefined, "no cancel entry after payment");
+  } finally { await probe.dispose(); }
+}));
+
+test("55435 P1: simulated payment success refreshes the channel view, closes the cashier and reports acceptance", async () => withDom(async window => {
+  let paid = false, accepted = 0;
+  const pendingView = channelView("order_A", {
+    dataOrigin: "LOCAL_CONTROLLED",
+    capability: { channelEnabled: true, productionPaymentCapability: false, methods: ["ALIPAY_NATIVE", "WEIXIN_NATIVE"], evidenceProfile: "CONTROLLED_TEST" },
+    request: channelRequest(),
+    projection: { displayState: "AWAITING_PAYMENT", actionBlockedReason: null },
+    paymentAction: { kind: "TEST_CASHIER", scope: "ECS_TEST_SIMULATED" },
+  });
+  const { PaymentAction } = loadComponent("apps/web/src/components/order/order-payment-action.tsx", session("user_A"));
+  const probe = createProbe(window, PaymentAction, {
+    order: { ...channelOrder, holdUntil: "2099-01-01T00:00:00.000Z" },
+    party: "renter", onChanged() {}, onAccepted() { accepted++; }, embedded: true,
+  }, async (url, init = {}) => {
+    const target = String(url);
+    if (target.includes("channel-payment-requests")) return json(paid ? appliedChannelView : pendingView);
+    if (target.endsWith("/demo-checkout/confirm")) { paid = true; return json(demoResult()); }
+    if (target.endsWith("/demo-checkout")) return json(demoAvailability());
+    return json({ error: { code: "NOT_FOUND" } }, 404);
+  }, { exerciseDemo: true });
+  try {
+    await probe.render();
+    let button;
+    for (let i = 0; i < 30 && !(button = [...window.document.querySelectorAll(".order-cashier-dialog button")].find(b => b.textContent === "模拟付款")); i++) await React.act(async () => { await tick(); });
+    assert.ok(button, "the embedded test cashier opens");
+    await React.act(async () => { button.click(); await tick(); });
+    for (let i = 0; i < 30 && accepted === 0; i++) await React.act(async () => { await tick(); });
+    assert.equal(accepted, 1, "the read-back propagates the paid fact to PaymentAction");
+    assert.equal(window.document.querySelector(".order-cashier-dialog"), null, "the embedded cashier closes after APPLIED");
+    assert.match(probe.host.textContent, /支付已接纳/);
+    assert.doesNotMatch(probe.host.textContent, /支付保留至|待支付|请使用原支付方式完成付款/);
+    assert.equal([...probe.host.querySelectorAll("button")].find(b => b.textContent === "取消订单"), undefined);
+  } finally {
+    await probe.dispose(() => {
+      intents.clearIntent("user_A", "order.demo-checkout", "order_A");
+      intents.clearIntent("user_A", "order.channel-payment", "order_A");
+    });
+  }
+}));
+
+test("55435 P1: an unresolved original request keeps its unknown notice and recovery entry, never closed as paid", async () => withDom(async window => {
+  intents.saveIntent({ userId: "user_A", kind: "order.channel-payment", resourceId: "order_A", key: "original_channel_key", body: { method: "WEIXIN_NATIVE" } });
+  let accepted = 0;
+  const { PaymentAction } = loadComponent("apps/web/src/components/order/order-payment-action.tsx", session("user_A"));
+  const probe = createProbe(window, PaymentAction, {
+    order: { ...channelOrder, holdUntil: "2099-01-01T00:00:00.000Z" },
+    party: "renter", onChanged() {}, onAccepted() { accepted++; },
+  }, async () => json(channelView("order_A", {
+    dataOrigin: "JOINPAY_CANDIDATE",
+    capability: { channelEnabled: true, productionPaymentCapability: true, methods: ["ALIPAY_NATIVE", "WEIXIN_NATIVE"], evidenceProfile: "JOINPAY_AGG_2_6_MD5" },
+    request: channelRequest("UNKNOWN"),
+    projection: { displayState: "CONFIRMING", actionBlockedReason: "CHANNEL_RESULT_UNKNOWN" },
+  })));
+  try {
+    await probe.render();
+    assert.equal(accepted, 0, "an unknown result is never reported as paid");
+    assert.match(probe.host.textContent, /支付结果正在确认/);
+    assert.ok(probe.buttons().some(text => text.includes("恢复原请求回执")), "the original-request recovery entry stays available");
+    assert.doesNotMatch(probe.host.textContent, /支付已接纳/);
+    assert.match(probe.host.textContent, /支付保留至/);
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.channel-payment", "order_A")); }
+}));
+
+test("55435 P1: the real payment dialog drops its countdown and pending-payment footnote once paid", async () => withDom(async window => {
+  const { PaymentDialog } = loadComponent("apps/web/src/components/order/payment-dialog.tsx", session("user_A"));
+  const probe = createProbe(window, PaymentDialog, {
+    order: { ...channelOrder, status: "PAID", holdUntil: "2099-01-01T00:00:00.000Z" },
+    party: "renter", open: true, onOpenChange() {}, onChanged() {}, onPaymentFacts() {}, onAccepted() {}, onCancelled() {},
+  }, async () => json(appliedChannelView));
+  try {
+    await probe.render();
+    const dialog = window.document.querySelector(".payment-dialog");
+    assert.ok(dialog, "the payment dialog renders");
+    assert.equal(dialog.querySelector(".payment-dialog-countdown"), null, "no payment-hold countdown after payment");
+    assert.equal(dialog.querySelector(".payment-dialog-footnote"), null, "no stale pending-payment guidance");
+    assert.match(dialog.textContent, /支付已完成/);
+    assert.match(dialog.textContent, /支付已接纳/);
+    assert.doesNotMatch(dialog.textContent, /待支付|请使用原支付方式完成付款/);
+    assert.equal([...dialog.querySelectorAll("button")].find(b => b.textContent === "取消订单"), undefined);
+  } finally { await probe.dispose(); }
+}));
+
+test("55435 P1: the created order's payment refresh reads the real order and closes the expired pending dialog", async () => withDom(async window => {
+  const accountId = "account_created_readback";
+  const created = { id: "order_created", status: "PENDING_PAYMENT", displayNo: "ZZ-NEW", amounts: { totalDue: money("470.00") } };
+  let detailReads = 0;
+  const fetchImpl = async (url, init = {}) => {
+    const target = String(url), method = (init.method ?? "GET").toUpperCase();
+    if (method === "POST" && target.includes("/api/order-confirmations")) return json(confirmation);
+    if (method === "POST" && target.includes("/api/v2/orders")) return json({ order: created });
+    if (method === "GET" && target.endsWith("/api/orders/order_created")) { detailReads++; return json({ order: { ...created, status: "PAID" } }); }
+    throw new Error(`unexpected fetch ${method} ${target}`);
+  };
+  const Panel = loadComponent("apps/web/src/components/order/rental-confirm-panel.tsx", session("user_A"), {
+    "@/lib/listing-view": { formatMoneyLabel: (value) => (value && typeof value.amount === "string" ? `¥${value.amount}` : null) },
+    "@/lib/supply-client": { supplyApi: { publishingOptions: async () => publishingOptions } },
+    exposePaymentDialogChanged: true,
+  }).RentalConfirmPanel;
+  const probe = createProbe(window, Panel, { ...detailPanelProps, accountId }, fetchImpl);
+  try {
+    await probe.render();
+    await probe.click("查看我的报价");
+    await probe.acceptAgreement();
+    await probe.click("确认并创建订单");
+    assert.ok(probe.host.querySelector('[data-testid="payment-dialog"]'), "the created order opens the payment dialog");
+    await probe.click("同步订单状态");
+    for (let i = 0; i < 20 && detailReads === 0; i++) await React.act(async () => { await tick(); });
+    assert.equal(detailReads, 1, "onChanged performs a real order read-back");
+    assert.equal(probe.host.querySelector('[data-testid="payment-dialog"]'), null, "the paid order closes the stale pending dialog");
+    assert.match(probe.host.textContent, /支付已接纳/);
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "order.create.v2", accountId)); }
+}));
+
+test("55435 P2: the last party's decision receipt immediately shows the posted result in the modal", async () => withDom(async window => {
+  const waitingVersion = { ...postedVersion, id: "v_wait", versionNo: "4", decisions: [{ party: "OWNER", action: "CONFIRM", createdAt: "2026-10-12T04:29:00Z" }] };
+  const pending = { ...postedSettlement, versions: [waitingVersion], settlement: waitingVersion,
+    currentRequest: { kind: "SETTLEMENT_VERSION", id: "v_wait", versionNo: "4" }, posting: null, ready: false, reasons: ["SETTLEMENT_REQUIRED"] };
+  let changed = 0; const stages = [];
+  const { SettlementAction } = loadComponent("apps/web/src/components/order/order-settlement-action.tsx", session("user_A"));
+  const probe = createProbe(window, SettlementAction, {
+    order: { ...paidOrder, status: "PAID" }, party: "renter", modal: true, focus: "decision",
+    onChanged() { changed++; }, onStageFacts(facts) { if (facts) stages.push(facts); },
+  }, router([
+    { match: "/settlement", method: "GET", respond: () => json(pending) },
+    { match: "/decision", method: "POST", respond: () => json(postedSettlement) },
+  ], []));
+  try {
+    await probe.render();
+    assert.match(probe.host.textContent, /结算确认/);
+    await probe.click("确认结算");
+    assert.match(probe.host.textContent, /结算已生效/, "the authoritative write receipt is rendered at once");
+    assert.doesNotMatch(probe.host.textContent, /等待对方确认/);
+    assert.ok(changed >= 1, "the outer order detail is refreshed");
+    assert.equal(stages.at(-1)?.phase, "POSTED", "stage facts report the posted phase from the write receipt");
+    // 真正只有一方确认时仍保留「等待对方确认」。
+    const oneSided = { ...pending, settlement: { ...waitingVersion, id: "v_one", versionNo: "5", decisions: [{ party: "RENTER", action: "CONFIRM" }] },
+      versions: [{ ...waitingVersion, id: "v_one", versionNo: "5", decisions: [{ party: "RENTER", action: "CONFIRM" }] }] };
+    const waitingProbe = createProbe(window, SettlementAction, {
+      order: { ...paidOrder, status: "PAID" }, party: "renter", modal: true, focus: "decision", onChanged() {},
+    }, router([{ match: "/settlement", method: "GET", respond: () => json(oneSided) }], []));
+    try {
+      await waitingProbe.render();
+      assert.match(waitingProbe.host.textContent, /等待对方确认/);
+      assert.doesNotMatch(waitingProbe.host.textContent, /结算已生效/);
+    } finally { await waitingProbe.dispose(); }
+  } finally { await probe.dispose(() => intents.clearIntent("user_A", "settlement.decision", "order_A")); }
+}));
+
+test("55435 P2: a terminal order that never had a group offers usable customer support, not a disabled build-group button", async () => withDom(async window => {
+  const { OrderGroupCard } = loadComponent("apps/web/src/components/order/order-detail-progress.tsx", session("user_A"));
+  for (const [status, label] of [["COMPLETED", "完成"], ["CANCELLED", "取消"]]) {
+    let supported = 0, grouped = 0;
+    const probe = createProbe(window, OrderGroupCard,
+      { order: { id: "order_A", status, fulfillmentAssignment: { state: "WAITING" } }, party: "renter",
+        onSupport() { supported++; }, onGroups() { grouped++; } },
+      async () => json({}));
+    try {
+      await probe.render();
+      const text = probe.host.textContent;
+      assert.match(text, new RegExp(`本单已${label}`));
+      assert.match(text, /履约期间未建立订单群/);
+      assert.doesNotMatch(text, /仅可查看历史消息|等待客服接入并建立订单群|等待客服建群/);
+      const button = [...probe.host.querySelectorAll("button")].find(node => node.textContent === "咨询客服");
+      assert.ok(button, "a usable support entry is present");
+      assert.equal(button.disabled, false);
+      await probe.click("咨询客服");
+      assert.equal(supported, 1);
+      assert.equal(grouped, 0);
+    } finally { await probe.dispose(); }
+  }
 }));
 
 test("master review: a re-entry, identity switch and corrupted storage never mint a new key", async () => withDom(async window => {

@@ -164,13 +164,17 @@ test("an effective posting is named as the settled result, never with the previe
   assert.ok(display.settlementAmountRows("renter", amounts).some((row) => row.label === "预计应退"));
 });
 
-test("cents-suffixed postings keep the exact value and an unknown one stays unknown", () => {
-  assert.equal(display.moneyCents("16836"), "¥168.36 元");
-  assert.equal(display.moneyCents("0"), "¥0.00 元");
-  assert.equal(display.moneyCents("-150"), "-¥1.50 元");
+test("cents-suffixed postings keep the exact value, one currency unit and an unknown one stays unknown", () => {
+  assert.equal(display.moneyCents("16836"), "¥168.36");
+  assert.equal(display.moneyCents("0"), "¥0.00");
+  assert.equal(display.moneyCents("-150"), "-¥1.50");
   assert.equal(display.moneyCents(null), "—");
   assert.equal(display.moneyCents(undefined), "—");
   assert.equal(display.moneyCents("168.36"), "—");
+  // 单一单位：任何 moneyCents 输出都不能同时带 ¥ 和「元」，也不能重复 ¥。
+  for (const value of ["1", "0", "16836", "-150", "99999999999"]) {
+    assert.doesNotMatch(display.moneyCents(value), /¥.* 元|^¥¥/, value);
+  }
 });
 
 test("consumption rows read opening, remaining and consumed from the server projection only", () => {

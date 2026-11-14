@@ -884,6 +884,34 @@ test("the IM projection parser rejects an unknown stage or malformed fact instea
   }
 });
 
+test("55435 P2: a terminal order without a group never claims historical group messages", () => {
+  const now = Date.parse("2026-10-20T00:00:00Z");
+  for (const stage of ["SETTLED", "CANCELLED"]) {
+    const summary = display.orderFulfillmentSummary(stageProjection({ stage, teamState: null, sendUntil: null, canSend: false }), { now });
+    assert.doesNotMatch(summary, /仅可查看历史消息|历史群消息/, summary);
+    assert.match(summary, /本单未建立订单群/, summary);
+    assert.match(summary, /客服/, summary);
+  }
+  // 已建群的终态仍按真实窗口说明；旧投影未带 teamState 时沿用原有窗口说明，不猜测群状态。
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", teamState: "READY", canSend: false }), { now }),
+    "结算完成 · 订单群仅可查看历史消息",
+  );
+  assert.equal(
+    display.orderFulfillmentSummary(stageProjection({ stage: "SETTLED", canSend: false }), { now }),
+    "结算完成 · 订单群仅可查看历史消息",
+  );
+});
+
+test("55435 P2: the IM projection parser keeps teamState and rejects a malformed one", () => {
+  assert.equal(client.parseOrderImProjection(stageProjection({ teamState: null })).teamState, null);
+  assert.equal(client.parseOrderImProjection(stageProjection({ teamState: "CREATING" })).teamState, "CREATING");
+  assert.equal(client.parseOrderImProjection(stageProjection({ teamState: "READY" })).teamState, "READY");
+  assert.equal(client.parseOrderImProjection(stageProjection()).teamState, undefined);
+  assert.throws(() => client.parseOrderImProjection(stageProjection({ teamState: 7 })),
+    (error) => error instanceof client.OrderRequestError && error.status === 502);
+});
+
 test("the list tag states a known early stage and stays silent on a ready group", () => {
   assert.equal(display.orderListFulfillmentTag({ status: "PAID", fulfillmentAssignment: { state: "WAITING" } }).label, "待客服接入");
   assert.equal(display.orderListFulfillmentTag({ status: "PAID", fulfillmentAssignment: { state: "ASSIGNED", teamReady: false } }).label, "订单群准备中");
@@ -938,6 +966,7 @@ test("a settled projection names the 72-hour window and its read-only state", as
     orderEndedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
     sendUntil: new Date(Date.now() - 2 * 86400000).toISOString(),
     canSend: false,
+    teamState: "READY",
   });
   const probe = await createProbe(async (input) => {
     const url = String(input);

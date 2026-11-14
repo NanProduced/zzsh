@@ -372,18 +372,22 @@ export function OrderGroupCard({ order, party, onSupport, onGroups }: { order: O
   const assignment = order.fulfillmentAssignment;
   const ready = assignment?.state === "ASSIGNED" && assignment.teamReady === true;
   const waiting = assignment?.state === "WAITING";
-  const copy = legacy
-    ? "本单来自旧平台，不会自动建群，请联系客服。"
-    : ready
-      ? "订单群已就绪。"
-      : waiting
-        ? "等待客服接入并建立订单群。"
-        : "客服接入后可在这里进入订单群。";
+  const terminal = order.status === "COMPLETED" || order.status === "CANCELLED";
+  const terminalWithoutGroup = terminal && (legacy || !ready);
+  const copy = terminalWithoutGroup
+    ? `本单已${order.status === "COMPLETED" ? "完成" : "取消"}，履约期间未建立订单群；如有账务或售后疑问可咨询客服`
+    : legacy
+      ? "本单来自旧平台，不会自动建群，请联系客服。"
+      : ready
+        ? "订单群已就绪。"
+        : waiting
+          ? "等待客服接入并建立订单群。"
+          : "客服接入后可在这里进入订单群。";
   return <section className="order-side-card order-group-card" aria-label="订单群与客服">
     <h2 className="order-section-title">订单群</h2>
     <p className="order-contact-copy"><MessageCircle size={16} aria-hidden="true" />{copy}</p>
     {legacy || !ready
-      ? <button type="button" className="button secondary" onClick={(event) => onSupport(event.currentTarget)}>联系客服</button>
+      ? <button type="button" className="button secondary" onClick={(event) => onSupport(event.currentTarget)}>咨询客服</button>
       : <button type="button" className="button primary" onClick={(event) => onGroups(event.currentTarget)}>打开订单群</button>}
   </section>;
 }

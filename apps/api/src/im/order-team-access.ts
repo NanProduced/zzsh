@@ -302,7 +302,9 @@ export async function readOrderTeamAccess(c:PoolClient,actor:OrderTeamActor,orde
       noEligibleStaff:escalationState==="EXHAUSTED"}};
   if(g.team_state!=="READY"){
     if(operation==="send")throw denied();
-    return {...summary,teamState:g.team_state??null,teamId:null,members:[],canRead:false,canSend:false};
+    // 从未建群（或群未就绪）时不存在群发言截止窗口；否则终态会把 sendUntil 展示成
+    // 「仅可查看历史消息」的群，暗示本单曾经有过群聊。
+    return {...summary,sendUntil:null,teamState:g.team_state??null,teamId:null,members:[],canRead:false,canSend:false};
   }
   const expected={provider:"yunxin" as const,appId:g.app_id as string,realm:actor.realm,kind:actor.realm==="user"?"USER" as const:"ADMIN" as const,platformSubjectId:actor.userId};
   if(!own||own.state!=="JOINED"||own.status!=="READY"||own.account_id!==deriveYunxinAccountId(expected)||own.identity_marker!==buildYunxinIdentityMarker(expected))throw denied();

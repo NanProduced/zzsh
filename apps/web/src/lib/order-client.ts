@@ -281,6 +281,8 @@ export type OrderImProjection = {
   orderEndedAt: string | null;
   sendUntil: string | null;
   canSend: boolean;
+  /** 服务端群状态；缺失表示旧投影未带该字段，此时不能推断群是否就绪。 */
+  teamState?: string | null;
 };
 export type Order = {
   viewerParty?: OrderParty;
@@ -700,6 +702,7 @@ export function parseOrderImProjection(value: unknown): OrderImProjection {
   if (root.cancelReason !== undefined && root.cancelReason !== null && typeof root.cancelReason !== "string") throw invalidOrderIm();
   const refundPending = root.refundPending === undefined ? false : root.refundPending;
   if (typeof refundPending !== "boolean") throw invalidOrderIm();
+  if (root.teamState !== undefined && root.teamState !== null && typeof root.teamState !== "string") throw invalidOrderIm();
   return {
     stage: root.stage as OrderImStage,
     ...(typeof root.cancelReason === "string" ? { cancelReason: root.cancelReason } : {}),
@@ -712,6 +715,7 @@ export function parseOrderImProjection(value: unknown): OrderImProjection {
     orderEndedAt: orderImTime(root.orderEndedAt),
     sendUntil: orderImTime(root.sendUntil),
     ...(root.refundCompletedAt !== undefined ? { refundCompletedAt: orderImTime(root.refundCompletedAt) } : {}),
+    ...(root.teamState !== undefined ? { teamState: root.teamState as string | null } : {}),
     canSend,
   };
 }

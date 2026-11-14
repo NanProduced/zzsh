@@ -138,6 +138,18 @@ function fulfillmentWindowText(sendUntil: string | null, canSend: boolean, now: 
 }
 
 /**
+ * 终态订单若从未建群（服务端 teamState 不是 READY），不存在「历史消息」或发言截止窗口；
+ * 此时只说明本单未建立订单群并给出客服入口。旧投影未带 teamState 时沿用原有窗口说明，
+ * 不把缺失字段猜成未建群。
+ */
+function terminalWindowText(projection: OrderImProjection, now: number): string {
+  if (projection.teamState !== undefined && projection.teamState !== "READY") {
+    return "本单未建立订单群，如有账务或售后疑问可咨询客服";
+  }
+  return fulfillmentWindowText(projection.sendUntil, projection.canSend, now);
+}
+
+/**
  * One compact line: current stage plus the next thing that matters. Due and read-only states come
  * only from the server projection; a missing projection stays "阶段未确认".
  */
@@ -171,15 +183,16 @@ export function orderFulfillmentSummary(
       if (options.ending === "SERVICE") return "结束确认 · 待客服核实";
       return "结束确认 · 等双方确认";
     case "CANCELLED": {
-      if (projection.cancelReason === "MANUAL_CLOSE") return `客服手动结束 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
-      if (projection.cancelReason !== "PRESTART_TERMINATED") return `已取消 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
-      if (options.showRefund === false) return `未开租终止 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      const windowText = terminalWindowText(projection, now);
+      if (projection.cancelReason === "MANUAL_CLOSE") return `客服手动结束 · ${windowText}`;
+      if (projection.cancelReason !== "PRESTART_TERMINATED") return `已取消 · ${windowText}`;
+      if (options.showRefund === false) return `未开租终止 · ${windowText}`;
       if (projection.refundPending) return "未开租终止 · 退款处理中 · 可沟通";
-      if (projection.refundCompletedAt) return `未开租终止 · 退款已完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
-      return `未开租终止 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      if (projection.refundCompletedAt) return `未开租终止 · 退款已完成 · ${windowText}`;
+      return `未开租终止 · ${windowText}`;
     }
     case "SETTLED":
-      return `结算完成 · ${fulfillmentWindowText(projection.sendUntil, projection.canSend, now)}`;
+      return `结算完成 · ${terminalWindowText(projection, now)}`;
     default:
       return "阶段未确认";
   }
@@ -1012,13 +1025,14 @@ export function moneyText(value: unknown): string {
 /**
  * Cents-suffixed posting fields are exact integer strings. A missing value stays unknown ("—"):
  * it is never widened to zero, and the sign is kept because a negative net is a real server fact.
+ * 与 moneyText 对齐，只保留一种货币单位（¥），不再追加「元」造成双单位。
  */
 export function moneyCents(value: string | null | undefined): string {
   if (typeof value !== "string" || !/^-?\d+$/.test(value)) return "—";
   const cents = BigInt(value);
   const sign = cents < 0n ? "-" : "";
   const absolute = cents < 0n ? -cents : cents;
-  return `${sign}¥${absolute / 100n}.${(absolute % 100n).toString().padStart(2, "0")} 元`;
+  return `${sign}¥${absolute / 100n}.${(absolute % 100n).toString().padStart(2, "0")}`;
 }
 
 function amountAt(amounts: Record<string, unknown>, key: string): string {

@@ -122,6 +122,7 @@ export function ChannelPaymentAction({
   onModeChange,
   onPendingChange,
   onPaymentFacts,
+  onAccepted,
   compact = false,
   children,
 }: {
@@ -131,6 +132,7 @@ export function ChannelPaymentAction({
   onModeChange: (active: boolean) => void;
   onPendingChange: (pending: boolean) => void;
   onPaymentFacts?: (facts: OrderPaymentFacts | null) => void;
+  onAccepted?: () => void;
   compact?: boolean;
   children: ReactNode;
 }) {
@@ -150,8 +152,8 @@ export function ChannelPaymentAction({
   const [cashierPending, setCashierPending] = useState(false);
   const [method, setMethod] = useState<ChannelPaymentMethod>("ALIPAY_NATIVE");
 
-  const latest = useRef({ orderId: order.id, onChanged });
-  latest.current = { orderId: order.id, onChanged };
+  const latest = useRef({ orderId: order.id, onChanged, onAccepted });
+  latest.current = { orderId: order.id, onChanged, onAccepted };
 
   const reset = useCallback(() => {
     setSnapshot(null);
@@ -238,6 +240,9 @@ export function ChannelPaymentAction({
       setSnapshot({ userId: acting, orderId: expected, view: next });
       setReadError(null);
       reportPayment.current?.({ ...channelPaymentFacts(next), originalRequestPending: originalRequestPendingRef.current });
+      // APPLIED + 服务端订单已 PAID 是确定回执，不是对未知结果的猜测：向上告知已接纳，
+      // 让外层立即撤掉倒计时、待付款说明和取消入口；未知结果不走这条路径。
+      if (channelApplied(next) && next.order.status === "PAID") latest.current.onAccepted?.();
       if (notify && channelApplied(next)) latest.current.onChanged();
     } catch (error) {
       if (mounted.current && identity.current(acting) && latest.current.orderId === expected && !signal?.aborted) {
@@ -380,7 +385,10 @@ export function ChannelPaymentAction({
   }, [cashierRequestId]);
 
   useEffect(() => {
-    if (applied) triggerOpenPaidOrderGroup(order.id);
+    if (!applied) return;
+    triggerOpenPaidOrderGroup(order.id);
+    // 付款已接纳后，内嵌测试扫码小窗不再有意义，立即收起。
+    setCashierOpen(false);
   }, [applied, order.id]);
 
   if (conflictingIntents) return <p className="order-inline-notice" role="alert">本单有待核对的原支付请求，请联系客服协助处理。</p>;
@@ -486,7 +494,7 @@ export function ChannelPaymentAction({
                     ? channelStateLabels[view.request.state] ?? "支付状态未记录"
                     : "请选择支付方式"}
       </p>
-      {view?.request ? (
+      {!applied && view?.request ? (
         <p className="order-muted">
           {amountKnown ? `待支付 ${channelMoneyText(view.request.amount)}，请使用原支付方式完成付款。` : "支付金额暂时无法确认。"}
         </p>
@@ -573,13 +581,28 @@ export function ChannelPaymentAction({
               <Dialog.Description>订单金额 {channelMoneyText(view?.request?.amount ?? null)} · {selected === "WEIXIN_NATIVE" ? "微信支付" : "支付宝"}</Dialog.Description>
               <div className="order-cashier-code" aria-label="测试二维码区域，不可扫码" />
               <p className="order-muted">测试环境无需真实扫码，点击下方按钮模拟付款。</p>
-              <DemoCheckoutAction order={order} blocked={blocked} onChanged={onChanged} onAccepted={() => triggerOpenPaidOrderGroup(order.id)} onModeChange={ignoreDemoMode} onPendingChange={setCashierPending} embedded expectedScope={cashier.scope}>{null}</DemoCheckoutAction>
+              <DemoCheckoutAction
+                order={order}
+                blocked={blocked}
+                onChanged={onChanged}
+                onAccepted={() => {
+                  setCashierOpen(false);
+                  triggerOpenPaidOrderGroup(order.id);
+                  // 成功回执只说明模拟付款已完成；用独立读回刷新本组件自己的 view，
+                  // 由读回的 APPLIED + PAID 把已接纳状态一路向上传递到 PaymentDialog。
+                  if (userId) void refresh(userId, undefined, true);
+                }}
+                onModeChange={ignoreDemoMode}
+                onPendingChange={setCashierPending}
+                embedded
+                expectedScope={cashier.scope}
+              >{null}</DemoCheckoutAction>
               <Dialog.Close className="button secondary" disabled={cashierPending}>稍后支付</Dialog.Close>
             </Dialog.Popup>
           </Dialog.Portal>
         </Dialog.Root>
       ) : null}
-      {!compact ? <p className="order-trade-note">打开支付页面不代表付款成功；付款状态以平台接纳记录为准，支付后仍须完成交付与开租确认。</p> : null}
+      {!compact && !applied ? <p className="order-trade-note">打开支付页面不代表付款成功；付款状态以平台接纳记录为准，支付后仍须完成交付与开租确认。</p> : null}
     </div>
   );
 }
@@ -592,6 +615,7 @@ export function PaymentAction({
   onAccepted,
   onCancelled,
   embedded = false,
+  paid = false,
 }: {
   order: Order;
   party: OrderParty;
@@ -600,8 +624,10 @@ export function PaymentAction({
   onAccepted?: () => void;
   onCancelled?: () => void;
   embedded?: boolean;
+  paid?: boolean;
 }) {
   const session = useUserSession();
+  const [channelAccepted, setChannelAccepted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unknown, setUnknown] = useState<string | null>(null);
   const [error, setError] = useState<PanelError | null>(null);
@@ -623,6 +649,7 @@ export function PaymentAction({
   }, [order.id, party, receipt]);
 
   const reset = useCallback(() => {
+    setChannelAccepted(false);
     setBusy(false);
     setUnknown(null);
     setError(null);
@@ -798,25 +825,29 @@ export function PaymentAction({
   const paymentOpen = paymentEntryOpen(order);
   const cancelOpen = cancelEntryOpen(order);
   const expired = order.status === "PENDING_PAYMENT" && order.expiredAwaitingCancel === true;
+  // 已知订单不再待支付、原键回执 APPLIED，或渠道读回 APPLIED+PAID，都属于确定生效事实。
+  // unknown / cancelUnknown 的提示与「查询原请求 / 恢复原请求回执」入口始终独立保留，
+  // 不因这里隐藏倒计时和取消入口而消失。
+  const paidNow = paid || order.status !== "PENDING_PAYMENT" || receipt?.disposition === "APPLIED" || channelAccepted;
 
   return (
     <section className={embedded ? "order-payment-embedded" : "order-detail-section order-trade-panel"} id={embedded ? undefined : "order-trade-actions"} aria-label="支付与取消">
       {!embedded ? <div className="order-trade-heading"><h2 className="order-section-title">支付与取消</h2></div> : null}
-      {receipt?.disposition === "APPLIED" ? (
+      {paidNow ? (
         <div className="order-notice is-success" role="status">
           <CheckCircle2 size={17} aria-hidden="true" />
           <div>
-            <strong>支付已接纳{receipt.replay ? "（原回执重放）" : ""}</strong>
+            <strong>支付已接纳{receipt?.replay ? "（原回执重放）" : ""}</strong>
             <span>订单状态以服务端记录为准；支付不等于交付、建群或开租。</span>
           </div>
         </div>
       ) : null}
-      {!embedded && order.status === "PENDING_PAYMENT" && order.holdUntil ? (
+      {!embedded && !paidNow && order.status === "PENDING_PAYMENT" && order.holdUntil ? (
         <p className="order-trade-deadline">
           {expired ? "原支付保留截止" : "支付保留至"} {formatOrderTime(order.holdUntil)}；到期后是否取消以服务端订单状态为准。
         </p>
       ) : null}
-      {expired ? (
+      {expired && !paidNow ? (
         <div className="order-notice is-warning" role="status">
           <Clock3 size={17} aria-hidden="true" />
           <div>
@@ -825,7 +856,7 @@ export function PaymentAction({
           </div>
         </div>
       ) : null}
-      {party === "renter" && !embedded ? (
+      {party === "renter" && !embedded && !paidNow ? (
         <p className="order-muted">付款或取消后，请先确认处理结果。结果尚未确认时，请查询原申请，不要重复操作；确认前暂不能付款或取消。</p>
       ) : null}
       {receipt?.disposition === "REVIEW_REQUIRED" ? (
@@ -849,6 +880,7 @@ export function PaymentAction({
             onModeChange={setChannelMode}
             onPendingChange={setChannelPending}
             onPaymentFacts={onPaymentFacts}
+            onAccepted={() => { setChannelAccepted(true); onAccepted?.(); }}
             compact={embedded}
           >
             <DemoCheckoutAction
@@ -857,6 +889,7 @@ export function PaymentAction({
               onChanged={onChanged}
               onModeChange={setDemoMode}
               onPendingChange={setDemoPending}
+              onAccepted={() => { setChannelAccepted(true); onAccepted?.(); }}
               embedded={embedded}
             >
               <LocalSandboxPaymentAction
@@ -867,7 +900,9 @@ export function PaymentAction({
                 onPendingChange={setLocalPending}
                 compact={embedded}
               >
-                {paymentOpen ? (
+                {paidNow ? (
+                  <p className="order-muted">本单已完成支付，无需再次付款。</p>
+                ) : paymentOpen ? (
                   <button type="button" className="button primary" onClick={() => void pay()} disabled={payLocked}>
                     <WalletCards size={15} aria-hidden="true" />
                     {busy ? "提交支付请求…" : "提交支付（本地测试支付）"}
@@ -878,7 +913,7 @@ export function PaymentAction({
               </LocalSandboxPaymentAction>
             </DemoCheckoutAction>
           </ChannelPaymentAction>
-          {cancelOpen ? (
+          {cancelOpen && !paidNow ? (
             <button ref={cancelButtonRef} type="button" className="button quiet" onClick={() => { setError(null); setCancelDialogOpen(true); }} disabled={cancelLocked}>
               取消订单
             </button>
@@ -887,7 +922,7 @@ export function PaymentAction({
       ) : (
         <p className="order-muted">等待租客完成支付；订单不提供代付或代为接单操作。</p>
       )}
-      {!channelMode && !localMode && !demoMode && !embedded ? (
+      {!paidNow && !channelMode && !localMode && !demoMode && !embedded ? (
         <p className="order-trade-note">当前为本地测试支付入口，测试付款记录不代表支付渠道已扣款。</p>
       ) : null}
       <ConfirmAlertDialog

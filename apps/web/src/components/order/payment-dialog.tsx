@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { X } from "lucide-react";
 import { formatOrderMoney, type Order, type OrderParty } from "@/lib/order-client";
@@ -24,6 +25,11 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
   onAccepted?: () => void;
   onCancelled?: () => void;
 }) {
+  // 外层订单快照可能仍是待支付，但渠道已回执 APPLIED。已接纳是确定事实，必须立刻撤掉
+  // 倒计时与待付款引导；未知回执不在此列，仍由 PaymentAction 完整保留查询与恢复入口。
+  // 按订单号记住已接纳，切换到另一笔订单时自然回到未完成态。
+  const [acceptedOrderId, setAcceptedOrderId] = useState<string | null>(null);
+  const paid = acceptedOrderId === order.id || order.status !== "PENDING_PAYMENT";
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -31,7 +37,7 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
         <Dialog.Popup className="payment-dialog">
           <header className="payment-dialog-head">
             <div>
-              <Dialog.Title className="payment-dialog-title">支付订单</Dialog.Title>
+              <Dialog.Title className="payment-dialog-title">{paid ? "支付已完成" : "支付订单"}</Dialog.Title>
               <Dialog.Description className="payment-dialog-subtitle">
                 {order.displayNo ? `订单 ${order.displayNo}` : "订单号待确认"}
               </Dialog.Description>
@@ -44,8 +50,8 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
           <div className="payment-dialog-body">
             <div className="payment-dialog-hero">
               <div className="payment-dialog-hero-head">
-                <p className="payment-dialog-hero-label">本次应付</p>
-                <PaymentCountdown until={order.holdUntil} expired={order.expiredAwaitingCancel} className="payment-dialog-countdown" />
+                <p className="payment-dialog-hero-label">{paid ? "已支付金额" : "本次应付"}</p>
+                {!paid ? <PaymentCountdown until={order.holdUntil} expired={order.expiredAwaitingCancel} className="payment-dialog-countdown" /> : null}
               </div>
               <strong className="payment-dialog-hero-amount">{formatOrderMoney(order.amounts?.totalDue)}</strong>
               <p className="payment-dialog-hero-sub">{orderAccountTitle(order)}</p>
@@ -62,11 +68,12 @@ export function PaymentDialog({ order, party, open, onOpenChange, onChanged, onP
               party={party}
               onChanged={onChanged}
               onPaymentFacts={onPaymentFacts}
-              onAccepted={onAccepted}
+              onAccepted={() => { setAcceptedOrderId(order.id); onAccepted?.(); }}
               onCancelled={() => { onOpenChange(false); onCancelled?.(); }}
+              paid={paid}
               embedded
             />
-            <p className="payment-dialog-footnote">关闭后仍可从个人中心“待支付”或订单列表继续付款。</p>
+            {!paid ? <p className="payment-dialog-footnote">关闭后仍可从个人中心“待支付”或订单列表继续付款。</p> : null}
           </div>
         </Dialog.Popup>
       </Dialog.Portal>

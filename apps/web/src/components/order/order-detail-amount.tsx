@@ -119,9 +119,9 @@ export function OrderAmountDetails({ order, party, refreshVersion = 0, onFacts }
         <h2 className="order-section-title">订单金额明细</h2>
         {membershipText ? <span className="order-member-badge"><Crown size={13} aria-hidden="true" />{membershipText}</span> : null}
       </div>
-      <span>{party === "owner" ? (facts?.phase === "POSTED" ? "结算净入账" : "预估收益") : order.status === "PENDING_PAYMENT" ? "本次应付" : order.status === "CANCELLED" && !order.paidAt ? "下单金额" : "实付金额"}</span>
+      <span className="order-amount-head-tag">{party === "owner" ? (facts?.phase === "POSTED" ? "结算净入账" : "预估收益") : facts?.phase === "POSTED" || order.status === "COMPLETED" ? "已结算" : order.status === "PENDING_PAYMENT" ? "本次应付" : order.status === "CANCELLED" && !order.paidAt ? "下单金额" : "实付金额"}</span>
     </div>
-    <p className="order-amount-details-note">{party === "owner" ? (facts?.phase === "POSTED" ? "包赔费已按结算规则扣除。" : "预估收益，包赔费按结算规则扣除。") : order.status === "PENDING_PAYMENT" ? "含租金与租客押金，支付后金额以订单记录为准。" : order.status === "CANCELLED" && !order.paidAt ? "订单未支付，以下为下单时的金额记录。" : "退款到账以实际进度为准。"}</p>
+    <p className="order-amount-details-note">{party === "owner" ? (facts?.phase === "POSTED" ? "包赔费已按结算规则扣除。" : "预估收益，包赔费按结算规则扣除。") : facts?.phase === "POSTED" || order.status === "COMPLETED" ? "本单已结算，应退金额以结算结果为准；退款到账以实际进度为准。" : order.status === "PENDING_PAYMENT" ? "含租金与租客押金，支付后金额以订单记录为准。" : order.status === "CANCELLED" && !order.paidAt ? "订单未支付，以下为下单时的金额记录。" : "退款到账以实际进度为准。"}</p>
     <div className="order-amount-details-grid">
       <AmountCard order={order} party={party} facts={facts} readFailed={visible.status === "error" || visible.status === "unavailable"} />
       <div className="order-amount-lines order-lines">
@@ -146,9 +146,11 @@ export function OrderAmountDetails({ order, party, refreshVersion = 0, onFacts }
  * was never in the data. Owner sees the listing quote and the owner settlement; renter sees what they
  * paid and the renter settlement.
  */
-/** The renter-side figure's name for the reading party, never implying a charge that did not happen. */
+/** 已付款/已完成订单的租客侧金额是实际付出的合计；只有未付款订单才叫下单金额或本次应付。 */
 function renterFigureLabel(order: Order): string {
-  return order.status === "PENDING_PAYMENT" ? "待支付金额" : "下单金额";
+  if (order.status === "PENDING_PAYMENT") return "本次应付";
+  if (order.status === "CANCELLED" && !order.paidAt) return "下单金额";
+  return "实付金额";
 }
 
 function AmountCard({ order, party, facts, readFailed }: { order: Order; party: OrderParty; facts: OrderStageFacts | null; readFailed: boolean }) {

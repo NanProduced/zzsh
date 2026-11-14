@@ -459,7 +459,7 @@ function EndingForm({ opening, order, party, onChanged, consumptionMode, extraRe
   );
 }
 
-function DecisionPanel({ version, party, order, disclosure, onChanged, readOnly = false, feeReconfirmationRequired = false }: { version: SettlementVersion; party: OrderParty; order: Order; disclosure?: EarlySettlementDisclosure; onChanged: () => void; readOnly?: boolean; feeReconfirmationRequired?: boolean }) {
+function DecisionPanel({ version, party, order, disclosure, onChanged, onApplied, readOnly = false, feeReconfirmationRequired = false }: { version: SettlementVersion; party: OrderParty; order: Order; disclosure?: EarlySettlementDisclosure; onChanged: () => void; onApplied?: (data: OrderSettlement) => void; readOnly?: boolean; feeReconfirmationRequired?: boolean }) {
   const session = useUserSession();
   const [busy, setBusy] = useState<"CONFIRM" | "REJECT" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -480,7 +480,14 @@ function DecisionPanel({ version, party, order, disclosure, onChanged, readOnly 
   const decided = (version.decisions ?? []).find((decision) => decision.party === myParty);
   const locked = unknown !== null;
   const apply = (acting: string, outcome: WriteOutcome<OrderSettlement>) => {
-    if (outcome.status === "ok") { setRejectOpen(false); onChanged(); return; }
+    // POST .../decisions 的回执本身就是权威的 OrderSettlement（含 posting / stage）。
+    // 最后一方确认时先用它收敛界面，避免弹窗短时仍显示「等待对方确认」。
+    if (outcome.status === "ok") {
+      setRejectOpen(false);
+      if (onApplied) onApplied(outcome.value);
+      else onChanged();
+      return;
+    }
     if (outcome.status === "unknown") { setUnknown(outcome.message); return; }
     if (outcome.status === "blocked") { setError(BLOCKED_MESSAGE); return; }
     if (outcome.status === "unauthorized") { setError(panelError(outcome.error).message); void session.confirm(); return; }
@@ -790,6 +797,13 @@ export function SettlementAction({
     onChanged();
   }, [onChanged]);
 
+  /** 写回执已是权威结算单：立即呈现生效结果并上报阶段事实，外层订单详情仍按原路径刷新。 */
+  const applySettlement = useCallback((data: OrderSettlement) => {
+    setState({ status: "ready", data });
+    report.current?.(stageFacts(data, activeOpening(data.openings), party), false);
+    onChanged();
+  }, [party, onChanged]);
+
   if (state.status === "loading") {
     if (modal) return <div className="order-action-form"><p className="order-muted" role="status">正在读取履约记录…</p></div>;
     return (
@@ -837,6 +851,9 @@ export function SettlementAction({
           <p className="order-muted">开租清单还没有准备好，请稍后刷新或联系客服。</p>
         );
       }
+      // 已过账生效优先于「等待对方确认」：最后一方确认的回执里 posting 已存在，
+      // 此时再展示等待对方确认会与服务端事实矛盾。
+      if (posting) return <PostingResult data={data} order={order} party={party} posting={posting} />;
       if (focus === "decision") {
         if (!current) return <p className="order-muted">当前没有需要你确认的结算版本，请刷新后查看。</p>;
         if (myDecision) {
@@ -848,15 +865,14 @@ export function SettlementAction({
             </div>
           );
         }
-        return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} readOnly={terminal} feeReconfirmationRequired={data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED")} />;
+        return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} onApplied={applySettlement} readOnly={terminal} feeReconfirmationRequired={data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED")} />;
       }
-      if (posting) return <PostingResult data={data} order={order} party={party} posting={posting} />;
       if (current && data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED")) {
-        return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} readOnly={terminal} feeReconfirmationRequired />;
+        return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} onApplied={applySettlement} readOnly={terminal} feeReconfirmationRequired />;
       }
       if (openIntake) return <p className="order-muted">结束申请已提交，客服核对后会生成结算方案。</p>;
       if (current && rejected) return <p className="order-muted">上一版结算未达成一致，请联系客服生成新的方案。</p>;
-      if (current && !myDecision) return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} readOnly={terminal} />;
+      if (current && !myDecision) return <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} onApplied={applySettlement} readOnly={terminal} />;
       if (current && myDecision) return <p className="order-muted">你已确认本版结算，等待对方确认。</p>;
       if (opening && data.rentalStarted) return <EndingForm opening={opening} order={order} party={party} onChanged={refresh} consumptionMode={data.consumptionMode} extraResources={data.extraResources} readOnly={terminal} />;
       return <p className="order-muted">当前没有可执行的结算操作，请稍后刷新或联系客服。</p>;
@@ -889,7 +905,7 @@ export function SettlementAction({
           {posting ? (
             <PostingResult data={data} order={order} party={party} posting={posting} />
           ) : current && data.reasons?.includes("SETTLEMENT_FEE_RECONFIRM_REQUIRED") ? (
-            <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} readOnly feeReconfirmationRequired />
+            <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} onApplied={applySettlement} readOnly feeReconfirmationRequired />
           ) : openIntake ? (
             <div className="order-trade-block">
               <h3>结束申请待客服处理</h3>
@@ -902,7 +918,7 @@ export function SettlementAction({
               <AmountTable rows={decisionAmountRows(party, current)} caption={`被拒绝版本金额明细（${party === "renter" ? "租客口径" : "号主口径"}${isAdjustedVersion(current) ? "，含人工调整" : ""}）`} />
             </div>
           ) : current && !myDecision ? (
-            <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} readOnly={terminal} />
+            <DecisionPanel version={current} party={party} order={order} disclosure={data.earlySettlementDisclosure} onChanged={refresh} onApplied={applySettlement} readOnly={terminal} />
           ) : current && myDecision ? (
             <div className="order-trade-block">
               <h3>等待对方确认 <span className="order-trade-tag">第{current.versionNo}版</span></h3>

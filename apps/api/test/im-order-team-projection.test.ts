@@ -154,6 +154,25 @@ test("terminal orders without their end timestamp fail closed for send but remai
   }
 });
 
+test("55435 P2: a terminal order that never had a group projects no send window and is not readable", async t => {
+  mockUserContext(t);
+  const endedAt = new Date(Date.now() - 1 * HOUR);
+  for (const fixture of [
+    { orderStatus: "COMPLETED", postedAt: endedAt, teamState: null },
+    { orderStatus: "CANCELLED", cancelledAt: endedAt, teamState: null },
+  ] as Fixture[]) {
+    const view = await readOrderTeamAccess(client(fixture), userActor, ORDER_ID);
+    assert.equal(view.teamState, null);
+    assert.equal(view.canRead, false);
+    assert.equal(view.canSend, false);
+    assert.equal(view.sendUntil, null, "an order without a group has no group-message deadline");
+  }
+  // 群已就绪的终态仍保留真实的 72 小时窗口，不被上面的规则误伤。
+  const ready = await readOrderTeamAccess(client({ orderStatus: "COMPLETED", postedAt: endedAt }), userActor, ORDER_ID);
+  assert.equal(ready.canRead, true);
+  assert.equal(ready.sendUntil, new Date(endedAt.getTime() + 72 * HOUR).toISOString());
+});
+
 test("active orders project no end window and keep the existing send permission", async t => {
   mockUserContext(t);
   const view = await readOrderTeamAccess(client({ orderStatus: "PAID" }), userActor, ORDER_ID);
