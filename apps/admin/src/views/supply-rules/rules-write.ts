@@ -13,6 +13,14 @@ const supplyId = (value: unknown): value is string => typeof value === "string" 
 const scheduleKind = (operation: string) => operation === scheduleOperations.price ? "price" : operation === scheduleOperations.mode ? "mode" : null;
 export const isPricingScheduleOperation = (operation: string) => scheduleKind(operation) !== null;
 export const pricingSchedulesPath = (gameId: string) => `/supply/games/${encodeURIComponent(gameId)}/pricing-schedules`;
+export const ruleChangesPath = (gameId: string) => `/supply/games/${encodeURIComponent(gameId)}/rule-changes`;
+const BATCH_CREATE = "supply.rules.rule_change_batch.create";
+const BATCH_VOID = "supply.rules.rule_change_batch.void";
+const isBatch = (operation: string) => operation === BATCH_CREATE || operation === BATCH_VOID;
+export function ruleChangeCommand(gameId: string, body: Record<string, unknown>, id?: string): Command {
+  return { gameId, resourceId: id ?? gameId, operation: id ? BATCH_VOID : BATCH_CREATE,
+    path: `${ruleChangesPath(gameId)}${id ? "/" + encodeURIComponent(id) + "/void" : ""}`, method: "POST", body };
+}
 
 export function pricingScheduleCommand(gameId: string, kind: "price" | "mode", body: Record<string, unknown>): Command {
   const path = kind === "price" ? "pricing-policy-schedules" : "pricing-mode-schedules";
@@ -37,6 +45,15 @@ export const draftCommand = (gameId: string, kind: RuleKind, action: "create" | 
 function receiptOf(value: unknown, operation: string, resourceId?: string, body?: Record<string, unknown>, stored = false): Receipt | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const r = value as Receipt, isRelease = operation === RULES_RELEASE_OPERATION, kind = scheduleKind(operation);
+  if (isBatch(operation)) {
+    const response = value as Record<string, unknown>;
+    if (!supplyId(r.id) || typeof r.effectiveAt !== "string" || !Number.isFinite(Date.parse(r.effectiveAt))
+      || operation === BATCH_VOID && r.id !== resourceId) return null;
+    if (!stored && (response.status !== (operation === BATCH_VOID ? "VOIDED" : "SCHEDULED") ||
+      operation === BATCH_CREATE && (response.gameId !== resourceId || response.announcementVersionId !== body?.announcementVersionId ||
+        response.pricingModel !== body?.pricingModel || Date.parse(r.effectiveAt) !== Date.parse(String(body?.effectiveAt))))) return null;
+    return { id: r.id, effectiveAt: r.effectiveAt };
+  }
   if (kind) {
     const response = value as Record<string, unknown>;
     if (!body || !scheduleBody(body, kind) || !supplyId(r.id) || typeof r.generation !== "string"
@@ -85,12 +102,15 @@ export function parsePendingRulesWrite(raw: string | null, adminId: string): Pen
   const p = value as PendingRulesWrite;
   const id = supplyId, schedule = scheduleKind(p.operation);
   const match = /^supply\.rules\.(price|term|agreement|full_payout_terms)_draft\.(create|update|seal)$/.exec(p.operation);
-  const expected = schedule ? pricingScheduleCommand(p.gameId, schedule, {}) : match ? draftCommand(p.gameId, match[1] as RuleKind, match[2] as "create" | "update" | "seal", {}, p.resourceId) : { path: "/supply/releases", method: "POST" };
+  const expected = isBatch(p.operation) ? ruleChangeCommand(p.gameId, {}, p.operation === BATCH_VOID ? p.resourceId : undefined)
+    : schedule ? pricingScheduleCommand(p.gameId, schedule, {}) : match ? draftCommand(p.gameId, match[1] as RuleKind, match[2] as "create" | "update" | "seal", {}, p.resourceId) : { path: "/supply/releases", method: "POST" };
   if (p.schema !== 1 || p.adminId !== adminId || !id(p.gameId) || !/^idem_[A-Za-z0-9_-]+$/.test(p.key) || !/^[0-9a-f]{64}$/.test(p.fingerprint)
-    || (!schedule && !match && p.operation !== RULES_RELEASE_OPERATION) || p.path !== expected.path || p.method !== expected.method
+    || (!schedule && !match && !isBatch(p.operation) && p.operation !== RULES_RELEASE_OPERATION) || p.path !== expected.path || p.method !== expected.method
     || (p.resourceId !== undefined && !id(p.resourceId)) || (match?.[2] === "create" ? p.resourceId !== undefined : !id(p.resourceId))
     || !p.body || typeof p.body !== "object" || Array.isArray(p.body) || (p.receipt !== undefined && !receiptOf(p.receipt, p.operation, p.resourceId, p.body, true))
     || (schedule && (p.resourceId !== p.gameId || !scheduleBody(p.body, schedule)))
+    || (p.operation === BATCH_CREATE && (p.resourceId !== p.gameId || p.body.gameId !== p.gameId))
+    || (p.operation === BATCH_VOID && (Object.keys(p.body).join() !== "reason" || typeof p.body.reason !== "string"))
     || (p.operation === RULES_RELEASE_OPERATION && (p.resourceId !== p.gameId || !ruleReleaseBody(p.body, p.gameId)))
     || (match?.[2] === "create" && p.body.gameId !== p.gameId)) throw new Error("规则请求恢复记录无法识别，请联系维护者核对原回执。");
   return p;
@@ -149,6 +169,19 @@ export function useRulesWrite(adminId: string, gameId: string, onReload: () => P
     setState({ kind: "accepted", message: "已收到写入回执，正在重新读取规则。" });
     try {
       const kind = scheduleKind(original.operation);
+      if (isBatch(original.operation)) {
+        const result = await adminRequest<{ items: { id: string; gameId: string; status: string; effectiveAt: string; announcementVersionId: string }[] }>(
+          `${ruleChangesPath(original.gameId)}/${encodeURIComponent(receipt.id!)}`);
+        if (!active(sequence)) return;
+        const row = result.items[0];
+        if (!row || row.id !== receipt.id || row.gameId !== original.gameId || row.effectiveAt !== receipt.effectiveAt ||
+          (original.operation === BATCH_VOID ? row.status !== "VOIDED" : row.announcementVersionId !== original.body.announcementVersionId))
+          throw new Error("rule change readback unavailable");
+        await onReload();
+        if (!active(sequence)) return;
+        clear(original); setPending(null); setState({ kind: "done", receipt, operation: original.operation });
+        return;
+      }
       if (kind) {
         const query = new URLSearchParams({ kind, scheduleId: receipt.id! });
         const schedules = await adminRequest<{ available: boolean; confirmed?: PricingScheduleRow | null }>(`${pricingSchedulesPath(original.gameId)}?${query}`);
@@ -205,7 +238,7 @@ export function useRulesWrite(adminId: string, gameId: string, onReload: () => P
           return await settle(original, receipt, sequence);
         } catch (failure) {
           if (sent && original && failure instanceof AdminApiError && failure.status >= 400 && failure.status < 500) {
-            try { clear(original); if (active(sequence)) { setPending(null); setState(failure.status === 409 ? { kind: "conflict", ...(isPricingScheduleOperation(command.operation) ? { message: friendlyError(failure) } : {}) } : { kind: "error", message: friendlyError(failure) }); } }
+            try { clear(original); if (active(sequence)) { setPending(null); setState(failure.status === 409 ? { kind: "conflict", ...(isPricingScheduleOperation(command.operation) || isBatch(command.operation) ? { message: friendlyError(failure) } : {}) } : { kind: "error", message: friendlyError(failure) }); } }
             catch { if (active(sequence)) setState({ kind: "blocked", message: "请求已被明确拒绝，但恢复记录已变化或清理失败，已暂停新的写入。" }); }
             return;
           }
@@ -247,5 +280,5 @@ export function useRulesWrite(adminId: string, gameId: string, onReload: () => P
   const locked = Boolean(pending) || ["blocked", "busy", "recovering"].includes(state.kind);
   useEffect(() => { if (!locked) return; const stop = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; }; window.addEventListener("beforeunload", stop); return () => window.removeEventListener("beforeunload", stop); }, [locked]);
   const dismissResult = () => { if (!pending && !busy.current && state.kind === "done") setState({ kind: "idle" }); };
-  return { pending, state, write, recover, locked, dismissResult };
+  return { pending, state, write, recover, locked, dismissResult, reloadRules: onReload };
 }

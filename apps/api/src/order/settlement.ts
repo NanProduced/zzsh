@@ -74,6 +74,7 @@ export type ComputeSettlementInput = {
   totalPayableRatio?: string | null;
   pricingMode?: "ACTUAL_TOTAL_DISCOUNT_V1" | "ACTUAL_TOTAL_DISCOUNT_V2" | "FIXED_FEE_TOTAL_V1";
   fixedFeeRate?: string;
+  fixedFeeEarlyV2?: boolean;
   haff: SettlementInventoryLine;
   items: readonly SettlementInventoryLine[];
 };
@@ -364,6 +365,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
     }
   } else if (input.fixedFeeRate !== undefined) reasons.push("FIXED_FEE_POLICY_INVALID");
   let haffBase=0n;
+  let fullHaffBase: Rat | null = null;
   const itemCharges: Array<{ itemId: string; buyerCents: bigint; ownerCents: bigint }> = [];
   const exact = input.haff ? parseExactRatio(input.haff.exactRatio, "HAFF", reasons) : null;
   try {
@@ -401,6 +403,7 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
         if(price.n*exact.owner.d<exact.owner.n*price.d)reasons.push("HAFF_BASE_PRICE_INVALID");
         haffBase=rRoundCents(rat(q * price.n, Q * price.d));
         if (fixedPricing) {
+          fullHaffBase = price;
           fixedPrepaidLines.push({ itemId: input.haff.itemId, grossCents: rRoundCents(price) });
           if (fixedRate) F = rat(price.n * fixedRate.value, price.d * 10n ** BigInt(fixedRate.scale));
         }
@@ -536,7 +539,24 @@ export function computeSettlement(input: ComputeSettlementInput): SettlementComp
       else{Hb=allocated[0]!;Gb=allocated.slice(1).reduce((sum,value)=>sum+value,0n);}
     }
   }
-  const makeupCents = totalPricing?rRoundCents(makeup):rRoundCents(radd(exactHb, makeup)) - rRoundCents(exactHb);
+  let makeupCents = totalPricing?rRoundCents(makeup):rRoundCents(radd(exactHb, makeup)) - rRoundCents(exactHb);
+  if (fixedPricing && input.fixedFeeEarlyV2 && fullHaffBase && Q > 0n && started && early === true
+    && input.endReason === "TENANT_VOLUNTARY_EARLY" && typeof input.totalPayableRatio === "string" && !reasons.length) {
+    const ratio = parseNonNegativeDecimal(input.totalPayableRatio, 8, "payable ratio");
+    const unit = 10n ** BigInt(ratio.scale);
+    const maxBasis = rat(fullHaffBase.n * ratio.value * 2n, fullHaffBase.d * unit * 5n);
+    const basis = F.n * maxBasis.d > maxBasis.n * F.d ? maxBasis : F;
+    const materialCents = itemCharges.reduce((sum, line) => sum + line.buyerCents, 0n);
+    const exactGross = radd(rat(fullHaffBase.n * q, fullHaffBase.d * Q), rat(materialCents, 100n));
+    const exactCharge = rat(exactGross.n * ratio.value, exactGross.d * unit);
+    const combined = rRoundCents(radd(exactCharge, makeupExact(basis, q, Q)));
+    // The early curve cannot exceed the first regular charge at the 70% boundary.
+    const firstRegular = (Q * 7n + 9n) / 10n;
+    const boundaryGross = rRoundCents(rat(fullHaffBase.n * firstRegular, fullHaffBase.d * Q)) + materialCents;
+    const boundary = payableCentsFor(boundaryGross, input.totalPayableRatio)!;
+    const capped = combined < boundary ? combined : boundary;
+    makeupCents = capped > Hb + Gb ? capped - Hb - Gb : 0n;
+  }
   if (fixedPricing || stableSpreadPricing) {
     // Discount and excess usage are settled against the combined prepayment before the deposit.
     const remaining = resourcePrepaid - Hb - Gb - makeupCents;

@@ -71,6 +71,7 @@ type LockedOrder = {
   appId: string | null;
   revision: string;
   openingGenerationRecoveryRequired: boolean;
+  fixedFeeEarlyV2?: boolean;
 };
 
 export function settlementSurfaceOpen(flag: boolean | undefined, admission?: FormalCollectionAdmission, sandbox?:LocalFinancialSandbox, demo?:DemoFinanceResource): boolean {
@@ -181,13 +182,14 @@ export async function lockSettlement(client: PoolClient, orderId: string, actor:
   const row = (await client.query<{
     id: string; renterUserId: string; ownerUserId: string; accountId: string; listingVersionId: string; gameId: string; status: string;
     depositCents: string; contentHash: string; ruleReleaseId: string; quote: Record<string, unknown>; appId: string | null; revision: string;
-    openingGenerationRecoveryRequired: boolean;
+    openingGenerationRecoveryRequired: boolean; fixedFeeEarlyV2?: boolean;
   }>(
     `SELECT o.id, o.renter_user_id AS "renterUserId", o.owner_user_id AS "ownerUserId", o.account_id AS "accountId",
             o.listing_version_id AS "listingVersionId", o.game_id AS "gameId", o.status, o.deposit_amount_cents::text AS "depositCents", o.content_hash AS "contentHash",
             o.rule_release_id AS "ruleReleaseId",
             o.quote_snapshot AS quote, o.revision::text AS revision,
             o.opening_generation_recovery_required AS "openingGenerationRecoveryRequired",
+            COALESCE((to_jsonb(o)->>'fixed_fee_early_v2')::boolean,false) AS "fixedFeeEarlyV2",
             g.app_id AS "appId"
        FROM zzsh_order.rental_order o
        LEFT JOIN zzsh_order.im_order_group g ON g.order_id = o.id
@@ -689,7 +691,7 @@ function probe(order: LockedOrder, openingId: string, basis: Basis, lines: Settl
     fullPayout: basis.fullPayout,
     fullPayoutPolicyRef: basis.fundingPolicyRef,
     ...(basis.settlementPricing?.schema === "settlement-pricing-v3"
-      ? {pricingMode:"FIXED_FEE_TOTAL_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio,fixedFeeRate:basis.settlementPricing.fixedFeeRate}
+      ? {pricingMode:"FIXED_FEE_TOTAL_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio,fixedFeeRate:basis.settlementPricing.fixedFeeRate,fixedFeeEarlyV2:order.fixedFeeEarlyV2 === true}
       : basis.settlementPricing ? {pricingMode:basis.personalQuoteSchema==='personal-quote-v6'?"ACTUAL_TOTAL_DISCOUNT_V2" as const:"ACTUAL_TOTAL_DISCOUNT_V1" as const,totalPayableRatio:basis.settlementPricing.payableRatio} : {}),
     haff: lines.find((line) => line.pricingKind === "HAFF_RATIO") ?? basis.haff,
     items: lines.filter((line) => line.pricingKind !== "HAFF_RATIO"),

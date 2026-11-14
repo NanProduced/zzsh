@@ -70,6 +70,7 @@ export function MembershipGrowthAdminView({
   canEditEntitlementRanges = false,
   canSimulateProfit = false,
   binding,
+  simulationGameId,
   approvedMeta,
   localPending = false,
   policyChangeRefreshing = false,
@@ -92,6 +93,7 @@ export function MembershipGrowthAdminView({
   canEditEntitlementRanges?: boolean;
   canSimulateProfit?: boolean;
   binding?: { ruleReleaseId?: string; priceVersionId?: string; sourceRef?: string } | null;
+  simulationGameId?: string;
   approvedMeta?: { id: string; version: string; effectiveAtUtc: string | null; priceVersionId?: string; payloadHash?: string } | null;
   localPending?: boolean;
   policyChangeRefreshing?: boolean;
@@ -380,7 +382,7 @@ export function MembershipGrowthAdminView({
             {canSimulateProfit ? (
               <Button size="sm" variant="outline" onClick={() => setIsSimulateOpen(true)}>
                 <LineChart className="h-3.5 w-3.5 mr-1.5" />
-                租金价差试算
+                会员优惠试算
               </Button>
             ) : null}
             {canEditPolicy ? (
@@ -872,7 +874,7 @@ export function MembershipGrowthAdminView({
       ) : null}
 
       {mounted && canSimulateProfit ? (
-        <ProfitSimulationModal key={`${binding?.ruleReleaseId ?? ""}:${binding?.priceVersionId ?? ""}`} open={isSimulateOpen} onOpenChange={setIsSimulateOpen} ruleReleaseId={binding?.ruleReleaseId ?? ""} priceVersionId={binding?.priceVersionId ?? ""} enabledModes={policy.catalog.enabledModes ?? []} />
+        <ProfitSimulationModal key={`${binding?.ruleReleaseId ?? ""}:${binding?.priceVersionId ?? ""}`} open={isSimulateOpen} onOpenChange={setIsSimulateOpen} ruleReleaseId={binding?.ruleReleaseId ?? ""} priceVersionId={binding?.priceVersionId ?? ""} enabledModes={policy.catalog.enabledModes ?? []} gameId={simulationGameId} />
       ) : null}
     </div>
   );

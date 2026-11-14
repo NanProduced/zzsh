@@ -592,7 +592,7 @@ export type PricingSchedules = { asOf: string } & (
 );
 
 export type SchedulePriceOptions = {
-  items: { id: string; sealedAt: string; fixedFeeRates: PriceVersionRecord["fixedFeeRates"] }[];
+  items: { id: string; revision: string; sealedAt: string; fixedFeeRates: PriceVersionRecord["fixedFeeRates"] }[];
   nextCursor: string | null;
 };
 

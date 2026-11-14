@@ -19,6 +19,8 @@ export type ProfitSimulationContext = {
   priceVersionId: string;
   termVersionId: string;
   enabledModes: AdminPricingMode[];
+  basisKind?: "CURRENT_LISTING";
+  pricingModel?: string;
   safeBoxes: string[];
   resources: { itemId: string; name: string; unit: string; pricingKind: string }[];
   termOptions: { code: string; dailyConsumption: string }[];
@@ -38,7 +40,7 @@ export type ProfitSimulationResult = {
   schema: "membership-profit-simulation.v1";
   baseQuotable: boolean;
   estimateOnly: true;
-  calculation: "RENTAL_SPREAD_BEFORE_FEES";
+  calculation: "RENTAL_SPREAD_BEFORE_FEES" | "FIXED_FEE_AFTER_DISCOUNT";
   basis: { gameId: string; ruleReleaseId: string; priceVersionId: string; termVersionId: string };
   baseline: {
     rentalCents: string;
@@ -178,12 +180,14 @@ export function ProfitSimulationModal({
   ruleReleaseId,
   priceVersionId,
   enabledModes,
+  gameId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   ruleReleaseId: string;
   priceVersionId: string;
   enabledModes: AdminPricingMode[];
+  gameId?: string;
 }) {
   const [loadingContext, setLoadingContext] = useState(false);
   const [context, setContext] = useState<ProfitSimulationContext | null>(null);
@@ -218,7 +222,7 @@ export function ProfitSimulationModal({
 
   useEffect(() => {
     if (!open) return;
-    if (!ruleReleaseId) {
+    if (!gameId && !ruleReleaseId) {
       setContextError("当前未绑定有效的规则发布，无法发起试算。");
       return;
     }
@@ -230,7 +234,7 @@ export function ProfitSimulationModal({
     setInputError(null);
     setDiscountError(null);
     adminRequest<ProfitSimulationContext>(
-      `/membership-growth/profit-simulation-context?ruleReleaseId=${encodeURIComponent(ruleReleaseId)}&priceVersionId=${encodeURIComponent(priceVersionId)}`,
+      `/membership-growth/profit-simulation-context?${gameId ? new URLSearchParams({ gameId }) : new URLSearchParams({ ruleReleaseId, priceVersionId, basis: "current" })}`,
       undefined,
       "GET",
       {},
@@ -254,7 +258,7 @@ export function ProfitSimulationModal({
       controller.abort();
       invalidateSimulation();
     };
-  }, [open, ruleReleaseId, priceVersionId, enabledModesKey]);
+  }, [open, gameId, ruleReleaseId, priceVersionId, enabledModesKey]);
 
   const handleConditionChange = (updater: () => void) => {
     invalidateSimulation();
@@ -323,7 +327,7 @@ export function ProfitSimulationModal({
     const contextSnapshot = context;
     const scenarioSnapshot = scenarios.map((scenario) => ({ ...scenario, lines: scenario.lines.map((line) => ({ ...line })) }));
     const discountSnapshot = discounts.map((discount) => ({ ...discount }));
-    const defaultCondition = { mode: enabledModes[0] ?? "ordinary", safeBoxCode: contextSnapshot.safeBoxes[0] ?? "", termOptionCode: contextSnapshot.termOptions[0]?.code ?? "", priceVersionId };
+    const defaultCondition = { mode: contextSnapshot.enabledModes[0] ?? "ordinary", safeBoxCode: contextSnapshot.safeBoxes[0] ?? "", termOptionCode: contextSnapshot.termOptions[0]?.code ?? "", priceVersionId: contextSnapshot.priceVersionId };
     const ratios = [...new Set(["1", ...discountSnapshot.map((discount) => discount.ratio)])];
     const inputKey = JSON.stringify([ruleReleaseId, priceVersionId, enabledModes, contextSnapshot.termVersionId, contextSnapshot.safeBoxes, contextSnapshot.termOptions, scenarioSnapshot, discountSnapshot]);
     runKeyRef.current = inputKey;
@@ -341,7 +345,8 @@ export function ProfitSimulationModal({
         }
         try {
           const result = await adminRequest<ProfitSimulationResult>("/membership-growth/profit-simulation", {
-            ruleReleaseId,
+            ruleReleaseId: contextSnapshot.ruleReleaseId,
+            ...(contextSnapshot.basisKind === "CURRENT_LISTING" ? { gameId: contextSnapshot.gameId } : {}),
             quoteInput: simulationQuoteInput(contextSnapshot, quantities, defaultCondition),
             payableRatios: ratios,
           }, undefined, {}, controller.signal);
@@ -448,7 +453,7 @@ export function ProfitSimulationModal({
                 <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-3">
                   <div className="space-y-1">
                     <p className="font-semibold text-foreground">本次试算依据</p>
-                    <p className="text-[11px] text-muted-foreground">按打开试算时绑定的封存价目计算；不是实时订单，也不代表当前发布价目。</p>
+                    <p className="text-xs text-muted-foreground">{context.basisKind === "CURRENT_LISTING" ? "按当前新上架价目试算" : "按会员政策绑定价目试算"}{context.pricingModel === "FIXED_FEE" ? " · 固定手续费" : context.pricingModel?.includes("SPREAD") ? " · 价差" : ""}</p>
                   </div>
                   <Badge variant="outline" className="shrink-0 text-[10px]">只读假设</Badge>
                 </div>
@@ -458,9 +463,8 @@ export function ProfitSimulationModal({
                     <div><dt className="inline text-foreground">规则发布：</dt><dd className="inline font-mono">{basisShort(context.ruleReleaseId)}</dd></div>
                     <div><dt className="inline text-foreground">价格版本：</dt><dd className="inline font-mono">{basisShort(context.priceVersionId)}</dd></div>
                     <div><dt className="inline text-foreground">租期版本：</dt><dd className="inline font-mono">{basisShort(context.termVersionId)}</dd></div>
-                    <div><dt className="inline text-foreground">固定条件：</dt><dd className="inline">{enabledModes[0] ?? "ordinary"} · {context.safeBoxes[0] ?? "未提供"} · {context.termOptions[0]?.code ?? "未提供"}</dd></div>
+                    <div><dt className="inline text-foreground">固定条件：</dt><dd className="inline">{context.enabledModes[0] ?? "ordinary"} · {context.safeBoxes[0] ?? "未提供"} · {context.termOptions[0]?.code ?? "未提供"}</dd></div>
                   </dl>
-                  <p className="mt-2 text-[10px] text-muted-foreground">接口未提供可选租期/保险箱；本页不把它们伪装成可调变量。当前发布价目是否与本次封存价目一致，需服务端后续提供投影。</p>
                 </details>
               </div>
 

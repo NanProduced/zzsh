@@ -22,6 +22,7 @@ import { mountPersonalWithdrawalHistory } from "../finance/withdrawal-history-ro
 import type { WithdrawalBankBindingOptions } from "../finance/withdrawal-bank-binding";
 import { mountMembershipGrowthRoutes } from "./membership-growth-routes";
 import { executeMembershipGrowthOperation } from "./membership-growth-approval";
+import { executePricingModeSwitch, PRICING_MODE_SWITCH_OPERATION } from "../supply/rule-change";
 import { createDistributionPolicyApprovalExecutor } from "../finance/distribution-policy-approval";
 import { createDistributionReversalApprovalExecutor, DISTRIBUTION_REVERSAL_OPERATION } from "../finance/distribution-reversal-approval";
 import { mountAdminDistributionReadRoutes } from "../finance/admin-distribution-routes";
@@ -1341,6 +1342,7 @@ export async function mountAuthHandlers(
     },
     testOperationsEnabled: options.testOperationsEnabled,
     distributionPolicyWriteScope: options.distributionScope,
+    pricingApprovalDemo: () => fixedFeeDemo,
     approvalOperationExecutor: (client, input, actor, requestId) => input.operationCode === "distribution.policy.publish"
       ? createDistributionPolicyApprovalExecutor(options.distributionScope)(client, input, actor, requestId)
       : input.operationCode === DISTRIBUTION_REVERSAL_OPERATION
@@ -1349,7 +1351,9 @@ export async function mountAuthHandlers(
           ? executeOrderCompensation(client,input,actor,requestId)
           : input.operationCode === FIXED_DOCUMENT_PUBLISH_OPERATION
             ? executeFixedDocumentPublish(client, input, actor, requestId)
-            : executeMembershipGrowthOperation(client, input, actor, requestId),
+            : input.operationCode === PRICING_MODE_SWITCH_OPERATION
+              ? executePricingModeSwitch(client, input, actor, requestId, fixedFeeDemo)
+              : executeMembershipGrowthOperation(client, input, actor, requestId),
     ...(yunxinRuntime ? {
       imProvisioner: yunxinRuntime.provisioner,
       imIdentityRepository: yunxinRuntime.repository,

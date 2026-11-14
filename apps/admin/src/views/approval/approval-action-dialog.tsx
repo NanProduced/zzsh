@@ -15,6 +15,8 @@ import {
   type RequestDetail as Detail,
 } from "./contract";
 import { SmoothTotpInput } from "../../components/smoothui/animated-otp-input";
+import { Input } from "../../components/ui/input";
+import { beijingLocalToIso, formatBeijing } from "../../lib/audit-labels";
 import {
   MembershipDateTimeField,
   formatCentsToYuan,
@@ -63,6 +65,7 @@ export function ApprovalActionDialog({
   const [confirmCompensation, setConfirmCompensation] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string>();
+  const [pricingTime, setPricingTime] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -77,6 +80,7 @@ export function ApprovalActionDialog({
     setConfirmCompensation(false);
     setSubmitting(false);
     setLocalError(undefined);
+    setPricingTime("");
   }, [open, mode, detail.requestId, detail.entitlementAmendment]);
 
   const highImpact = isHighImpactOperation(detail.operation.code);
@@ -91,6 +95,10 @@ export function ApprovalActionDialog({
     : "";
 
   const buildAmendment = (): ApprovalDecisionAmendment | undefined => {
+    if (detail.pricingTimeAmendment && pricingTime) return {
+      expectedPayloadHash: detail.pricingTimeAmendment.expectedPayloadHash,
+      finalPayload: { ...detail.pricingTimeAmendment.editablePayload, effectiveAt: beijingLocalToIso(pricingTime) },
+    };
     if (!canEdit || !editRequested || !finalPayload) return undefined;
     const base = { ...finalPayload };
     const trimmed = depositAllowanceInput.trim();
@@ -106,7 +114,9 @@ export function ApprovalActionDialog({
     return { expectedPayloadHash: detail.entitlementAmendment!.expectedPayloadHash, finalPayload: base };
   };
 
-  const approveDisabled = busy || blocked || submitting || (highImpact && !/^\d{6}$/.test(totpCode)) || (compensation && !confirmCompensation) || Boolean(editError);
+  const pricingTimeInvalid = pricingTime ? !(Date.parse(beijingLocalToIso(pricingTime)) > Date.now())
+    : Boolean(detail.business?.pricingChange && Date.parse(detail.business.pricingChange.effectiveAt) <= Date.now());
+  const approveDisabled = busy || blocked || submitting || (highImpact && !/^\d{6}$/.test(totpCode)) || (compensation && !confirmCompensation) || Boolean(editError) || pricingTimeInvalid;
   const rejectDisabled = busy || blocked || submitting || reason.trim().length < 3;
   const withdrawDisabled = busy || blocked || submitting;
 
@@ -172,6 +182,11 @@ export function ApprovalActionDialog({
                 <p className="text-xs leading-relaxed text-muted-foreground">打开身份验证器，输入当前 6 位数字；不会自动提交。</p>
               </div>
             ) : null}
+            {detail.pricingTimeAmendment && detail.business?.pricingChange ? <label className="block space-y-1.5">
+              <FieldLabel>重选生效时间（北京时间）</FieldLabel>
+              <Input type="datetime-local" value={pricingTime} onChange={event => setPricingTime(event.target.value)} disabled={busy || submitting} />
+              <p className="text-sm text-muted-foreground">原计划 {formatBeijing(detail.business.pricingChange.effectiveAt)}。新时间须晚于当前时间，并仍在原公告有效期内。</p>
+            </label> : null}
             {compensation ? (
               <label className="flex items-start gap-2 rounded-md border border-border/60 p-3 text-sm leading-relaxed">
                 <Checkbox checked={confirmCompensation} onCheckedChange={(checked) => setConfirmCompensation(checked === true)} />

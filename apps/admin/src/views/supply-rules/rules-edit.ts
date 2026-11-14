@@ -15,9 +15,10 @@ export type EditContext = { price?: PriceVersionRecord; haff: HaffV2 | null; pol
 /** priceVersionId 省略时取线上版本；传入时按该版本（如草稿）读取。 */
 export function editContext(rules: RulesResponse, priceVersionId?: string): EditContext {
   const r = rules.release;
-  const id = priceVersionId ?? r?.priceVersionId;
+  const id = priceVersionId ?? (rules.newListingPrice === undefined ? r?.priceVersionId : rules.newListingPrice?.priceVersionId);
   const price = id ? rules.priceVersions.find((v) => v.id === id) : undefined;
-  return { price, haff: asHaffV2(price?.haffRule), policy: price?.fundingPolicy ?? null, termVersionId: r?.termVersionId };
+  const funding = priceVersionId === undefined ? rules.priceVersions.find(v => v.id === r?.priceVersionId) : price;
+  return { price, haff: asHaffV2(price?.haffRule), policy: funding?.fundingPolicy ?? null, termVersionId: r?.termVersionId };
 }
 
 const centsToYuan = (c: string) => { const n = num(c); return n === null ? "" : String(n / 100); };

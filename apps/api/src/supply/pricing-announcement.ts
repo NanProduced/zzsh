@@ -10,7 +10,7 @@ export async function assertPublishedPricingAnnouncement(client: PoolClient, gam
     JOIN zzsh_content.content_item i ON i.id=v.item_id CROSS JOIN at
     WHERE v.id=$1 AND i.type='ANNOUNCEMENT' AND (i.game_id=$2 OR i.game_id IS NULL)
       AND v.state='PUBLISHED' AND v.published_at<=at.now AND at.now<$3::timestamptz
-      AND ${now.visible} AND ${now.alive} AND ${effective.visible}
+      AND ${now.visible} AND ${now.alive} AND ${effective.visible} AND ${effective.alive}
     FOR SHARE OF v,i`, [versionId, gameId, effectiveAt])).rows[0];
   if (!announcement) throw conflict("请先发布适用于该游戏的调价公告");
 }

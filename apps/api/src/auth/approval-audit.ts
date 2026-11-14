@@ -32,6 +32,7 @@ import { ORDER_COMPENSATION_OPERATION } from '../finance/order-compensation-cont
 import { validateCompensationSubmission } from '../finance/order-compensation-approval';
 import { isUnifiedTotalDiscountContract } from "./membership-growth";
 import { normalizeGrowthInstant } from "./membership-growth-integration";
+import { parseRuleChange, PRICING_MODE_SWITCH_OPERATION, RULE_CHANGE_SCHEDULED, validateRuleChange } from "../supply/rule-change";
 
 const IDEMPOTENCY_KEY_PATTERN = new RegExp(API_V1_TOKEN_PATTERN);
 
@@ -508,8 +509,15 @@ function immutablePayload(body: Record<string, unknown>): { value: Record<string
 }
 
 function assertFinalPayloadTarget(row: RequestRow, final: Record<string, unknown>, expectedHash: string): void {
-  if (!AMENDABLE_ENTITLEMENTS.has(row.operationCode)) invalid("This operation does not support amended approval");
   if (row.operationPayloadHash !== expectedHash) conflict("Approval request payload changed; reload before deciding");
+  if (row.operationCode === PRICING_MODE_SWITCH_OPERATION) {
+    const original = parseRuleChange(row.operationPayload, true);
+    const proposed = parseRuleChange(final, true);
+    if (hashApprovalPayload({ ...original, effectiveAt: null }).hash !== hashApprovalPayload({ ...proposed, effectiveAt: null }).hash)
+      conflict("模式变更审批只允许重选生效时间");
+    return;
+  }
+  if (!AMENDABLE_ENTITLEMENTS.has(row.operationCode)) invalid("This operation does not support amended approval");
   const mutable = new Set(["startsAtUtc", "endsAtUtc", "pricing", "depositWaived", "depositAllowanceCents", "reason"]);
   const fixed = (payload: Record<string, unknown>) => Object.fromEntries(Object.entries(payload).filter(([key]) => !mutable.has(key)));
   if (hashApprovalPayload(fixed(row.operationPayload)).hash !== hashApprovalPayload(fixed(final)).hash) conflict("An amended approval must keep the original recipient and business references");
@@ -883,6 +891,10 @@ async function createRequest(request: AuthSecurityNodeRequest, response: AuthSec
     },
     action: async (client) => {
       if (AMENDABLE_ENTITLEMENTS.has(op) && !isUnifiedTotalDiscountContract(payload.value.pricing)) throw new SecurityApiError(409, "CONFLICT", "礼遇办理已改为统一总价折扣，请刷新并使用新版表单", [{ path: "pricing.scope", code: "INVALID_FIELD" }]);
+      if (op === PRICING_MODE_SWITCH_OPERATION) {
+        if (version !== 1) invalid("模式变更审批版本无效");
+        await validateRuleChange(client, parseRuleChange(payload.value, true), true, null, options.pricingApprovalDemo?.());
+      }
       if (op === "membership.benefit.policy.publish") await validateUnifiedMembershipPolicySubmission(client, payload.value as Record<string, unknown>);
       if (op === "distribution.policy.publish") await validateDistributionPolicySubmission(client, payload.value as Record<string, unknown>, options.distributionPolicyWriteScope);
       if (op === "distribution.earning.reverse") await validateDistributionReversalSubmission(client, payload.value as Record<string, unknown>, context.userId);
@@ -1075,7 +1087,7 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
       const row = await readRequestForUpdate(client, targetRequestId);
       if (row.status !== "PENDING") conflict("This approval request is already closed");
       if (decision === "APPROVE") await assertApprovalObjectFreshness(client, row);
-      if (final) await validateMembershipEntitlementPayload(client, final.value, row.requestedBy);
+      if (final && AMENDABLE_ENTITLEMENTS.has(row.operationCode)) await validateMembershipEntitlementPayload(client, final.value, row.requestedBy);
       const finalStatus: ApprovalStatus = decision === "APPROVE" ? "APPROVED" : "REJECTED";
       await client.query(
         `INSERT INTO "zzsh_iam"."approval_decision" ("id", "request_id", "approver_admin_id", "decision", "reason", "final_payload", "final_payload_hash") VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
@@ -1112,7 +1124,9 @@ async function decideRequest(request: AuthSecurityNodeRequest, response: AuthSec
           [`approval_exec_${randomUUID().replaceAll("-", "")}`, row.id, row.operationCode, executed.resultCode, resultDetail, context.userId],
         );
         const updated = await client.query(
-          `UPDATE "zzsh_iam"."approval_request" SET "status" = 'EXECUTED', "status_reason" = '审批通过并已生效' WHERE "id" = $1 AND "status" = 'APPROVED'`,
+          executed.resultCode === RULE_CHANGE_SCHEDULED
+            ? `UPDATE "zzsh_iam"."approval_request" SET "status" = 'EXECUTED', "status_reason" = '审批通过，已安排生效' WHERE "id" = $1 AND "status" = 'APPROVED'`
+            : `UPDATE "zzsh_iam"."approval_request" SET "status" = 'EXECUTED', "status_reason" = '审批通过并已生效' WHERE "id" = $1 AND "status" = 'APPROVED'`,
           [row.id],
         );
         if (updated.rowCount !== 1) conflict("Approval request changed during execution");
@@ -1627,7 +1641,7 @@ function businessScopeDenied(state: { isBoss: boolean; gameScope: AdminGameScope
   // 结算调整的 gameId 由 OBJECT_GAME_SQL 按 payload.orderId 反查；反查不到时，带游戏范围限制的
   // 账号一律拒绝（R2 的失败关闭），否则「只有 B 游戏范围的运营」又能批任意游戏订单的资金调整。
   if (!gameId) {
-    if (operationCode === DISTRIBUTION_REVERSAL_OPERATION || operationCode === ORDER_COMPENSATION_OPERATION) return true;
+    if (operationCode === DISTRIBUTION_REVERSAL_OPERATION || operationCode === ORDER_COMPENSATION_OPERATION || operationCode === PRICING_MODE_SWITCH_OPERATION) return true;
     return operationCode === SETTLEMENT_ADJUST_OPERATION && !global;
   }
   if (global) return false;
@@ -1825,6 +1839,8 @@ async function requestDetail(request: AuthSecurityNodeRequest, response: AuthSec
     summary: row.summary,
     business: views.business.get(row.id) ?? null,
     entitlementAmendment: editablePayload ? { expectedPayloadHash: row.operationPayloadHash, editablePayload } : null,
+    pricingTimeAmendment: row.operationCode === PRICING_MODE_SWITCH_OPERATION && views.actions.get(row.id)?.some(action => action.action === "approve" && action.allowed)
+      ? { expectedPayloadHash: row.operationPayloadHash, editablePayload: row.operationPayload } : null,
     actions: views.actions.get(row.id) ?? [],
     candidateAvailability: views.candidates.get(row.id) ?? null,
     template: { id: row.templateId, version: row.templateVersion },

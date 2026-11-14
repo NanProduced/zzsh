@@ -6,6 +6,7 @@ import { entitlementPricingSummary, entitlementStateAt, isTotalDiscountContract 
 import { ORDER_COMPENSATION_OPERATION, parseCompensationPayload } from '../finance/order-compensation-contract';
 import { FIXED_DOCUMENT_PUBLISH_OPERATION, FIXED_DOCUMENT_PUBLISH_PERMISSION, FIXED_DOCUMENT_SUBMIT_PERMISSION } from "../legal/fixed-document-contract";
 import { fixedDocumentView, loadFixedDocumentFacts } from "../legal/fixed-document-projection";
+import { parseRuleChange, PRICING_MODE_SWITCH_OPERATION, RULE_CHANGE_SCHEDULED } from "../supply/rule-change";
 
 export const APPROVAL_TEST_OPERATION = "approval.test.execute";
 export const SETTLEMENT_ADJUST_OPERATION = "order.settlement.adjust";
@@ -19,7 +20,7 @@ export const APPROVAL_EXECUTION_MODE = {
 } as const;
 
 export type ApprovalExecutionMode = (typeof APPROVAL_EXECUTION_MODE)[keyof typeof APPROVAL_EXECUTION_MODE];
-export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "compensation" | "content" | "test";
+export type ApprovalBusinessType = "membership" | "distribution" | "settlement" | "compensation" | "content" | "pricing" | "test";
 
 export type ApprovalOperationRegistration = {
   operationCode: string;
@@ -44,6 +45,7 @@ const REGISTRATIONS: readonly ApprovalOperationRegistration[] = [
   { operationCode: SETTLEMENT_ADJUST_OPERATION, businessType: "settlement", title: "人工调整订单结算", executionMode: SOURCE, testOnly: false, permissionStage: null },
   { operationCode: ORDER_COMPENSATION_OPERATION, businessType: "compensation", title: "订单全额包赔赔偿", executionMode: GENERIC, testOnly: false, permissionStage: "DECIDE" },
   { operationCode: FIXED_DOCUMENT_PUBLISH_OPERATION, businessType: "content", title: "固定文书发布", executionMode: GENERIC, testOnly: false, permissionStage: "EXECUTE" },
+  { operationCode: PRICING_MODE_SWITCH_OPERATION, businessType: "pricing", title: "切换计价模式", executionMode: GENERIC, testOnly: false, permissionStage: "DECIDE" },
   { operationCode: APPROVAL_TEST_OPERATION, businessType: "test", title: "本地非资金测试动作", executionMode: GENERIC, testOnly: true, permissionStage: null },
 ];
 
@@ -61,6 +63,7 @@ export function approvalRegistration(operationCode: string): ApprovalOperationRe
  * 避免预检与实际执行各写一份而漂移。
  */
 export function membershipBusinessPermission(operationCode: string, stage: "REQUEST" | "DECIDE" | "EXECUTE"): string | null {
+  if (operationCode === PRICING_MODE_SWITCH_OPERATION) return stage === "REQUEST" ? ADMIN_PERMISSION.supplyRulesEdit : ADMIN_PERMISSION.supplyRulesActivate;
   if (operationCode === ORDER_COMPENSATION_OPERATION) return stage === "REQUEST" ? ADMIN_PERMISSION.orderCompensationRequest : ADMIN_PERMISSION.orderCompensationApprove;
   if (operationCode === "distribution.policy.publish") return "personal.distribution.policy.manage";
   // 固定文书发布：运营 / BOSS 提交与批准（含自批），客服不能改；批准即执行，决定与执行同一权限。
@@ -78,14 +81,15 @@ export function membershipBusinessPermission(operationCode: string, stage: "REQU
 
 export function membershipDecisionRequiresBoss(operationCode: string): boolean {
   // Owner 已定：只有会员权益政策和订单全额包赔赔偿需要 Boss 角色；分销政策下放运营。
-  return operationCode === "membership.benefit.policy.publish" || operationCode === ORDER_COMPENSATION_OPERATION;
+  return operationCode === "membership.benefit.policy.publish" || operationCode === ORDER_COMPENSATION_OPERATION || operationCode === PRICING_MODE_SWITCH_OPERATION;
 }
 
 /** 高影响批准的批准动作需要动态码；驳回、撤回与中低影响批准都不需要，也不再要密码。 */
 export function approvalDecisionRequiresTotp(operationCode: string): boolean {
   return operationCode === "membership.benefit.policy.publish"
     || operationCode === "distribution.policy.publish"
-    || operationCode === ORDER_COMPENSATION_OPERATION;
+    || operationCode === ORDER_COMPENSATION_OPERATION
+    || operationCode === PRICING_MODE_SWITCH_OPERATION;
 }
 
 /** 执行侧是否要求游戏对象范围：与会员执行器实际校验保持一致，不机械加严审批前置。 */
@@ -669,19 +673,23 @@ export async function projectApprovalBusinesses(
   const membership = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "membership");
   const settlements = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "settlement");
   const content = rows.filter((row) => approvalRegistration(row.operationCode)?.businessType === "content");
+  const pricing = rows.filter(row => row.operationCode === PRICING_MODE_SWITCH_OPERATION && row.status === "EXECUTED");
   const unknown = rows.filter((row) => {
     const registration = approvalRegistration(row.operationCode);
     return !registration || (registration.businessType !== "membership" && registration.businessType !== "settlement" && registration.businessType !== "content");
   });
 
-  const [entitlements, policies, settlementRows, executions, reversalEarnings, compensationProofs, fixedFacts] = await Promise.all([
+  const [entitlements, policies, settlementRows, executions, reversalEarnings, compensationProofs, fixedFacts, pricingBatches] = await Promise.all([
     loadEntitlements(client, membership),
     loadPolicies(client, membership),
     loadSettlements(client, settlements),
-    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution", "compensation", "content"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
+    loadExecutionReceipts(client, rows.filter(row => ["membership", "distribution", "compensation", "content", "pricing"].includes(approvalRegistration(row.operationCode)?.businessType ?? ""))),
     loadReversalEarnings(client, unknown.filter(row => row.operationCode === "distribution.earning.reverse")),
     loadCompensationProofs(client, unknown.filter(row => row.operationCode === ORDER_COMPENSATION_OPERATION)),
     loadFixedDocumentFacts(client, content),
+    pricing.length ? client.query<{ requestId: string; id: string; status: string }>(`SELECT approval_request_id AS "requestId",id,
+      CASE WHEN voided_at IS NOT NULL THEN 'VOIDED' WHEN effective_at<=clock_timestamp() THEN 'EFFECTIVE' ELSE 'SCHEDULED' END AS status
+      FROM zzsh_supply.rule_change_batch WHERE approval_request_id=ANY($1::text[])`, [pricing.map(row => row.id)]) : null,
   ]);
   const gameIds = new Set<string>();
   const userIds = new Set<string>();
@@ -737,6 +745,20 @@ export async function projectApprovalBusinesses(
       operationCode: row.operationCode,
       executionMode: registration?.executionMode ?? APPROVAL_EXECUTION_MODE.unsupported,
     };
+    if (row.operationCode === PRICING_MODE_SWITCH_OPERATION) {
+      const original = parseRuleChange(row.operationPayload, true);
+      if (!scopeAllowsGame(viewer.gameScope, viewer.access.isBoss, original.gameId)) {
+        views.set(row.id, restricted(base, "GAME_SCOPE_DENIED"));
+        continue;
+      }
+      const approved = row.finalPayload ? parseRuleChange(row.finalPayload, true) : original;
+      const execution = executions.get(row.id);
+      const batch = pricingBatches?.rows.find(candidate => candidate.requestId === row.id && execution?.resultCode === RULE_CHANGE_SCHEDULED && execution.resultDetail === candidate.id);
+      views.set(row.id, { ...base, summaryAvailable: true, detailsAvailable: true,
+        pricingChange: { ...approved, originallyRequestedAt: original.effectiveAt,
+          batchId: batch?.id ?? null, batchStatus: batch?.status ?? null } });
+      continue;
+    }
     if (row.operationCode === ORDER_COMPENSATION_OPERATION) {
       const payload = parseCompensationPayload(row.operationPayload);
       if (!payload || !viewer.access.isBoss && !hasPermission(viewer.access, ADMIN_PERMISSION.orderRead)) { views.set(row.id, restricted(base, 'BUSINESS_PERMISSION_REQUIRED')); continue; }

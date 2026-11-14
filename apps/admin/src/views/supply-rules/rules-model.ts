@@ -215,6 +215,10 @@ export function priceDiff(rules: RulesResponse, fromId: string | undefined, toId
   if (!b) return [{ group: "价格规则", label: "所选版本", before: fromId ?? "未提供", after: "版本内容未提供，无法完成对比" }];
   const rows: RuleDiffRow[] = [];
   for (const key of ["mode", "commissionRate", "roundingPolicy", "compensationPolicyRef"] as const) appendDiff(rows, "价格规则", DIFF_LABELS[key]!, a?.[key], b[key]);
+  for (const [key, label] of [["ordinary", "普通"], ["custom", "自定义"], ["fast", "极速"]] as const) {
+    const before = a?.fixedFeeRates?.[key], after = b.fixedFeeRates?.[key];
+    if (before !== after) appendDiff(rows, "手续费率", `${label}手续费率`, before === undefined ? undefined : fixedFeePercent(before), after === undefined ? undefined : fixedFeePercent(after));
+  }
   appendDiff(rows, "哈夫币价格", "", a?.haffRule, b.haffRule);
   const fa = a?.fundingPolicy ?? undefined, fb = b.fundingPolicy ?? undefined;
   const strip = (f: typeof fa) => { if (!f || typeof f !== "object") return f; const { recommendation: _r, ...rest } = f as Record<string, unknown>; return rest; };

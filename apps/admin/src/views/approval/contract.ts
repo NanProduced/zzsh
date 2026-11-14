@@ -41,8 +41,12 @@ export function receiptEnvelopeIssue(result: RecoveryResult, bound: { key: strin
     case "approval.request.create":
       return status === "PENDING" ? null : "创建回执缺少待审批状态";
     case "approval.request.decide": {
-      // 决定命令的返回是 APPROVED / REJECTED；PENDING 或未知值都不是终态。
-      if (status === 'EXECUTED') return receipt.decision === 'APPROVED' && receipt.executionStatus === 'SUCCEEDED' && receipt.resultCode === 'ORDER_COMPENSATION_POSTED' && typeof receipt.businessResultRef === 'string' && /^comp_[a-f0-9]{40}$/.test(receipt.businessResultRef) ? null : '审批入账回执不完整';
+      if (status === "EXECUTED") {
+        const ref = receipt.businessResultRef;
+        if (receipt.decision !== "APPROVED" || receipt.executionStatus !== "SUCCEEDED" || typeof ref !== "string") return "审批执行回执不完整";
+        if (receipt.resultCode === "RULE_CHANGE_SCHEDULED") return /^rule_change_[a-f0-9]{32}$/.test(ref) ? null : "审批排期回执不完整";
+        return receipt.resultCode === "ORDER_COMPENSATION_POSTED" && /^comp_[a-f0-9]{40}$/.test(ref) ? null : "审批入账回执不完整";
+      }
       if (status !== "APPROVED" && status !== "REJECTED") return "决定回执不是已生效的批准或驳回终态";
       if (receipt.decision !== undefined && receipt.decision !== status) return "决定回执的决定与状态互相矛盾";
       return null;
@@ -152,6 +156,9 @@ export type BusinessView = {
   costBasis?: { priceVersionId: string | null; ruleReleaseId: string | null };
   /** 分销申请的冻结改动，不是当前全局政策或完整原值。 */
   policyChange?: { schema?: string; initial?: boolean; expectedPolicyId: string | null; expectedRevision: string | null; expectedPolicyDigest: string | null; changes?: Record<string, unknown>; reason: string | null };
+  pricingChange?: { gameId: string; pricingModel: "FIXED_FEE" | "SPREAD"; effectiveAt: string; originallyRequestedAt: string; announcementVersionId: string;
+    price: { version: { id: string } } | null; combination: { funding: { id: string }; term: { id: string }; agreement: { id: string } } | null; batchId: string | null;
+    batchStatus: "SCHEDULED" | "EFFECTIVE" | "VOIDED" | null };
   /** displayNo 为订单展示号；旧结构只有 orderId，展示时优先取 displayNo。 */
   compensation?: { orderId:string;displayNo?:string|null;origin:'NATIVE'|'LEGACY';gameId:string;ownerUserId:string;ownerName?:string|null;amountCents:string;caseRef:string;reason:string;evidenceRef:string;sourceDigest:string };
   /** 分销佣金冲回的冻结原事实；批准只授权冲回，不直接改余额。 */
@@ -214,6 +221,7 @@ export type AuditEvent = {
 
 export type RequestDetail = Omit<RequestSummary, "operationCode"> & {
   entitlementAmendment?: { expectedPayloadHash: string; editablePayload: EntitlementAmendmentPayload } | null;
+  pricingTimeAmendment?: { expectedPayloadHash: string; editablePayload: Record<string, unknown> } | null;
   operation: {
     code: string; triggerCondition: string; payloadVersion: number; payloadHash: string;
     executionMode?: string; payload?: Record<string, unknown>;
@@ -231,7 +239,7 @@ export type EntitlementAmendmentPayload = Record<string, unknown> & {
   startsAtUtc: string; endsAtUtc: string; depositWaived: boolean; depositAllowanceCents?: string; reason: string;
   pricing: Record<string, unknown> & { payableRatio: string };
 };
-export type ApprovalDecisionAmendment = { expectedPayloadHash: string; finalPayload: EntitlementAmendmentPayload };
+export type ApprovalDecisionAmendment = { expectedPayloadHash: string; finalPayload: Record<string, unknown> };
 
 export type OperationTrigger = {
   triggerCondition: string; templateVersion: number;
@@ -622,6 +630,7 @@ export const OPERATION_TITLES: Record<string, string> = {
   "membership.entitlement.revoke": "撤销会员礼遇",
   "distribution.earning.reverse": "冲回分销佣金",
   "content.fixed_document.publish": "固定文书发布",
+  "supply.rules.mode_switch": "切换计价模式",
   "approval.test.execute": "本地非资金测试动作",
 };
 
@@ -630,6 +639,7 @@ export const HIGH_IMPACT_OPERATIONS = new Set([
   "membership.benefit.policy.publish",
   "distribution.policy.publish",
   "order.compensation.grant",
+  "supply.rules.mode_switch",
 ]);
 
 export function isHighImpactOperation(code: string | undefined | null): boolean {
@@ -647,6 +657,13 @@ export function operationLevel(code: string | undefined | null): RiskLevel {
 
 /** 结算调整单批准后到订单完成确认/过账之间，用专用状态文案，不显示通用「已生效」。 */
 export function requestStatusView(input: { status: string; operationCode?: string | null; business?: BusinessView }): { label: string; tone: InlineStatusTone } {
+  if (input.operationCode === "supply.rules.mode_switch" && input.status === "EXECUTED") {
+    const batch = input.business?.pricingChange?.batchStatus;
+    return batch === "EFFECTIVE" ? { label: "已生效", tone: "success" }
+      : batch === "VOIDED" ? { label: "排期已作废", tone: "warning" }
+        : batch === "SCHEDULED" ? { label: "待生效", tone: "warning" }
+          : { label: "排期待核对", tone: "warning" };
+  }
   if (input.operationCode === "order.settlement.adjust" && input.status === "APPROVED") {
     return input.business?.settlementResult?.posted === true
       ? { label: "已完成", tone: "success" }
@@ -664,6 +681,7 @@ export type RuleRow = {
 export const RULES_COLUMNS = ["类型", "谁提交", "谁批准", "能否自批", "动态码", "批准后", "在哪发起"] as const;
 
 export const RULES_ROWS: RuleRow[] = [
+  { type: "切换计价模式", submitters: "有规则编辑权限的管理员", approvers: "仅 Boss", selfApprove: "Boss 可以", totp: "要", afterApprove: "整批安排生效", entry: "租赁定价 · 调价排期" },
   { type: "发布会员权益政策", submitters: "运营、Boss", approvers: "仅 Boss", selfApprove: "Boss 可以", totp: "要", afterApprove: "立即发布", entry: "会员成长页" },
   { type: "调整分销政策", submitters: "运营、Boss", approvers: "运营、Boss", selfApprove: "可以", totp: "要", afterApprove: "立即生成新版本", entry: "分销政策页" },
   { type: "订单全额包赔赔偿", submitters: "客服、运营、Boss", approvers: "仅 Boss", selfApprove: "Boss 可以", totp: "要", afterApprove: "立即记入号主余额", entry: "订单详情" },

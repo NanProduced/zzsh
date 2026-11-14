@@ -267,6 +267,13 @@ export async function applyRuntimePrivileges(pool: Pick<Pool, "query">, runtimeR
   if ((await pool.query("SELECT to_regclass('zzsh_iam.admin_workspace_layout') AS relation")).rows[0]?.relation) {
     await pool.query(`GRANT SELECT, INSERT, UPDATE ON TABLE "zzsh_iam"."admin_workspace_layout" TO ${runtimeUser}`);
   }
+  if ((await pool.query("SELECT to_regclass('zzsh_supply.rule_change_batch') AS relation")).rows[0]?.relation) {
+    await pool.query(`
+      REVOKE UPDATE, DELETE, TRUNCATE ON zzsh_supply.rule_change_batch,zzsh_supply.pricing_policy_schedule,zzsh_supply.pricing_mode_schedule FROM ${runtimeUser};
+      GRANT UPDATE (voided_at,voided_by_admin_id,void_reason) ON zzsh_supply.rule_change_batch TO ${runtimeUser};
+      GRANT UPDATE (voided_at) ON zzsh_supply.pricing_policy_schedule,zzsh_supply.pricing_mode_schedule,zzsh_supply.rule_release TO ${runtimeUser};
+    `);
+  }
   await configureSkinIdentityPrivileges(pool, runtimeRole);
   const fundingValidators = [
     "zzsh_supply.valid_funding_policy_legacy_v1(jsonb)",

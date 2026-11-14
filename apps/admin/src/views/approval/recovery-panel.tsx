@@ -17,7 +17,7 @@ export type RecoveryLookup =
 
 const RECEIPT_FIELDS: Array<[string, (receipt: NonNullable<RecoveryResult["receipt"]>) => string | null]> = [
   ["申请编号", (receipt) => receipt.approvalRequestId ?? null],
-  ["审批状态", (receipt) => (receipt.status ? statusView(receipt.status).label : null)],
+  ["审批状态", (receipt) => receipt.resultCode === "RULE_CHANGE_SCHEDULED" ? "已批准并排期" : (receipt.status ? statusView(receipt.status).label : null)],
   ["决定", (receipt) => (receipt.decision === "APPROVED" ? "批准" : receipt.decision === "REJECTED" ? "驳回" : receipt.decision ?? null)],
   ["执行状态", (receipt) => (receipt.executionStatus ? executionView(receipt.executionStatus).label : null)],
   ["结果码", (receipt) => receipt.resultCode ?? null],

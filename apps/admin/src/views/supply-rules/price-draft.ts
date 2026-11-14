@@ -16,7 +16,7 @@ export function standardLineBodies(lines: PriceLineRecord[], mode: PriceVersionR
 
 /** 编辑基线来源：当前生效价格版本，缺省时取最新封存版本。 */
 export function sourcePriceVersion(rules: RulesResponse): PriceVersionRecord | undefined {
-  return rules.release ? rules.priceVersions.find(v => v.id === rules.release?.priceVersionId)
+  return rules.release ? rules.priceVersions.find(v => v.id === (rules.newListingPrice === undefined ? rules.release?.priceVersionId : rules.newListingPrice?.priceVersionId))
     : rules.priceVersions.find(v => v.status === "SEALED" && !v.fixedFeeRates);
 }
 
@@ -40,7 +40,8 @@ export function priceSaveBody(rules: RulesResponse, target: PriceVersionRecord, 
   }
   if (source) {
     if (target.haffRule === null && !("haffRule" in patch) && source.haffRule && !target.fixedFeeRates) body.haffRule = source.haffRule;
-    if (!target.fixedFeeRates && !target.fundingPolicy && !("fundingPolicy" in patch) && source.fundingPolicy) body.fundingPolicy = source.fundingPolicy;
+    const funding = rules.release ? rules.priceVersions.find(version => version.id === rules.release?.priceVersionId)?.fundingPolicy : source.fundingPolicy;
+    if (!target.fixedFeeRates && !target.fundingPolicy && !("fundingPolicy" in patch) && funding) body.fundingPolicy = funding;
     if (!("roundingPolicy" in patch) && !target.roundingPolicy && source.roundingPolicy) body.roundingPolicy = source.roundingPolicy;
   }
   return body;

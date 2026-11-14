@@ -161,6 +161,7 @@ export type AuthSecurityOptions = {
   accountCancelObligationReader: AccountCancelObligationReader;
   testOperationsEnabled: boolean;
   approvalOperationExecutor?: ApprovalOperationExecutor;
+  pricingApprovalDemo?: () => import("../finance/ecs-test-demo-resource").DemoFinanceResource | undefined;
   /** Same explicit write capability as the distribution executor; never the read-only scope. */
   distributionPolicyWriteScope?: import('../finance/distribution-policy-store').LocalDistributionScope;
   imProvisioner?: ImIdentityProvisioner;

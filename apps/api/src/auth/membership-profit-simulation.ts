@@ -5,7 +5,11 @@ import { centsOfAmount, payableCentsFor } from "./membership-total-discount";
 import { parseDepositAllowanceCents } from "./membership-growth";
 import { SecurityApiError } from "./security-core";
 import { quotePreview } from "../supply/rules";
-import { assertGameScope, ensureOnlyFields } from "../supply/supply-util";
+import { fixedFeeAllowsPayableRatio } from "../supply/fixed-fee";
+import { assertGameScope, conflict, ensureOnlyFields } from "../supply/supply-util";
+import { effectiveRuleRelease } from "../supply/effective-rule-release";
+import { readNewListingPrice } from "../supply/pricing-policy-schedule";
+import { sealedEnabledRentalModes } from "./membership-growth";
 import type { ProjectedQuote } from "../supply/pricing";
 
 type Viewer = { adminId: string; access: EffectiveAdminAccess };
@@ -37,14 +41,17 @@ export function simulateMembershipProfit(quote: ProjectedQuote, payableRatios: u
     lineOwner += centsOfAmount(line.ownerAmount.amount);
   }
   if (haff + material !== rental || lineOwner !== owner) throw unavailable();
+  const fixedFee = quote.schemaVersion === 4;
+  const rate = quote.pricingInputs.commissionRate;
+  if (fixedFee && !rate) throw unavailable();
   return {
-    schema: "membership-profit-simulation.v1", calculation: "RENTAL_SPREAD_BEFORE_FEES", estimateOnly: true,
+    schema: "membership-profit-simulation.v1", calculation: fixedFee ? "FIXED_FEE_AFTER_DISCOUNT" : "RENTAL_SPREAD_BEFORE_FEES", estimateOnly: true,
     excluded: ["DEPOSIT", "PUBLISHER_BAIL", "PAYMENT_FEES", "DISTRIBUTION_COMMISSION", "OPERATING_EXPENSES"],
     baseline: { rentalCents: rental.toString(), haffRentalCents: haff.toString(), materialFeesCents: material.toString(), ownerIncomeCents: owner.toString(), platformSpreadCents: (rental - owner).toString(), depositCents: quote.tenantDeposit == null ? null : centsOfAmount(quote.tenantDeposit.amount).toString(), termSeconds: quote.termSeconds },
     breakEven: rental === 0n ? null : { numerator: owner.toString(), denominator: rental.toString() },
     points: ratios.map(payableRatio => {
       const payable = payableCentsFor(rental, payableRatio)!;
-      return { payableRatio, payableRentalCents: payable.toString(), discountCents: (rental - payable).toString(), ownerIncomeCents: owner.toString(), platformSpreadCents: (payable - owner).toString(), ownerFloorSatisfied: payable >= owner, spreadRate: payable === 0n ? null : { numerator: (payable - owner).toString(), denominator: payable.toString() } };
+      return { payableRatio, payableRentalCents: payable.toString(), discountCents: (rental - payable).toString(), ownerIncomeCents: owner.toString(), platformSpreadCents: (payable - owner).toString(), ownerFloorSatisfied: payable >= owner && (!fixedFee || fixedFeeAllowsPayableRatio(rate!, payableRatio)), spreadRate: payable === 0n ? null : { numerator: (payable - owner).toString(), denominator: payable.toString() } };
     }),
   };
 }
@@ -58,21 +65,61 @@ async function simulationBasis(client: PoolClient, viewer: Viewer, ruleReleaseId
   return sealed;
 }
 
-export async function readMembershipProfitSimulationContext(client: PoolClient, viewer: Viewer, ruleReleaseId: string, priceVersionId: string) {
+async function currentListingSimulationBasis(client: PoolClient, viewer: Viewer, gameId: string) {
+  if (!canSimulateMembershipProfit(viewer.access)) throw new SecurityApiError(403, "FORBIDDEN", "Membership policy and internal quote read permissions are required");
+  await assertGameScope(client, viewer.adminId, viewer.access.isBoss, gameId);
+  const release = (await client.query<{ ruleReleaseId: string; basePriceVersionId: string; termVersionId: string; asOf: string }>(`SELECT
+    r.id AS "ruleReleaseId",r.price_version_id AS "basePriceVersionId",r.term_version_id AS "termVersionId",
+    to_char(transaction_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "asOf"
+    FROM zzsh_supply.game g JOIN zzsh_supply.rule_release r ON r.id=${effectiveRuleRelease("g")}
+    WHERE g.id=$1 AND g.enabled`, [gameId])).rows[0];
+  if (!release) throw unavailable();
+  const current = await readNewListingPrice(client, gameId, release.basePriceVersionId, release.asOf);
+  const price = (await client.query<{ rule: unknown }>(`SELECT haff_rule AS rule
+    FROM zzsh_supply.price_version WHERE id=$1 AND game_id=$2 AND status='SEALED'`, [current.priceVersionId, gameId])).rows[0];
+  const modes = price && sealedEnabledRentalModes(price.rule);
+  if (!price || !modes) throw unavailable();
+  const rule = price.rule as { baseBySafeBox?: Record<string, unknown> };
+  const resources = (await client.query<{ itemId: string; name: string; unit: string; pricingKind: string }>(`SELECT
+    l.item_id AS "itemId",i.name,i.unit,l.pricing_kind AS "pricingKind"
+    FROM zzsh_supply.price_line l JOIN zzsh_supply.billable_item i ON i.id=l.item_id
+    WHERE l.price_version_id=$1 AND l.customer_tier='STANDARD' ORDER BY l.item_id`, [current.priceVersionId])).rows;
+  return { gameId, ...release, priceVersionId: current.priceVersionId, pricingModel: current.pricingModel,
+    enabledModes: modes, catalog: { resources, safeBoxes: Object.keys(rule.baseBySafeBox ?? {}).sort() } };
+}
+
+export async function readMembershipProfitSimulationContext(client: PoolClient, viewer: Viewer, ruleReleaseId: string, priceVersionId: string, gameId?: string, currentFromBinding = false) {
+  if (currentFromBinding) {
+    const bound = await simulationBasis(client, viewer, ruleReleaseId, priceVersionId);
+    gameId = bound.gameId;
+  }
+  if (gameId !== undefined) {
+    const current = await currentListingSimulationBasis(client, viewer, gameId);
+    const termOptions = (await client.query<{ code: string; dailyConsumption: string }>(`SELECT code, daily_consumption::text AS "dailyConsumption" FROM zzsh_supply.term_option WHERE version_id=$1 ORDER BY code`, [current.termVersionId])).rows;
+    return { schema: "membership-profit-simulation-context.v1", gameId, ruleReleaseId: current.ruleReleaseId, priceVersionId: current.priceVersionId,
+      termVersionId: current.termVersionId, enabledModes: current.enabledModes, pricingModel: current.pricingModel,
+      safeBoxes: current.catalog.safeBoxes, resources: current.catalog.resources, termOptions, basisKind: "CURRENT_LISTING" };
+  }
   const sealed = await simulationBasis(client, viewer, ruleReleaseId, priceVersionId);
   const termOptions = (await client.query<{ code: string; dailyConsumption: string }>(`SELECT code,daily_consumption::text AS "dailyConsumption" FROM zzsh_supply.term_option WHERE version_id=$1 ORDER BY code`, [sealed.termVersionId])).rows;
   return { schema: "membership-profit-simulation-context.v1", gameId: sealed.gameId, ruleReleaseId, priceVersionId, termVersionId: sealed.termVersionId, enabledModes: sealed.enabledModes, safeBoxes: sealed.catalog.safeBoxes, resources: sealed.catalog.resources, termOptions };
 }
 
 export async function readMembershipProfitSimulation(client: PoolClient, viewer: Viewer, body: Record<string, unknown>) {
-  ensureOnlyFields(body, ["ruleReleaseId", "quoteInput", "payableRatios"]);
+  ensureOnlyFields(body, ["ruleReleaseId", "quoteInput", "payableRatios", "gameId"]);
   const ratios = ratiosOf(body.payableRatios);
   if (!body.quoteInput || typeof body.quoteInput !== "object" || Array.isArray(body.quoteInput)) throw invalid("A simulation scenario is required");
   const quoteInput = body.quoteInput as Record<string, unknown>;
   ensureOnlyFields(quoteInput, ["priceVersionId", "termVersionId", "conditions", "inventory", "deposits"]);
   const ruleReleaseId = typeof body.ruleReleaseId === "string" ? body.ruleReleaseId : "";
   const priceVersionId = typeof quoteInput.priceVersionId === "string" ? quoteInput.priceVersionId : "";
-  const sealed = await simulationBasis(client, viewer, ruleReleaseId, priceVersionId);
+  const gameId = body.gameId;
+  if (gameId !== undefined && (typeof gameId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId)))
+    throw invalid("Game reference is invalid");
+  const current = gameId === undefined ? null : await currentListingSimulationBasis(client, viewer, gameId);
+  if (current && (current.ruleReleaseId !== ruleReleaseId || current.priceVersionId !== priceVersionId))
+    throw conflict("试算期间生效规则已变更，请重新读取当前价目");
+  const sealed = current ?? await simulationBasis(client, viewer, ruleReleaseId, priceVersionId);
   if (quoteInput.termVersionId !== sealed.termVersionId) throw invalid("Scenario terms must belong to the bound sealed release");
   if (!Array.isArray(quoteInput.inventory) || quoteInput.inventory.length < 1 || quoteInput.inventory.length > 50) throw invalid("Scenario inventory must contain 1 to 50 resources");
   const resourceIds = new Set(sealed.catalog.resources!.map(item => item.itemId));

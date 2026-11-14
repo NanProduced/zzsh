@@ -16,6 +16,9 @@ for (const kind of ["price", "term", "agreement", "full_payout_terms"]) {
   }
 }
 operations.set("supply.rules.release.activate", { table: "rule_release", permission: ADMIN_PERMISSION.supplyRulesActivate, resultKey: "releaseId", bossOnly: true });
+for (const action of ["create", "void"]) {
+  operations.set(`supply.rules.rule_change_batch.${action}`, { table: "rule_change_batch", permission: ADMIN_PERMISSION.supplyRulesActivate, bossOnly: true, scopeIsTarget: action === "void" });
+}
 for (const table of ["pricing_policy_schedule", "pricing_mode_schedule"]) {
   operations.set(`supply.rules.${table}.create`, { table, permission: ADMIN_PERMISSION.supplyRulesActivate, bossOnly: true });
 }
@@ -102,7 +105,10 @@ export async function readAdminSupplyOperationResult(client: PoolClient, actorId
   const result: Record<string, string | number | boolean | null> = {};
   const isReleasePlan = definition.table === "rule_release" && typeof body.effectiveAt === "string";
   if (isReleasePlan && resourceId !== target.gameId) throw notFound();
-  const fields = isSchedule || isReleasePlan ? [...safeFields, "pricingModel", "priceVersionId", "announcementVersionId", "effectiveAt"] : safeFields;
+  if (definition.table === "rule_change_batch" && (body.gameId !== target.gameId ||
+    resourceId !== (definition.scopeIsTarget ? targetId : target.gameId))) throw notFound();
+  const fields = isSchedule || isReleasePlan || definition.table === "rule_change_batch"
+    ? [...safeFields, "pricingModel", "priceVersionId", "announcementVersionId", "effectiveAt", "priceScheduleId", "modeScheduleId"] : safeFields;
   for (const name of fields) {
     const value = body[name];
     if (value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || (typeof value === "string" && value.length <= 160)) result[name] = value;

@@ -631,8 +631,9 @@ export function BusinessSummary({ business, operationCode, onOpenPath }: { busin
   const settlementOperation = operationCode === "order.settlement.adjust";
   const compensationOperation = operationCode === "order.compensation.grant";
   const fixedOperation = operationCode === "content.fixed_document.publish";
+  const pricingOperation = operationCode === "supply.rules.mode_switch";
   const testOperation = operationCode === "approval.test.execute";
-  const knownOperation = policyOperation || distributionOperation || reversalOperation || entitlementOperation || settlementOperation || compensationOperation || fixedOperation || testOperation;
+  const knownOperation = policyOperation || distributionOperation || reversalOperation || entitlementOperation || settlementOperation || compensationOperation || fixedOperation || pricingOperation || testOperation;
 
   const restrictedNotice = business.summaryAvailable === false ? (
     <NotApplicable reason={`无权查看本次申请的业务摘要：${restricted.map(reasonLabel).join("；") || "原因未提供"}。这与「你能否审批」是两件事，动作资格以逐项 actions 为准。`} />
@@ -650,6 +651,20 @@ export function BusinessSummary({ business, operationCode, onOpenPath }: { busin
       ) : null}
 
       {!testOperation && business.summaryAvailable !== false && fixedOperation ? <FixedDocumentSummary business={business} /> : null}
+      {pricingOperation && business.pricingChange ? <Section title="计价模式变更">
+        <FactGrid>
+          <Fact label="目标模式" value={business.pricingChange.pricingModel === "FIXED_FEE" ? "固定手续费" : "价差"} />
+          <Fact label="生效时间" value={formatDate(business.pricingChange.effectiveAt)} />
+          <Fact label="公告" value={business.pricingChange.announcementVersionId} />
+          <Fact label="目标价目" value={business.pricingChange.price?.version.id} />
+          {business.pricingChange.combination ? <>
+            <Fact label="资金政策依据" value={business.pricingChange.combination.funding.id} />
+            <Fact label="租期规则" value={business.pricingChange.combination.term.id} />
+            <Fact label="出租协议" value={business.pricingChange.combination.agreement.id} />
+          </> : null}
+          {business.pricingChange.batchId ? <Fact label="排期回执" value={business.pricingChange.batchId} /> : null}
+        </FactGrid>
+      </Section> : null}
       {!testOperation && business.summaryAvailable !== false && compensationOperation ? <CompensationSummary business={business} onOpenPath={onOpenPath} /> : null}
       {!testOperation && business.summaryAvailable !== false && settlementOperation ? <SettlementAdjustmentContent business={business} summary={summary} onOpenPath={onOpenPath} /> : null}
       {!testOperation && business.summaryAvailable !== false && entitlementOperation ? <MembershipEntitlementContent business={business} summary={summary} operationCode={operationCode} onOpenPath={onOpenPath} /> : null}

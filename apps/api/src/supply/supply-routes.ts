@@ -15,7 +15,7 @@ import type { INestApplication } from "@nestjs/common";
 import { assignAccountNumber } from "./account-number";
 import type { Pool, PoolClient } from "pg";
 import { auditObjectType, auditSnapshot } from "./supply-audit";
-import { ContentHashError } from "./content-hash";
+import { ContentHashError, humanText } from "./content-hash";
 import { DecimalError } from "./decimal";
 
 import {
@@ -77,7 +77,8 @@ import {
 } from "./rules";
 import { parseLegalAcceptanceRef } from "../legal/legal-documents";
 import { readFullPayoutTerms } from "./full-payout-terms";
-import { readPricingSchedules, readSchedulePriceOptions, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, schedulePricingMode, scheduleSpreadPrice } from "./pricing-policy-schedule";
+import { readPricingSchedules, readSchedulePriceOptions, assertPublishedPricingAnnouncement, scheduleFixedFeePrice, scheduleSpreadPrice } from "./pricing-policy-schedule";
+import { parseRuleChange, readRuleChanges, scheduleRuleChange, voidRuleChange } from "./rule-change";
 import { readAdminSupplyOperationResult, readUserSupplyOperationResult } from "./supply-operation-results";
 import { validateFundingPolicy } from "./funding-policy";
 import { appendAccountGuaranteeProof, readGuaranteeContext, revalidateGuaranteeContextEvidence, readGuaranteeEvidenceAsset, readGuaranteeEvidenceBytes, projectGuaranteeProof, type GuaranteeProof } from "./funding-authority";
@@ -928,6 +929,22 @@ async function handleAdminRead(
     sendJson(response, 200, result, requestId);
     return;
   }
+  const ruleChanges = /^\/games\/([^/]+)\/rule-changes(?:\/([^/]+))?$/.exec(path);
+  if (ruleChanges) {
+    const gameId = decodeId(ruleChanges[1]!);
+    const id = ruleChanges[2] ? decodeId(ruleChanges[2]) : undefined;
+    const result = await withTransaction(options.pool, async client => {
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await assertAdminContextInTransaction(client, { userId: adminUserId, sessionId: adminSessionId });
+      const access = await requireAdminAccess(client, adminUserId);
+      requirePermission(access, ADMIN_PERMISSION.supplyRulesEdit);
+      await assertGameScope(client, adminUserId, access.isBoss, gameId);
+      await assertRulesGameSupported(client, gameId);
+      return readRuleChanges(client, gameId, id);
+    });
+    sendJson(response, 200, result, requestId);
+    return;
+  }
   const priceOptionsMatch = /^\/games\/([^/]+)\/pricing-schedule-price-options$/.exec(path);
   if (priceOptionsMatch) {
     const gameId = decodeId(priceOptionsMatch[1]!), model = query.get("pricingModel");
@@ -1139,7 +1156,7 @@ async function handleAdminWrite(
         requirePermission(access, permission);
         const gameId = await gameIdResolver(client);
         const objectType = auditObjectType(operation);
-        const before = resourceId && !operation.endsWith(".create")
+        const before = auditAction && resourceId && !operation.endsWith(".create")
           ? await auditSnapshot(client, objectType === "rule_release" ? "game" : objectType, resourceId) : null;
         const result = await action(client, access, gameId ?? "");
         if (auditAction) {
@@ -1451,6 +1468,33 @@ async function handleAdminWrite(
     }, "supply.rules.price_draft_created");
     return;
   }
+  const ruleChangeMatch = /^\/games\/([^/]+)\/rule-changes$/.exec(path);
+  if (ruleChangeMatch && method === "POST") {
+    const gameId = decodeId(ruleChangeMatch[1]!);
+    const change = parseRuleChange(bodyOf(request), false);
+    if (change.gameId !== gameId) throw invalid("游戏与本次规则变更不一致");
+    await write("supply.rules.rule_change_batch.create", gameId, ADMIN_PERMISSION.supplyRulesActivate, async () => gameId,
+      async (client, access) => ({ status: 200, body: await scheduleRuleChange(client,
+        { userId: actor.id, isBoss: access.isBoss, sessionId: actor.sessionId }, change, requestId, null, options.fixedFeeDemo) }), undefined, true);
+    return;
+  }
+  const voidRuleChangeMatch = /^\/games\/([^/]+)\/rule-changes\/([^/]+)\/void$/.exec(path);
+  if (voidRuleChangeMatch && method === "POST") {
+    const gameId = decodeId(voidRuleChangeMatch[1]!);
+    const batchId = decodeId(voidRuleChangeMatch[2]!);
+    const body = bodyOf(request);
+    ensureOnlyFields(body, ["reason"]);
+    const reason = humanText(requiredString(body, "reason", 500)).trim();
+    if (reason.length < 2) throw invalid("请填写作废原因");
+    await write("supply.rules.rule_change_batch.void", batchId, ADMIN_PERMISSION.supplyRulesActivate, async client => {
+      const found = await client.query("SELECT 1 FROM zzsh_supply.rule_change_batch WHERE id=$1 AND game_id=$2", [batchId, gameId]);
+      if (!found.rows.length) throw notFound();
+      return gameId;
+    },
+      async (client, access) => ({ status: 200, body: await voidRuleChange(client,
+        { userId: actor.id, isBoss: access.isBoss, sessionId: actor.sessionId }, gameId, batchId, reason, requestId) }), undefined, true);
+    return;
+  }
   const priceScheduleMatch=/^\/games\/([^/]+)\/pricing-policy-schedules$/.exec(path);
   if(priceScheduleMatch&&method==="POST"){
     const gameId=decodeId(priceScheduleMatch[1]!),body=bodyOf(request);
@@ -1475,13 +1519,8 @@ async function handleAdminWrite(
     ensureOnlyFields(body,["pricingModel","expectedGeneration","effectiveAt","announcementVersionId"]);
     const pricingModel=requiredString(body,"pricingModel",16);
     if(pricingModel!=="SPREAD"&&pricingModel!=="FIXED_FEE")throw invalid("抽成模式无效","pricingModel");
-    const expectedGeneration=requiredString(body,"expectedGeneration",20),effectiveAt=requiredString(body,"effectiveAt",40);
-    const announcementVersionId=decodeId(requiredString(body,"announcementVersionId",128));
-    await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async(client,access)=>{
-      const result=await schedulePricingMode(client,{userId:actor.id,isBoss:access.isBoss},{gameId,pricingModel,expectedGeneration,effectiveAt},options.fixedFeeDemo);
-      await assertPublishedPricingAnnouncement(client,gameId,announcementVersionId,result.effectiveAt);
-      const scheduled={...result,gameId,pricingModel,announcementVersionId};
-      return {status:200,body:scheduled,details:{pricingSchedule:scheduled}};
+    await write("supply.rules.pricing_mode_schedule.create",gameId,ADMIN_PERMISSION.supplyRulesActivate,async()=>gameId,async()=>{
+      throw conflict("切换计价模式须提交审批");
     },"supply.rules.pricing_mode_scheduled",true);return;
   }
   const priceUpdateMatch = /^\/price-drafts\/([^/]+)$/.exec(path);

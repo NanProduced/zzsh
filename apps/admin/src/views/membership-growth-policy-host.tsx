@@ -396,6 +396,7 @@ export function MembershipGrowthPolicyHost({ tab, snapshot, onDirtyChange, refre
       policyResetNonce={policyResetNonce}
       onDiscardPolicyChanges={discardPolicyChanges}
       binding={binding}
+      simulationGameId={gameId}
       canEditEntitlementRanges={ready.capability.canChangeEntitlementRanges ?? (snapshot.security.isBoss || hasPermission(snapshot, "membership.policy.draft"))}
       canSimulateProfit={(snapshot.security.status === "ACTIVE" && snapshot.security.isBoss) || (hasPermission(snapshot, "supply.quote.internal.read") && (hasPermission(snapshot, "membership.policy.draft") || hasPermission(snapshot, "membership.policy.publish")))}
       localPending={unresolvedPending}

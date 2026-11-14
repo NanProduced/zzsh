@@ -19,6 +19,7 @@ import {
 } from "./rules-model";
 import { TrialWindow } from "./rules-trial-window";
 import { activePriceDraft, pendingSealedPrice, MutedDetails, priceDiff as draftDiff } from "./publish-flow";
+import { FixedFeeTrial } from "./fixed-fee-trial";
 import { HelpTip } from "./step0-editors";
 import { RULES_RELEASE_OPERATION, type useRulesWrite } from "./rules-write";
 
@@ -226,7 +227,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
           </div>
           <div className="ml-auto flex flex-wrap gap-2">
             {canEdit && !skinV2Ready ? <Button type="button" variant="secondary" onClick={onOpenSkin}>配置新版皮肤押金</Button> : null}
-            <Button type="button" variant="outline" disabled={!canPreview || !release || fixedFee} title={fixedFee ? "当前试算工具仅支持价差模式" : !canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
+            <Button type="button" variant="outline" disabled={!canPreview || !release || !curPrice} title={!canPreview ? "当前账号没有内部试算权限" : undefined} onClick={() => setTrialOpen(true)}>试算一单</Button>
             {canActivate ? <Button type="button" disabled={command.locked && command.pending?.operation !== RULES_RELEASE_OPERATION} onClick={() => setDialog("confirm")}>选择版本并确认排期</Button> : null}
           </div>
         </div>
@@ -534,7 +535,7 @@ export function RulesOverview({ rules, command, isBoss, canPreview, canEdit = fa
         </DialogContent>
       </Dialog>
 
-      {trialOpen && release && !fixedFee ? <TrialWindow rules={rules} onClose={() => setTrialOpen(false)} /> : null}
+      {trialOpen && release ? (fixedFee ? <FixedFeeTrial rules={rules} onClose={() => setTrialOpen(false)} /> : <TrialWindow rules={rules} onClose={() => setTrialOpen(false)} />) : null}
       {dialog === "confirm" ? <ConfirmDialog rules={rules} command={command} onOpenSettlement={onOpenSettlement} onClose={() => { setDialog("none"); command.dismissResult(); }} /> : null}
     </div>
   );
@@ -588,7 +589,7 @@ export function SettlementRules({ fixedFee = false }: { fixedFee?: boolean }) {
             <div className="mb-2 flex items-center gap-1.5">
               <h4 className="text-xs font-semibold text-foreground">租客主动提前结束 · {fixedFee ? "哈夫币手续费补足梯度" : "哈夫币价差补交梯度"}</h4>
               <HelpTip label="提前结束补差说明">
-                {fixedFee ? "按订单冻结费率计算全量哈夫币手续费，再乘以对应的补足比例。" : "按实际消耗比例阶梯补交哈夫币价差。"} 消耗达到 70% 及以上时免交。
+                {fixedFee ? "新合同以全量哈夫币手续费和全量折后哈夫币租金的 40% 中较低值为基数。历史订单按冻结合同计算。" : "按实际消耗比例阶梯补交哈夫币价差。"} 消耗达到 70% 及以上时免交。
               </HelpTip>
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-md text-foreground" role="img" aria-label="补差比例：消耗0%补100%，50%补50%，60%补25%，70%及以上为0">

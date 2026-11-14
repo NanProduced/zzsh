@@ -95,6 +95,7 @@ function DiffBadge({ before, after, reverse = false, unit = "元" }: { before: n
 /** 试算一单：同一单分别按线上和草稿报价（服务端），差额＝草稿−线上；临时调整只在本窗口生效，标为估算。 */
 export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; seed?: EditValues; onClose: () => void }) {
   const release = rules.release!, { haff } = editContext(rules);
+  const livePriceId = rules.newListingPrice?.priceVersionId ?? release.priceVersionId;
   const draftCandidate = activePriceDraft(rules);
   const draft = draftCandidate && priceDiff(rules, draftCandidate).length ? draftCandidate : pendingSealedPrice(rules);
   const draftBase = draft ? baseline(rules, draft.id).values : baseline(rules).values, liveBase = baseline(rules).values;
@@ -114,7 +115,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
   }));
   const [parametersOpen, setParametersOpen] = useState(false);
   const validation = validateTrialAccount(rules, account);
-  const signature = JSON.stringify([rules.game.id, release.priceVersionId, draft?.id, draft?.revision, release.termVersionId, validation.inventory, rules.items.map(item => [item.id, item.enabled]), account]);
+  const signature = JSON.stringify([rules.game.id, livePriceId, draft?.id, draft?.revision, release.termVersionId, validation.inventory, rules.items.map(item => [item.id, item.enabled]), account]);
   const [server, setServer] = useState<ServerResult>({ signature: "", status: "idle" });
   const [serverDraft, setServerDraft] = useState<ServerResult>({ signature: "", status: "idle" });
   const reqId = useRef(0), pane = useRef<HTMLDivElement>(null), close = useRef<HTMLButtonElement>(null);
@@ -150,7 +151,7 @@ export function TrialWindow({ rules, seed, onClose }: { rules: RulesResponse; se
         conditions: { safeBoxCode: account.box, vitLevel: Number(account.vit), bearLevel: Number(account.bear), termOptionCode: account.term, rentalPricing: { rentalMode: "ordinary" } }, inventory: validation.inventory,
       }, "POST", {}, controller.signal).then(result => { if (!controller.signal.aborted && id === reqId.current) set({ signature, status: "ok", result }); }).catch(failure => { if (!controller.signal.aborted && id === reqId.current) set({ signature, status: "error", message: friendlyError(failure) }); });
     const timer = setTimeout(() => {
-      void ask(release.priceVersionId, undefined, setServer);
+      void ask(livePriceId, undefined, setServer);
       if (draft) void ask(draft.id, draft.status === "DRAFT" ? draft.revision : undefined, setServerDraft);
     }, 400);
     return () => { clearTimeout(timer); ++reqId.current; controller.abort(); };

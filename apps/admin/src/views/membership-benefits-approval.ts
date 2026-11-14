@@ -7,10 +7,10 @@ type Snapshot = Extract<SessionSnapshot, { authenticated: true }>;
 
 const CREATE_PATH = "/security/approvals/requests";
 const CREATE_OPERATION = "approval.request.create";
-const MEMBERSHIP_OPERATIONS = new Set(["membership.benefit.policy.publish", "membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const POLICY_OPERATIONS = new Set(["membership.benefit.policy.publish"]);
 const ENTITLEMENT_OPERATIONS = new Set(["membership.entitlement.grant", "membership.entitlement.replace", "membership.entitlement.revoke"]);
 const COMPENSATION_OPERATIONS = new Set(["order.compensation.grant"]);
+const PRICING_OPERATIONS = new Set(["supply.rules.mode_switch"]);
 const PENDING_EVENT = "zzsh:membership-approval-pending";
 export type VerifiedPolicyDraftReference = { policyDraftId: string; policyDraftVersion: string; policyDraftHash: string };
 export function policyDraftReferenceOf(body: Record<string, unknown>): VerifiedPolicyDraftReference | null {
@@ -21,8 +21,8 @@ export function policyDraftReferenceOf(body: Record<string, unknown>): VerifiedP
   const hash = payload && typeof payload.policyDraftHash === "string" ? payload.policyDraftHash : "";
   return id && version && hash ? { policyDraftId: id, policyDraftVersion: version, policyDraftHash: hash } : null;
 }
-export type MembershipApprovalBusiness = "policy" | "entitlement" | "compensation";
-const BUSINESS_OPERATIONS: Record<MembershipApprovalBusiness, Set<string>> = { policy: POLICY_OPERATIONS, entitlement: ENTITLEMENT_OPERATIONS, compensation: COMPENSATION_OPERATIONS };
+export type MembershipApprovalBusiness = "policy" | "entitlement" | "compensation" | "pricing";
+const BUSINESS_OPERATIONS: Record<MembershipApprovalBusiness, Set<string>> = { policy: POLICY_OPERATIONS, entitlement: ENTITLEMENT_OPERATIONS, compensation: COMPENSATION_OPERATIONS, pricing: PRICING_OPERATIONS };
 
 function notifyPendingChanged() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event(PENDING_EVENT));
@@ -51,13 +51,13 @@ export function membershipPendingLabel(record: { body: Record<string, unknown> }
 }
 
 export function identityOf(snapshot: Snapshot) {
-  return JSON.stringify([snapshot.adminUserId, snapshot.session.id, snapshot.session.locked, snapshot.security.status, snapshot.security.isBoss, snapshot.security.passwordChangeRequired, [...snapshot.permissions].sort()]);
+  return JSON.stringify([snapshot.adminUserId, snapshot.session?.id, snapshot.session?.locked, snapshot.security.status, snapshot.security.isBoss, snapshot.security.passwordChangeRequired, [...snapshot.permissions].sort()]);
 }
 
 /** Only existing approval.request.create; policy and entitlement hosts share the same original-key responsibility. */
 export function useMembershipApprovalRequest(snapshot: Snapshot, business: MembershipApprovalBusiness = "entitlement") {
   const identity = identityOf(snapshot);
-  const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session.id, "", CREATE_OPERATION);
+  const subject = pendingWriteSubject(snapshot.adminUserId, snapshot.session?.id ?? "", "", CREATE_OPERATION);
   const live = useRef(identity); live.current = identity;
   const mounted = useRef(true);
   const inFlight = useRef(false);
@@ -98,12 +98,12 @@ export function useMembershipApprovalRequest(snapshot: Snapshot, business: Membe
 
   async function submit(body: Record<string, unknown>): Promise<string | null> {
     if (inFlight.current || !current()) return null;
-    if (snapshot.session.locked || snapshot.security.status !== "ACTIVE" || snapshot.security.passwordChangeRequired || !snapshot.security.isBoss && !hasPermission(snapshot, "approval.request.create")) { update({ error: "当前身份不能提交审批" }); return null; }
-    if (typeof body.operationCode !== "string" || !(MEMBERSHIP_OPERATIONS.has(body.operationCode) || COMPENSATION_OPERATIONS.has(body.operationCode)) || !operations.has(body.operationCode)) { update({ error: "不支持的审批操作" }); return null; }
+    if (!snapshot.session || snapshot.session.locked || snapshot.security.status !== "ACTIVE" || snapshot.security.passwordChangeRequired || !snapshot.security.isBoss && !hasPermission(snapshot, "approval.request.create")) { update({ error: "当前身份不能提交审批" }); return null; }
+    if (typeof body.operationCode !== "string" || !operations.has(body.operationCode)) { update({ error: "不支持的审批操作" }); return null; }
     const existing = refreshPending();
     if (existing.state !== "absent") {
       const foreign = foreignPending(existing);
-      update({ pending: existing, error: existing.state === "valid" ? foreign ? "另有会员申请待核对，请先到对应子页或审批中心处理" : "还有原请求未核清，请先查询原结果" : "原请求记录不可读，本次未提交" });
+      update({ pending: existing, error: existing.state === "valid" ? foreign ? "另有审批申请待核对，请先到对应子页或审批中心处理" : "还有原请求未核清，请先查询原结果" : "原请求记录不可读，本次未提交" });
       return null;
     }
     if (!globalThis.crypto?.randomUUID) { update({ error: "无法生成请求标识，本次未提交" }); return null; }

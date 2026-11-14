@@ -76,15 +76,20 @@ export async function handleMembershipGrowthPolicyAdmin(request: SupplyNodeReque
     if (request.method === "POST" && path === "/api/v1/admin/membership-growth/profit-simulation"
       || request.method === "GET" && path === "/api/v1/admin/membership-growth/profit-simulation-context") {
       const result = await withTransaction(options.pool, async client => {
-        await client.query("SET TRANSACTION READ ONLY");
+        await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
         await assertAdminContextInTransaction(client, context);
         const access = await loadEffectiveAdminAccess(client, context.userId);
         if (!access || !canSimulateMembershipProfit(access)) throw forbidden();
         const viewer = { adminId: context.userId, access };
         if (request.method === "POST") return readMembershipProfitSimulation(client, viewer, bodyRecord(request));
         const query = new URL(request.originalUrl ?? request.url ?? "", "http://127.0.0.1").searchParams;
-        for (const key of query.keys()) if (!["ruleReleaseId", "priceVersionId"].includes(key) || query.getAll(key).length !== 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Simulation context query is invalid");
-        return readMembershipProfitSimulationContext(client, viewer, query.get("ruleReleaseId") ?? "", query.get("priceVersionId") ?? "");
+        for (const key of query.keys()) if (!["ruleReleaseId", "priceVersionId", "gameId", "basis"].includes(key) || query.getAll(key).length !== 1) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Simulation context query is invalid");
+        const gameId = query.get("gameId");
+        if (gameId !== null && (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(gameId) || query.has("ruleReleaseId") || query.has("priceVersionId")))
+          throw new SecurityApiError(400, "INVALID_ARGUMENT", "Simulation context query is invalid");
+        const basis = query.get("basis");
+        if (basis !== null && (basis !== "current" || gameId !== null)) throw new SecurityApiError(400, "INVALID_ARGUMENT", "Simulation basis is invalid");
+        return readMembershipProfitSimulationContext(client, viewer, query.get("ruleReleaseId") ?? "", query.get("priceVersionId") ?? "", gameId ?? undefined, basis === "current");
       });
       sendJson(response, 200, result, requestId);
       return;

@@ -48,7 +48,7 @@ export function SupplyRulesView({
   const [leaveAsk, setLeaveAsk] = useState<RulesSection | null>(null);
   const [resetNonce, setResetNonce] = useState(0);
   const canEdit = hasPermission(snapshot, "supply.rules.edit");
-  const canPreview = hasPermission(snapshot, "supply.quote.internal.read");
+  const canPreview = canEdit && hasPermission(snapshot, "supply.quote.internal.read");
   const isBoss = snapshot.security.isBoss;
   const canSchedule = isBoss && canEdit && hasPermission(snapshot, "supply.rules.activate");
   const [games, setGames] = useState<SupplyGame[]>([]);
@@ -57,7 +57,7 @@ export function SupplyRulesView({
   const currentPrice = rules?.priceVersions.find(version => version.id === rules.release?.priceVersionId);
   const pricingVersion = rules?.newListingPrice === undefined ? currentPrice : rules.priceVersions.find(v => v.id === rules.newListingPrice?.priceVersionId);
   const fixedFee = Boolean(pricingVersion?.fixedFeeRates);
-  const priceEditable = canEdit && !fixedFee && !currentPrice?.fixedFeeRates && rules?.newListingPrice !== null && (!rules?.release || Boolean(pricingVersion));
+  const priceEditable = canEdit && !fixedFee && rules?.newListingPrice !== null && (!rules?.release || Boolean(pricingVersion));
   const [editingFixedDraft, setEditingFixedDraft] = useState(false);
   const [createFixedOpen, setCreateFixedOpen] = useState(false);
   const [initialRates, setInitialRates] = useState({ ordinary: "", custom: "", fast: "" });
@@ -248,7 +248,7 @@ export function SupplyRulesView({
           <div hidden={show("overview")}><RulesOverview key={`${snapshot.adminUserId}:${rules.game.id}`} rules={rules} command={command} isBoss={isBoss} canPreview={canPreview} canEdit={priceEditable} canActivate={canSchedule} onOpenSkin={() => onOpenPath?.("/supply/rules?section=skin")} onOpenSettlement={() => onOpenPath?.("/supply/rules?section=settlement")} /></div>
           <DepositSection hidden={show("deposit")} editorProps={editorProps} editorKey={editorKey} setCapDirty={setCapDirty} fixedEditor={fixedEditor} fixedDraft={fixedDraft} currentPrice={currentPrice} fundingVersion={fundingVersion} setFundingVersion={setFundingVersion} payoutTermsId={payoutTermsId} setPayoutTermsId={setPayoutTermsId} gameId={gameId} guard={guard} setError={setError} />
           <SettlementSection hidden={show("settlement")} rules={rules} fixedFee={fixedFee} onOpenPath={onOpenPath} tradePath={tradePath} />
-          <PricingSection hidden={show("pricing")} pricingTab={pricingTab} setPricingTab={setPricingTab} showSchedules={showSchedules} adminUserId={snapshot.adminUserId} sessionId={snapshot.session?.id} gameId={gameId} canSchedule={canSchedule} editorKey={editorKey} editorProps={editorProps} fixedEditor={fixedEditor} priceEditable={priceEditable} setBaseDirty={setBaseDirty} setModeDirty={setModeDirty} setDailyDirty={setDailyDirty} loading={loading} guard={guard} termId={termId} termOptions={termOptions} setTermOptions={setTermOptions} dirty={dirty} setDirty={setDirty} applyTerm={applyTerm} setSwitchAsk={setSwitchAsk} setSealAsk={setSealAsk} setError={setError} setSuccess={setSuccess} setLoading={setLoading} />
+          <PricingSection snapshot={snapshot} hidden={show("pricing")} pricingTab={pricingTab} setPricingTab={setPricingTab} showSchedules={showSchedules} adminUserId={snapshot.adminUserId} sessionId={snapshot.session?.id} gameId={gameId} canSchedule={canSchedule} editorKey={editorKey} editorProps={editorProps} fixedEditor={fixedEditor} priceEditable={priceEditable} setBaseDirty={setBaseDirty} setModeDirty={setModeDirty} setDailyDirty={setDailyDirty} loading={loading} guard={guard} termId={termId} termOptions={termOptions} setTermOptions={setTermOptions} dirty={dirty} setDirty={setDirty} applyTerm={applyTerm} setSwitchAsk={setSwitchAsk} setSealAsk={setSealAsk} setError={setError} setSuccess={setSuccess} setLoading={setLoading} />
           <div hidden={show("items")}><PriceItemsEditor key={`items:${editorKey}`} {...editorProps} onDirtyChange={setItemsDirty} /></div>
           <div hidden={show("skin")}><SkinDepositPolicyEditor key={`${editorKey}`} readOnly={!(priceEditable || fixedEditor && canEdit)} rules={rules} command={command} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setDepositDirty} /></div>
           <AgreementSection hidden={show("agreement")} rules={rules} agreementId={agreementId} setAgreementId={setAgreementId} command={command} loading={loading} canSchedule={canSchedule} onOpenPath={onOpenPath} tradePath={tradePath} setScheduleAsk={setScheduleAsk} />

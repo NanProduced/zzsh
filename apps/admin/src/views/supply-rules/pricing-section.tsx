@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 
-import type { RulesResponse } from "../../api";
+import type { RulesResponse, SessionSnapshot } from "../../api";
 import { Button } from "../../components/ui/button";
 import { PricingSchedulesPanel } from "./pricing-schedules-panel";
 import { PRICING_TABS, type PricingTab, type TermOptionDraft } from "./rules-nav";
@@ -18,6 +18,7 @@ export function PricingSection({
   setPricingTab,
   showSchedules,
   adminUserId,
+  snapshot,
   sessionId,
   gameId,
   canSchedule,
@@ -47,6 +48,7 @@ export function PricingSection({
   setPricingTab: Dispatch<SetStateAction<PricingTab>>;
   showSchedules: boolean;
   adminUserId: string;
+  snapshot: Extract<SessionSnapshot, { authenticated: true }>;
   sessionId: string | undefined;
   gameId: string;
   canSchedule: boolean;
@@ -75,7 +77,7 @@ export function PricingSection({
   return (
     <div hidden={hidden} className="space-y-4">
       <div role="tablist" aria-label="租赁定价" className="flex flex-wrap gap-2">{PRICING_TABS.map(([value, label]) => <Button key={value} type="button" role="tab" aria-selected={pricingTab === value} variant={pricingTab === value ? "secondary" : "ghost"} onClick={() => setPricingTab(value)}>{label}</Button>)}</div>
-      <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${adminUserId}:${sessionId}:${gameId}`} gameId={gameId} command={command} canSchedule={canSchedule} active={showSchedules} /></div>
+      <div hidden={pricingTab !== "schedule" || undefined}><PricingSchedulesPanel key={`${adminUserId}:${sessionId}:${gameId}`} gameId={gameId} command={command} canSchedule={canSchedule} active={showSchedules} snapshot={snapshot} rules={rules} /></div>
       <div hidden={pricingTab !== "base" || undefined}><BasePricingEditor key={`base:${editorKey}`} {...editorProps} part="base" onDirtyChange={setBaseDirty} /></div>
       <div hidden={pricingTab !== "mode" || undefined}>{fixedEditor ? <FixedRentalModeEditor key={`mode:${editorKey}`} {...editorProps} onDirtyChange={setModeDirty} /> : <RentalModeEditor key={`mode:${editorKey}`} rules={rules} command={command} canEdit={priceEditable} draftId={draftId} ensureDraft={ensureDraft} onDirtyChange={setModeDirty} />}</div>
       <div hidden={pricingTab !== "term" || undefined} className="space-y-6">
