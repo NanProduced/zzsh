@@ -4,8 +4,6 @@ export const SEO_SITE_NAME = "洲洲商行";
 export const SEO_HOME_TITLE = "洲洲商行 - 三角洲行动账号租赁平台";
 export const SEO_HOME_DESCRIPTION =
   "洲洲商行是三角洲行动游戏账号租赁平台，在线挑选高价值账号，资源费用、押金与租期公开透明，支付后由真人客服全程履约。";
-export const SEO_HOME_H1 = "三角洲行动账号租赁平台";
-export const SEO_HOME_LEAD = "在线挑选高价值账号，支付后由真人客服全程履约。";
 export const SEO_LOGO_PATH = "/brand/zzsh-logo-variant-01.png";
 
 function isRootOrigin(value: string, protocol: "http:" | "https:" | "both"): boolean {
